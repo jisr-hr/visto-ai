@@ -1,0 +1,55 @@
+// src/engine/types.ts
+import type { ChangedFile, PullRequestInfo, Side, Source } from '../forge/types.ts';
+
+export type Severity = 'blocker' | 'major' | 'minor';
+export interface AuditEntry { stage: string; action: string; subject: string; reason: string }
+export interface Usage { calls: number; inputTokens: number; outputTokens: number; cachedTokens: number; cost: number }
+
+export interface ChatMessage { role: 'system' | 'user' | 'assistant'; content: string }
+export interface ToolDefinition { type: 'function'; function: { name: string; description: string; parameters: Record<string, unknown> } }
+export type Effort = 'default' | 'elevated';
+export interface ModelRequest { messages: ChatMessage[]; tools: ToolDefinition[]; forcedTool: string; effort: Effort; timeoutMs: number }
+export interface ModelResponse { toolName: string | null; toolArguments: string | null; text: string | null; model: string; usage: Usage }
+export interface ModelClient { complete(request: ModelRequest): Promise<ModelResponse> }
+
+export interface Limits { inputTokensPerCall: number; batchesPerReview: number; modelTimeoutSeconds: number }
+export interface RepoConfig { primaryBranches: string[] }
+
+export interface ReviewInput {
+  pullRequest: PullRequestInfo;
+  trigger: 'automatic' | 'manual';
+  repoConfig: RepoConfig;
+  limits: Limits;
+  asOf: Date;
+  earlier: null;              // a pull request's earlier state arrives with a later plan
+}
+export interface ReviewDeps {
+  source: Source;
+  model: ModelClient;
+  contract: string;
+  clock: () => Date;
+  token: () => string;        // fresh random text for data markers, 16 hex characters
+  log: (entry: Record<string, unknown>) => void;
+}
+
+export interface RawFinding { path: string; side: Side; line: number; severity: Severity; body: string; quote: string; beyond_diff: boolean }
+export interface Finding { path: string; side: Side; line: number; severity: Severity; body: string; quote: string; requestedLine: number | null }
+export type UnplacedReason = 'file_has_no_patch' | 'line_not_in_diff';
+export interface UnplacedFinding { path: string; side: Side; line: number; severity: Severity; body: string; quote: string; reason: UnplacedReason }
+export type NotReviewedReason = 'no_diff' | 'too_large' | 'over_batch_limit' | 'batch_failed';
+export interface NotReviewed { path: string; reason: NotReviewedReason }
+
+export interface ReviewResult {
+  status: 'ok' | 'failed';
+  failure: { stage: 'context' | 'model'; code: string } | null;
+  mode: 'full';
+  overview: string;
+  findings: Finding[];
+  unplaced: UnplacedFinding[];
+  beyondDiff: RawFinding[];
+  coverage: { reviewed: string[]; notReviewed: NotReviewed[] };
+  usage: Usage;
+  dependencies: { model: 'ok' | 'error' };
+  audit: AuditEntry[];
+}
+export type { ChangedFile, PullRequestInfo, Side, Source };
