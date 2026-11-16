@@ -560,7 +560,7 @@ test('order: score, then size, then path', () => {
 
 ```ts
 test('removes bidirectional and zero-width characters and counts them', () => {
-  assert.deepEqual(stripControl('a‮b​c⁦d'), { text: 'abcd', removed: 3 });
+  assert.deepEqual(stripControl('a\u202Eb\u200Bc\u2066d'), { text: 'abcd', removed: 3 });
 });
 test('keeps tabs and newlines, normalises CRLF', () => {
   assert.deepEqual(stripControl('a\tb\r\nc'), { text: 'a\tb\nc', removed: 0 });
@@ -643,7 +643,7 @@ test('contents are never fetched twice and test probes stop at 20', async () => 
   assert.equal(new Set(source.calls).size, source.calls.length);
 });
 test('stripped control characters are audited', async () => {
-  const { audit } = await buildFileContexts(pr, [file('src/a.ts', { patch: '@@ -1 +1 @@\n-a\n+b‮' })], stub({ 'head:src/a.ts': 'b\n' }));
+  const { audit } = await buildFileContexts(pr, [file('src/a.ts', { patch: '@@ -1 +1 @@\n-a\n+b\u202E' })], stub({ 'head:src/a.ts': 'b\n' }));
   assert.deepEqual(audit, [{ stage: 'context', action: 'control_characters_stripped', subject: 'src/a.ts', reason: '1' }]);
 });
 
