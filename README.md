@@ -1,0 +1,119 @@
+# Visto AI
+
+An open-source, self-hosted AI reviewer for pull requests. It looks for defects it can demonstrate, and it scores which parts of a change still need a human reviewer.
+
+> **Status: early development.** The review engine and an offline evaluation tool are built. The service that connects to GitHub is not, so Visto AI cannot review a live pull request yet. See [Status](#status).
+
+## Why
+
+Code used to be written by people and reviewed by people. Now AI writes much of it, and people hand the review to AI as well. Nobody is left deciding which changes still need a person.
+
+Visto AI reviews a pull request and answers two questions:
+
+1. **What is wrong with this change?** Findings the reviewer can demonstrate, each with a concrete failure scenario. No style comments.
+2. **Which parts of the change need a human reviewer, and why?** Every changed block of code gets a score from 0% to 100%. Blocks at or above a threshold (70% by default) are listed for a person, with the lines to read. If nothing reaches the threshold, and the team has switched this on, the bot approves the pull request.
+
+The aim is to reduce what people must review, and to be able to show the numbers that justify it.
+
+## The score
+
+The score measures how much a change needs a person's judgement. It does not measure how likely the change is to contain a bug: findings cover bugs.
+
+| Score | Meaning | Examples |
+|---|---|---|
+| 0% to 19% | No judgement involved | Generated files, formatting, documentation text |
+| 20% to 39% | Mechanical | A rename, new tests that mirror existing behaviour |
+| 40% to 69% | A local behaviour change that follows an existing pattern | A bug fix inside one function |
+| 70% to 89% | A decision | A changed business rule, data model, public contract or permission check. A new dependency. A weakened test |
+| 90% to 100% | A decision that is costly to get wrong | Authentication, tenant isolation, an irreversible data migration, billing |
+
+The scored unit is a block: one hunk of the diff. A file with ten changes, of which one is a decision, sends a person to that one change and not to the whole file.
+
+## What it is designed to do
+
+- **Evidence-backed findings**, tagged `[blocker]`, `[major]` or `[minor]`.
+- **A human-review score** for every changed block, with a reason for each block that needs a person.
+- **Optional automatic approval**, per repository, off by default.
+- **Optional merge gate**: a required check that blocks a merge while a major or blocker finding is unanswered.
+- **Learning by retrieval**: what people do on pull requests is stored and retrieved into later reviews. The model is never fine-tuned.
+- **Self-hosted**: `docker compose up` on one machine, with the app and Postgres. You create your own GitHub App and connect it. The project runs no hosted service.
+- **Your choice of model**: built and tested against [OpenRouter](https://openrouter.ai) first. Any OpenAI-compatible endpoint can be configured.
+- **Measured before trusted**: findings and scores can be replayed offline against past pull requests, with no side effects.
+
+The full design, with every decision and its reason, is in [docs/superpowers/specs/2026-11-13-visto-ai-design.md](docs/superpowers/specs/2026-11-13-visto-ai-design.md).
+
+## Status
+
+| Part | State |
+|---|---|
+| Skeleton: typed configuration, the review contract, a test harness that blocks the network, CI | Built |
+| Engine: findings | Built. Tested against stubs only; not yet measured against a real model |
+| Offline replay of past pull requests | Built. Not yet run |
+| Engine: the score | Planned, next |
+| Service: webhooks, queue, publishing a review to GitHub | Planned |
+| Merge gate | Planned |
+| Extensions and MCP tools | Planned |
+| Memory | Planned |
+| Automatic approval | Planned |
+| UI | Planned |
+
+What exists today is a library and a command-line tool. There is no Docker setup and no GitHub App integration yet.
+
+## How the engine works
+
+The engine is one function, `review(input, deps)`. It reads a pull request and returns a structured review. It writes nowhere: not to GitHub, not to a database. That is what lets the evaluation call it directly.
+
+1. **Read.** The pull request, its changed files and their contents come through a read-only source. The GitHub source only ever sends `GET` requests.
+2. **Build context.** The model gets the diff with an anchor on every line (`R142    |+code`), the full contents of changed files where they fit, and the test file that belongs to a changed file. A large pull request is split into batches, up to a limit; what does not fit is reported as not reviewed.
+3. **Mark untrusted text.** Everything that comes from the pull request is wrapped in data markers with a random token. The contract tells the model that text inside the markers is data, never instructions.
+4. **Ask the model.** The model must answer through one forced tool call, `submit_review`, so the answer is structured data and not prose. The rules it follows are in [contract/review-contract.md](contract/review-contract.md).
+5. **Check the answer.** An answer that names no changed file is sent back once, and then rejected. A finding on a file that is not in the pull request is dropped. A finding on a line that cannot take a comment is moved to the nearest line that can, within three lines, or listed separately.
+6. **Render.** The service builds the review text from the structured result. The layout, the severity tags and the lists are the service's. The model supplies only the overview and the text of each finding.
+
+## Development
+
+Requires Node 26 or later. TypeScript files run directly; there is no build step.
+
+```bash
+npm ci
+npm test
+npm run typecheck
+npm run lint
+```
+
+Tests never reach the network. The test setup blocks sockets and `fetch`, and clears credential variables, so a test that tries to reach GitHub or a model fails.
+
+## Configuration
+
+[config.example.yml](config.example.yml) documents every key. Copy it to `config.local.yml`, which git ignores. A secret is never written in the file; the file names the environment variable that holds it.
+
+## Replay
+
+The replay runs past pull requests through the engine and scores its findings against what human reviewers said on those pull requests. It reads from GitHub and calls the model. It posts nothing.
+
+It makes paid model calls. It runs at most `--max-cases` cases (60 by default) and starts no new case once the cost reaches `--max-cost` (10 by default). The cost is the one the provider reports, as OpenRouter does, or else it is computed from the prices in your configuration. With neither, the cost counts as zero and `--max-cost` stops nothing.
+
+```bash
+export GITHUB_TOKEN=...        # a read-only token
+export OPENROUTER_API_KEY=...  # or the variable your configuration names
+
+npm run eval:replay -- --cases ../cases.jsonl --out ../runs/first --label first --config config.local.yml
+npm run eval:compare -- ../runs/baseline/summary.json ../runs/first/summary.json
+```
+
+The case file and the output folder must be outside the project folder, so that private data cannot be committed by accident. A case file is JSON Lines: each line names a pull request at a fixed head and base, with the review comments people left, labelled by whether they were valid. This repository has no command that builds a case file yet.
+
+## Repository layout
+
+| Path | What |
+|---|---|
+| `src/engine` | The review engine: context, model call, checks on the answer, rendering |
+| `src/forge` | The boundary to git services. `forge/github` holds the read-only GitHub source |
+| `src/eval` | The replay and comparison commands |
+| `src/config` | Loading and validating configuration |
+| `contract` | The rules the model is given |
+| `docs/superpowers` | The design and the implementation plans |
+
+## Licence
+
+[Apache-2.0](LICENSE).
