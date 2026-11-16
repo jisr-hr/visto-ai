@@ -70,6 +70,15 @@ interface Run {
   batchCount: number;
 }
 
+// A failing logger must never change a review.
+function safeLog(deps: ReviewDeps, entry: Record<string, unknown>): void {
+  try {
+    deps.log(entry);
+  } catch {
+    // ignored on purpose
+  }
+}
+
 async function oneCall(run: Run, files: FileContext[], firstFileNumber: number, batchIndex: number): Promise<BatchAnswer> {
   const batch: Batch = { files, tokens: 0 };
   const messages = buildMessages({
@@ -80,7 +89,7 @@ async function oneCall(run: Run, files: FileContext[], firstFileNumber: number, 
     { messages, effort: run.effort, timeoutMs: run.limits.modelTimeoutSeconds * 1000, prPaths: run.prPaths },
     run.deps.model,
   );
-  run.deps.log({
+  safeLog(run.deps, {
     event: 'model_call', files: files.length, effort: run.effort, code: answer.ok ? 'ok' : answer.code, usage: answer.usage,
   });
   return answer;
@@ -236,11 +245,7 @@ export async function review(input: ReviewInput, deps: ReviewDeps): Promise<Revi
   } catch (error) {
     const code = stage === 'model' ? 'internal_error' : sourceFailed ? 'source_error' : 'internal_error';
     const name = error instanceof Error ? error.name : 'unknown';
-    try {
-      deps.log({ event: 'internal_error', stage, name });
-    } catch {
-      // logging must not make review throw
-    }
+    safeLog(deps, { event: 'internal_error', stage, name });
     return failedResult(stage, code, usage, audit, 'ok');
   }
 }

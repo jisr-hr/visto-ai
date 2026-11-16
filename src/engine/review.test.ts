@@ -297,3 +297,13 @@ test('a dead key stops new batches: at most the two in flight', async () => {
   assert.deepEqual(r.failure, { stage: 'model', code: 'no_credit' });
   assert.equal(r.usage.calls, d.model.requests.length - 1);
 });
+
+test('a logger that always throws changes nothing in the result', async () => {
+  const answerFor = { 'src/a.ts': answerOnA, 'src/b.ts': answerOnB };
+  const normal = await review(smallLimits, deps({ files: [fileA, fileB], answerFor }));
+  const broken = deps({ files: [fileA, fileB], answerFor });
+  broken.log = () => { throw new Error('logger down'); };
+  const r = await review(smallLimits, broken);
+  assert.equal(r.usage.calls, 2);
+  assert.deepEqual(r, normal);
+});
