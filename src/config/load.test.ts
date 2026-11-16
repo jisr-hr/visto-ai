@@ -47,3 +47,11 @@ test('the example file parses', () => {
   const c = parseConfig(text, { OPENROUTER_API_KEY: 'k' });
   assert.equal(c.model.apiKey, 'k');
 });
+
+test('a YAML syntax error never echoes file text', () => {
+  const text = 'model:\n  apiKey: sk-SECRET123\n  model: [m\n';
+  assert.throws(
+    () => parseConfig(text, {}),
+    (e: ConfigError) => e instanceof ConfigError && !e.message.includes('SECRET123') && !e.issues.join().includes('SECRET123') && !e.issues.join().includes('[m'),
+  );
+});

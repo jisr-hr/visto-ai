@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs';
-import { parse } from 'yaml';
+import { parse, YAMLParseError } from 'yaml';
 import type { RepoConfig } from '../engine/types.ts';
 import { configSchema } from './schema.ts';
 
@@ -30,7 +30,12 @@ export function parseConfig(yamlText: string, env: Record<string, string | undef
   try {
     doc = parse(yamlText);
   } catch (e) {
-    throw new ConfigError([`not valid YAML: ${e instanceof Error ? e.message : 'parse error'}`]);
+    // The library's message quotes source lines, which may hold a secret: report position only.
+    const pos = e instanceof YAMLParseError ? e.linePos?.[0] : undefined;
+    const code = e instanceof YAMLParseError ? ` (${e.code})` : '';
+    throw new ConfigError([
+      pos === undefined ? `not valid YAML${code}` : `not valid YAML at line ${pos.line}, column ${pos.col}${code}`,
+    ]);
   }
   // Issue messages never echo the offending value, so a secret written inline is not printed.
   const result = configSchema.safeParse(doc ?? {});
