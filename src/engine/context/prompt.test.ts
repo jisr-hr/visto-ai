@@ -1,11 +1,13 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { estimateTokens } from './batches.ts';
+import { estimateTokens, packBatches } from './batches.ts';
 import type { Batch } from './batches.ts';
+import { buildFileContexts } from './build.ts';
 import type { FileContext } from './build.ts';
 import { ANCHOR_LEGEND } from './diff.ts';
-import { buildMessages, fixedTokens, pullRequestHeader } from './prompt.ts';
-import type { PullRequestInfo } from '../types.ts';
+import { buildMessages, fixedTokens, headerStripCounts, pullRequestHeader } from './prompt.ts';
+import { submitReviewTool } from '../model/submit-review.ts';
+import type { ChangedFile, PullRequestInfo, Source } from '../types.ts';
 
 const pr: PullRequestInfo = {
   ref: { service: 'github', owner: 'acme', repo: 'shop', number: 7 },
@@ -27,6 +29,7 @@ function ctx(path: string, extra: Partial<FileContext> = {}): FileContext {
     diffText: 'R1 +x',
     full: { kind: 'full', totalLines: 3, text: 'one\ntwo\nthree' },
     test: null,
+    skip: null,
     ...extra,
   };
 }
@@ -110,12 +113,55 @@ test('file numbers continue from firstFileNumber', () => {
   assert.ok(m[2]!.content.includes('## File 4/9: src/a.ts'));
   assert.ok(m[2]!.content.includes('## File 5/9: src/b.ts'));
 });
-test('fixedTokens adds contract, header at 9999 files, and legend', () => {
+test('fixedTokens adds contract, header at 9999 files, batch line, legend, tool definition and retry allowance', () => {
   const expected =
     estimateTokens('CONTRACT') +
     estimateTokens(pullRequestHeader(pr, 9999, '0123456789abcdef')) +
-    estimateTokens(ANCHOR_LEGEND);
+    estimateTokens('Batch 9999 of 9999.\n\n') +
+    estimateTokens(`${ANCHOR_LEGEND}\n\n`) +
+    estimateTokens(JSON.stringify(submitReviewTool)) +
+    800;
   assert.equal(fixedTokens('CONTRACT', pr), expected);
+});
+test('headerStripCounts counts what is stripped from title and description', () => {
+  assert.deepEqual(headerStripCounts({ ...pr, title: 'a\u200bb\u00ad', description: 'c\u{e0041}' }), { title: 2, description: 1 });
+  assert.deepEqual(headerStripCounts(pr), { title: 0, description: 0 });
+});
+
+// Every call of a packed review, tool definition included, stays within the limit.
+async function assertCallsFit(files: ChangedFile[], heads: Record<string, string>): Promise<number> {
+  const limit = 20_000;
+  const contract = 'Rules of the review. '.repeat(200);
+  const source: Source = { listFiles: async () => files, getFileContent: async (_p, path, sha) => (sha === pr.headSha ? heads[path] ?? null : null) };
+  const built = await buildFileContexts(pr, files, source);
+  const packed = packBatches(built.contexts, limit - fixedTokens(contract, pr), 1000);
+  assert.deepEqual(packed.notReviewed, []);
+  const fileCount = packed.batches.reduce((n, b) => n + b.files.length, 0);
+  let first = 1;
+  packed.batches.forEach((b, i) => {
+    const messages = buildMessages({ contract, pr, fileCount, firstFileNumber: first, batch: b, batchIndex: i, batchCount: packed.batches.length, token: '0123456789abcdef' });
+    first += b.files.length;
+    const total = messages.reduce((n, m) => n + estimateTokens(m.content), 0) + estimateTokens(JSON.stringify(submitReviewTool));
+    assert.ok(total <= limit, `batch ${i + 1} is ${total} tokens`);
+  });
+  return packed.batches.length;
+}
+test('250 one-line files are packed into calls that fit the limit', async () => {
+  const files = Array.from({ length: 250 }, (_, i): ChangedFile => ({
+    path: `src/module${i}/part${i}.ts`, previousPath: null, status: 'modified', additions: 1, deletions: 1,
+    patch: `@@ -1 +1 @@\n-old ${i}\n+new ${i}`,
+  }));
+  const heads = Object.fromEntries(files.map((f, i) => [f.path, `new ${i}\n`]));
+  assert.ok((await assertCallsFit(files, heads)) > 1);
+});
+test('40 files of 30 lines are packed into calls that fit the limit', async () => {
+  const body = (i: number): string[] => Array.from({ length: 30 }, (_, n) => `export const value${i}x${n} = compute(${n}, ${i * 31});`);
+  const files = Array.from({ length: 40 }, (_, i): ChangedFile => ({
+    path: `src/area${i}/file${i}.ts`, previousPath: null, status: 'added', additions: 30, deletions: 0,
+    patch: `@@ -0,0 +1,30 @@\n${body(i).map((l) => `+${l}`).join('\n')}`,
+  }));
+  const heads = Object.fromEntries(files.map((f, i) => [f.path, `${body(i).join('\n')}\n`]));
+  assert.ok((await assertCallsFit(files, heads)) > 1);
 });
 test('control characters are stripped from the description', () => {
   const m = buildMessages({ ...args, pr: { ...pr, description: 'Adds totals\u200b and \u202emore' } });

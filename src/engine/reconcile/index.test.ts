@@ -12,7 +12,7 @@ const raw = (path: string, line: number, extra: Partial<RawFinding> = {}): RawFi
 });
 const ctxWith = (path: string, r: Ranges | null): FileContext => ({
   file: { path, previousPath: null, status: 'modified', additions: 1, deletions: 0, patch: r ? 'p' : null },
-  hunks: [], ranges: r, diffText: null, full: null, test: null,
+  hunks: [], ranges: r, diffText: null, full: null, test: null, skip: r ? null : 'no_diff',
 }) as FileContext;
 const answer = (overview: string, ...findings: RawFinding[]): SubmitReviewArgs => ({ overview, findings });
 const ctxs = [ctxWith('src/a.ts', ranges), ctxWith('src/b.ts', ranges), ctxWith('img/logo.bin', null)];

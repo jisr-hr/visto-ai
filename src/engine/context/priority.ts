@@ -17,8 +17,16 @@ function segmentsOf(path: string): string[] {
   return path.toLowerCase().split('/');
 }
 
-function wordsOf(segments: string[]): string[] {
-  return segments.flatMap((segment) => [segment, ...segment.split(/[._-]/)]).filter((word) => word !== '');
+// Words are split on separators and at case boundaries of the original spelling
+// (`PaymentService` -> payment, service; `APIClient` -> api, client), then lowercased.
+const CASE_BOUNDARY = /(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])/;
+
+function wordsOf(path: string): string[] {
+  return path
+    .split(/[/._-]/)
+    .flatMap((part) => part.split(CASE_BOUNDARY))
+    .map((word) => word.toLowerCase())
+    .filter((word) => word !== '');
 }
 
 function matchesAny(words: string[], keywords: Set<string>): boolean {
@@ -43,7 +51,7 @@ export function isLowPriority(path: string): boolean {
 
 export function priorityScore(file: ChangedFile): number {
   const segments = segmentsOf(file.path);
-  const words = wordsOf(segments);
+  const words = wordsOf(file.path);
   let score = file.additions + file.deletions;
   if (segments.some((segment) => SOURCE_SEGMENTS.has(segment))) score += 120;
   if (matchesAny(words, RISK_WORDS)) score += 160;

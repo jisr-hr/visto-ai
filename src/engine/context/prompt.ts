@@ -1,9 +1,13 @@
 import type { ChatMessage, PullRequestInfo } from '../types.ts';
 import { estimateTokens } from './batches.ts';
 import type { Batch } from './batches.ts';
-import type { FileContext } from './build.ts';
 import { ANCHOR_LEGEND } from './diff.ts';
+import { submitReviewTool } from '../model/submit-review.ts';
+import { MEASURE_NUMBER, MEASURE_TOKEN, fileSection } from './section.ts';
 import { inlineText, stripControl, wrapData } from './untrusted.ts';
+
+// Room kept for the retry turn: the rejected answer (cut to 2,000 characters) and the rejection line.
+export const RETRY_ALLOWANCE_TOKENS = 800;
 
 // Everything the pull request author wrote is untrusted: text printed outside a
 // data wrapper goes through inlineText, text inside one is stripped first.
@@ -20,35 +24,9 @@ export function pullRequestHeader(pr: PullRequestInfo, fileCount: number, token:
   ].join('\n');
 }
 
-function fileSection(c: FileContext, k: number, fileCount: number, token: string): string {
-  const path = c.file.path;
-  const lines = [
-    `## File ${k}/${fileCount}: ${inlineText(path)}`,
-    `status: ${c.file.status}`,
-    `additions: ${c.file.additions}`,
-    `deletions: ${c.file.deletions}`,
-  ];
-  if (c.file.previousPath !== null) {
-    lines.push(`previous path: ${inlineText(c.file.previousPath)}`);
-  }
-  if (c.diffText !== null) {
-    lines.push(wrapData(`diff ${path}`, c.diffText, token));
-  }
-  if (c.full !== null) {
-    lines.push(
-      c.full.kind === 'full'
-        ? '### Full file (kind: full)'
-        : `### Full file (kind: excerpt of ${c.full.totalLines} lines)`,
-      wrapData(`full file ${path}`, c.full.text, token),
-    );
-  }
-  if (c.test !== null) {
-    lines.push(
-      `### Paired test: ${inlineText(c.test.path)}`,
-      wrapData(`test ${c.test.path}`, c.test.text, token),
-    );
-  }
-  return lines.join('\n');
+// What stripping removes from the title and the description, for the audit.
+export function headerStripCounts(pr: PullRequestInfo): { title: number; description: number } {
+  return { title: stripControl(pr.title).removed, description: stripControl(pr.description).removed };
 }
 
 export function buildMessages(args: {
@@ -77,10 +55,15 @@ export function buildMessages(args: {
   ];
 }
 
+// Everything in a call except the file sections: the contract, the header, the
+// batch line, the legend, the tool definition and the retry turn.
 export function fixedTokens(contract: string, pr: PullRequestInfo): number {
   return (
     estimateTokens(contract) +
-    estimateTokens(pullRequestHeader(pr, 9999, 'x'.repeat(16))) +
-    estimateTokens(ANCHOR_LEGEND)
+    estimateTokens(pullRequestHeader(pr, MEASURE_NUMBER, MEASURE_TOKEN)) +
+    estimateTokens(`Batch ${MEASURE_NUMBER} of ${MEASURE_NUMBER}.\n\n`) +
+    estimateTokens(`${ANCHOR_LEGEND}\n\n`) +
+    estimateTokens(JSON.stringify(submitReviewTool)) +
+    RETRY_ALLOWANCE_TOKENS
   );
 }

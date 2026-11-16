@@ -100,8 +100,50 @@ test('a renamed file with identical contents has no diff', async () => {
   const { contexts } = await buildFileContexts(pr, [file('src/new.ts', { patch: null, status: 'renamed', previousPath: 'src/old.ts' })], source);
   assert.ok(source.calls.includes('base:src/old.ts'));
   assert.deepEqual([contexts[0]!.ranges, contexts[0]!.diffText, contexts[0]!.full, contexts[0]!.test], [null, null, null, null]);
+  assert.equal(contexts[0]!.skip, 'unchanged');
 });
 test('an empty given patch has no diff', async () => {
   const { contexts } = await buildFileContexts(pr, [file('src/a.ts', { patch: '' })], stub(allPresent));
   assert.deepEqual([contexts[0]!.ranges, contexts[0]!.diffText, contexts[0]!.full, contexts[0]!.test], [null, null, null, null]);
+  assert.equal(contexts[0]!.skip, 'unchanged');
+});
+test('skip is null for a file with a diff, no_diff for one with no patch and no content', async () => {
+  const { contexts } = await buildFileContexts(
+    pr,
+    [file('src/a.ts'), file('logo.bin', { patch: null }), file('src/gone.ts', { patch: null, status: 'removed' })],
+    stub({ 'head:src/a.ts': 'b\n' }),
+  );
+  assert.deepEqual(contexts.map((c) => [c.file.path, c.skip]), [['src/a.ts', null], ['src/gone.ts', 'no_diff'], ['logo.bin', 'no_diff']]);
+});
+const manyLines = (count: number, prefix: string): string => Array.from({ length: count }, (_, i) => `${prefix}${i}`).join('\n') + '\n';
+test('a patch that cannot be computed within the bound is too_large', async () => {
+  const source = stub({ 'base:src/big.ts': manyLines(6000, 'old'), 'head:src/big.ts': manyLines(6000, 'new') });
+  const { contexts } = await buildFileContexts(pr, [file('src/big.ts', { patch: null })], source);
+  assert.deepEqual([contexts[0]!.skip, contexts[0]!.ranges, contexts[0]!.full], ['too_large', null, null]);
+});
+test('control characters stripped from the base content count toward the file', async () => {
+  const { audit } = await buildFileContexts(pr, [file('src/a.ts', { patch: null })], stub({ 'base:src/a.ts': 'x\u200b\u00ad\n', 'head:src/a.ts': 'y\u200b\n' }));
+  assert.deepEqual(audit, [{ stage: 'context', action: 'control_characters_stripped', subject: 'src/a.ts', reason: '3' }]);
+});
+test('a failed probe for a paired test is audited and the file has no test', async () => {
+  const source = stub({ 'head:src/a.ts': 'x\n' });
+  const inner = source.getFileContent;
+  source.getFileContent = async (p, path, sha) => {
+    if (path === 'src/a.test.ts') throw new Error('github_502');
+    if (path === 'src/a.spec.ts') throw new Error('Something long went wrong');
+    return inner(p, path, sha);
+  };
+  const { contexts, audit } = await buildFileContexts(pr, [file('src/a.ts')], source);
+  assert.equal(contexts[0]!.test, null);
+  assert.notEqual(contexts[0]!.ranges, null);
+  assert.deepEqual(audit, [
+    { stage: 'context', action: 'test_probe_failed', subject: 'src/a.test.ts', reason: 'github_502' },
+    { stage: 'context', action: 'test_probe_failed', subject: 'src/a.spec.ts', reason: 'source_error' },
+  ]);
+});
+test('a failure fetching the file own content still fails', async () => {
+  const source = stub({});
+  source.getFileContent = async () => { throw new Error('github_502'); };
+  await assert.rejects(buildFileContexts(pr, [file('src/a.ts', { patch: null })], source), { message: 'github_502' });
+  await assert.rejects(buildFileContexts(pr, [file('src/a.ts')], source), { message: 'github_502' });
 });

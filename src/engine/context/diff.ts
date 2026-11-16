@@ -104,9 +104,15 @@ export function commentableRanges(hunks: Hunk[]): Ranges {
   return { RIGHT: toRanges(right), LEFT: toRanges(left) };
 }
 
-export function patchFromContents(oldText: string, newText: string): string {
-  const { hunks } = structuredPatch('a', 'b', oldText, newText, undefined, undefined, { context: 3 });
-  return hunks
+// Beyond this many edits the diff library gives up: two large, fully different
+// contents would otherwise block the process for a long time.
+const MAX_EDIT_LENGTH = 8000;
+
+/** The unified hunks between two contents, or null when the diff gives up at MAX_EDIT_LENGTH. */
+export function patchFromContents(oldText: string, newText: string): string | null {
+  const patch = structuredPatch('a', 'b', oldText, newText, undefined, undefined, { context: 3, maxEditLength: MAX_EDIT_LENGTH });
+  if (patch === undefined) return null;
+  return patch.hunks
     .map((h) => [`@@ -${h.oldStart},${h.oldLines} +${h.newStart},${h.newLines} @@`, ...h.lines].join('\n'))
     .join('\n');
 }

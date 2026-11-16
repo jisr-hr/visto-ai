@@ -48,3 +48,27 @@ test('ordering does not mutate its input', () => {
   orderByPriority(input);
   assert.deepEqual(input.map((x) => x.path), ['b.txt', 'src/a.ts']);
 });
+
+test('words split at case boundaries', () => {
+  assert.equal(priorityScore(f('src/billing/PaymentService.ts')), 10 + 120 + 160);
+  assert.equal(priorityScore(f('src/PaymentService.ts')), 10 + 120 + 160);
+  assert.equal(priorityScore(f('src/APIClient.ts')), 10 + 120 + 100);
+  assert.equal(priorityScore(f('src/Capital.ts')), 10 + 120);
+});
+
+test('an equal score with different sizes is ordered by size', () => {
+  const out = orderByPriority([f('src/small.ts', 1), f('src/large.ts', 9)]);
+  assert.deepEqual(out.map((x) => x.path), ['src/large.ts', 'src/small.ts']);
+  assert.equal(priorityScore(f('src/small.ts', 1)) - 1, priorityScore(f('src/large.ts', 9)) - 9);
+});
+
+test('plural words match their singular', () => {
+  assert.equal(priorityScore(f('src/services/x.ts')), 10 + 120 + 160);
+  assert.equal(priorityScore(f('src/routes/x.ts')), 10 + 120 + 100);
+});
+
+test('a .min.js name and a name with no dot', () => {
+  assert.equal(priorityScore(f('web/app.min.js')), 10 - 120);
+  assert.equal(priorityScore(f('Makefile')), 10);
+  assert.equal(priorityScore(f('src/Dockerfile')), 10 + 120);
+});

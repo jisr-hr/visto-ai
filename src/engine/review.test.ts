@@ -114,6 +114,24 @@ test('files but nothing reviewable: ok, no call, files listed', async () => {
   assert.deepEqual(r.coverage.notReviewed, [{ path: 'logo.bin', reason: 'no_diff' }]);
 });
 
+test('a pure rename is neither reviewed nor listed as not reviewed, and is audited', async () => {
+  const rename: ChangedFile = { path: 'src/new.ts', previousPath: 'src/old.ts', status: 'renamed', additions: 0, deletions: 0, patch: null };
+  const d = deps({ files: [fileA, rename], answers: [answerOnA] });
+  d.source.getFileContent = async (_p, path) => (path === 'src/old.ts' || path === 'src/new.ts' ? 'same\n' : null);
+  const r = await review(input, d);
+  assert.deepEqual(r.coverage, { reviewed: ['src/a.ts'], notReviewed: [] });
+  assert.deepEqual(r.audit.filter((e) => e.subject === 'src/new.ts'), [{ stage: 'context', action: 'skipped', subject: 'src/new.ts', reason: 'unchanged' }]);
+});
+
+test('characters stripped from the title and the description reach the audit', async () => {
+  const pr = { ...input.pullRequest, title: 'Add\u200b things\u202e', description: 'Adds\u00ad things.' };
+  const r = await review({ ...input, pullRequest: pr }, deps({ files: [fileA], answers: [answerOnA] }));
+  assert.deepEqual(r.audit.filter((e) => e.subject === 'title' || e.subject === 'description'), [
+    { stage: 'context', action: 'control_characters_stripped', subject: 'title', reason: '2' },
+    { stage: 'context', action: 'control_characters_stripped', subject: 'description', reason: '1' },
+  ]);
+});
+
 test('a budget below the fixed part fails with no call', async () => {
   const d = deps({ files: [fileA] });
   const r = await review({ ...input, limits: { ...input.limits, inputTokensPerCall: 10 } }, d);

@@ -3,7 +3,7 @@ import type { FileContext } from './context/build.ts';
 import { packBatches } from './context/batches.ts';
 import type { Batch } from './context/batches.ts';
 import { orderByPriority } from './context/priority.ts';
-import { buildMessages, fixedTokens } from './context/prompt.ts';
+import { buildMessages, fixedTokens, headerStripCounts } from './context/prompt.ts';
 import { callBatch } from './model/call.ts';
 import type { BatchAnswer } from './model/call.ts';
 import type { SubmitReviewArgs } from './model/submit-review.ts';
@@ -195,6 +195,10 @@ export async function review(input: ReviewInput, deps: ReviewDeps): Promise<Revi
     const budget = input.limits.inputTokensPerCall - fixedTokens(deps.contract, pr);
     if (budget <= 0) return failedResult('context', 'budget_too_small', usage, audit, 'ok');
 
+    const stripped = headerStripCounts(pr);
+    for (const subject of ['title', 'description'] as const) {
+      if (stripped[subject] > 0) audit.push({ stage: 'context', action: 'control_characters_stripped', subject, reason: String(stripped[subject]) });
+    }
     const built = await buildFileContexts(pr, orderByPriority(files), source);
     const packed = packBatches(built.contexts, budget, input.limits.batchesPerReview);
     audit.push(...built.audit, ...packed.audit);

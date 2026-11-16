@@ -1,10 +1,11 @@
 // Handling of text written by the pull request author. It is data, never instructions.
 
-// C0 controls except tab (\u0009) and newline (\u000a), DEL, C1 controls,
-// zero-width and direction marks, embeddings and overrides, invisible operators,
-// isolates, and the byte order mark.
+// C0 controls except tab (\u0009) and newline (\u000a), DEL, C1 controls, the soft
+// hyphen, the Arabic letter mark, the Mongolian vowel separator, zero-width and
+// direction marks, line and paragraph separators, embeddings and overrides,
+// invisible operators, isolates, the byte order mark, and the tag characters.
 const INVISIBLE =
-  /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/g;
+  /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u00ad\u061c\u180e\u200b-\u200f\u2028-\u202e\u2060-\u2064\u2066-\u2069\ufeff\u{e0000}-\u{e007f}]/gu;
 
 const INLINE_LIMIT = 300;
 

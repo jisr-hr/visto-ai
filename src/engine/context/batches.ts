@@ -1,5 +1,6 @@
 import type { AuditEntry, NotReviewed } from '../types.ts';
 import type { FileContext } from './build.ts';
+import { MEASURE_NUMBER, MEASURE_TOKEN, fileSection } from './section.ts';
 
 export interface Batch { files: FileContext[]; tokens: number }
 
@@ -7,17 +8,9 @@ export function estimateTokens(text: string): number {
   return Math.ceil(text.length / 3);
 }
 
-export function unitTokens(c: FileContext): { diff: number; full: number; test: number } {
-  return {
-    diff: c.diffText === null ? 0 : estimateTokens(c.diffText),
-    full: c.full === null ? 0 : estimateTokens(c.full.text),
-    test: c.test === null ? 0 : estimateTokens(c.test.text),
-  };
-}
-
-function total(c: FileContext): number {
-  const t = unitTokens(c);
-  return t.diff + t.full + t.test;
+// A file's size for packing: its rendered section, with the separator that follows it.
+export function unitTokens(c: FileContext): number {
+  return estimateTokens(`${fileSection(c, MEASURE_NUMBER, MEASURE_NUMBER, MEASURE_TOKEN)}\n\n`);
 }
 
 export function packBatches(
@@ -33,8 +26,12 @@ export function packBatches(
 
   for (const original of contexts) {
     const path = original.file.path;
-    if (original.ranges === null) {
-      notReviewed.push({ path, reason: 'no_diff' });
+    if (original.skip === 'unchanged') {
+      audit.push({ stage: 'context', action: 'skipped', subject: path, reason: 'unchanged' });
+      continue;
+    }
+    if (original.skip !== null) {
+      notReviewed.push({ path, reason: original.skip });
       continue;
     }
     // Shed the test, then the full file, until the unit fits an empty call.
@@ -43,15 +40,15 @@ export function packBatches(
     const cut = (action: string): void => {
       cuts.push({ stage: 'context', action, subject: path, reason: 'over_call_budget' });
     };
-    if (total(c) > budget && c.test !== null) {
+    if (unitTokens(c) > budget && c.test !== null) {
       c = { ...c, test: null };
       cut('test_file_cut');
     }
-    if (total(c) > budget && c.full !== null) {
+    if (unitTokens(c) > budget && c.full !== null) {
       c = { ...c, full: null };
       cut('full_file_cut');
     }
-    if (total(c) > budget) {
+    if (unitTokens(c) > budget) {
       notReviewed.push({ path, reason: 'too_large' });
       continue;
     }
@@ -59,7 +56,7 @@ export function packBatches(
       notReviewed.push({ path, reason: 'over_batch_limit' });
       continue;
     }
-    const tokens = total(c);
+    const tokens = unitTokens(c);
     if (current === null || current.tokens + tokens > budget) {
       if (batches.length >= maxBatches) {
         full = true;

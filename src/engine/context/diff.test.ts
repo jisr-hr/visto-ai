@@ -114,26 +114,40 @@ test('the legend explains both anchors and the lines without one', () => {
 
 test('patchFromContents round-trips through parsePatch', () => {
   const p = patchFromContents('a\nb\nc\n', 'a\nB\nc\n');
-  assert.deepEqual(commentableRanges(parsePatch(p)), { RIGHT: [[1, 3]], LEFT: [[2, 2]] });
+  assert.deepEqual(commentableRanges(parsePatch(p!)), { RIGHT: [[1, 3]], LEFT: [[2, 2]] });
   assert.equal(patchFromContents('same\n', 'same\n'), '');
 });
 
 test('patchFromContents has no file headers and keeps 3 lines of context', () => {
   const old = Array.from({ length: 20 }, (_, i) => `l${i + 1}`).join('\n') + '\n';
   const next = old.replace('l10\n', 'ten\n');
-  const p = patchFromContents(old, next);
+  const p = patchFromContents(old, next)!;
   assert.ok(p.startsWith('@@ -7,7 +7,7 @@\n'));
   assert.doesNotMatch(p, /^(---|\+\+\+|Index)/m);
 });
 
 test('patchFromContents handles an empty side', () => {
-  assert.deepEqual(commentableRanges(parsePatch(patchFromContents('', 'a\nb\n'))), { RIGHT: [[1, 2]], LEFT: [] });
-  assert.deepEqual(commentableRanges(parsePatch(patchFromContents('a\nb\n', ''))), { RIGHT: [], LEFT: [[1, 2]] });
+  assert.deepEqual(commentableRanges(parsePatch(patchFromContents('', 'a\nb\n')!)), { RIGHT: [[1, 2]], LEFT: [] });
+  assert.deepEqual(commentableRanges(parsePatch(patchFromContents('a\nb\n', '')!)), { RIGHT: [], LEFT: [[1, 2]] });
 });
 
 test('CRLF content is numbered like LF content', () => {
   assert.deepEqual(
-    commentableRanges(parsePatch(patchFromContents('a\r\nb\r\n', 'a\r\nB\r\n'))).LEFT,
+    commentableRanges(parsePatch(patchFromContents('a\r\nb\r\n', 'a\r\nB\r\n')!)).LEFT,
     [[2, 2]],
   );
+});
+
+const lines = (count: number, prefix: string): string => Array.from({ length: count }, (_, i) => `${prefix}${i}`).join('\n') + '\n';
+
+test('patchFromContents gives up on two fully different large contents', () => {
+  assert.equal(patchFromContents(lines(6000, 'old'), lines(6000, 'new')), null);
+});
+
+test('patchFromContents still diffs a small change in a large file', () => {
+  const old = lines(6000, 'row');
+  const next = old.replace('row10\n', 'ten\n').replace('row3000\n', 'mid\n').replace('row5990\n', 'end\n');
+  const p = patchFromContents(old, next);
+  assert.notEqual(p, null);
+  assert.equal(parsePatch(p!).length, 3);
 });

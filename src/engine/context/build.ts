@@ -14,9 +14,12 @@ export interface FileContext {
   diffText: string | null; // anchored diff, control characters stripped
   full: FullFile | null;
   test: { path: string; text: string } | null;
+  // Why the file has nothing to send; null when it has a diff.
+  skip: 'no_diff' | 'too_large' | 'unchanged' | null;
 }
 
 const MAX_TEST_PROBES = 20;
+const SHORT_CODE = /^[a-z][a-z0-9_]{0,39}$/;
 
 function stripped(count: number, subject: string): AuditEntry[] {
   return count === 0
@@ -39,6 +42,8 @@ export async function buildFileContexts(
     return content;
   };
   const changedPaths = new Set(files.map((f) => f.path));
+  const contexts: FileContext[] = [];
+  const audit: AuditEntry[] = [];
 
   const findTest = async (path: string): Promise<{ path: string; content: string } | null> => {
     for (const candidate of testCandidates(path)) {
@@ -47,18 +52,25 @@ export async function buildFileContexts(
         if (attempts >= MAX_TEST_PROBES) return null;
         attempts += 1;
       }
-      const content = await fetchContent(candidate, pr.headSha);
+      let content: string | null;
+      try {
+        content = await fetchContent(candidate, pr.headSha);
+      } catch (error) {
+        // A failed probe means no test file at that path; the review goes on.
+        const reason = error instanceof Error && SHORT_CODE.test(error.message) ? error.message : 'source_error';
+        audit.push({ stage: 'context', action: 'test_probe_failed', subject: candidate, reason });
+        cache.set(`${pr.headSha}:${candidate}`, null);
+        continue;
+      }
       if (content !== null) return { path: candidate, content };
     }
     return null;
   };
 
-  const contexts: FileContext[] = [];
-  const audit: AuditEntry[] = [];
-
   for (const file of orderByPriority(files)) {
     let removed = 0;
     let patch: string | null = null;
+    let tooLarge = false;
     let head: string | null = null; // cleaned head content, fetched at most once
     let headFetched = false;
     const loadHead = async (): Promise<void> => {
@@ -79,19 +91,26 @@ export async function buildFileContexts(
       const old = file.status === 'added' ? '' : await fetchContent(file.previousPath ?? file.path, pr.baseSha);
       await loadHead();
       if (old !== null && head !== null) {
-        patch = patchFromContents(stripControl(old).text, head);
+        const cleanOld = stripControl(old);
+        removed += cleanOld.removed;
+        patch = patchFromContents(cleanOld.text, head);
+        tooLarge = patch === null;
       }
     }
 
     let hunks: Hunk[] = [];
     let ranges: Ranges | null = null;
     let diffText: string | null = null;
+    let skip: FileContext['skip'] = tooLarge ? 'too_large' : 'no_diff';
     if (patch !== null) {
       const parsed = parsePatch(patch);
       if (parsed.length > 0) {
         hunks = parsed;
         ranges = commentableRanges(hunks);
         diffText = renderAnchoredDiff(hunks);
+        skip = null;
+      } else {
+        skip = 'unchanged';
       }
     }
 
@@ -112,7 +131,7 @@ export async function buildFileContexts(
       }
     }
     audit.push(...stripped(removed, file.path));
-    contexts.push({ file, hunks, ranges, diffText, full, test });
+    contexts.push({ file, hunks, ranges, diffText, full, test, skip });
   }
   return { contexts, audit };
 }
