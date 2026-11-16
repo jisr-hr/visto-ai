@@ -25,15 +25,16 @@ function retryAfterMs(header: string | null): number {
   return Math.min(Number(header.trim()) * 1000, MAX_RETRY_MS);
 }
 
-function detailOf(status: number, body: unknown): string {
+function detailOf(status: number, body: unknown, secret: string): string {
   const message = isRecord(body) && isRecord(body.error) && typeof body.error.message === 'string' ? body.error.message : '';
-  const line = message.replace(/\s+/g, ' ').trim().slice(0, 200);
+  const hidden = secret === '' ? message : message.replaceAll(secret, '[redacted]');
+  const line = hidden.replace(/\s+/g, ' ').trim().slice(0, 200);
   return line === '' ? `status ${status}` : line;
 }
 
-export function classify(status: number, body: unknown, retryAfterHeader: string | null): ProviderError | null {
+export function classify(status: number, body: unknown, retryAfterHeader: string | null, secret = ''): ProviderError | null {
   const make = (kind: ProviderErrorKind, retry: number | null = null): ProviderError =>
-    new ProviderError(kind, `${kind}: ${detailOf(status, body)}`, status, retry);
+    new ProviderError(kind, `${kind}: ${detailOf(status, body, secret)}`, status, retry);
   if (status === 401) return make('auth');
   if (status === 402) return make('no_credit');
   if (status === 429) return make('rate_limited', retryAfterMs(retryAfterHeader));

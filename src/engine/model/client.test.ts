@@ -94,6 +94,35 @@ test('a body read that times out is a timeout, not a fallback', async () => {
     assert.equal(s.calls.length, calls);
   }
 });
+const unreadable = (status: number, name: string, headers: Record<string, string> = {}): Response =>
+  ({ status, headers: new Headers(headers), text: () => Promise.reject(named(name)) }) as unknown as Response;
+test('a failed body read on a non-2xx status is still classified by status', async () => {
+  const a = setup();
+  a.queue(unreadable(401, 'Other'), json(200, success('vendor/model-b')));
+  await assert.rejects(a.client.complete(req), (e: ProviderError) => e.kind === 'auth');
+  assert.equal(a.calls.length, 1);
+  const b = setup();
+  b.queue(unreadable(429, 'Other', { 'retry-after': '3' }), json(200, success('vendor/model-a')));
+  await b.client.complete(req);
+  assert.deepEqual(b.slept, [3000]);
+  assert.deepEqual(b.calls.map((c) => c.body.model), ['vendor/model-a', 'vendor/model-a']);
+  const c = setup();
+  c.queue(unreadable(200, 'TimeoutError'), json(200, success('vendor/model-b')));
+  await assert.rejects(c.client.complete(req), (e: ProviderError) => e.kind === 'timeout');
+  assert.equal(c.calls.length, 1);
+});
+test('the key is in neither message nor stack, even across the 200-character cut', async () => {
+  const key = 'sk-test-0123456789abcdef';
+  const cases = [`bad key ${key} given`, `${'x'.repeat(190)}${key}`];
+  for (const message of cases) {
+    const { client, queue } = setup({ ...baseConfig, apiKey: key });
+    queue(json(401, { error: { message } }));
+    await assert.rejects(client.complete(req), (e: ProviderError) => {
+      const seen = `${e.message}\n${e.stack ?? ''}`;
+      return !seen.includes(key.slice(0, 8)) && e.message.includes('[redacted]');
+    });
+  }
+});
 test('the key is redacted from an error message the provider echoes it in', async () => {
   const { client, queue } = setup({ ...baseConfig, apiKey: 'sekret-key-value' });
   queue(json(401, { error: { message: 'bad key sekret-key-value given' } }));

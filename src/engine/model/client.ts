@@ -73,7 +73,8 @@ export function createModelClient(config: ModelConfig, io: Io): ModelClient {
     } catch (err) {
       const name = err instanceof Error ? err.name : '';
       if (name === 'TimeoutError' || name === 'AbortError') throw new ProviderError('timeout', 'timeout: response aborted', res.status, null);
-      throw new ProviderError('provider', 'provider: response body unreadable', res.status, null);
+      const byStatus = res.status >= 200 && res.status <= 299 ? null : classify(res.status, undefined, res.headers.get('retry-after'), config.apiKey);
+      throw byStatus ?? new ProviderError('provider', 'provider: response body unreadable', res.status, null);
     }
     let parsed: unknown;
     try {
@@ -89,7 +90,7 @@ export function createModelClient(config: ModelConfig, io: Io): ModelClient {
       total.cachedTokens += usage.cachedTokens;
       total.cost += usage.cost;
     }
-    const failure = classify(res.status, parsed, res.headers.get('retry-after'));
+    const failure = classify(res.status, parsed, res.headers.get('retry-after'), config.apiKey);
     if (failure !== null) throw failure;
     return parsed as Json;
   }
@@ -120,13 +121,6 @@ export function createModelClient(config: ModelConfig, io: Io): ModelClient {
   }
 
   return {
-    async complete(request: ModelRequest): Promise<ModelResponse> {
-      try {
-        return await run(request);
-      } catch (err) {
-        if (err instanceof ProviderError && config.apiKey !== '') err.message = err.message.replaceAll(config.apiKey, '[redacted]');
-        throw err;
-      }
-    },
+    complete: run,
   };
 }
