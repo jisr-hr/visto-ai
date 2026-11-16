@@ -67,3 +67,18 @@ test('model.timeoutSeconds is at most 300', () => {
     (e: ConfigError) => e.issues.some((i) => i.startsWith('model.timeoutSeconds')),
   );
 });
+
+test('limits.inputTokensPerCall is at least 10,000', () => {
+  const at = (n: number): string => `${minimal}limits:\n  inputTokensPerCall: ${n}\n`;
+  assert.equal(parseConfig(at(10_000), { MODEL_KEY: 'k' }).limits.inputTokensPerCall, 10_000);
+  assert.throws(() => parseConfig(at(9_999), { MODEL_KEY: 'k' }), (e: ConfigError) => e.issues.some((i) => i.startsWith('limits.inputTokensPerCall')));
+});
+
+test('model.baseUrl must be an http or https URL', () => {
+  const at = (url: string): string => `${minimal}  baseUrl: '${url}'\n`;
+  assert.equal(parseConfig(at('http://localhost:8080/v1'), { MODEL_KEY: 'k' }).model.baseUrl, 'http://localhost:8080/v1');
+  assert.equal(parseConfig(at('https://models.example.test/api'), { MODEL_KEY: 'k' }).model.baseUrl, 'https://models.example.test/api');
+  for (const bad of ['not a url', 'ftp://models.example.test', 'file:///etc/models', 'javascript:alert(1)', '//models.example.test']) {
+    assert.throws(() => parseConfig(at(bad), { MODEL_KEY: 'k' }), (e: ConfigError) => e.issues.some((i) => i.startsWith('model.baseUrl')) && !e.message.includes(bad), bad);
+  }
+});

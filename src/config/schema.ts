@@ -3,6 +3,12 @@ import { z } from 'zod';
 /** A secret is never written in the file; it names the environment variable that holds it. */
 const secretRef = z.object({ env: z.string().min(1) }).strict();
 
+function isHttpUrl(value: string): boolean {
+  if (!URL.canParse(value)) return false;
+  const { protocol } = new URL(value);
+  return protocol === 'http:' || protocol === 'https:';
+}
+
 const fragment = z.record(z.string(), z.unknown()).prefault({});
 
 const prices = z
@@ -15,7 +21,7 @@ const prices = z
 
 const model = z
   .object({
-    baseUrl: z.string().min(1).default('https://openrouter.ai/api/v1'),
+    baseUrl: z.string().refine(isHttpUrl, { message: 'must be an http or https URL' }).default('https://openrouter.ai/api/v1'),
     apiKey: secretRef,
     model: z.string().min(1),
     fallbacks: z.array(z.string().min(1)).default([]),
@@ -32,7 +38,7 @@ const model = z
 
 const limits = z
   .object({
-    inputTokensPerCall: z.number().int().positive().default(200000),
+    inputTokensPerCall: z.number().int().min(10000).default(200000),
     batchesPerReview: z.number().int().positive().default(6),
   })
   .strict();
