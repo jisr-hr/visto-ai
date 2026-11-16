@@ -59,8 +59,17 @@ export async function buildFileContexts(
   for (const file of orderByPriority(files)) {
     let removed = 0;
     let patch: string | null = null;
-    let head: string | null = null;
+    let head: string | null = null; // cleaned head content, fetched at most once
     let headFetched = false;
+    const loadHead = async (): Promise<void> => {
+      if (headFetched) return;
+      headFetched = true;
+      const raw = await fetchContent(file.path, pr.headSha);
+      if (raw === null) return;
+      const clean = stripControl(raw);
+      removed += clean.removed;
+      head = clean.text;
+    };
 
     if (file.patch !== null) {
       const clean = stripControl(file.patch);
@@ -68,10 +77,9 @@ export async function buildFileContexts(
       removed += clean.removed;
     } else if (file.status !== 'removed') {
       const old = file.status === 'added' ? '' : await fetchContent(file.previousPath ?? file.path, pr.baseSha);
-      head = await fetchContent(file.path, pr.headSha);
-      headFetched = true;
+      await loadHead();
       if (old !== null && head !== null) {
-        patch = patchFromContents(stripControl(old).text, stripControl(head).text);
+        patch = patchFromContents(stripControl(old).text, head);
       }
     }
 
@@ -79,21 +87,20 @@ export async function buildFileContexts(
     let ranges: Ranges | null = null;
     let diffText: string | null = null;
     if (patch !== null) {
-      hunks = parsePatch(patch);
-      ranges = commentableRanges(hunks);
-      diffText = renderAnchoredDiff(hunks);
+      const parsed = parsePatch(patch);
+      if (parsed.length > 0) {
+        hunks = parsed;
+        ranges = commentableRanges(hunks);
+        diffText = renderAnchoredDiff(hunks);
+      }
     }
 
     let full: FullFile | null = null;
     let test: FileContext['test'] = null;
     if (ranges !== null) {
       if (file.status !== 'removed' && !isLowPriority(file.path)) {
-        if (!headFetched) head = await fetchContent(file.path, pr.headSha);
-        if (head !== null) {
-          const clean = stripControl(head);
-          removed += clean.removed;
-          full = fullFileContext(clean.text, hunks);
-        }
+        await loadHead();
+        if (head !== null) full = fullFileContext(head, hunks);
       }
       if (file.status !== 'removed') {
         const found = await findTest(file.path);

@@ -71,7 +71,7 @@ test('the paired test is attached, and skipped when it is itself changed', async
 test('contents are never fetched twice and test probes stop at 20', async () => {
   const source = stub({});
   await buildFileContexts(pr, Array.from({ length: 30 }, (_, i) => file(`src/f${i}.ts`)), source);
-  assert.ok(source.calls.filter((k) => /\.(test|spec)\.ts$/.test(k)).length <= 20);
+  assert.equal(source.calls.filter((k) => /\.(test|spec)\.ts$/.test(k)).length, 20);
   assert.equal(new Set(source.calls).size, source.calls.length);
 });
 test('a content fetched for the diff is reused for the full file', async () => {
@@ -89,4 +89,19 @@ test('control characters in head content and in a paired test are audited separa
     { stage: 'context', action: 'control_characters_stripped', subject: 'src/a.test.ts', reason: '2' },
     { stage: 'context', action: 'control_characters_stripped', subject: 'src/a.ts', reason: '1' },
   ]);
+});
+test('control characters in the head of a low-priority file with no patch are audited once', async () => {
+  const { audit, contexts } = await buildFileContexts(pr, [file('docs/x.md', { patch: null })], stub({ 'base:docs/x.md': 'x\n', 'head:docs/x.md': 'y\u200b\n' }));
+  assert.notEqual(contexts[0]!.ranges, null);
+  assert.deepEqual(audit, [{ stage: 'context', action: 'control_characters_stripped', subject: 'docs/x.md', reason: '1' }]);
+});
+test('a renamed file with identical contents has no diff', async () => {
+  const source = stub({ 'base:src/old.ts': 'same\n', 'head:src/new.ts': 'same\n', 'head:src/new.test.ts': 't\n' });
+  const { contexts } = await buildFileContexts(pr, [file('src/new.ts', { patch: null, status: 'renamed', previousPath: 'src/old.ts' })], source);
+  assert.ok(source.calls.includes('base:src/old.ts'));
+  assert.deepEqual([contexts[0]!.ranges, contexts[0]!.diffText, contexts[0]!.full, contexts[0]!.test], [null, null, null, null]);
+});
+test('an empty given patch has no diff', async () => {
+  const { contexts } = await buildFileContexts(pr, [file('src/a.ts', { patch: '' })], stub(allPresent));
+  assert.deepEqual([contexts[0]!.ranges, contexts[0]!.diffText, contexts[0]!.full, contexts[0]!.test], [null, null, null, null]);
 });
