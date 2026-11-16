@@ -22,3 +22,7 @@ test('test candidates', () => {
 test('a lib ruby file maps to spec/lib', () => {
   assert.deepEqual(testCandidates('lib/tax/rate.rb'), ['spec/lib/tax/rate_spec.rb']);
 });
+
+test('a script file at the repository root has no ./ prefix', () => {
+  assert.deepEqual(testCandidates('index.ts'), ['index.test.ts', 'index.spec.ts', '__tests__/index.test.ts']);
+});

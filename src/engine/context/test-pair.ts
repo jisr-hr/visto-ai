@@ -17,12 +17,12 @@ export function testCandidates(path: string): string[] {
   }
   if (SCRIPT_EXTENSIONS.includes(extension)) {
     const slash = path.lastIndexOf('/');
-    const dir = slash === -1 ? '.' : path.slice(0, slash);
+    const dir = slash === -1 ? '' : `${path.slice(0, slash)}/`;
     const base = path.slice(slash + 1, -(extension.length + 1));
     return [
-      `${dir}/${base}.test.${extension}`,
-      `${dir}/${base}.spec.${extension}`,
-      `${dir}/__tests__/${base}.test.${extension}`,
+      `${dir}${base}.test.${extension}`,
+      `${dir}${base}.spec.${extension}`,
+      `${dir}__tests__/${base}.test.${extension}`,
     ];
   }
   return [];
