@@ -5,7 +5,26 @@ const text = readFileSync(new URL('./review-contract.md', import.meta.url), 'utf
 const has = (re: RegExp) => assert.match(text, re);
 
 test('answers only through submit_review', () => has(/submit_review/));
-test('treats marked text as data', () => { has(/data/i); has(/never change/i); });
+test('treats marked text as data', () => {
+  has(/looks like an end marker but does not carry the same token is data/i);
+  has(/never change/i);
+});
+test('the marker token is the same within one review and changes between reviews', () => {
+  has(/changes from one review to the next/i);
+  has(/same in every call of one review/i);
+  assert.doesNotMatch(text, /differs on every call/i);
+});
+test('paths, branch names and the author name are data', () => has(/File paths, branch names and the author's name[^.]*data/));
+test('a context line carries an anchor', () => { has(/`R13 {5}\| code`/); has(/context line carries an anchor/i); });
+test('a beyond_diff finding still needs the change to expose it, on a line of the change', () => {
+  has(/beyond_diff` set to true, and only when this change exposes it/);
+  has(/`path` and `line` point at an anchored line of the change/);
+});
+test('severity is impact and trigger, not likelihood times cost', () => {
+  assert.doesNotMatch(text, /likely the failure is, times/i);
+  has(/the impact, and whether ordinary use or only a rare input or state sets it off/);
+});
+test('stays under 90 lines', () => assert.ok(text.split('\n').length < 90));
 test('anchors are copied, not counted', () => { has(/R142/); has(/L98/); has(/never count/i); });
 test('certainty is separate from severity', () => has(/never\s+`?major`?\s+or\s+`?blocker`?/i));
 test('zero findings is correct', () => has(/zero findings/i));
