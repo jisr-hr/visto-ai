@@ -1,0 +1,43 @@
+# Deployment configuration. Copy to config.local.yml (git-ignored) and adjust.
+# An unknown key anywhere in this file is an error.
+# A secret is never written here; it is named by reference: { env: VARIABLE_NAME }.
+
+model:
+  # Base URL of the chat-completions endpoint.
+  baseUrl: https://openrouter.ai/api/v1
+  # The API key, read from this environment variable (sent as a bearer token).
+  apiKey: { env: OPENROUTER_API_KEY }
+  # The model to ask first.
+  model: vendor/model-a
+  # Models to try, in order, when the first one fails.
+  fallbacks: []
+  # Provider fragments merged into the request body for each effort level.
+  effort:
+    # Used for ordinary pull requests.
+    default: {}
+    # Used for large pull requests or those that target a primary branch.
+    elevated: { reasoning: { effort: high } }
+  # Extra fields merged into every request body.
+  extraBody: {}
+  # Extra headers sent with every request.
+  extraHeaders: {}
+  # Prices in your billing currency, used to report cost; null leaves cost at zero.
+  prices: null
+  # prices: { inputPerMillion: 1.0, cachedInputPerMillion: 0.1, outputPerMillion: 4.0 }
+  # How long one model call may take.
+  timeoutSeconds: 600
+
+limits:
+  # Input tokens allowed in one model call.
+  inputTokensPerCall: 200000
+  # Batches of files allowed in one review.
+  batchesPerReview: 6
+
+repositories:
+  # Settings for every repository.
+  defaults:
+    # Branches that count as primary; a pull request targeting one gets elevated effort.
+    primaryBranches: [main, master]
+  # Per-repository changes, keyed by "owner/name"; each replaces only the keys it sets.
+  overrides:
+    acme/shop: { primaryBranches: [trunk] }
