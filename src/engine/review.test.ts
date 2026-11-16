@@ -264,7 +264,7 @@ test('usage sums every call, failed ones included', async () => {
   assert.equal(r.usage.inputTokens, 300);
 });
 
-test('the model's own retry shows in usage and audit', async () => {
+test('a retry inside the model call shows in usage and audit', async () => {
   const d = deps({ files: [fileA], answers: [ungrounded, ungrounded] });
   const r = await review(input, d);
   assert.equal(r.usage.calls, 2);
