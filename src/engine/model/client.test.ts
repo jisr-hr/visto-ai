@@ -67,12 +67,37 @@ test('merges the effort fragment and the extras', async () => {
   assert.deepEqual(calls[0]!.body.reasoning, { effort: 'high' });
   assert.deepEqual(calls[0]!.body.provider, { require_parameters: true });
 });
-test('the extras override the effort fragment, which overrides the base', async () => {
-  const { client, calls, queue } = setup({ ...baseConfig, effort: { default: { model: 'x', n: 1 }, elevated: {} }, extraBody: { n: 2 } });
+test('extraBody overrides the effort fragment', async () => {
+  const { client, calls, queue } = setup({ ...baseConfig, effort: { default: { n: 1, temperature: 0 }, elevated: {} }, extraBody: { n: 2 } });
   queue(json(200, success('vendor/model-a')));
   await client.complete(req);
-  assert.equal(calls[0]!.body.model, 'x');
   assert.equal(calls[0]!.body.n, 2);
+  assert.equal(calls[0]!.body.temperature, 0);
+});
+test('configuration cannot override the engine fields', async () => {
+  const hostile = { model: 'x', messages: [], tools: [], tool_choice: 'none' };
+  const { client, calls, queue } = setup({ ...baseConfig, effort: { default: hostile, elevated: {} }, extraBody: { model: 'x', tool_choice: 'none' } });
+  queue(json(200, { error: { message: 'down' } }), json(200, success('vendor/model-b')));
+  await client.complete(req);
+  assert.equal(calls[0]!.body.model, 'vendor/model-a');
+  assert.equal(calls[1]!.body.model, 'vendor/model-b');
+  assert.deepEqual(calls[0]!.body.tool_choice, { type: 'function', function: { name: 'submit_review' } });
+  assert.deepEqual(calls[0]!.body.messages, req.messages);
+  assert.deepEqual(calls[0]!.body.tools, req.tools);
+});
+test('a body read that times out is a timeout, not a fallback', async () => {
+  for (const [name, kind, calls] of [['TimeoutError', 'timeout', 1], ['AbortError', 'timeout', 1], ['Other', 'provider', 2]] as const) {
+    const s = setup();
+    const broken = { status: 200, headers: new Headers(), text: () => Promise.reject(named(name)) } as unknown as Response;
+    s.queue(broken, broken);
+    await assert.rejects(s.client.complete(req), (e: ProviderError) => e.kind === kind);
+    assert.equal(s.calls.length, calls);
+  }
+});
+test('the key is redacted from an error message the provider echoes it in', async () => {
+  const { client, queue } = setup({ ...baseConfig, apiKey: 'sekret-key-value' });
+  queue(json(401, { error: { message: 'bad key sekret-key-value given' } }));
+  await assert.rejects(client.complete(req), (e: ProviderError) => !e.message.includes('sekret') && e.message.includes('[redacted]'));
 });
 test('reads the tool call, the model and the usage', async () => {
   const { client, queue } = setup();

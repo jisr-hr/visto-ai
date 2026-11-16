@@ -47,12 +47,12 @@ export function createModelClient(config: ModelConfig, io: Io): ModelClient {
 
   async function attempt(model: string, request: ModelRequest, total: Usage): Promise<Json> {
     const body = {
+      ...config.effort[request.effort],
+      ...config.extraBody,
       model,
       messages: request.messages,
       tools: request.tools,
       tool_choice: { type: 'function', function: { name: request.forcedTool } },
-      ...config.effort[request.effort],
-      ...config.extraBody,
     };
     let res: Response;
     try {
@@ -67,9 +67,17 @@ export function createModelClient(config: ModelConfig, io: Io): ModelClient {
       if (name === 'TimeoutError' || name === 'AbortError') throw new ProviderError('timeout', 'timeout: request aborted', null, null);
       throw new ProviderError('provider', 'provider: network failure', null, null);
     }
+    let text: string;
+    try {
+      text = await res.text();
+    } catch (err) {
+      const name = err instanceof Error ? err.name : '';
+      if (name === 'TimeoutError' || name === 'AbortError') throw new ProviderError('timeout', 'timeout: response aborted', res.status, null);
+      throw new ProviderError('provider', 'provider: response body unreadable', res.status, null);
+    }
     let parsed: unknown;
     try {
-      parsed = JSON.parse(await res.text());
+      parsed = JSON.parse(text);
     } catch {
       parsed = undefined;
     }
@@ -96,20 +104,29 @@ export function createModelClient(config: ModelConfig, io: Io): ModelClient {
     }
   }
 
+  async function run(request: ModelRequest): Promise<ModelResponse> {
+    const total: Usage = { calls: 0, inputTokens: 0, outputTokens: 0, cachedTokens: 0, cost: 0 };
+    let last: ProviderError | null = null;
+    for (const model of [config.model, ...config.fallbacks]) {
+      try {
+        const body = await onModel(model, request, total);
+        return { ...readChoice(body), usage: total };
+      } catch (err) {
+        if (!(err instanceof ProviderError) || err.kind !== 'provider') throw err;
+        last = err;
+      }
+    }
+    throw last ?? new ProviderError('provider', 'provider: no model configured', null, null);
+  }
+
   return {
     async complete(request: ModelRequest): Promise<ModelResponse> {
-      const total: Usage = { calls: 0, inputTokens: 0, outputTokens: 0, cachedTokens: 0, cost: 0 };
-      let last: ProviderError | null = null;
-      for (const model of [config.model, ...config.fallbacks]) {
-        try {
-          const body = await onModel(model, request, total);
-          return { ...readChoice(body), usage: total };
-        } catch (err) {
-          if (!(err instanceof ProviderError) || err.kind !== 'provider') throw err;
-          last = err;
-        }
+      try {
+        return await run(request);
+      } catch (err) {
+        if (err instanceof ProviderError && config.apiKey !== '') err.message = err.message.replaceAll(config.apiKey, '[redacted]');
+        throw err;
       }
-      throw last ?? new ProviderError('provider', 'provider: no model configured', null, null);
     },
   };
 }
