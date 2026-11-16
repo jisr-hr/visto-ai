@@ -1,3 +1,4 @@
+import dgram from 'node:dgram';
 import net from 'node:net';
 
 export class NetworkBlockedError extends Error {
@@ -7,7 +8,7 @@ export class NetworkBlockedError extends Error {
   }
 }
 
-const CREDENTIAL_NAME = /TOKEN|SECRET|PASSWORD|CREDENTIAL|PRIVATE|API_KEY|_KEY$|DATABASE_URL|DSN/i;
+const CREDENTIAL_NAME = /TOKEN|SECRET|PASSWORD|CREDENTIAL|PRIVATE|AUTH|API_KEY|_KEY$|^PAT$|_PAT$|DATABASE_URL|DSN/i;
 
 export function clearCredentialEnv(env: NodeJS.ProcessEnv): string[] {
   const removed = Object.keys(env).filter((name) => CREDENTIAL_NAME.test(name));
@@ -21,4 +22,8 @@ globalThis.fetch = () => Promise.reject(new NetworkBlockedError('fetch'));
 
 net.Socket.prototype.connect = function connect(): never {
   throw new NetworkBlockedError('socket connect');
+};
+
+dgram.Socket.prototype.send = function send(): never {
+  throw new NetworkBlockedError('udp send');
 };

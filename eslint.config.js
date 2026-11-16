@@ -1,6 +1,7 @@
 import tseslint from 'typescript-eslint';
 
 const githubAdapter = '**/forge/github/**';
+const engineForbidden = ['fs', 'fs/promises', 'net', 'http', 'https', 'http2', 'tls', 'dns', 'dgram', 'child_process', 'worker_threads', 'cluster'];
 
 export default tseslint.config(
   { ignores: ['node_modules/', 'runs/', '.superpowers/'] },
@@ -19,9 +20,10 @@ export default tseslint.config(
         'error',
         {
           patterns: [githubAdapter, '**/eval/**'],
-          paths: ['node:fs', 'node:fs/promises', 'node:net', 'node:http', 'node:https', 'node:child_process'],
+          paths: engineForbidden.flatMap((name) => [name, `node:${name}`]),
         },
       ],
+      'no-restricted-syntax': ['error', { selector: 'ImportExpression', message: 'The engine may not import dynamically.' }],
     },
   },
 );

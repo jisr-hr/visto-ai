@@ -22,13 +22,17 @@ test('an unknown key is an error that names it', () => {
 
 test('a missing secret names its variable and never prints a value', () => {
   assert.throws(
-    () => parseConfig(minimal, {}),
-    (e: ConfigError) => e.issues.join().includes('MODEL_KEY'),
+    () => parseConfig(minimal, { OTHER_KEY: 'sk-other-value-77' }),
+    (e: ConfigError) =>
+      e.issues.join().includes('MODEL_KEY') && !e.message.includes('sk-other-value-77') && !e.issues.join().includes('sk-other-value-77'),
   );
 });
 
-test('a secret written inline is rejected', () => {
-  assert.throws(() => parseConfig('model:\n  apiKey: sk-inline\n  model: m\n', {}), ConfigError);
+test('a secret written inline is rejected and never printed', () => {
+  assert.throws(
+    () => parseConfig('model:\n  apiKey: sk-inline\n  model: m\n', {}),
+    (e: ConfigError) => e instanceof ConfigError && !e.message.includes('sk-inline') && !e.issues.join().includes('sk-inline'),
+  );
 });
 
 test('effort fragments pass through untouched', () => {

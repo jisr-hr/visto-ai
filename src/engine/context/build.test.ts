@@ -80,11 +80,11 @@ test('a content fetched for the diff is reused for the full file', async () => {
   assert.equal(source.calls.filter((k) => k === 'head:src/a.ts').length, 1);
 });
 test('stripped control characters are audited', async () => {
-  const { audit } = await buildFileContexts(pr, [file('src/a.ts', { patch: '@@ -1 +1 @@\n-a\n+b‮' })], stub({ 'head:src/a.ts': 'b\n' }));
+  const { audit } = await buildFileContexts(pr, [file('src/a.ts', { patch: '@@ -1 +1 @@\n-a\n+b\u202e' })], stub({ 'head:src/a.ts': 'b\n' }));
   assert.deepEqual(audit, [{ stage: 'context', action: 'control_characters_stripped', subject: 'src/a.ts', reason: '1' }]);
 });
 test('control characters in head content and in a paired test are audited separately', async () => {
-  const { audit } = await buildFileContexts(pr, [file('src/a.ts')], stub({ 'head:src/a.ts': 'b​\n', 'head:src/a.test.ts': 't‮‮\n' }));
+  const { audit } = await buildFileContexts(pr, [file('src/a.ts')], stub({ 'head:src/a.ts': 'b\u200b\n', 'head:src/a.test.ts': 't\u202e\u202e\n' }));
   assert.deepEqual(audit, [
     { stage: 'context', action: 'control_characters_stripped', subject: 'src/a.test.ts', reason: '2' },
     { stage: 'context', action: 'control_characters_stripped', subject: 'src/a.ts', reason: '1' },
