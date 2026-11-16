@@ -55,7 +55,7 @@ test('every request carries the auth, version and agent headers', async () => {
   for (const c of calls) {
     assert.equal(c.headers.authorization, 'Bearer t');
     assert.equal(c.headers['x-github-api-version'], '2022-11-28');
-    assert.equal(c.headers['user-agent'], 'ai-score-reviewer');
+    assert.equal(c.headers['user-agent'], 'visto-ai');
   }
   assert.equal(calls[0]!.headers.accept, 'application/vnd.github+json');
 });

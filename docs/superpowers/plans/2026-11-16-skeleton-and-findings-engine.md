@@ -8,7 +8,7 @@
 
 **Tech Stack:** Node 26 running TypeScript directly (type stripping), npm, `node:test` and `node:assert`, `tsc --noEmit`, ESLint with typescript-eslint, `zod`, `yaml`, `diff`.
 
-**Spec:** `docs/superpowers/specs/2026-11-13-ai-score-reviewer-design.md`. Executors read both. Section numbers below refer to it.
+**Spec:** `docs/superpowers/specs/2026-11-13-visto-ai-design.md`. Executors read both. Section numbers below refer to it.
 
 ## Scope
 
@@ -38,7 +38,7 @@ This is plan 1 of several. It covers build stages 1 and 2 of section 18.
 - **Severities:** `blocker`, `major`, `minor`. There is no `nit`.
 - **Effort (5.4):** elevated when the pull request has more than 15 files, more than 500 added lines, or targets a primary branch.
 - **Model endpoint (O20):** `https://openrouter.ai/api/v1/chat/completions`, key as a bearer token.
-- **Identifier:** `ai-score-reviewer`. **Licence:** Apache-2.0.
+- **Identifier:** `visto-ai`. **Licence:** Apache-2.0.
 - **Git:** the repository is local and private. `git init` and every commit need the owner's go-ahead, given once before Task 1. No remote is added and nothing is pushed in this plan.
 
 ## Review Focus
@@ -184,7 +184,7 @@ export type { ChangedFile, PullRequestInfo, Side, Source };
 **Interfaces:**
 - Produces: `npm test`, `npm run typecheck`, `npm run lint`. From `test/setup.ts`: `class NetworkBlockedError extends Error`, `clearCredentialEnv(env: NodeJS.ProcessEnv): string[]` (returns the names removed).
 
-- [ ] **Step 1: Initialise.** With the owner's go-ahead, run `git init -b main`. Create `package.json` with `"name": "ai-score-reviewer"`, `"private": true`, `"type": "module"`, `"license": "Apache-2.0"`, `"engines": { "node": ">=26" }` and scripts:
+- [ ] **Step 1: Initialise.** With the owner's go-ahead, run `git init -b main`. Create `package.json` with `"name": "visto-ai"`, `"private": true`, `"type": "module"`, `"license": "Apache-2.0"`, `"engines": { "node": ">=26" }` and scripts:
 
 ```json
 {

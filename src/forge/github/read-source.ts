@@ -40,7 +40,7 @@ export function createGithubReadSource(opts: { token: string; fetch: typeof fetc
           headers: {
             Authorization: `Bearer ${opts.token}`,
             'X-GitHub-Api-Version': '2022-11-28',
-            'User-Agent': 'ai-score-reviewer',
+            'User-Agent': 'visto-ai',
             Accept: accept,
           },
         });

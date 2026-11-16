@@ -1,7 +1,7 @@
-# AI Score Reviewer: design
+# Visto AI: design
 
 Status: draft for the owner's approval, revised after the owner's first read and after a review against the predecessor's production record. Date: 2026-11-13.
-Name: AI Score Reviewer, written `ai-score-reviewer` in identifiers (section 11.4).
+Name: Visto AI, written `visto-ai` in identifiers (section 11.4).
 
 ## 1. Why this exists
 
@@ -71,7 +71,7 @@ These would make the project a failure even if it works.
 | O11 | Learning is continuous: every pull request feeds later reviews, by retrieval, not fine-tuning. | Owner |
 | O12 | A small new UI, built last. | Owner |
 | O13 | Two reference projects, Mira and PR-Agent, are sources of ideas, not bases. | Owner |
-| O14 | The name is AI Score Reviewer. | Owner |
+| O14 | The name is Visto AI. | Owner |
 | O15 | A review cut short by the limits sends the pull request to human review. | Owner |
 | O16 | Thumbs up and down on a review keep being collected from chat. | Owner |
 | O17 | No separate HTTP endpoint for requesting a review. A review is requested through the app. | Owner |
@@ -652,7 +652,7 @@ One file, owned by whoever runs the deployment and kept in their own git reposit
 
 ### 11.2 The file in a reviewed repository
 
-A team may commit one file, `.ai-score-reviewer.yml` at the root of its repository, listing paths that always need a human. It is read from the repository's default branch.
+A team may commit one file, `.visto-ai.yml` at the root of its repository, listing paths that always need a human. It is read from the repository's default branch.
 
 **Design call D10.** This file can only tighten. Anything that loosens protection (the gate off, clearing a gate thread by reply, approval on, a higher threshold, a smaller audit share, the relaxed thread rule for approval) is set in the deployment config, which a pull request cannot change.
 
@@ -672,7 +672,7 @@ The first deployment's ticket, wiki and chat integrations are extensions kept in
 
 ### 11.4 Names
 
-The project is AI Score Reviewer (O14). Identifiers use `ai-score-reviewer`: the image, the hidden marker in thread replies, and the file a team commits (section 11.2). The database schema is `ai_score_reviewer`. The gate's check keeps its own configurable name (section 9).
+The project is Visto AI (O14). Identifiers use `visto-ai`: the image, the hidden marker in thread replies, and the file a team commits (section 11.2). The database schema is `visto_ai`. The gate's check keeps its own configurable name (section 9).
 
 ## 12. Limits and cost guards
 
