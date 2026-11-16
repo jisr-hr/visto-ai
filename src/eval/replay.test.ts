@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, readdirSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -156,4 +156,59 @@ test('paths inside the project are refused', () => {
   assert.throws(() => assertOutsideProject('/work/proj/../proj/x', '/work/proj'), /path_inside_project/);
   assert.doesNotThrow(() => assertOutsideProject('/work/eval/x', '/work/proj'));
   assert.doesNotThrow(() => assertOutsideProject('/work/project-two/x', '/work/proj'));
+});
+
+test('real paths are compared: a link into the project is refused, existing or not', () => {
+  const base = mkdtempSync(tmpdir() + '/');
+  const project = join(base, 'proj');
+  const elsewhere = join(base, 'elsewhere');
+  mkdirSync(join(project, 'inner'), { recursive: true });
+  mkdirSync(join(elsewhere, 'plain'), { recursive: true });
+  symlinkSync(join(project, 'inner'), join(elsewhere, 'link'));
+  assert.throws(() => assertOutsideProject(join(elsewhere, 'link'), project), /path_inside_project/);
+  assert.throws(() => assertOutsideProject(join(elsewhere, 'link', 'not', 'yet'), project), /path_inside_project/);
+  assert.doesNotThrow(() => assertOutsideProject(join(elsewhere, 'plain'), project));
+  assert.doesNotThrow(() => assertOutsideProject(join(elsewhere, 'plain', 'not', 'yet'), project));
+  assert.doesNotThrow(() => assertOutsideProject(join(elsewhere, 'new'), project));
+  assert.throws(() => assertOutsideProject(project, project), /path_inside_project/);
+});
+
+test('stale summary files are removed when a run begins, and a failed write ends the run', async () => {
+  const args = baseArgs({ outDir: tmp() });
+  for (const f of ['summary.json', 'summary.md', 'unmatched-sample.jsonl']) writeFileSync(join(args.outDir, f), 'stale');
+  mkdirSync(join(args.outDir, 'results.jsonl'));
+  let requests = 0;
+  const base = stubDeps();
+  const deps = { ...base, model: { complete: (r: Parameters<typeof base.model.complete>[0]) => { requests += 1; return base.model.complete(r); } } };
+  await assert.rejects(runReplay({ ...args, deps }));
+  assert.deepEqual(readdirSync(args.outDir), ['results.jsonl']);
+  assert.equal(requests, 0);
+});
+
+test('after a result line cannot be written, no new case starts and the run rejects once started cases settle', async () => {
+  for (const concurrency of [1, 2]) {
+    const args = baseArgs({ outDir: tmp(), cases: [caseA, mkCase(8), mkCase(9), mkCase(10)], concurrency });
+    const base = stubDeps();
+    let requests = 0;
+    let inFlight = 0;
+    const deps = {
+      ...base,
+      model: {
+        complete: async (r: Parameters<typeof base.model.complete>[0]) => {
+          requests += 1;
+          inFlight += 1;
+          try {
+            await new Promise((done) => setTimeout(done, 20));
+            const path = join(args.outDir, 'results.jsonl');
+            if (!statSync(path).isDirectory()) { rmSync(path, { force: true }); mkdirSync(path); }
+            return await base.model.complete(r);
+          } finally { inFlight -= 1; }
+        },
+      },
+    };
+    await assert.rejects(runReplay({ ...args, deps }));
+    assert.equal(inFlight, 0);
+    assert.equal(requests, concurrency);
+    assert.ok(!existsSync(join(args.outDir, 'summary.json')));
+  }
 });

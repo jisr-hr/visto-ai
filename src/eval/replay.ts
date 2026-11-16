@@ -1,8 +1,8 @@
 // Replays frozen pull requests through the engine and writes the run's results.
 // It builds no clients: the caller hands in `deps`.
 import { createHash } from 'node:crypto';
-import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs';
-import { join, resolve, sep } from 'node:path';
+import { appendFileSync, lstatSync, mkdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { dirname, join, resolve, sep } from 'node:path';
 import { repoConfigFor } from '../config/load.ts';
 import type { DeploymentConfig } from '../config/load.ts';
 import { review } from '../engine/review.ts';
@@ -77,9 +77,27 @@ export function sampleUnmatched(scored: CaseScore[], seed: string, size: number)
     .map((x) => x.f);
 }
 
+// Follows links through the deepest ancestor that exists, then appends the part
+// that does not exist yet. A dangling link counts as not existing.
+function realPathOf(path: string): string {
+  let existing = resolve(path);
+  const rest: string[] = [];
+  for (;;) {
+    try {
+      lstatSync(existing);
+      return join(realpathSync.native(existing), ...rest);
+    } catch {
+      const parent = dirname(existing);
+      if (parent === existing) return join(existing, ...rest);
+      rest.unshift(existing.slice(parent.length).replace(/^[\\/]+/, ''));
+      existing = parent;
+    }
+  }
+}
+
 export function assertOutsideProject(path: string, projectRoot: string): void {
-  const p = resolve(path);
-  const root = resolve(projectRoot);
+  const p = realPathOf(path);
+  const root = realPathOf(projectRoot);
   if (p === root || p.startsWith(root.endsWith(sep) ? root : root + sep)) throw new Error('path_inside_project');
 }
 
@@ -93,6 +111,8 @@ export async function runReplay(args: {
   maxCases: number; maxCost: number; concurrency: number; config: DeploymentConfig; deps: ReviewDeps;
 }): Promise<SummaryFile> {
   mkdirSync(args.outDir, { recursive: true });
+  // Files from an earlier run must not sit beside this run's files.
+  for (const name of ['summary.json', 'summary.md', 'unmatched-sample.jsonl']) rmSync(join(args.outDir, name), { force: true });
   const resultsPath = join(args.outDir, 'results.jsonl');
   writeFileSync(resultsPath, '');
 
@@ -101,20 +121,27 @@ export async function runReplay(args: {
   let next = 0;
   let spent = 0;
   let stoppedByCost = false;
+  let failure: { error: unknown } | null = null;
 
   async function worker(): Promise<void> {
     for (;;) {
-      if (next >= selected.length) return;
+      if (failure !== null || next >= selected.length) return;
       if (spent >= args.maxCost) { stoppedByCost = true; return; }
       const index = next;
       next += 1;
       const result = await replayCase(selected[index]!, args.config, args.deps);
       results[index] = result;
       spent += result.total_cost;
-      appendFileSync(resultsPath, JSON.stringify(result) + '\n');
+      try {
+        appendFileSync(resultsPath, JSON.stringify(result) + '\n');
+      } catch (error) {
+        failure ??= { error };
+        return;
+      }
     }
   }
   await Promise.all(Array.from({ length: args.concurrency }, () => worker()));
+  if (failure !== null) throw (failure as { error: unknown }).error;
 
   const started: { c: EvalCase; r: CaseResult }[] = [];
   selected.forEach((c, i) => { const r = results[i]; if (r) started.push({ c, r }); });
