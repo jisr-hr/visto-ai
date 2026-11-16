@@ -5,17 +5,17 @@ export const SUBMIT_REVIEW = 'submit_review';
 export interface SubmitReviewArgs { overview: string; findings: RawFinding[] }
 
 const findingSchema = z.object({
-  path: z.string().min(1),
+  path: z.string().trim().min(1),
   side: z.enum(['LEFT', 'RIGHT']),
   line: z.number().int().positive(),
   severity: z.enum(['blocker', 'major', 'minor']),
-  body: z.string().min(1),
+  body: z.string().trim().min(1),
   quote: z.string(),
   beyond_diff: z.boolean(),
 }).strict();
 
 const argsSchema = z.object({
-  overview: z.string().min(1),
+  overview: z.string().trim().min(1),
   findings: z.array(findingSchema),
 }).strict();
 

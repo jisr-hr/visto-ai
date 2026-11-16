@@ -69,3 +69,28 @@ test('the tool definition is a JSON schema with the required fields', () => {
   assert.equal(p.additionalProperties, false);
   assert.ok(!('$schema' in p));
 });
+test('a whitespace-only overview, body or path is invalid', () => {
+  assert.match(reasonOf({ ...ok, overview: '   ' }), /^overview: /);
+  const a = structuredClone(ok); a.findings[0]!.body = '   ';
+  assert.match(reasonOf(a), /^findings\[0\]\.body: /);
+  const b = structuredClone(ok); b.findings[0]!.path = ' \t ';
+  assert.match(reasonOf(b), /^findings\[0\]\.path: /);
+});
+test('overview, body and path are trimmed; quote is kept verbatim', () => {
+  const t = structuredClone(ok);
+  t.overview = '  Changes src/a.ts.  ';
+  t.findings[0]!.path = ' src/a.ts ';
+  t.findings[0]!.body = '  Breaks on empty input.  ';
+  t.findings[0]!.quote = '    return x;';
+  const r = parseSubmitReview(JSON.stringify(t));
+  assert.ok(r.ok);
+  assert.equal(r.value.overview, 'Changes src/a.ts.');
+  assert.equal(r.value.findings[0]!.path, 'src/a.ts');
+  assert.equal(r.value.findings[0]!.body, 'Breaks on empty input.');
+  assert.equal(r.value.findings[0]!.quote, '    return x;');
+});
+test('the JSON schema still gives overview, body and path a minimum length of 1', () => {
+  const p = submitReviewTool.function.parameters as { properties: { overview: { type: string; minLength: number }; findings: { items: { properties: Record<string, { type: string; minLength: number }> } } } };
+  assert.deepEqual([p.properties.overview.type, p.properties.overview.minLength], ['string', 1]);
+  for (const k of ['path', 'body']) assert.deepEqual([p.properties.findings.items.properties[k]!.type, p.properties.findings.items.properties[k]!.minLength], ['string', 1]);
+});
