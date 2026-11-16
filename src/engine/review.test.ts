@@ -268,9 +268,63 @@ test('a source error is a failed result, not an exception', async () => {
 
 test('an error reading file content is a source error too', async () => {
   const d = deps({ files: [{ ...fileA, patch: null }] });
-  d.source.getFileContent = () => Promise.reject(new Error('nope'));
+  d.source.getFileContent = () => Promise.reject(new Error('Content read failed'));
   const r = await review(input, d);
   assert.deepEqual(r.failure, { stage: 'context', code: 'source_error' });
+});
+
+test('a source error whose message is a short code keeps that code', async () => {
+  for (const code of ['github_401', 'too_many_files', 'github_network']) {
+    const d = deps({ files: [], listError: new Error(code) });
+    const r = await review(input, d);
+    assert.deepEqual(r.failure, { stage: 'context', code });
+    assert.deepEqual(d.logged, [{ event: 'internal_error', stage: 'context', name: 'Error' }]);
+  }
+  const d = deps({ files: [{ ...fileA, patch: null }] });
+  d.source.getFileContent = () => Promise.reject(new Error('github_502'));
+  assert.deepEqual((await review(input, d)).failure, { stage: 'context', code: 'github_502' });
+});
+
+test('a source error whose message is not a short code is source_error', async () => {
+  for (const message of ['Github_401', 'github 401', `g${'x'.repeat(40)}`, '']) {
+    const r = await review(input, deps({ files: [], listError: new Error(message) }));
+    assert.deepEqual(r.failure, { stage: 'context', code: 'source_error' }, message);
+  }
+});
+
+test('a failed probe for a paired test does not fail the review', async () => {
+  const d = deps({ files: [fileA], answers: [answerOnA] });
+  d.source.getFileContent = (_p, path) => (path === 'src/a.test.ts' ? Promise.reject(new Error('github_503')) : Promise.resolve(null));
+  const r = await review(input, d);
+  assert.equal(r.status, 'ok');
+  assert.ok(r.audit.some((e) => e.action === 'test_probe_failed' && e.subject === 'src/a.test.ts' && e.reason === 'github_503'));
+});
+
+test('an answer is grounded only by the files of its own batch', async () => {
+  const namesOther = { overview: 'The change in src/a.ts is fine.', findings: [] };
+  const d = deps({ files: [fileA, fileB], answerFor: { 'src/a.ts': answerOnA, 'src/b.ts': namesOther } });
+  const r = await review(smallLimits, d);
+  assert.deepEqual(r.coverage.reviewed, ['src/a.ts']);
+  assert.deepEqual(r.coverage.notReviewed, [{ path: 'src/b.ts', reason: 'batch_failed' }]);
+  assert.ok(r.audit.some((e) => e.action === 'retry' && e.reason.startsWith('ungrounded')));
+});
+
+test('a finding on a file of another batch is dropped', async () => {
+  const crossing = { overview: 'src/b.ts is fine.', findings: [{ ...answerOnA.findings[0]!, severity: 'blocker' }] };
+  const r = await review(smallLimits, deps({ files: [fileA, fileB], answerFor: { 'src/a.ts': answerOnB, 'src/b.ts': crossing } }));
+  assert.deepEqual(r.findings, []);
+  assert.ok(r.audit.some((e) => e.action === 'dropped' && e.subject === 'src/a.ts' && e.reason === 'path_not_in_batch'));
+});
+
+test('file numbers run across batches', async () => {
+  const d = deps({ files: [fileA, fileB], answerFor: { 'src/a.ts': answerOnA, 'src/b.ts': answerOnB } });
+  await review(smallLimits, d);
+  const sections = d.model.requests.map((q) => q.messages[2]!.content);
+  const first = sections.find((t) => t.includes('Batch 1 of 2'))!;
+  const second = sections.find((t) => t.includes('Batch 2 of 2'))!;
+  assert.ok(first.includes('## File 1/2: src/a.ts'));
+  assert.ok(second.includes('## File 2/2: src/b.ts'));
+  assert.ok(!first.includes('## File 2/2') && !second.includes('## File 1/2'));
 });
 
 test('an unexpected error in the model phase is internal_error', async () => {

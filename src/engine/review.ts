@@ -16,6 +16,7 @@ const CONCURRENCY = 2;
 const PROVIDER_CODES = new Set(['auth', 'no_credit', 'provider', 'timeout', 'rate_limited']);
 const ELEVATED_FILES = 15;
 const ELEVATED_ADDITIONS = 500;
+const SOURCE_CODE = /^[a-z][a-z0-9_]{0,39}$/;
 
 const zeroUsage = (): Usage => ({ calls: 0, inputTokens: 0, outputTokens: 0, cachedTokens: 0, cost: 0 });
 function addUsage(a: Usage, b: Usage): Usage {
@@ -70,7 +71,6 @@ interface BatchOutcome {
 interface Run {
   contexts: FileContext[];
   limits: ReviewInput['limits'];
-  prPaths: string[];
   effort: Effort;
   token: string;
   pr: PullRequestInfo;
@@ -95,7 +95,7 @@ async function oneCall(run: Run, files: FileContext[], firstFileNumber: number, 
     batchIndex, batchCount: run.batchCount, token: run.token,
   });
   const answer = await callBatch(
-    { messages, effort: run.effort, timeoutMs: run.limits.modelTimeoutSeconds * 1000, prPaths: run.prPaths },
+    { messages, effort: run.effort, timeoutMs: run.limits.modelTimeoutSeconds * 1000, prPaths: files.map((f) => f.file.path) },
     run.deps.model,
   );
   safeLog(run.deps, {
@@ -183,7 +183,7 @@ async function inPool<T>(count: number, width: number, ctl: Control, work: (inde
 
 export async function review(input: ReviewInput, deps: ReviewDeps): Promise<ReviewResult> {
   let stage: 'context' | 'model' = 'context';
-  let sourceFailed = false;
+  const sourceErrors = new Set<unknown>(); // what the source rejected with; a caught probe failure is not fatal
   let usage = zeroUsage();
   let answered = noneAnswered();
   const audit: AuditEntry[] = [];
@@ -193,7 +193,7 @@ export async function review(input: ReviewInput, deps: ReviewDeps): Promise<Revi
       try {
         return await call();
       } catch (error) {
-        sourceFailed = true;
+        sourceErrors.add(error);
         throw error;
       }
     };
@@ -221,7 +221,7 @@ export async function review(input: ReviewInput, deps: ReviewDeps): Promise<Revi
 
     stage = 'model';
     const run: Run = {
-      contexts: built.contexts, limits: input.limits, prPaths: files.map((f) => f.path),
+      contexts: built.contexts, limits: input.limits,
       effort: chooseEffort(pr, files, input.repoConfig), token: deps.token(), pr, deps,
       fileCount: packed.batches.reduce((n, b) => n + b.files.length, 0), batchCount: packed.batches.length,
     };
@@ -263,7 +263,10 @@ export async function review(input: ReviewInput, deps: ReviewDeps): Promise<Revi
       usage, ...answered, dependencies: { model: modelState }, audit,
     });
   } catch (error) {
-    const code = stage === 'model' ? 'internal_error' : sourceFailed ? 'source_error' : 'internal_error';
+    let code = 'internal_error';
+    if (stage === 'context' && sourceErrors.has(error)) {
+      code = error instanceof Error && SOURCE_CODE.test(error.message) ? error.message : 'source_error';
+    }
     const name = error instanceof Error ? error.name : 'unknown';
     safeLog(deps, { event: 'internal_error', stage, name });
     return failedResult(stage, code, usage, audit, 'ok', answered);
