@@ -6,9 +6,9 @@ import { ProviderError } from './errors.ts';
 import { SUBMIT_REVIEW, submitReviewTool } from './submit-review.ts';
 
 const usage = (calls = 1): Usage => ({ calls, inputTokens: 100, outputTokens: 10, cachedTokens: 5, cost: 0.5 });
-const toolCall = (args: unknown): ModelResponse =>
-  ({ toolName: SUBMIT_REVIEW, toolArguments: JSON.stringify(args), text: null, model: 'm', usage: usage() });
-const prose = (text: string): ModelResponse => ({ toolName: null, toolArguments: null, text, model: 'm', usage: usage() });
+const toolCall = (args: unknown, model = 'm', provider: string | null = null): ModelResponse =>
+  ({ toolName: SUBMIT_REVIEW, toolArguments: JSON.stringify(args), text: null, model, provider, usage: usage() });
+const prose = (text: string): ModelResponse => ({ toolName: null, toolArguments: null, text, model: 'm', provider: null, usage: usage() });
 
 function stubModel(...steps: Array<ModelResponse | Error>): ModelClient & { requests: ModelRequest[]; calls: number } {
   const requests: ModelRequest[] = [];
@@ -89,8 +89,36 @@ test('a rejected answer is cut to 2000 characters, the reason to 200', async () 
   assert.match(reason, /^: unexpected key kkk/);
 });
 
+test('the retry audit entry carries the cut reason', async () => {
+  const long = { overview: 'o', findings: [], ['k'.repeat(500)]: 1 };
+  const r = await callBatch(args, stubModel(toolCall(long), toolCall(valid)));
+  assert.equal(r.audit[0]!.action, 'retry');
+  assert.equal(r.audit[0]!.reason.length, 200);
+});
+
+test('the models and providers that answered are listed in call order', async () => {
+  const r = await callBatch(args, stubModel(toolCall(ungrounded, 'vendor/a', 'Up One'), toolCall(valid, 'vendor/b', null)));
+  assert.ok(r.ok);
+  assert.deepEqual([r.models, r.providers], [['vendor/a', 'vendor/b'], ['Up One']]);
+  const failed = await callBatch(args, stubModel(toolCall(ungrounded, 'vendor/a', 'Up One'), new ProviderError('timeout', 't', null, null)));
+  assert.ok(!failed.ok);
+  assert.deepEqual([failed.models, failed.providers], [['vendor/a'], ['Up One']]);
+});
+
+test('a finding path is normalised before it grounds an answer', async () => {
+  const onPrefixed = { overview: 'A short summary.', findings: [{ ...finding, path: 'a/src/a.ts' }] };
+  const r = await callBatch(args, stubModel(toolCall(onPrefixed)));
+  assert.ok(r.ok);
+});
+
+test('only the files of the batch ground an answer', async () => {
+  const other = { overview: 'The change to src/b.ts looks right.', findings: [] };
+  const r = await callBatch({ ...args, prPaths: ['src/a.ts'] }, stubModel(toolCall(other), toolCall(other)));
+  assert.ok(!r.ok && r.code === 'invalid_output' && r.reason === UNGROUNDED);
+});
+
 test('a missing answer is shown as (no answer); a tool call shows its arguments', async () => {
-  const empty: ModelResponse = { toolName: null, toolArguments: null, text: null, model: 'm', usage: usage() };
+  const empty: ModelResponse = { toolName: null, toolArguments: null, text: null, model: 'm', provider: null, usage: usage() };
   const a = stubModel(empty, toolCall(valid));
   await callBatch(args, a);
   assert.equal(a.requests[1]!.messages.at(-2)!.content, '(no answer)');

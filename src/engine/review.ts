@@ -35,19 +35,26 @@ export function chooseEffort(pr: PullRequestInfo, files: ChangedFile[], repo: Re
     : 'default';
 }
 
-function failedResult(stage: 'context' | 'model', code: string, usage: Usage, audit: AuditEntry[], model: 'ok' | 'error'): ReviewResult {
+type Answered = { models: string[]; providers: string[] };
+const noneAnswered = (): Answered => ({ models: [], providers: [] });
+
+function failedResult(
+  stage: 'context' | 'model', code: string, usage: Usage, audit: AuditEntry[], model: 'ok' | 'error', answered: Answered = noneAnswered(),
+): ReviewResult {
   return {
     status: 'failed', failure: { stage, code }, mode: 'full', overview: '', findings: [], unplaced: [], beyondDiff: [],
-    coverage: { reviewed: [], notReviewed: [] }, usage, dependencies: { model }, audit,
+    coverage: { reviewed: [], notReviewed: [] }, usage, ...answered, dependencies: { model }, audit,
   };
 }
 
 function okResult(overview: string, rest: Partial<ReviewResult>): ReviewResult {
   return {
     status: 'ok', failure: null, mode: 'full', overview, findings: [], unplaced: [], beyondDiff: [],
-    coverage: { reviewed: [], notReviewed: [] }, usage: zeroUsage(), dependencies: { model: 'ok' }, audit: [], ...rest,
+    coverage: { reviewed: [], notReviewed: [] }, usage: zeroUsage(), models: [], providers: [], dependencies: { model: 'ok' }, audit: [], ...rest,
   };
 }
+
+const distinct = (values: string[]): string[] => [...new Set(values)];
 
 interface BatchOutcome {
   answers: SubmitReviewArgs[];
@@ -55,6 +62,8 @@ interface BatchOutcome {
   failedFiles: string[];
   failedCodes: string[]; // codes of the parts that ended failed, in order
   usage: Usage;
+  models: string[];
+  providers: string[];
   audit: AuditEntry[];
 }
 
@@ -91,6 +100,7 @@ async function oneCall(run: Run, files: FileContext[], firstFileNumber: number, 
   );
   safeLog(run.deps, {
     event: 'model_call', files: files.length, effort: run.effort, code: answer.ok ? 'ok' : answer.code, usage: answer.usage,
+    model: answer.models.at(-1) ?? null, provider: answer.providers.at(-1) ?? null,
   });
   return answer;
 }
@@ -99,7 +109,7 @@ interface Control { stopped: boolean; error: unknown; failed: boolean }
 
 // Never rejects: an unexpected error is recorded in `ctl`, which stops every worker from starting more work.
 async function runBatch(run: Run, ctl: Control, batch: Batch, firstFileNumber: number, batchIndex: number): Promise<BatchOutcome> {
-  const out: BatchOutcome = { answers: [], reviewed: [], failedFiles: [], failedCodes: [], usage: zeroUsage(), audit: [] };
+  const out: BatchOutcome = { answers: [], reviewed: [], failedFiles: [], failedCodes: [], usage: zeroUsage(), models: [], providers: [], audit: [] };
   try {
     await attempt(run, ctl, out, batch, firstFileNumber, batchIndex);
   } catch (error) {
@@ -115,6 +125,8 @@ async function runBatch(run: Run, ctl: Control, batch: Batch, firstFileNumber: n
 async function attempt(run: Run, ctl: Control, out: BatchOutcome, batch: Batch, firstFileNumber: number, batchIndex: number): Promise<void> {
   const take = (answer: BatchAnswer, files: FileContext[]): void => {
     out.usage = addUsage(out.usage, answer.usage);
+    out.models.push(...answer.models);
+    out.providers.push(...answer.providers);
     out.audit.push(...answer.audit);
     if (answer.ok) {
       out.answers.push(answer.value);
@@ -173,6 +185,7 @@ export async function review(input: ReviewInput, deps: ReviewDeps): Promise<Revi
   let stage: 'context' | 'model' = 'context';
   let sourceFailed = false;
   let usage = zeroUsage();
+  let answered = noneAnswered();
   const audit: AuditEntry[] = [];
   try {
     const pr = input.pullRequest;
@@ -226,13 +239,16 @@ export async function review(input: ReviewInput, deps: ReviewDeps): Promise<Revi
       usage = addUsage(usage, o.usage);
       audit.push(...o.audit);
     }
+    answered = {
+      models: distinct(outcomes.flatMap((o) => o.models)), providers: distinct(outcomes.flatMap((o) => o.providers)),
+    };
     if (ctl.failed) throw ctl.error;
     const codes = outcomes.flatMap((o) => o.failedCodes);
     const modelState = codes.some((c) => PROVIDER_CODES.has(c)) ? 'error' : 'ok';
     const fatal = codes.find((c) => c === 'auth' || c === 'no_credit');
     const everyBatchFailed = outcomes.every((o) => o.answers.length === 0);
     if (fatal !== undefined || everyBatchFailed) {
-      return failedResult('model', fatal ?? codes[0] ?? 'internal_error', usage, audit, modelState);
+      return failedResult('model', fatal ?? codes[0] ?? 'internal_error', usage, audit, modelState, answered);
     }
 
     const rec = reconcile(outcomes.flatMap((o) => o.answers), built.contexts);
@@ -244,12 +260,12 @@ export async function review(input: ReviewInput, deps: ReviewDeps): Promise<Revi
     return okResult(rec.overview, {
       findings: rec.findings, unplaced: rec.unplaced, beyondDiff: rec.beyondDiff,
       coverage: { reviewed: outcomes.flatMap((o) => o.reviewed), notReviewed },
-      usage, dependencies: { model: modelState }, audit,
+      usage, ...answered, dependencies: { model: modelState }, audit,
     });
   } catch (error) {
     const code = stage === 'model' ? 'internal_error' : sourceFailed ? 'source_error' : 'internal_error';
     const name = error instanceof Error ? error.name : 'unknown';
     safeLog(deps, { event: 'internal_error', stage, name });
-    return failedResult(stage, code, usage, audit, 'ok');
+    return failedResult(stage, code, usage, audit, 'ok', answered);
   }
 }

@@ -5,9 +5,10 @@ import type { ProviderErrorKind } from './errors.ts';
 import { SUBMIT_REVIEW, parseSubmitReview, submitReviewTool } from './submit-review.ts';
 import type { SubmitReviewArgs } from './submit-review.ts';
 
+// `models` and `providers`: those that answered, in call order.
 export type BatchAnswer =
-  | { ok: true; value: SubmitReviewArgs; usage: Usage; audit: AuditEntry[] }
-  | { ok: false; code: 'invalid_output' | ProviderErrorKind; reason: string; usage: Usage; audit: AuditEntry[] };
+  | { ok: true; value: SubmitReviewArgs; usage: Usage; models: string[]; providers: string[]; audit: AuditEntry[] }
+  | { ok: false; code: 'invalid_output' | ProviderErrorKind; reason: string; usage: Usage; models: string[]; providers: string[]; audit: AuditEntry[] };
 
 const MAX_ANSWER_CHARS = 2000;
 const MAX_REASON_CHARS = 200;
@@ -45,6 +46,8 @@ export async function callBatch(
 ): Promise<BatchAnswer> {
   let usage = zeroUsage();
   const audit: AuditEntry[] = [];
+  const models: string[] = [];
+  const providers: string[] = [];
   let messages = args.messages;
   let reason = '';
   try {
@@ -53,8 +56,10 @@ export async function callBatch(
         messages, tools: [submitReviewTool], forcedTool: SUBMIT_REVIEW, effort: args.effort, timeoutMs: args.timeoutMs,
       });
       usage = addUsage(usage, response.usage);
+      models.push(response.model);
+      if (response.provider !== null) providers.push(response.provider);
       const verdict = judge(response, args.prPaths);
-      if (verdict.ok) return { ok: true, value: verdict.value, usage, audit };
+      if (verdict.ok) return { ok: true, value: verdict.value, usage, models, providers, audit };
       reason = verdict.reason;
       if (attempt === 0) {
         audit.push({ stage: 'model', action: 'retry', subject: 'batch', reason });
@@ -68,8 +73,8 @@ export async function callBatch(
   } catch (error) {
     if (!(error instanceof ProviderError)) throw error;
     audit.push({ stage: 'model', action: 'failed', subject: 'batch', reason: error.kind });
-    return { ok: false, code: error.kind, reason: error.message, usage, audit };
+    return { ok: false, code: error.kind, reason: error.message, usage, models, providers, audit };
   }
   audit.push({ stage: 'model', action: 'failed', subject: 'batch', reason: 'invalid_output' });
-  return { ok: false, code: 'invalid_output', reason, usage, audit };
+  return { ok: false, code: 'invalid_output', reason, usage, models, providers, audit };
 }

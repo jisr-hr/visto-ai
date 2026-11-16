@@ -94,3 +94,10 @@ test('the JSON schema still gives overview, body and path a minimum length of 1'
   assert.deepEqual([p.properties.overview.type, p.properties.overview.minLength], ['string', 1]);
   for (const k of ['path', 'body']) assert.deepEqual([p.properties.findings.items.properties[k]!.type, p.properties.findings.items.properties[k]!.minLength], ['string', 1]);
 });
+
+test('a reason is one line and at most 200 characters', () => {
+  const reason = reasonOf({ overview: 'o', findings: [], [`k\n${'k'.repeat(499)}`]: 1 });
+  assert.equal(reason.length, 200);
+  assert.doesNotMatch(reason, /\n/);
+  assert.match(reason, /unexpected key k k/);
+});

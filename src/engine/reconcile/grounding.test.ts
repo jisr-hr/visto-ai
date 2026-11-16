@@ -23,8 +23,10 @@ test('a finding on a pull request file grounds the answer', () => {
   assert.equal(isGrounded(answerOn('src/a.ts'), ['src/a.ts']), true);
 });
 
-test('a finding path must equal a pull request path exactly', () => {
-  assert.equal(isGrounded(answerOn('./src/a.ts'), ['src/a.ts']), false);
+test('a finding path is compared after normalisation', () => {
+  assert.equal(isGrounded(answerOn('./src/a.ts'), ['src/a.ts']), true);
+  assert.equal(isGrounded(answerOn('a/src/a.ts'), ['src/a.ts']), true);
+  assert.equal(isGrounded(answerOn('lib/src/a.ts'), ['src/a.ts']), false);
 });
 
 test('an essay about something else is not grounded', () => {

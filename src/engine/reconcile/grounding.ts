@@ -1,4 +1,5 @@
 import type { SubmitReviewArgs } from '../model/submit-review.ts';
+import { normalizePath } from './placement.ts';
 
 // Ported from PM-quality: the rules for what counts as a mention of a pull request file.
 
@@ -42,7 +43,8 @@ function pathIsMentioned(text: string, filePath: string): boolean {
 
 export function isGrounded(answer: SubmitReviewArgs, prPaths: string[]): boolean {
   if (prPaths.length === 0) return true;
-  if (answer.findings.some((finding) => prPaths.includes(finding.path))) return true;
+  const known: ReadonlySet<string> = new Set(prPaths);
+  if (answer.findings.some((finding) => normalizePath(finding.path, known) !== null)) return true;
   const text = [answer.overview, ...answer.findings.map((finding) => finding.body)].join('\n');
   const paths = prPaths.filter((path) => path !== '');
   return paths.some((path) => pathIsMentioned(text, path));

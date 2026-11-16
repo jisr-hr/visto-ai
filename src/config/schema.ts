@@ -26,7 +26,7 @@ const model = z
     extraBody: z.record(z.string(), z.unknown()).default({}),
     extraHeaders: z.record(z.string(), z.string()).default({}),
     prices: prices.nullable().default(null),
-    timeoutSeconds: z.number().positive().default(600),
+    timeoutSeconds: z.number().positive().max(300).default(240),
   })
   .strict();
 

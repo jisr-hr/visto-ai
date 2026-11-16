@@ -9,7 +9,7 @@ export interface ChatMessage { role: 'system' | 'user' | 'assistant'; content: s
 export interface ToolDefinition { type: 'function'; function: { name: string; description: string; parameters: Record<string, unknown> } }
 export type Effort = 'default' | 'elevated';
 export interface ModelRequest { messages: ChatMessage[]; tools: ToolDefinition[]; forcedTool: string; effort: Effort; timeoutMs: number }
-export interface ModelResponse { toolName: string | null; toolArguments: string | null; text: string | null; model: string; usage: Usage }
+export interface ModelResponse { toolName: string | null; toolArguments: string | null; text: string | null; model: string; provider: string | null; usage: Usage }
 export interface ModelClient { complete(request: ModelRequest): Promise<ModelResponse> }
 
 export interface Limits { inputTokensPerCall: number; batchesPerReview: number; modelTimeoutSeconds: number }
@@ -49,6 +49,8 @@ export interface ReviewResult {
   beyondDiff: RawFinding[];
   coverage: { reviewed: string[]; notReviewed: NotReviewed[] };
   usage: Usage;
+  models: string[];           // models that answered, distinct, in first-seen order
+  providers: string[];        // upstream providers that answered, distinct, in first-seen order
   dependencies: { model: 'ok' | 'error' };
   audit: AuditEntry[];
 }

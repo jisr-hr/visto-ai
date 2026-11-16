@@ -10,7 +10,7 @@ test('defaults', () => {
   assert.equal(c.model.baseUrl, 'https://openrouter.ai/api/v1');
   assert.equal(c.model.apiKey, 'k');
   assert.deepEqual(c.limits, { inputTokensPerCall: 200000, batchesPerReview: 6 });
-  assert.equal(c.model.timeoutSeconds, 600);
+  assert.equal(c.model.timeoutSeconds, 240);
 });
 
 test('an unknown key is an error that names it', () => {
@@ -57,5 +57,13 @@ test('a YAML syntax error never echoes file text', () => {
   assert.throws(
     () => parseConfig(text, {}),
     (e: ConfigError) => e instanceof ConfigError && !e.message.includes('SECRET123') && !e.issues.join().includes('SECRET123') && !e.issues.join().includes('[m'),
+  );
+});
+
+test('model.timeoutSeconds is at most 300', () => {
+  assert.equal(parseConfig(minimal + '  timeoutSeconds: 300\n', { MODEL_KEY: 'k' }).model.timeoutSeconds, 300);
+  assert.throws(
+    () => parseConfig(minimal + '  timeoutSeconds: 301\n', { MODEL_KEY: 'k' }),
+    (e: ConfigError) => e.issues.some((i) => i.startsWith('model.timeoutSeconds')),
   );
 });

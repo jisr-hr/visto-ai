@@ -39,7 +39,7 @@ function stubDeps(findings: unknown[] = [finding(2)], overrides: Partial<ReviewD
     complete: (): Promise<ModelResponse> => Promise.resolve({
       toolName: SUBMIT_REVIEW,
       toolArguments: JSON.stringify({ overview: 'src/a.ts has a problem.', findings }),
-      text: null, model: 'm', usage: { calls: 1, inputTokens: 100, outputTokens: 10, cachedTokens: 0, cost: 0.0123 },
+      text: null, model: 'm', provider: null, usage: { calls: 1, inputTokens: 100, outputTokens: 10, cachedTokens: 0, cost: 0.0123 },
     }),
   };
   const source: Source = { listFiles: () => Promise.resolve([fileA]), getFileContent: () => Promise.resolve(null) };

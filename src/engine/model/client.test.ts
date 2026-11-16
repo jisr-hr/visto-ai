@@ -4,7 +4,7 @@ import type { ModelConfig } from '../../config/load.ts';
 import type { ModelRequest } from '../types.ts';
 import { ProviderError, classify, createModelClient } from './client.ts';
 
-interface Call { url: string; method: string | undefined; headers: Record<string, string>; body: Record<string, unknown>; signal: AbortSignal | null | undefined }
+interface Call { url: string; method: string | undefined; headers: Record<string, string>; raw: Headers; body: Record<string, unknown>; signal: AbortSignal | null | undefined }
 type Step = Response | Error;
 
 const baseConfig: ModelConfig = {
@@ -34,7 +34,7 @@ function setup(config: ModelConfig = baseConfig) {
   const fetchStub = (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
     const headers: Record<string, string> = {};
     for (const [k, v] of Object.entries((init?.headers ?? {}) as Record<string, string>)) headers[k.toLowerCase()] = v;
-    calls.push({ url: String(url), method: init?.method, headers, body: JSON.parse(String(init?.body)) as Record<string, unknown>, signal: init?.signal });
+    calls.push({ url: String(url), method: init?.method, headers, raw: new Headers(init?.headers), body: JSON.parse(String(init?.body)) as Record<string, unknown>, signal: init?.signal });
     const next = steps.shift();
     if (next === undefined) throw new Error('stub fetch: queue empty');
     return next instanceof Error ? Promise.reject(next) : Promise.resolve(next);
@@ -57,7 +57,7 @@ test('sends a forced tool call with the bearer key', async () => {
   assert.deepEqual(calls[0]!.body.messages, req.messages);
   assert.deepEqual(calls[0]!.body.tools, req.tools);
   assert.equal(calls[0]!.body.model, 'vendor/model-a');
-  assert.equal(calls[0]!.body.stream, undefined);
+  assert.equal(calls[0]!.body.stream, false);
   assert.ok(calls[0]!.signal instanceof AbortSignal);
 });
 test('merges the effort fragment and the extras', async () => {
@@ -132,7 +132,7 @@ test('reads the tool call, the model and the usage', async () => {
   const { client, queue } = setup();
   queue(json(200, success('vendor/model-a')));
   const r = await client.complete(req);
-  assert.deepEqual([r.toolName, r.toolArguments, r.text, r.model], ['submit_review', '{"a": 1}', null, 'vendor/model-a']);
+  assert.deepEqual([r.toolName, r.toolArguments, r.text, r.model, r.provider], ['submit_review', '{"a": 1}', null, 'vendor/model-a', null]);
   assert.deepEqual(r.usage, { calls: 1, inputTokens: 1000, outputTokens: 50, cachedTokens: 800, cost: 0.0123 });
 });
 test('a reply with no tool call is returned with its text', async () => {
@@ -230,4 +230,51 @@ test('usage adds up the attempts that returned it', async () => {
   );
   const r = await client.complete(req);
   assert.deepEqual(r.usage, { calls: 2, inputTokens: 1010, outputTokens: 51, cachedTokens: 800, cost: 0.5123 });
+});
+test('the upstream provider is read when it is a string', async () => {
+  const a = setup();
+  a.queue(json(200, { ...(success('vendor/model-a') as object), provider: 'Upstream One' }));
+  assert.equal((await a.client.complete(req)).provider, 'Upstream One');
+  const b = setup();
+  b.queue(json(200, { ...(success('vendor/model-a') as object), provider: { name: 'x' } }));
+  assert.equal((await b.client.complete(req)).provider, null);
+});
+test('a response with no model field reports the model that was requested', async () => {
+  const { client, queue } = setup();
+  const body = success('ignored') as Record<string, unknown>;
+  delete body.model;
+  queue(json(200, { error: { message: 'down' } }), json(200, body));
+  assert.equal((await client.complete(req)).model, 'vendor/model-b');
+});
+test('a fetch that gives up waiting for headers or body is a timeout, not a fallback', async () => {
+  for (const code of ['UND_ERR_HEADERS_TIMEOUT', 'UND_ERR_BODY_TIMEOUT']) {
+    const { client, calls, queue } = setup();
+    queue(Object.assign(new TypeError('fetch failed'), { cause: Object.assign(new Error('timeout'), { code }) }), json(200, success('vendor/model-b')));
+    await assert.rejects(client.complete(req), (e: ProviderError) => e.kind === 'timeout');
+    assert.equal(calls.length, 1);
+  }
+  const other = setup();
+  other.queue(Object.assign(new TypeError('fetch failed'), { cause: Object.assign(new Error('refused'), { code: 'ECONNREFUSED' }) }), json(200, success('vendor/model-b')));
+  assert.equal((await other.client.complete(req)).model, 'vendor/model-b');
+});
+test('a body read that gives up on the undici body timeout is a timeout', async () => {
+  const s = setup();
+  const failing = { status: 200, headers: new Headers(), text: () => Promise.reject(Object.assign(new TypeError('terminated'), { cause: { code: 'UND_ERR_BODY_TIMEOUT' } })) } as unknown as Response;
+  s.queue(failing, json(200, success('vendor/model-b')));
+  await assert.rejects(s.client.complete(req), (e: ProviderError) => e.kind === 'timeout');
+  assert.equal(s.calls.length, 1);
+});
+test('configuration cannot override the request headers or streaming', async () => {
+  const { client, calls, queue } = setup({
+    ...baseConfig,
+    extraHeaders: { authorization: 'Bearer other', 'content-type': 'text/plain', 'X-Title': 'synthetic' },
+    extraBody: { stream: true },
+    effort: { default: { stream: true }, elevated: {} },
+  });
+  queue(json(200, success('vendor/model-a')));
+  await client.complete(req);
+  assert.equal(calls[0]!.raw.get('authorization'), 'Bearer k');
+  assert.equal(calls[0]!.raw.get('content-type'), 'application/json');
+  assert.equal(calls[0]!.raw.get('x-title'), 'synthetic');
+  assert.equal(calls[0]!.body.stream, false);
 });

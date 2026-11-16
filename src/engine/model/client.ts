@@ -29,7 +29,19 @@ function readUsage(body: unknown, prices: ModelConfig['prices']): Usage | null {
   return { calls: 1, inputTokens, outputTokens, cachedTokens, cost };
 }
 
-function readChoice(body: Json): Pick<ModelResponse, 'toolName' | 'toolArguments' | 'text' | 'model'> {
+// Node's fetch stops waiting for headers or body after its own limit, whatever signal it is given.
+const UNDICI_TIMEOUTS = new Set(['UND_ERR_HEADERS_TIMEOUT', 'UND_ERR_BODY_TIMEOUT']);
+
+function isTimeout(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  if (err.name === 'TimeoutError' || err.name === 'AbortError') return true;
+  return isRecord(err.cause) && typeof err.cause.code === 'string' && UNDICI_TIMEOUTS.has(err.cause.code);
+}
+
+// Header names the engine sets itself; configuration cannot replace them.
+const OWN_HEADERS = new Set(['authorization', 'content-type']);
+
+function readChoice(body: Json, requested: string): Pick<ModelResponse, 'toolName' | 'toolArguments' | 'text' | 'model' | 'provider'> {
   const choice = (body.choices as unknown[])[0];
   const message = isRecord(choice) && isRecord(choice.message) ? choice.message : {};
   const calls = Array.isArray(message.tool_calls) ? (message.tool_calls as unknown[]) : [];
@@ -38,12 +50,14 @@ function readChoice(body: Json): Pick<ModelResponse, 'toolName' | 'toolArguments
     toolName: fn !== null && typeof fn.name === 'string' ? fn.name : null,
     toolArguments: fn !== null && typeof fn.arguments === 'string' ? fn.arguments : null,
     text: typeof message.content === 'string' ? message.content : null,
-    model: typeof body.model === 'string' ? body.model : '',
+    model: typeof body.model === 'string' ? body.model : requested,
+    provider: typeof body.provider === 'string' ? body.provider : null,
   };
 }
 
 export function createModelClient(config: ModelConfig, io: Io): ModelClient {
   const url = `${config.baseUrl.replace(/\/+$/, '')}/chat/completions`;
+  const extraHeaders = Object.fromEntries(Object.entries(config.extraHeaders).filter(([name]) => !OWN_HEADERS.has(name.toLowerCase())));
 
   async function attempt(model: string, request: ModelRequest, total: Usage): Promise<Json> {
     const body = {
@@ -53,26 +67,25 @@ export function createModelClient(config: ModelConfig, io: Io): ModelClient {
       messages: request.messages,
       tools: request.tools,
       tool_choice: { type: 'function', function: { name: request.forcedTool } },
+      stream: false,
     };
     let res: Response;
     try {
       res = await io.fetch(url, {
         method: 'POST',
-        headers: { Authorization: `Bearer ${config.apiKey}`, 'Content-Type': 'application/json', ...config.extraHeaders },
+        headers: { ...extraHeaders, Authorization: `Bearer ${config.apiKey}`, 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
         signal: AbortSignal.timeout(request.timeoutMs),
       });
     } catch (err) {
-      const name = err instanceof Error ? err.name : '';
-      if (name === 'TimeoutError' || name === 'AbortError') throw new ProviderError('timeout', 'timeout: request aborted', null, null);
+      if (isTimeout(err)) throw new ProviderError('timeout', 'timeout: request aborted', null, null);
       throw new ProviderError('provider', 'provider: network failure', null, null);
     }
     let text: string;
     try {
       text = await res.text();
     } catch (err) {
-      const name = err instanceof Error ? err.name : '';
-      if (name === 'TimeoutError' || name === 'AbortError') throw new ProviderError('timeout', 'timeout: response aborted', res.status, null);
+      if (isTimeout(err)) throw new ProviderError('timeout', 'timeout: response aborted', res.status, null);
       const byStatus = res.status >= 200 && res.status <= 299 ? null : classify(res.status, undefined, res.headers.get('retry-after'), config.apiKey);
       throw byStatus ?? new ProviderError('provider', 'provider: response body unreadable', res.status, null);
     }
@@ -111,7 +124,7 @@ export function createModelClient(config: ModelConfig, io: Io): ModelClient {
     for (const model of [config.model, ...config.fallbacks]) {
       try {
         const body = await onModel(model, request, total);
-        return { ...readChoice(body), usage: total };
+        return { ...readChoice(body, model), usage: total };
       } catch (err) {
         if (!(err instanceof ProviderError) || err.kind !== 'provider') throw err;
         last = err;

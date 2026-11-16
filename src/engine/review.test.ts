@@ -41,7 +41,7 @@ const ungrounded = { overview: 'A long article about city gardens.', findings: [
 
 const usage = (): Usage => ({ calls: 1, inputTokens: 100, outputTokens: 10, cachedTokens: 5, cost: 0.5 });
 const respond = (answer: unknown): ModelResponse =>
-  ({ toolName: SUBMIT_REVIEW, toolArguments: JSON.stringify(answer), text: null, model: 'm', usage: usage() });
+  ({ toolName: SUBMIT_REVIEW, toolArguments: JSON.stringify(answer), text: null, model: 'm', provider: null, usage: usage() });
 
 type Step = unknown | ProviderError;
 function deps(spec: { files: ChangedFile[]; answers?: Step[]; answerFor?: Record<string, Step>; delayMs?: number; listError?: Error }):
@@ -214,8 +214,30 @@ test('a failed batch does not waste the others', async () => {
 test('every model call is logged with its effort and outcome', async () => {
   const d = deps({ files: [fileA], answers: [answerOnA] });
   await review(input, d);
-  assert.deepEqual(d.logged.map((e) => [e.event, e.effort, e.code, e.files]), [['model_call', 'default', 'ok', 1]]);
+  assert.deepEqual(d.logged.map((e) => [e.event, e.effort, e.code, e.files, e.model, e.provider]), [['model_call', 'default', 'ok', 1, 'm', null]]);
   assert.equal((e0(d.logged).usage as Usage).calls, 1);
+});
+
+test('the models and providers that answered reach the result and the log', async () => {
+  const d = deps({ files: [fileA, fileB], answerFor: { 'src/a.ts': answerOnA, 'src/b.ts': answerOnB } });
+  const complete = d.model.complete.bind(d.model);
+  d.model.complete = async (request) => {
+    const r = await complete(request);
+    return request.messages[2]!.content.includes('src/a.ts')
+      ? { ...r, model: 'vendor/a', provider: 'Up One' }
+      : { ...r, model: 'vendor/b', provider: 'Up One' };
+  };
+  const r = await review(smallLimits, d);
+  assert.deepEqual([r.models, r.providers], [['vendor/a', 'vendor/b'], ['Up One']]);
+  assert.deepEqual(d.logged.map((e) => [e.model, e.provider]).sort(), [['vendor/a', 'Up One'], ['vendor/b', 'Up One']]);
+});
+
+test('a call that fails without an answer logs a null model and provider', async () => {
+  const down = new ProviderError('provider', 'p', 502, null);
+  const d = deps({ files: [fileA], answers: [down, down] });
+  const r = await review(input, d);
+  assert.deepEqual(d.logged.map((e) => [e.code, e.model, e.provider]), [['provider', null, null], ['provider', null, null]]);
+  assert.deepEqual([r.models, r.providers], [[], []]);
 });
 const e0 = (l: Array<Record<string, unknown>>): Record<string, unknown> => l[0]!;
 

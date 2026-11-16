@@ -24,8 +24,8 @@ model:
   # Prices in your billing currency, used to report cost; null leaves cost at zero.
   prices: null
   # prices: { inputPerMillion: 1.0, cachedInputPerMillion: 0.1, outputPerMillion: 4.0 }
-  # How long one model call may take.
-  timeoutSeconds: 600
+  # How long one model call may take, at most 300.
+  timeoutSeconds: 240
 
 limits:
   # Input tokens allowed in one model call.

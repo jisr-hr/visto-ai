@@ -42,11 +42,19 @@ function formatPath(path: PropertyKey[]): string {
   return out;
 }
 
+const MAX_REASON_CHARS = 200;
+
 function oneLine(text: string): string {
   return text.replace(/\s+/g, ' ').trim();
 }
 
+// A rejection reason is one line of at most MAX_REASON_CHARS characters.
 export function parseSubmitReview(json: string): { ok: true; value: SubmitReviewArgs } | { ok: false; reason: string } {
+  const parsed = parseArgs(json);
+  return parsed.ok ? parsed : { ok: false, reason: oneLine(parsed.reason).slice(0, MAX_REASON_CHARS) };
+}
+
+function parseArgs(json: string): { ok: true; value: SubmitReviewArgs } | { ok: false; reason: string } {
   let data: unknown;
   try {
     data = JSON.parse(json);
