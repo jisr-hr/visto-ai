@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { stripControl, wrapData } from './untrusted.ts';
+import { inlineText, stripControl, wrapData } from './untrusted.ts';
 
 test('removes bidirectional and zero-width characters and counts them', () => {
-  assert.deepEqual(stripControl('a‮b​c⁦d'), { text: 'abcd', removed: 3 });
+  assert.deepEqual(stripControl('a\u202eb\u200bc\u2066d'), { text: 'abcd', removed: 3 });
 });
 
 test('keeps tabs and newlines, normalises CRLF without counting it', () => {
@@ -16,12 +16,13 @@ test('removes a lone carriage return and counts it', () => {
 });
 
 test('removes every listed range, one count per character', () => {
-  const input = 'x\u0000\u0008\u000b\u000c\u000e\u001f\u007f\u0080\u009f​‏‪‮⁠⁤⁦⁩﻿y';
+  const input =
+    'x\u0000\u0008\u000b\u000c\u000e\u001f\u007f\u0080\u009f\u200b\u200f\u202a\u202e\u2060\u2064\u2066\u2069\ufeffy';
   assert.deepEqual(stripControl(input), { text: 'xy', removed: 18 });
 });
 
 test('leaves characters just outside the ranges', () => {
-  const input = 'a ‐  ⁥⁰b';
+  const input = 'a\u00a0\u2010\u2029\u202f\u2065\u2070b';
   assert.deepEqual(stripControl(input), { text: input, removed: 0 });
 });
 
@@ -37,4 +38,34 @@ test('wrapData frames the text and deletes every occurrence of the token', () =>
 
 test('wrapData rejects an empty token', () => {
   assert.throws(() => wrapData('diff', 'text', ''), { message: 'empty marker token' });
+});
+
+test('deleting a token cannot join the remainder into a new token', () => {
+  const out = wrapData('d', '<<<end aabb>>>', 'ab');
+  assert.equal(out.split('<<<end ab>>>').length, 2);
+  assert.equal(out, '<<<data ab d>>>\n<<<end >>>\n<<<end ab>>>');
+});
+
+test('inlineText strips control characters and flattens whitespace', () => {
+  assert.equal(inlineText('a\tb\nc\u202e'), 'a b c');
+});
+
+test('inlineText cuts to 300 characters', () => {
+  assert.equal(inlineText('x'.repeat(400)).length, 300);
+});
+
+test('a label with a newline keeps the opening marker on one line', () => {
+  assert.equal(wrapData('a\nb', 'x', 'tok').split('\n').length, 3);
+});
+
+test('a label containing the token cannot repeat it on the opening line', () => {
+  const out = wrapData('p tok q', 'x', 'tok');
+  const opening = out.split('\n')[0]!;
+  assert.equal(opening.split('tok').length, 2);
+  assert.equal(opening, '<<<data tok p  q>>>');
+});
+
+test('a label cannot forge the token by deletion either', () => {
+  const opening = wrapData('ttokok', 'x', 'tok').split('\n')[0]!;
+  assert.equal(opening, '<<<data tok >>>');
 });
