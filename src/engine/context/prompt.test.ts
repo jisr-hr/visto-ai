@@ -117,3 +117,9 @@ test('fixedTokens adds contract, header at 9999 files, and legend', () => {
     estimateTokens(ANCHOR_LEGEND);
   assert.equal(fixedTokens('CONTRACT', pr), expected);
 });
+test('control characters are stripped from the description', () => {
+  const m = buildMessages({ ...args, pr: { ...pr, description: 'Adds totals\u200b and \u202emore' } });
+  assert.ok(m[1]!.content.includes('Adds totals and more'));
+  assert.ok(!m[1]!.content.includes('\u200b'));
+  assert.ok(!m[1]!.content.includes('\u202e'));
+});
