@@ -107,11 +107,48 @@ test('content is fetched raw at the commit, with the path encoded', async () => 
   assert.equal(calls[0]!.headers.accept, 'application/vnd.github.raw+json');
 });
 
-test('owner, repo and commit id are encoded too; a trailing slash on apiBase is removed', async () => {
+test('the commit id is encoded too; a trailing slash on apiBase is removed', async () => {
   queue(new Response('x', { status: 200 }));
-  const odd: PullRequestInfo = { ...pr, ref: { service: 'github', owner: 'a/b', repo: 'c d', number: 1 } };
+  const odd: PullRequestInfo = { ...pr, ref: { service: 'github', owner: 'acme-co', repo: 'shop.web_2', number: 1 } };
   await source('https://example.test/api/').getFileContent(odd, 'x.ts', 'sha/1');
-  assert.equal(calls[0]!.url, 'https://example.test/api/repos/a%2Fb/c%20d/contents/x.ts?ref=sha%2F1');
+  assert.equal(calls[0]!.url, 'https://example.test/api/repos/acme-co/shop.web_2/contents/x.ts?ref=sha%2F1');
+});
+
+test('an owner or repository name outside the allowed form is refused before any request', async () => {
+  const bad: Array<[string, string]> = [['..', 'shop'], ['.', 'shop'], ['acme', '..'], ['a/b', 'shop'], ['acme', 'c d'], ['', 'shop'], ['acme', 'sh%2Fop']];
+  for (const [owner, repo] of bad) {
+    const odd: PullRequestInfo = { ...pr, ref: { service: 'github', owner, repo, number: 1 } };
+    await assert.rejects(source().listFiles(odd), (e: Error) => e.message === 'github_bad_path', `${owner}/${repo}`);
+    await assert.rejects(source().getFileContent(odd, 'a.ts', 'head111'), (e: Error) => e.message === 'github_bad_path', `${owner}/${repo}`);
+  }
+  assert.equal(calls.length, 0);
+});
+
+test('a 5xx or a network failure is retried once, for both calls', async () => {
+  queue(new Response('', { status: 502 }), json({ files: [] }));
+  assert.deepEqual(await source().listFiles(pr), []);
+  assert.equal(calls.length, 2);
+  queue(new Response('', { status: 502 }), new Response('hello', { status: 200 }));
+  assert.equal(await source().getFileContent(pr, 'a.ts', 'head111'), 'hello');
+  assert.equal(calls.length, 4);
+  queue(new TypeError('fetch failed'), new Response('again', { status: 200 }));
+  assert.equal(await source().getFileContent(pr, 'a.ts', 'head111'), 'again');
+  assert.equal(calls.length, 6);
+});
+
+test('a second 5xx is reported after two requests', async () => {
+  queue(new Response('', { status: 502 }), new Response('', { status: 502 }));
+  await assert.rejects(source().listFiles(pr), (e: Error) => e.message === 'github_502');
+  assert.equal(calls.length, 2);
+  queue(new Response('', { status: 503 }), new Response('', { status: 502 }));
+  await assert.rejects(source().getFileContent(pr, 'a.ts', 'head111'), (e: Error) => e.message === 'github_502');
+  assert.equal(calls.length, 4);
+});
+
+test('a 4xx is not retried', async () => {
+  queue(new Response('', { status: 403 }), json({ files: [] }));
+  await assert.rejects(source().listFiles(pr), (e: Error) => e.message === 'github_403');
+  assert.equal(calls.length, 1);
 });
 
 test('absent and binary content are null', async () => {
@@ -132,7 +169,7 @@ test('content over 2,000,000 characters is null; exactly 2,000,000 is returned',
 });
 
 test('a failure names the status and hides the body', async () => {
-  queue(new Response('secret detail', { status: 500 }));
+  queue(new Response('secret detail', { status: 500 }), new Response('secret detail', { status: 500 }));
   await assert.rejects(source().listFiles(pr), (e: Error) => e.message === 'github_500');
   queue(new Response('secret detail', { status: 403 }));
   await assert.rejects(source().getFileContent(pr, 'a.ts', 'head111'), (e: Error) => e.message === 'github_403');
@@ -144,7 +181,7 @@ test('the token is absent from every error, even when the body echoes it', async
   const token = 'tok-secret-value';
   const s = createGithubReadSource({ token, fetch: stubFetch });
   const echo = () => new Response(`bad credentials: Bearer ${token}`, { status: 401 });
-  queue(echo(), echo(), new TypeError(`fetch failed for ${token}`));
+  queue(echo(), echo(), new TypeError(`fetch failed for ${token}`), new TypeError(`fetch failed for ${token}`));
   const attempts = [
     () => s.listFiles(pr),
     () => s.getFileContent(pr, 'a.ts', 'head111'),
@@ -161,8 +198,9 @@ test('the token is absent from every error, even when the body echoes it', async
 });
 
 test('a rejected fetch becomes github_network', async () => {
-  queue(new TypeError('fetch failed'));
+  queue(new TypeError('fetch failed'), new TypeError('fetch failed'));
   await assert.rejects(source().listFiles(pr), (e: Error) => e.message === 'github_network');
+  assert.equal(calls.length, 2);
 });
 
 test('only GET is ever sent', async () => {

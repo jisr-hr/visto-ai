@@ -21,29 +21,41 @@ const isObject = (v: unknown): v is Record<string, unknown> => typeof v === 'obj
 
 const encodePath = (path: string): string => path.split('/').map(encodeURIComponent).join('/');
 
+const NAME = /^[A-Za-z0-9_.-]+$/;
+const isName = (name: string): boolean => NAME.test(name) && name !== '.' && name !== '..';
+
 export function createGithubReadSource(opts: { token: string; fetch: typeof fetch; apiBase?: string }): Source {
   const apiBase = (opts.apiBase ?? 'https://api.github.com').replace(/\/+$/, '');
 
   // The only place a request is sent. Anything but GET is refused.
+  // A 5xx status or a network failure is retried once, immediately.
   async function send(method: string, url: string, accept: string): Promise<Response> {
     if (method !== 'GET') throw new ReadOnlyViolation('read_only');
-    try {
-      return await opts.fetch(url, {
-        method,
-        headers: {
-          Authorization: `Bearer ${opts.token}`,
-          'X-GitHub-Api-Version': '2022-11-28',
-          'User-Agent': 'ai-score-reviewer',
-          Accept: accept,
-        },
-      });
-    } catch {
-      throw new Error('github_network');
+    for (let attempt = 0; ; attempt += 1) {
+      const last = attempt === 1;
+      let res: Response;
+      try {
+        res = await opts.fetch(url, {
+          method,
+          headers: {
+            Authorization: `Bearer ${opts.token}`,
+            'X-GitHub-Api-Version': '2022-11-28',
+            'User-Agent': 'ai-score-reviewer',
+            Accept: accept,
+          },
+        });
+      } catch {
+        if (last) throw new Error('github_network');
+        continue;
+      }
+      if (res.status < 500 || last) return res;
     }
   }
 
-  const repoUrl = (pr: PullRequestInfo): string =>
-    `${apiBase}/repos/${encodeURIComponent(pr.ref.owner)}/${encodeURIComponent(pr.ref.repo)}`;
+  const repoUrl = (pr: PullRequestInfo): string => {
+    if (!isName(pr.ref.owner) || !isName(pr.ref.repo)) throw new Error('github_bad_path');
+    return `${apiBase}/repos/${encodeURIComponent(pr.ref.owner)}/${encodeURIComponent(pr.ref.repo)}`;
+  };
 
   return {
     async listFiles(pr) {
