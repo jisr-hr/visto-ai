@@ -270,3 +270,30 @@ test('a retry inside the model call shows in usage and audit', async () => {
   assert.equal(r.usage.calls, 2);
   assert.ok(r.audit.some((e) => e.action === 'retry'));
 });
+
+const fourFiles = ['a', 'b', 'c', 'd'].map((n) => fileAt(`src/${n}.ts`));
+const okFor = (f: ChangedFile): { overview: string; findings: never[] } => ({ overview: `${f.path} ok`, findings: [] });
+
+test('an unexpected error stops the pool: nothing runs after review returns', async () => {
+  const answerFor: Record<string, unknown> = Object.fromEntries(fourFiles.map((f) => [f.path, okFor(f)]));
+  delete answerFor['src/a.ts']; // the stub throws a plain Error for this file
+  const d = deps({ files: fourFiles, answerFor, delayMs: 10 });
+  const r = await review(smallLimits, d);
+  const requests = d.model.requests.length;
+  const logs = d.logged.length;
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  assert.deepEqual([d.model.requests.length, d.logged.length], [requests, logs]);
+  assert.ok(requests <= 2);
+  assert.deepEqual(r.failure, { stage: 'model', code: 'internal_error' });
+  assert.equal(r.usage.calls, requests - 1); // the call that threw carries no usage; the in-flight one finished
+});
+
+test('a dead key stops new batches: at most the two in flight', async () => {
+  const answerFor: Record<string, unknown> = Object.fromEntries(fourFiles.map((f) => [f.path, okFor(f)]));
+  answerFor['src/a.ts'] = new ProviderError('no_credit', 'c', 402, null);
+  const d = deps({ files: fourFiles, answerFor, delayMs: 10 });
+  const r = await review(smallLimits, d);
+  assert.ok(d.model.requests.length <= 2);
+  assert.deepEqual(r.failure, { stage: 'model', code: 'no_credit' });
+  assert.equal(r.usage.calls, d.model.requests.length - 1);
+});

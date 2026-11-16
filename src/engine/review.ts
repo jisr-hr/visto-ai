@@ -86,8 +86,24 @@ async function oneCall(run: Run, files: FileContext[], firstFileNumber: number, 
   return answer;
 }
 
-async function runBatch(run: Run, batch: Batch, firstFileNumber: number, batchIndex: number): Promise<BatchOutcome> {
+interface Control { stopped: boolean; error: unknown; failed: boolean }
+
+// Never rejects: an unexpected error is recorded in `ctl`, which stops every worker from starting more work.
+async function runBatch(run: Run, ctl: Control, batch: Batch, firstFileNumber: number, batchIndex: number): Promise<BatchOutcome> {
   const out: BatchOutcome = { answers: [], reviewed: [], failedFiles: [], failedCodes: [], usage: zeroUsage(), audit: [] };
+  try {
+    await attempt(run, ctl, out, batch, firstFileNumber, batchIndex);
+  } catch (error) {
+    if (!ctl.failed) {
+      ctl.failed = true;
+      ctl.error = error;
+    }
+    ctl.stopped = true;
+  }
+  return out;
+}
+
+async function attempt(run: Run, ctl: Control, out: BatchOutcome, batch: Batch, firstFileNumber: number, batchIndex: number): Promise<void> {
   const take = (answer: BatchAnswer, files: FileContext[]): void => {
     out.usage = addUsage(out.usage, answer.usage);
     out.audit.push(...answer.audit);
@@ -96,43 +112,45 @@ async function runBatch(run: Run, batch: Batch, firstFileNumber: number, batchIn
       out.reviewed.push(...files.map((f) => f.file.path));
     }
   };
-  const giveUp = (answer: Extract<BatchAnswer, { ok: false }>, files: FileContext[]): void => {
+  const giveUp = (code: string, files: FileContext[]): void => {
     for (const f of files) out.failedFiles.push(f.file.path);
-    out.failedCodes.push(answer.code);
-    out.audit.push({ stage: 'model', action: 'batch_failed', subject: files.map((f) => f.file.path).join(', '), reason: answer.code });
+    out.failedCodes.push(code);
+    out.audit.push({ stage: 'model', action: 'batch_failed', subject: files.map((f) => f.file.path).join(', '), reason: code });
+    if (code === 'auth' || code === 'no_credit') ctl.stopped = true;
   };
 
   const first = await oneCall(run, batch.files, firstFileNumber, batchIndex);
   take(first, batch.files);
-  if (first.ok) return out;
+  if (first.ok) return;
+  if (first.code === 'auth' || first.code === 'no_credit') ctl.stopped = true;
 
-  if (first.code === 'timeout' && batch.files.length > 1) {
-    const mid = Math.ceil(batch.files.length / 2);
-    const halves = [batch.files.slice(0, mid), batch.files.slice(mid)];
-    let number = firstFileNumber;
-    for (const half of halves) {
-      const answer = await oneCall(run, half, number, batchIndex);
-      take(answer, half);
-      if (!answer.ok) giveUp(answer, half);
-      number += half.length;
+  const splits = first.code === 'timeout' && batch.files.length > 1;
+  const again = first.code === 'timeout' || first.code === 'provider' || first.code === 'rate_limited';
+  if (ctl.stopped || !again) {
+    giveUp(first.code, batch.files);
+    return;
+  }
+  const parts = splits
+    ? [batch.files.slice(0, Math.ceil(batch.files.length / 2)), batch.files.slice(Math.ceil(batch.files.length / 2))]
+    : [batch.files];
+  let number = firstFileNumber;
+  for (const part of parts) {
+    if (ctl.stopped) {
+      giveUp(first.code, part);
+    } else {
+      const answer = await oneCall(run, part, number, batchIndex);
+      take(answer, part);
+      if (!answer.ok) giveUp(answer.code, part);
     }
-    return out;
+    number += part.length;
   }
-  if (first.code === 'timeout' || first.code === 'provider' || first.code === 'rate_limited') {
-    const second = await oneCall(run, batch.files, firstFileNumber, batchIndex);
-    take(second, batch.files);
-    if (!second.ok) giveUp(second, batch.files);
-    return out;
-  }
-  giveUp(first, batch.files);
-  return out;
 }
 
-async function inPool<T>(count: number, width: number, work: (index: number) => Promise<T>): Promise<T[]> {
-  const results: T[] = new Array<T>(count);
+async function inPool<T>(count: number, width: number, ctl: Control, work: (index: number) => Promise<T>): Promise<Array<T | undefined>> {
+  const results: Array<T | undefined> = new Array<T | undefined>(count).fill(undefined);
   let next = 0;
   const worker = async (): Promise<void> => {
-    while (next < count) {
+    while (next < count && !ctl.stopped) {
       const index = next;
       next += 1;
       results[index] = await work(index);
@@ -187,12 +205,15 @@ export async function review(input: ReviewInput, deps: ReviewDeps): Promise<Revi
       firsts.push(seen + 1);
       seen += b.files.length;
     }
-    const outcomes = await inPool(packed.batches.length, CONCURRENCY, (i) => runBatch(run, packed.batches[i]!, firsts[i]!, i));
+    const ctl: Control = { stopped: false, error: null, failed: false };
+    const settled = await inPool(packed.batches.length, CONCURRENCY, ctl, (i) => runBatch(run, ctl, packed.batches[i]!, firsts[i]!, i));
+    const outcomes = settled.filter((o): o is BatchOutcome => o !== undefined);
 
     for (const o of outcomes) {
       usage = addUsage(usage, o.usage);
       audit.push(...o.audit);
     }
+    if (ctl.failed) throw ctl.error;
     const codes = outcomes.flatMap((o) => o.failedCodes);
     const modelState = codes.some((c) => PROVIDER_CODES.has(c)) ? 'error' : 'ok';
     const fatal = codes.find((c) => c === 'auth' || c === 'no_credit');
