@@ -15,7 +15,9 @@ const MAX_LISTED_FILES = 300;
 const MAX_CONTENT_CHARS = 2_000_000;
 const BINARY_SCAN_BYTES = 8000;
 
-const STATUS: Record<string, FileStatus> = { added: 'added', removed: 'removed', renamed: 'renamed' };
+const STATUS = new Map<string, FileStatus>([['added', 'added'], ['removed', 'removed'], ['renamed', 'renamed']]);
+
+const isObject = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
 
 const encodePath = (path: string): string => path.split('/').map(encodeURIComponent).join('/');
 
@@ -48,13 +50,20 @@ export function createGithubReadSource(opts: { token: string; fetch: typeof fetc
       const url = `${repoUrl(pr)}/compare/${encodeURIComponent(pr.baseSha)}...${encodeURIComponent(pr.headSha)}?per_page=1`;
       const res = await send('GET', url, 'application/vnd.github+json');
       if (!res.ok) throw new Error(`github_${res.status}`);
-      const body = (await res.json()) as { files?: CompareFile[] };
-      const files = body.files ?? [];
+      let body: unknown;
+      try {
+        body = JSON.parse(await res.text());
+      } catch {
+        throw new Error('github_bad_response');
+      }
+      if (!isObject(body) || !Array.isArray(body.files)) throw new Error('github_bad_response');
+      const files: unknown[] = body.files;
+      if (!files.every((f) => isObject(f) && typeof f.filename === 'string')) throw new Error('github_bad_response');
       if (files.length >= MAX_LISTED_FILES) throw new Error('too_many_files');
-      return files.map((f): ChangedFile => ({
+      return (files as CompareFile[]).map((f): ChangedFile => ({
         path: f.filename,
         previousPath: f.previous_filename ?? null,
-        status: STATUS[f.status ?? ''] ?? 'modified',
+        status: STATUS.get(f.status ?? '') ?? 'modified',
         additions: f.additions ?? 0,
         deletions: f.deletions ?? 0,
         patch: f.patch ?? null,
@@ -62,6 +71,7 @@ export function createGithubReadSource(opts: { token: string; fetch: typeof fetc
     },
 
     async getFileContent(pr, path, sha) {
+      if (path.split('/').some((seg) => seg === '' || seg === '.' || seg === '..')) throw new Error('github_bad_path');
       const url = `${repoUrl(pr)}/contents/${encodePath(path)}?ref=${encodeURIComponent(sha)}`;
       const res = await send('GET', url, 'application/vnd.github.raw+json');
       if (res.status === 404) return null;

@@ -173,3 +173,37 @@ test('only GET is ever sent', async () => {
   assert.equal(calls.length, 3);
   assert.ok(calls.every((c) => c.method === 'GET'));
 });
+
+test('a 200 body that is not JSON gives github_bad_response and leaks nothing', async () => {
+  queue(new Response('<html>marker-xyz detail</html>', { status: 200 }));
+  await assert.rejects(source().listFiles(pr), (e: Error) => {
+    assert.equal(e.message, 'github_bad_response');
+    assert.equal(e.message.includes('marker-xyz'), false);
+    assert.equal((e.stack ?? '').includes('marker-xyz'), false);
+    assert.equal(e.cause, undefined);
+    return true;
+  });
+});
+
+test('a malformed compare response is github_bad_response, never an empty list', async () => {
+  const bodies: unknown[] = [
+    { files: {} }, {}, null, 5, [], { files: 'x' },
+    { files: [null] }, { files: [{ status: 'added' }] }, { files: [{ filename: 3 }] },
+  ];
+  for (const b of bodies) {
+    queue(json(b));
+    await assert.rejects(source().listFiles(pr), (e: Error) => e.message === 'github_bad_response' && e.cause === undefined);
+  }
+});
+
+test('odd content paths are refused before any request', async () => {
+  for (const p of ['../../orgs/acme/members', 'src//a.ts', './a.ts', '/a.ts', 'a/./b', 'a/..', '']) {
+    await assert.rejects(source().getFileContent(pr, p, 'head111'), (e: Error) => e.message === 'github_bad_path');
+  }
+  assert.equal(calls.length, 0);
+});
+
+test('a status named like an inherited property maps to modified', async () => {
+  queue(json({ files: [{ filename: 'a', status: 'constructor' }, { filename: 'b', status: 'toString' }] }));
+  assert.deepEqual((await source().listFiles(pr)).map((f) => f.status), ['modified', 'modified']);
+});
