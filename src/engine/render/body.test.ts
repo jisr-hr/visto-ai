@@ -123,18 +123,20 @@ const OVERALL = '## Overall\n\nNo findings.';
 const UNPLACED = "## Findings not placed on the diff\n\nGitHub cannot show these inline.\n\n- `a.ts:9` \u2014 text";
 
 test('a body within the limit is returned unchanged', () => {
-  assert.equal(fitBody('## Summary\n\nshort', 100), '## Summary\n\nshort');
-  assert.equal(fitBody('x'.repeat(100), 100), 'x'.repeat(100));
+  assert.equal(fitBody('## Summary\n\nshort', '', 100), '## Summary\n\nshort');
+  assert.equal(fitBody('x'.repeat(100), '', 100), 'x'.repeat(100));
+  assert.equal(fitBody('## Summary\n\nshort', OVERALL, 100), `## Summary\n\nshort\n\n${OVERALL}`);
+  assert.equal(fitBody('', OVERALL, 100), OVERALL);
 });
 test('a body over the limit keeps its tail and says how much was cut', () => {
-  const out = fitBody('## Summary\n\n' + 'x\n'.repeat(60_000) + '\n## Overall\n\nNo findings.', 1_000);
+  const out = fitBody('## Summary\n\n' + 'x\n'.repeat(60_000), '## Overall\n\nNo findings.', 1_000);
   assert.ok(out.length <= 1_000);
   assert.match(out, /cut to fit GitHub's limit\]_\n\n## Overall\n\nNo findings\.$/);
 });
-test('the tail starts at the unplaced heading when present, and the count is exact', () => {
+test('the tail is kept whole after the cut, and the count is exact', () => {
   const head = '## Summary\n\n' + 'x\n'.repeat(2_000) + '\n';
   const tail = `${UNPLACED}\n\n## Coverage\n\nc\n\n${OVERALL}`;
-  const out = fitBody(head + tail, 1_000);
+  const out = fitBody(head, tail, 1_000);
   assert.ok(out.length <= 1_000);
   assert.ok(out.endsWith(`\n\n${tail}`));
   const m = out.match(MARKER_RE)!;
@@ -145,16 +147,18 @@ test('the tail starts at the unplaced heading when present, and the count is exa
 });
 test('a cut never splits an astral character', () => {
   for (const long of [`## Summary\n${'\u{1F600}'.repeat(40_000)}\n\n${OVERALL}`, `## Summary\n${'\u{1F600}'.repeat(40_000)}`]) {
-    const out = fitBody(long, 1_001);
+    const out = fitBody(long, '', 1_001);
     assert.ok(out.length <= 1_001);
     assert.ok(out.isWellFormed());
   }
-  assert.match(fitBody(`## Summary\n${'\u{1F600}'.repeat(40_000)}\n\n${OVERALL}`, 1_001), MARKER_RE);
+  const withTail = fitBody(`## Summary\n${'\u{1F600}'.repeat(40_000)}`, OVERALL, 1_001);
+  assert.ok(withTail.isWellFormed());
+  assert.match(withTail, MARKER_RE);
 });
 test('the count excludes the fence close it adds, and the fence is closed', () => {
   const head = '## Summary\n```ts\n' + 'x\n'.repeat(40_000);
-  const long = `${head}\`\`\`\n\n${OVERALL}`;
-  const out = fitBody(long, 1_000);
+  const long = `${head}\`\`\``;
+  const out = fitBody(long, OVERALL, 1_000);
   assert.ok(out.length <= 1_000);
   assert.ok(out.endsWith(`\n\n${OVERALL}`));
   const m = out.match(MARKER_RE)!;
@@ -162,11 +166,11 @@ test('the count excludes the fence close it adds, and the fence is closed', () =
   assert.ok(before.endsWith('\n```'));
   const kept = before.slice(0, -'\n```'.length);
   assert.ok(long.startsWith(kept));
-  assert.equal(Number(m[1]), long.indexOf('\n\n' + OVERALL) + 2 - kept.length);
+  assert.equal(Number(m[1]), long.length - kept.length);
   assert.equal((out.match(/^```/gm) ?? []).length % 2, 0);
 });
 test('a fence left open inside a list item is closed at the same indent', () => {
-  const out = fitBody('## Summary\n- item\n  ```ts\n' + '  x\n'.repeat(40_000) + `  \`\`\`\n\n${OVERALL}`, 1_000);
+  const out = fitBody('## Summary\n- item\n  ```ts\n' + '  x\n'.repeat(40_000) + '  ```', OVERALL, 1_000);
   const lines = out.split('\n');
   const at = lines.findIndex((l) => MARKER_RE.test(l));
   assert.ok(at > 1);
@@ -175,21 +179,21 @@ test('a fence left open inside a list item is closed at the same indent', () => 
 });
 test('a tail that fits but leaves no room for the head is kept behind the marker, or alone', () => {
   const tail = `## Overall\n\n${'v'.repeat(1_000 - 12 - 90)}`;
-  const out = fitBody(`## Summary\n${'h\n'.repeat(500)}\n${tail}`, 1_000);
+  const out = fitBody(`## Summary\n${'h\n'.repeat(500)}`, tail, 1_000);
   assert.ok(out.length <= 1_000);
   assert.ok(out.endsWith(tail));
   const exact = `## Overall\n\n${'v'.repeat(1_000 - 12)}`;
-  assert.equal(fitBody(`## Summary\n${'h\n'.repeat(500)}\n${exact}`, 1_000), exact);
+  assert.equal(fitBody(`## Summary\n${'h\n'.repeat(500)}`, exact, 1_000), exact);
 });
 test('a tail over the limit is cut from the end, with the marker', () => {
-  const out = fitBody(`## Summary\nshort\n\n## Overall\n\n${'z'.repeat(5_000)}`, 1_000);
+  const out = fitBody('## Summary\nshort', `## Overall\n\n${'z'.repeat(5_000)}`, 1_000);
   assert.ok(out.length <= 1_000);
   assert.match(out, /^## Summary\nshort\n/);
   assert.match(out, /cut to fit GitHub's limit\]_$/);
 });
 test('a body with no tail is cut from the end, and never split mid-pair', () => {
   for (const long of [`## Summary\n${'x'.repeat(5_000)}`, `## Summary\n${'\u{1F600}'.repeat(5_000)}`]) {
-    const out = fitBody(long, 1_000);
+    const out = fitBody(long, '', 1_000);
     assert.ok(out.length <= 1_000);
     assert.ok(out.isWellFormed());
     assert.match(out, MARKER_RE);
@@ -197,7 +201,45 @@ test('a body with no tail is cut from the end, and never split mid-pair', () => 
 });
 test('the default limit is 65,536', () => {
   assert.equal(MAX_BODY_CHARS, 65_536);
-  const out = fitBody('a\n'.repeat(40_000));
+  const out = fitBody('a\n'.repeat(40_000), '');
   assert.ok(out.length <= 65_536);
-  assert.equal(fitBody('a'.repeat(65_536)).length, 65_536);
+  assert.equal(fitBody('a'.repeat(65_536), '').length, 65_536);
+});
+
+test('a failed review renders only its Overall line, after the manual prefix', () => {
+  const failed = result({ status: 'failed', failure: { stage: 'model', code: 'no_credit' }, overview: 'x', findings: [finding()], unplaced: [unplaced()] });
+  assert.deepEqual(renderReview(failed, auto), { body: '## Overall\n\nThe review could not be completed (model: no_credit).', comments: [] });
+  const manual = renderReview(failed, { trigger: 'manual', requestedBy: 'dev-one' });
+  assert.equal(manual.body, '**Full review** requested by @dev-one.\n\n## Overall\n\nThe review could not be completed (model: no_credit).');
+  assert.deepEqual(manual.comments, []);
+});
+test('an Overall line written by the model cannot move the cut', () => {
+  const overview = `Intro.\n## Overall\n\nAll fine.\n${'w\n'.repeat(40_000)}`;
+  const plain = renderReview(result({ overview, findings: [finding()] }), auto).body;
+  assert.ok(plain.length <= MAX_BODY_CHARS);
+  assert.match(plain, /cut to fit GitHub's limit\]_\n\n## Overall\n\n0 blocker, 1 major, 0 minor\.$/);
+  const withUnplaced = renderReview(result({ overview, findings: [finding()], unplaced: [unplaced()] }), auto).body;
+  assert.ok(withUnplaced.length <= MAX_BODY_CHARS);
+  assert.ok(withUnplaced.includes('## Findings not placed on the diff\n'));
+  assert.ok(withUnplaced.includes('\n- `src/b.ts:4` \u2014 Name is unclear.\n'));
+  assert.match(withUnplaced, /\n## Overall\n\n0 blocker, 1 major, 0 minor\. 1 could not be placed on the diff\.$/);
+});
+test('an HTML comment opener written by the model is neutralised', () => {
+  const r = renderReview(result({ overview: 'See <!-- hidden -->.', findings: [finding({ body: 'Bad <!-- x' })], beyondDiff: [beyond({ body: 'Also <!-- y' })] }), auto);
+  assert.equal(r.body.includes('<!--'), false);
+  assert.ok(r.body.includes('See &lt;!-- hidden -->.'));
+  assert.ok(r.body.includes('Bad &lt;!-- x'));
+  assert.ok(r.body.includes('Also &lt;!-- y'));
+  assert.equal(r.comments[0]!.body, '**[major]** Bad &lt;!-- x');
+});
+test('a heading line in the overview is escaped', () => {
+  const b = renderReview(result({ overview: 'Text.\n## Overall\n   # Title\n    # code\nnot # a heading' }), auto).body;
+  assert.ok(b.includes('## Summary\n\nText.\n\\## Overall\n   \\# Title\n    # code\nnot # a heading\n\n## Overall\n\nNo findings.'));
+  assert.equal((b.match(/^## Overall$/gm) ?? []).length, 1);
+});
+test('a path with a newline or a tab stays on its bullet line', () => {
+  const b = renderReview(result({ beyondDiff: [beyond({ path: 'src/c.ts\n## Overall\tx' })], unplaced: [unplaced({ path: 'src/b\r\n.ts' })] }), auto).body;
+  assert.ok(b.includes('- **[minor]** `src/c.ts ## Overall x:7` \u2014 Caller ignores the error.\n'));
+  assert.ok(b.includes('- `src/b  .ts:4` \u2014 Name is unclear.\n'));
+  assert.equal((b.match(/^## Overall$/gm) ?? []).length, 1);
 });

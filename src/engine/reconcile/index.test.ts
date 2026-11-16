@@ -14,8 +14,11 @@ const ctxWith = (path: string, r: Ranges | null): FileContext => ({
   file: { path, previousPath: null, status: 'modified', additions: 1, deletions: 0, patch: r ? 'p' : null },
   hunks: [], ranges: r, diffText: null, full: null, test: null, skip: r ? null : 'no_diff',
 }) as FileContext;
-const answer = (overview: string, ...findings: RawFinding[]): SubmitReviewArgs => ({ overview, findings });
 const ctxs = [ctxWith('src/a.ts', ranges), ctxWith('src/b.ts', ranges), ctxWith('img/logo.bin', null)];
+const allFiles = ctxs.map((c) => c.file.path);
+const answerIn = (files: string[], overview: string, ...findings: RawFinding[]): { value: SubmitReviewArgs; files: string[] } =>
+  ({ value: { overview, findings }, files });
+const answer = (overview: string, ...findings: RawFinding[]): { value: SubmitReviewArgs; files: string[] } => answerIn(allFiles, overview, ...findings);
 
 test('prefixes normalise; unknown paths are dropped with an audit entry', () => {
   const out = reconcile([answer('o', raw('a/src/a.ts', 12), raw('other/x.ts', 1))], ctxs);
@@ -34,11 +37,34 @@ test('beyond_diff items are set apart and never placed', () => {
   assert.equal(out.audit.length, 0);
 });
 
-test('beyond_diff on an unknown path is untouched, not dropped', () => {
+test('beyond_diff on a path outside the pull request is dropped', () => {
   const item = raw('nowhere.ts', 1, { beyond_diff: true });
   const out = reconcile([answer('o', item)], ctxs);
-  assert.deepEqual(out.beyondDiff, [item]);
-  assert.equal(out.audit.length, 0);
+  assert.deepEqual(out.beyondDiff, []);
+  assert.deepEqual(out.audit, [{ stage: 'reconcile', action: 'dropped', subject: 'nowhere.ts', reason: 'path_not_in_pull_request' }]);
+});
+
+test('a surviving beyond_diff item carries the normalised path', () => {
+  const out = reconcile([answer('o', raw('b/src/a.ts', 500, { beyond_diff: true }))], ctxs);
+  assert.deepEqual(out.beyondDiff, [raw('b/src/a.ts', 500, { beyond_diff: true, path: 'src/a.ts' })]);
+});
+
+test('a finding on a file of another batch is dropped', () => {
+  const out = reconcile([
+    answerIn(['src/a.ts'], 'o', raw('src/b.ts', 12, { severity: 'blocker' }), raw('src/b.ts', 12, { beyond_diff: true }), raw('src/a.ts', 12)),
+  ], ctxs);
+  assert.deepEqual(out.findings.map((f) => f.path), ['src/a.ts']);
+  assert.deepEqual(out.beyondDiff, []);
+  assert.deepEqual(out.audit, [
+    { stage: 'reconcile', action: 'dropped', subject: 'src/b.ts', reason: 'path_not_in_batch' },
+    { stage: 'reconcile', action: 'dropped', subject: 'src/b.ts', reason: 'path_not_in_batch' },
+  ]);
+});
+
+test('each overview is cut to 4,000 characters before they are joined', () => {
+  const out = reconcile([answer('y'.repeat(80_000)), answer('two')], ctxs);
+  assert.equal(out.overview, `${'y'.repeat(3_999)}\u2026\n\ntwo`);
+  assert.equal(reconcile([answer('z'.repeat(4_000))], ctxs).overview, 'z'.repeat(4_000));
 });
 
 test('overviews of several batches are joined', () => {

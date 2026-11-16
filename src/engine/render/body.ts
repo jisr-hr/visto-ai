@@ -24,8 +24,20 @@ function firstLine(body: string): string {
   return line.length > FIRST_LINE_CHARS ? `${safeSlice(line, FIRST_LINE_CHARS - 1)}\u2026` : line;
 }
 
-function codeSpan(text: string): string {
+// A path shown in a bullet stays on its line: newlines and tabs become spaces first.
+function codeSpan(raw: string): string {
+  const text = raw.replace(/[\r\n\t]/g, ' ');
   return text.includes('`') ? `\`\` ${text} \`\`` : `\`${text}\``;
+}
+
+// An HTML comment opener could hide the rest of the text: show it instead.
+function noComment(text: string): string {
+  return text.replaceAll('<!--', '&lt;!--');
+}
+
+// A model-written line must not become a heading of the review body.
+function noHeading(text: string): string {
+  return text.replace(/^( {0,3})#/gm, '$1\\#');
 }
 
 function bullets(items: string[]): string[] {
@@ -41,7 +53,7 @@ const notReviewedLine = (n: NotReviewed): string => `- ${codeSpan(n.path)}: ${n.
 
 function commentBody(f: Finding): string {
   const moved = f.requestedLine === null ? '' : `_(Refers to ${f.side === 'LEFT' ? 'old line' : 'line'} ${f.requestedLine}, just outside the diff.)_ `;
-  return `**[${f.severity}]** ${moved}${f.body}`;
+  return `**[${f.severity}]** ${moved}${noComment(f.body)}`;
 }
 
 function overallLine(result: ReviewResult): string {
@@ -60,23 +72,31 @@ function overallLine(result: ReviewResult): string {
 }
 
 export function renderReview(result: ReviewResult, meta: Meta): { body: string; comments: InlineComment[] } {
-  const sections: string[] = [];
+  const prefix: string[] = [];
   if (meta.trigger === 'manual') {
-    sections.push(meta.requestedBy === null ? '**Full review** requested.' : `**Full review** requested by @${meta.requestedBy}.`);
+    prefix.push(meta.requestedBy === null ? '**Full review** requested.' : `**Full review** requested by @${meta.requestedBy}.`);
   }
+  if (result.status === 'failed') {
+    const failure = result.failure === null ? 'unknown' : `${result.failure.stage}: ${result.failure.code}`;
+    return { body: [...prefix, `${OVERALL_HEADING}\n\nThe review could not be completed (${failure}).`].join('\n\n'), comments: [] };
+  }
+  // The tail is kept whole when the body is cut: from the unplaced section on, or the Overall section alone.
+  const head: string[] = [...prefix];
+  const tail: string[] = [];
   const overview = result.overview.trim();
-  if (overview !== '') sections.push(`## Summary\n\n${overview}`);
-  if (result.findings.length > 0) sections.push(['## Findings', '', ...bullets(result.findings.map(located))].join('\n'));
+  if (overview !== '') head.push(`## Summary\n\n${noHeading(overview)}`);
+  if (result.findings.length > 0) head.push(['## Findings', '', ...bullets(result.findings.map(located))].join('\n'));
+  const rest = result.unplaced.length > 0 ? tail : head;
   if (result.unplaced.length > 0) {
-    sections.push([UNPLACED_HEADING, '', UNPLACED_NOTE, '', ...bullets(result.unplaced.map(unplacedLine))].join('\n'));
+    tail.push([UNPLACED_HEADING, '', UNPLACED_NOTE, '', ...bullets(result.unplaced.map(unplacedLine))].join('\n'));
   }
-  if (result.beyondDiff.length > 0) sections.push(['## Beyond the diff', '', ...bullets(result.beyondDiff.map(located))].join('\n'));
+  if (result.beyondDiff.length > 0) rest.push(['## Beyond the diff', '', ...bullets(result.beyondDiff.map(located))].join('\n'));
   if (result.coverage.notReviewed.length > 0) {
-    sections.push(['## Coverage', '', 'These files were not reviewed:', '', ...bullets(result.coverage.notReviewed.map(notReviewedLine))].join('\n'));
+    rest.push(['## Coverage', '', 'These files were not reviewed:', '', ...bullets(result.coverage.notReviewed.map(notReviewedLine))].join('\n'));
   }
-  sections.push(`${OVERALL_HEADING}\n\n${overallLine(result)}`);
+  tail.push(`${OVERALL_HEADING}\n\n${overallLine(result)}`);
   const comments = result.findings.map((f) => ({ path: f.path, side: f.side, line: f.line, body: commentBody(f) }));
-  return { body: fitBody(sections.join('\n\n')), comments };
+  return { body: fitBody(noComment(head.join('\n\n')), noComment(tail.join('\n\n'))), comments };
 }
 
 const cutMarker = (removed: number): string => `_[\u2026 ${removed} characters of the review were cut to fit GitHub's limit]_`;
@@ -105,14 +125,6 @@ function cutAtLineBreak(text: string, room: number): string {
   return at > 0 ? slice.slice(0, at) : slice;
 }
 
-function tailStart(body: string): number {
-  for (const heading of [UNPLACED_HEADING, OVERALL_HEADING]) {
-    const m = new RegExp(`^${heading}[ \\t]*$`, 'm').exec(body);
-    if (m) return m.index;
-  }
-  return -1;
-}
-
 // Keep as much of `head` as fits in `room` after the cut, then the marker, then `tail`.
 function assemble(head: string, tail: string, limit: number): string {
   let room = limit - tail.length - cutMarker(head.length).length - 4;
@@ -126,13 +138,11 @@ function assemble(head: string, tail: string, limit: number): string {
   return compact.length <= limit ? compact : tail;
 }
 
-export function fitBody(body: string, limit: number = MAX_BODY_CHARS): string {
+/** `tail` is kept whole when it fits: the cut takes the end of `head`. */
+export function fitBody(head: string, tail: string, limit: number = MAX_BODY_CHARS): string {
+  const body = head === '' ? tail : tail === '' ? head : `${head}\n\n${tail}`;
   if (body.length <= limit) return body;
-  const start = tailStart(body);
-  if (start > 0) {
-    const tail = body.slice(start);
-    if (tail.length <= limit) return assemble(body.slice(0, start), tail, limit);
-  }
+  if (head !== '' && tail !== '' && tail.length <= limit) return assemble(head, tail, limit);
   // No tail to protect, or the tail alone is over the limit: cut from the end.
   return assemble(body, '', limit);
 }

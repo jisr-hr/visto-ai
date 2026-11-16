@@ -57,7 +57,7 @@ function okResult(overview: string, rest: Partial<ReviewResult>): ReviewResult {
 const distinct = (values: string[]): string[] => [...new Set(values)];
 
 interface BatchOutcome {
-  answers: SubmitReviewArgs[];
+  answers: { value: SubmitReviewArgs; files: string[] }[]; // each answer with the paths of the files it was given
   reviewed: string[];
   failedFiles: string[];
   failedCodes: string[]; // codes of the parts that ended failed, in order
@@ -129,7 +129,7 @@ async function attempt(run: Run, ctl: Control, out: BatchOutcome, batch: Batch, 
     out.providers.push(...answer.providers);
     out.audit.push(...answer.audit);
     if (answer.ok) {
-      out.answers.push(answer.value);
+      out.answers.push({ value: answer.value, files: files.map((f) => f.file.path) });
       out.reviewed.push(...files.map((f) => f.file.path));
     }
   };
