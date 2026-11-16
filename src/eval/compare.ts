@@ -27,5 +27,22 @@ export function compareSummaries(baseline: SummaryFile, candidate: SummaryFile, 
     }
     return `| ${m.name} | ${show(b)} | ${show(c)} | ${show(delta)} | ${mark}${mark === '' ? '' : ' '}|`;
   });
-  return [`| metric | ${labelOf(baseline, 'baseline')} | ${labelOf(candidate, 'candidate')} | delta | |`, '| --- | --- | --- | --- | --- |', ...rows].join('\n');
+  return [
+    `| metric | ${labelOf(baseline, 'baseline')} | ${labelOf(candidate, 'candidate')} | delta | |`, '| --- | --- | --- | --- | --- |', ...rows,
+    ...warnings(baseline, candidate),
+  ].join('\n');
+}
+
+// Conditions under which the two runs are not comparable as they stand.
+function warnings(a: SummaryFile, b: SummaryFile): string[] {
+  const out: string[] = [];
+  const casesA = valueOf(a, 'cases');
+  const casesB = valueOf(b, 'cases');
+  if (casesA !== casesB) out.push(`warning: case counts differ (${show(casesA)} and ${show(casesB)})`);
+  const reasons = [...new Set([a.stopped_reason, b.stopped_reason].filter((r): r is NonNullable<typeof r> => typeof r === 'string'))];
+  if (reasons.length > 0) out.push(`warning: a run was stopped early (${reasons.join(', ')})`);
+  const failedA = valueOf(a, 'failed_cases');
+  const failedB = valueOf(b, 'failed_cases');
+  if ((failedA ?? 0) > 0 || (failedB ?? 0) > 0) out.push(`warning: failed cases (${show(failedA)} and ${show(failedB)})`);
+  return out;
 }

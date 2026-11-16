@@ -8,6 +8,7 @@ import { SUBMIT_REVIEW } from '../engine/model/submit-review.ts';
 import type { ChangedFile, ModelClient, ModelResponse, ReviewDeps, Source } from '../engine/types.ts';
 import type { EvalCase } from './cases.ts';
 import { assertOutsideProject, replayCase, runReplay, sampleUnmatched, toReviewInput } from './replay.ts';
+import { METRICS } from './score.ts';
 import type { CaseScore, ReplayFinding } from './score.ts';
 
 const config: DeploymentConfig = {
@@ -73,6 +74,38 @@ test('only placed findings are scored', async () => {
   assert.deepEqual(r.findings[0], { path: 'src/a.ts', line: 2, side: 'RIGHT', severity: 'major', body: 'Wrong value.' });
   assert.equal(r.key, 'acme/shop#7@abcdef012345');
   assert.ok(r.duration_ms >= 0);
+});
+
+test('a case result explains the run: calls, cached tokens, models, unplaced and coverage', async () => {
+  const files: ChangedFile[] = [fileA, { path: 'logo.bin', previousPath: null, status: 'modified', additions: 0, deletions: 0, patch: null }];
+  const model: ModelClient = {
+    complete: (): Promise<ModelResponse> => Promise.resolve({
+      toolName: SUBMIT_REVIEW,
+      toolArguments: JSON.stringify({ overview: 'src/a.ts has a problem.', findings: [finding(2), finding(500)] }),
+      text: null, model: 'vendor/model-a', provider: 'Up One', usage: { calls: 1, inputTokens: 100, outputTokens: 10, cachedTokens: 40, cost: 0.01 },
+    }),
+  };
+  const r = await replayCase(caseA, config, stubDeps([], { model, source: { listFiles: () => Promise.resolve(files), getFileContent: () => Promise.resolve(null) } }));
+  assert.deepEqual(
+    [r.calls, r.cached_tokens, r.models, r.unplaced, r.files_reviewed, r.not_reviewed],
+    [1, 40, ['vendor/model-a'], 1, 1, { no_diff: 1 }],
+  );
+});
+
+test('a case that fails in eval has empty explanations', async () => {
+  const r = await replayCase(mkCase(1, { repo: 'shop' }), config, stubDeps());
+  assert.deepEqual([r.calls, r.cached_tokens, r.models, r.unplaced, r.files_reviewed, r.not_reviewed], [0, 0, [], 0, 0, {}]);
+});
+
+test('the summary file carries the coverage of the run, and the summary object is unchanged', async () => {
+  const twoFiles: ChangedFile[] = [fileA, { path: 'logo.bin', previousPath: null, status: 'modified', additions: 0, deletions: 0, patch: null }];
+  const source: Source = {
+    listFiles: (p) => Promise.resolve(p.ref.number === 8 ? twoFiles : [fileA]),
+    getFileContent: () => Promise.resolve(null),
+  };
+  const s = await runReplay(baseArgs({ deps: stubDeps([finding(2)], { source }) }));
+  assert.deepEqual(s.coverage, { files_reviewed: 3, files_not_reviewed: { no_diff: 1 }, cases_with_files_not_reviewed: 1, calls: 3, models: ['m'] });
+  assert.deepEqual(Object.keys(s.summary), ['label', ...METRICS.map((m) => m.name)]);
 });
 
 test('a failed review fills the failure stage and reason', async () => {

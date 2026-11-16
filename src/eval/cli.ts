@@ -3,7 +3,7 @@ import { randomBytes } from 'node:crypto';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { loadConfig } from '../config/load.ts';
+import { ConfigError, loadConfig } from '../config/load.ts';
 import { createModelClient } from '../engine/model/client.ts';
 import type { ReviewDeps } from '../engine/types.ts';
 import { createGithubReadSource } from '../forge/github/read-source.ts';
@@ -72,8 +72,8 @@ async function replay(argv: string[], env: Record<string, string | undefined>, o
     throw new UsageError('usage: --out is not empty; use --force to reuse it');
   }
 
-  const config = loadConfig(configPath, env);
-  const { cases, sha256 } = loadCases(casesPath);
+  const config = readable('config', () => loadConfig(configPath, env));
+  const { cases, sha256 } = readable('cases', () => loadCases(casesPath));
   const sleep = (ms: number): Promise<void> => new Promise((done) => { setTimeout(done, ms); });
   const deps: ReviewDeps = {
     source: createGithubReadSource({ token: githubToken, fetch: globalThis.fetch }),
@@ -86,6 +86,17 @@ async function replay(argv: string[], env: Record<string, string | undefined>, o
   const file = await runReplay({ cases, casesFile: casesPath, casesSha256: sha256, label, outDir, maxCases, maxCost, concurrency, config, deps });
   out(`cases ${file.summary.cases}, failed ${file.summary.failed_cases}, not started ${file.cases_not_started}, total_cost ${file.summary.total_cost}`);
   if (file.stopped_reason !== null) out(`stopped: ${file.stopped_reason}`);
+}
+
+// A file that cannot be read is a usage error; one that is read but invalid is not.
+function readable<T>(name: string, load: () => T): T {
+  try {
+    return load();
+  } catch (error) {
+    const fileError = error instanceof Error && typeof (error as NodeJS.ErrnoException).code === 'string' && typeof (error as NodeJS.ErrnoException).syscall === 'string';
+    if (fileError) throw new UsageError(`usage: cannot read --${name}`);
+    throw error;
+  }
 }
 
 function safeList(path: string): string[] | null {
@@ -117,6 +128,8 @@ export async function main(argv: string[], env: Record<string, string | undefine
     return 0;
   } catch (error) {
     if (error instanceof UsageError) { out(error.message); return 2; }
+    // Issues name keys and variables, never values.
+    if (error instanceof ConfigError) { for (const issue of error.issues) out(`config: ${issue}`); return 2; }
     out(error instanceof Error && SHORT_CODE.test(error.message) ? error.message : `unexpected_error ${error instanceof Error ? error.name : 'unknown'}`);
     return 1;
   }

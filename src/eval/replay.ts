@@ -12,9 +12,12 @@ import { caseKey } from './cases.ts';
 import { METRICS, scoreCase, summarize } from './score.ts';
 import type { CaseResult, CaseScore, ReplayFinding, Summary } from './score.ts';
 
+export interface RunCoverage {
+  files_reviewed: number; files_not_reviewed: Record<string, number>; cases_with_files_not_reviewed: number; calls: number; models: string[];
+}
 export interface SummaryFile {
   summary: Summary; cases_file: string; cases_sha256: string; case_count: number; max_cases: number;
-  stopped_reason: 'max_cost' | null; cases_not_started: number; scored: CaseScore[];
+  stopped_reason: 'max_cost' | null; cases_not_started: number; coverage: RunCoverage; scored: CaseScore[];
 }
 
 const EM_DASH = '\u2014';
@@ -43,7 +46,10 @@ export function toReviewInput(c: EvalCase, config: DeploymentConfig, asOf: Date)
 // Case data is private: only a short code, or the error's name, is recorded.
 function evalFailure(c: EvalCase, error: unknown, duration_ms: number): CaseResult {
   const reason = error instanceof Error && SHORT_CODE.test(error.message) ? error.message : 'unexpected_error';
-  return { key: caseKey(c), status: 'failed', failure_stage: 'eval', failure_reason: reason, total_cost: 0, total_tokens: 0, duration_ms, findings: [] };
+  return {
+    key: caseKey(c), status: 'failed', failure_stage: 'eval', failure_reason: reason, total_cost: 0, total_tokens: 0, duration_ms,
+    calls: 0, cached_tokens: 0, models: [], unplaced: 0, files_reviewed: 0, not_reviewed: {}, findings: [],
+  };
 }
 
 export async function replayCase(c: EvalCase, config: DeploymentConfig, deps: ReviewDeps): Promise<CaseResult> {
@@ -59,11 +65,37 @@ export async function replayCase(c: EvalCase, config: DeploymentConfig, deps: Re
       total_cost: result.usage.cost,
       total_tokens: result.usage.inputTokens + result.usage.outputTokens,
       duration_ms: Date.now() - started,
+      calls: result.usage.calls,
+      cached_tokens: result.usage.cachedTokens,
+      models: result.models,
+      unplaced: result.unplaced.length,
+      files_reviewed: result.coverage.reviewed.length,
+      not_reviewed: countBy(result.coverage.notReviewed.map((n) => n.reason)),
       findings,
     };
   } catch (error) {
     return evalFailure(c, error, Date.now() - started);
   }
+}
+
+function countBy(keys: string[]): Record<string, number> {
+  const counts: Record<string, number> = {};
+  for (const key of keys) counts[key] = (counts[key] ?? 0) + 1;
+  return counts;
+}
+
+function runCoverage(results: CaseResult[]): RunCoverage {
+  const notReviewed: Record<string, number> = {};
+  for (const r of results) {
+    for (const [reason, n] of Object.entries(r.not_reviewed)) notReviewed[reason] = (notReviewed[reason] ?? 0) + n;
+  }
+  return {
+    files_reviewed: results.reduce((n, r) => n + r.files_reviewed, 0),
+    files_not_reviewed: notReviewed,
+    cases_with_files_not_reviewed: results.filter((r) => Object.values(r.not_reviewed).some((n) => n > 0)).length,
+    calls: results.reduce((n, r) => n + r.calls, 0),
+    models: [...new Set(results.flatMap((r) => r.models))],
+  };
 }
 
 const sha256 = (text: string): string => createHash('sha256').update(text).digest('hex');
@@ -150,7 +182,8 @@ export async function runReplay(args: {
   const notStarted = selected.length - started.length;
   const file: SummaryFile = {
     summary, cases_file: args.casesFile, cases_sha256: args.casesSha256, case_count: args.cases.length, max_cases: args.maxCases,
-    stopped_reason: stoppedByCost && notStarted > 0 ? 'max_cost' : null, cases_not_started: notStarted, scored,
+    stopped_reason: stoppedByCost && notStarted > 0 ? 'max_cost' : null, cases_not_started: notStarted,
+    coverage: runCoverage(started.map((s) => s.r)), scored,
   };
   writeFileSync(join(args.outDir, 'summary.json'), JSON.stringify(file, null, 2) + '\n');
   writeFileSync(join(args.outDir, 'summary.md'), summaryTable(summary));
