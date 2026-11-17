@@ -78,29 +78,35 @@ function backtestArgs(over: Record<string, string> = {}, drop: string[] = []): s
   return ['backtest', ...Object.entries(options).flatMap(([k, v]) => [`--${k}`, v])];
 }
 
-test('backtest usage errors exit 2 with one line', async () => {
+const backtestEnv = { GITHUB_TOKEN: 't', MODEL_KEY: 'k' };
+
+// The config loads and the history file does not exist, so a case that passes its own check ends at
+// "cannot read --history" and the test names which check was meant to stop it.
+test('backtest usage errors exit 2 with one exact line', async () => {
   mkdirSync(join(dir, 'busy'), { recursive: true });
   writeFileSync(join(dir, 'busy', 'x'), 'x');
-  const bad: [string, Promise<[number, string[]]>][] = [
-    ['no arguments', run(['backtest'])],
-    ['missing history', run(backtestArgs({}, ['history']))],
-    ['missing out', run(backtestArgs({}, ['out']))],
-    ['missing label', run(backtestArgs({}, ['label']))],
-    ['missing config', run(backtestArgs({}, ['config']))],
-    ['no token', run(backtestArgs(), {})],
-    ['history inside the project', run(backtestArgs({ history: join(projectRoot, 'h.jsonl') }))],
-    ['out inside the project', run(backtestArgs({ out: join(projectRoot, 'run') }))],
-    ['out not empty without --force', run(backtestArgs({ out: join(dir, 'busy') }))],
-    ['concurrency 4', run([...backtestArgs(), '--concurrency', '4'])],
-    ['max-cases 0', run([...backtestArgs(), '--max-cases', '0'])],
-    ['positional argument', run([...backtestArgs(), 'extra'])],
-    ['unknown option', run([...backtestArgs(), '--nope', '1'])],
+  writeFileSync(join(dir, 'config.yml'), 'model:\n  apiKey: { env: MODEL_KEY }\n  model: vendor/model-a\n');
+  const cases: [string, string[], Record<string, string | undefined>, string][] = [
+    ['no arguments', ['backtest'], backtestEnv, 'usage: backtest needs --history'],
+    ['missing history', backtestArgs({}, ['history']), backtestEnv, 'usage: backtest needs --history'],
+    ['missing out', backtestArgs({}, ['out']), backtestEnv, 'usage: backtest needs --out'],
+    ['missing label', backtestArgs({}, ['label']), backtestEnv, 'usage: backtest needs --label'],
+    ['missing config', backtestArgs({}, ['config']), backtestEnv, 'usage: backtest needs --config'],
+    ['no token', backtestArgs(), { MODEL_KEY: 'k' }, 'usage: GITHUB_TOKEN is not set'],
+    ['history inside the project', backtestArgs({ history: join(projectRoot, 'h.jsonl') }), backtestEnv, 'usage: --history must be outside the project folder'],
+    ['out inside the project', backtestArgs({ out: join(projectRoot, 'run') }), backtestEnv, 'usage: --out must be outside the project folder'],
+    ['out not empty without --force', backtestArgs({ out: join(dir, 'busy') }), backtestEnv, 'usage: --out is not empty; use --force to reuse it'],
+    ['concurrency 4', [...backtestArgs(), '--concurrency', '4'], backtestEnv, 'usage: --concurrency must be 1, 2 or 3'],
+    ['max-cases 0', [...backtestArgs(), '--max-cases', '0'], backtestEnv, 'usage: --max-cases must be a positive number'],
+    ['positional argument', [...backtestArgs(), 'extra'], backtestEnv, 'usage: backtest takes no positional arguments'],
+    ['unknown option', [...backtestArgs(), '--nope', '1'], backtestEnv, 'usage: unknown option --nope'],
+    ['history that does not exist', backtestArgs(), backtestEnv, 'usage: cannot read --history'],
+    ['config that does not exist', backtestArgs({ config: join(dir, 'none.yml') }), backtestEnv, 'usage: cannot read --config'],
   ];
-  for (const [name, p] of bad) {
-    const [code, lines] = await p;
+  for (const [name, argv, env, message] of cases) {
+    const [code, lines] = await run(argv, env);
     assert.equal(code, 2, name);
-    assert.equal(lines.length, 1, name);
-    assert.match(lines[0]!, /^usage: /, name);
+    assert.deepEqual(lines, [message], name);
   }
 });
 

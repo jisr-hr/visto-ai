@@ -143,7 +143,8 @@ export async function runBacktest(args: {
   }
   mkdirSync(args.outDir, { recursive: true });
   // Files from an earlier run must not sit beside this run's files.
-  for (const name of ['summary.json', 'summary.md']) rmSync(join(args.outDir, name), { force: true });
+  // A link left at a result file would send the writes elsewhere, so the files are removed, not truncated.
+  for (const name of ['summary.json', 'summary.md', 'results.jsonl', 'scores.jsonl']) rmSync(join(args.outDir, name), { force: true });
   const resultsPath = join(args.outDir, 'results.jsonl');
   const scoresPath = join(args.outDir, 'scores.jsonl');
   writeFileSync(resultsPath, '');

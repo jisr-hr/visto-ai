@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, readdirSync, readFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -139,8 +139,10 @@ test('the run stops starting cases at the cost limit', async () => {
 });
 
 test('max_cases takes the first cases in file order', async () => {
-  const s = await runBacktest({ ...baseArgs(), maxCases: 1 });
+  const args = baseArgs({ maxCases: 1 });
+  const s = await runBacktest(args);
   assert.deepEqual([s.cases, s.case_count, s.max_cases, s.stopped_reason], [1, 2, 1, null]);
+  assert.deepEqual((lines(join(args.outDir, 'results.jsonl')) as { key: string }[]).map((r) => r.key), ['acme/shop#1@head10000000']);
 });
 
 test('two cases with the same key are refused before any case runs', async () => {
@@ -153,9 +155,40 @@ test('two cases with the same key are refused before any case runs', async () =>
   assert.ok(!existsSync(args.outDir));
 });
 
-test('stale summary files are removed when a run begins', async () => {
+test('summary files of an earlier run are removed when a run begins, even if the run then fails', async () => {
+  const args = baseArgs();
+  mkdirSync(args.outDir);
+  for (const f of ['summary.json', 'summary.md']) writeFileSync(join(args.outDir, f), 'stale');
+  mkdirSync(join(args.outDir, 'scores.jsonl')); // makes the run fail after the removals
+  await assert.rejects(runBacktest(args));
+  assert.deepEqual(readdirSync(args.outDir), ['scores.jsonl']);
+});
+
+test('a reused directory starts the result files afresh', async () => {
   const args = baseArgs();
   await runBacktest(args);
   await runBacktest({ ...args, cases: [caseA] });
   assert.equal(lines(join(args.outDir, 'results.jsonl')).length, 1);
+  assert.equal(lines(join(args.outDir, 'scores.jsonl')).length, 1);
+});
+
+test('a link planted at a result file is replaced, and what it pointed at is left alone', async () => {
+  const args = baseArgs();
+  mkdirSync(args.outDir);
+  const elsewhere = join(tmp(), 'other.txt');
+  writeFileSync(elsewhere, 'keep');
+  symlinkSync(elsewhere, join(args.outDir, 'scores.jsonl'));
+  await runBacktest(args);
+  assert.equal(lstatSync(join(args.outDir, 'scores.jsonl')).isFile(), true);
+  assert.equal(readFileSync(elsewhere, 'utf8'), 'keep');
+  assert.equal(lines(join(args.outDir, 'scores.jsonl')).length, 2);
+});
+
+test('a share with nothing to divide by is written as an em dash', async () => {
+  const args = baseArgs({ cases: [mkCase(3, 'src/a.ts')], deps: stubDeps([3]) });
+  const s = await runBacktest(args);
+  assert.equal(s.numbers[0]!.benefit, null);
+  const md = readFileSync(join(args.outDir, 'summary.md'), 'utf8');
+  assert.match(md, /^\| 20 \| \u2014 \| 0 \|/m);
+  assert.ok(!md.includes('null'));
 });

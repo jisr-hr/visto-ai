@@ -147,7 +147,8 @@ export async function runReplay(args: {
 }): Promise<SummaryFile> {
   mkdirSync(args.outDir, { recursive: true });
   // Files from an earlier run must not sit beside this run's files.
-  for (const name of ['summary.json', 'summary.md', 'unmatched-sample.jsonl']) rmSync(join(args.outDir, name), { force: true });
+  // A link left at results.jsonl would send the writes elsewhere, so it is removed, not truncated.
+  for (const name of ['summary.json', 'summary.md', 'unmatched-sample.jsonl', 'results.jsonl']) rmSync(join(args.outDir, name), { force: true });
   const resultsPath = join(args.outDir, 'results.jsonl');
   writeFileSync(resultsPath, '');
 
