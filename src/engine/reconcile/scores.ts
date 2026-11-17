@@ -73,21 +73,30 @@ function blocksFor(path: string, block: Block, item: RawBlock | undefined, audit
 
   const parts = validParts(item.parts, subject, audit);
   if (parts.length === 0) return [blockScore(block, null)];
+
+  const split = splitBlock(block, parts.map((p) => ({ first: p.first, last: p.last })));
+  let dropped = parts.length < item.parts.length;
+  for (const made of split.parts) {
+    if (made === null) {
+      dropped = true;
+      audit.push({ stage: 'reconcile', action: 'part_invalid', subject, reason: 'lines_overlap_or_unchanged' });
+    }
+  }
+
   if (block.changed.length <= SPLIT_ABOVE) {
+    // Not split, so the parts only vouch for the block when they cover all of it and none was dropped.
     audit.push({ stage: 'reconcile', action: 'split_ignored', subject, reason: 'block_has_30_changed_lines_or_fewer' });
+    if (dropped || split.rest !== null) return [blockScore(block, null)];
     let best = parts[0]!;
     for (const part of parts) if (part.entry.score > best.entry.score) best = part;
     return [blockScore(block, best.entry)];
   }
 
-  const split = splitBlock(block, parts.map((p) => ({ first: p.first, last: p.last })));
+  // Nothing kept means nothing was split: the block stays whole, without a score.
+  if (split.parts.every((made) => made === null)) return [blockScore(block, null)];
   const out: BlockScore[] = [];
   for (const [i, made] of split.parts.entries()) {
-    if (made === null) {
-      audit.push({ stage: 'reconcile', action: 'part_invalid', subject, reason: 'lines_overlap_or_unchanged' });
-    } else {
-      out.push(blockScore(made, parts[i]!.entry));
-    }
+    if (made !== null) out.push(blockScore(made, parts[i]!.entry));
   }
   if (split.rest !== null) out.push(blockScore(split.rest, null));
   return out;

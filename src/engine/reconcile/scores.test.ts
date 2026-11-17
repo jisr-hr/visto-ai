@@ -166,14 +166,48 @@ test('a part with bad anchors or a bad score is dropped', () => {
 });
 
 test('parts on a short block are not a split: the highest part stands', () => {
-  const out = run([file('src/a.ts', [{ id: 'B1', parts: [part('R11', 'R11', 30, 'rename'), part('R12', 'R12', 75, 'calculation', 'Changes rounding.')] }, b('B2', 10, 'formatting')])], [ctx('src/a.ts', twoHunks)]);
-  assert.equal(out.scores[0]!.blocks[0]!.id, 'B1');
+  const out = run([file('src/a.ts', [{ id: 'B1', parts: [part('L11', 'R11', 30, 'rename'), part('R12', 'R12', 75, 'calculation', 'Changes rounding.')] }, b('B2', 10, 'formatting')])], [ctx('src/a.ts', twoHunks)]);
+  assert.deepEqual(out.scores[0]!.blocks.map((x) => x.id), ['B1', 'B2']);
   assert.equal(out.scores[0]!.blocks[0]!.entry!.score, 75);
   assert.ok(out.audit.some((a) => a.action === 'split_ignored' && a.subject === 'src/a.ts B1'));
 });
 
+for (const [name, parts, action] of [
+  ['one part has an invalid score', [part('R11', 'R11', 85.5, 'fix', 'x'), part('R12', 'R12', 20, 'fix')], 'part_invalid'],
+  ['the parts leave a changed line out', [part('R11', 'R11', 20, 'fix')], 'split_ignored'],
+  ['the parts overlap', [part('R11', 'R12', 30, 'fix'), part('R12', 'R12', 75, 'fix', 'x')], 'part_invalid'],
+] as const) {
+  test(`a short block keeps no score when ${name}`, () => {
+    const out = run([file('src/a.ts', [{ id: 'B1', parts: [...parts] }, b('B2', 10)])], [ctx('src/a.ts', twoHunks)]);
+    assert.equal(out.scores[0]!.blocks[0]!.id, 'B1');
+    assert.equal(out.scores[0]!.blocks[0]!.entry, null);
+    assert.deepEqual(out.scores[0]!.fileLevel, { score: 100, source: 'not_scored' });
+    assert.equal(out.scores[0]!.covered, false);
+    assert.ok(out.audit.some((a) => a.action === action));
+    assert.ok(out.audit.some((a) => a.action === 'block_not_scored' && a.subject === 'src/a.ts B1'));
+  });
+}
+
+test('a long block whose parts are all rejected stays the original block', () => {
+  const out = run([file('src/new.ts', [{ id: 'B1', parts: [part('R50', 'R60', 30, 'test'), part('R70', 'R80', 40, 'test')] }])], [ctx('src/new.ts', fortyAdded, { status: 'added', additions: 40, deletions: 0 })]);
+  assert.deepEqual(out.scores[0]!.blocks.map((x) => [x.id, x.entry]), [['B1', null]]);
+  assert.equal(out.audit.filter((a) => a.action === 'part_invalid').length, 2);
+});
+
+for (const kind of ['model', 'model_whole'] as const) {
+  test(`an invalid whole-file score is 100 not_scored on a ${kind} file`, () => {
+    const c = kind === 'model'
+      ? ctx('src/a.ts', twoHunks)
+      : ctx('lib/a.ts', null, { status: 'renamed', previousPath: 'src/a.ts', additions: 0, deletions: 0 });
+    const out = run([{ ...file(c.file.path, []), score: 72.5, category: 'fix', reason: 'x' }], [c]);
+    assert.deepEqual(out.scores[0]!.fileLevel, { score: 100, source: 'not_scored' });
+    assert.equal(out.scores[0]!.covered, false);
+    assert.ok(out.audit.some((a) => a.action === 'score_invalid' && a.subject === c.file.path));
+  });
+}
+
 test('on a tie between parts of a short block the first stands', () => {
-  const out = run([file('src/a.ts', [{ id: 'B1', parts: [part('R11', 'R11', 50, 'fix', 'First.'), part('R12', 'R12', 50, 'refactor', 'Second.')] }, b('B2', 10)])], [ctx('src/a.ts', twoHunks)]);
+  const out = run([file('src/a.ts', [{ id: 'B1', parts: [part('L11', 'R11', 50, 'fix', 'First.'), part('R12', 'R12', 50, 'refactor', 'Second.')] }, b('B2', 10)])], [ctx('src/a.ts', twoHunks)]);
   assert.equal(out.scores[0]!.blocks[0]!.entry!.category, 'fix');
 });
 
