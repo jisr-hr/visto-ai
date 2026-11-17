@@ -176,7 +176,8 @@ test('a path missing from the final files, or with no patch, counts as changed',
 });
 
 test('a final patch with CRLF line endings that equals the replayed one is not strict', () => {
-  const crlf = patchA.replaceAll('\n', '\r\n');
+  // The service's shape: a carriage return on each content line, none on a header, no line feed at the end.
+  const crlf = patchA.split('\n').map((l) => (l.startsWith('@@') ? l : `${l}\r`)).join('\n');
   const s = scoresOf([['src/a.ts', crlf]]);
   const l = labelCase(caseOf([note('c1')], [same('src/a.ts', crlf)]), s);
   assert.deepEqual(l.blocks.get(A1), { loose: true, strict: false });

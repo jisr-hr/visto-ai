@@ -4,7 +4,7 @@ import { scorePlan } from '../score/rules.ts';
 import type { ScorePlan } from '../score/rules.ts';
 import type { Block } from '../score/types.ts';
 import { commentableRanges, parsePatch, patchFromContents, renderAnchoredDiff } from './diff.ts';
-import type { Hunk, Ranges } from './diff.ts';
+import type { Hunk, HunkLine, Ranges } from './diff.ts';
 import { fullFileContext, numberLines } from './full-file.ts';
 import type { FullFile } from './full-file.ts';
 import { isLowPriority, orderByPriority } from './priority.ts';
@@ -26,14 +26,26 @@ export interface FileContext {
   hidden: boolean;
 }
 
+const isNoNewlineMarker = (line: HunkLine | undefined): boolean => line?.kind === 'meta' && line.text.startsWith('\\');
+
 /**
  * The one way a patch becomes hunks. The hunks are built from the cleaned text, so a
  * character stripped from a changed line leaves no trace in them: `hidden` keeps it.
+ *
+ * A patch from the service keeps a file's carriage return at the end of each content line, so
+ * one trailing carriage return is a line ending, unless the line is marked as having none.
+ * A computed patch was diffed with line endings already turned into line feeds, so any carriage
+ * return left on a line is part of its text.
  */
-export function hunksOf(patch: string): { hunks: Hunk[]; text: string; removed: number; hidden: boolean } {
+export function hunksOf(patch: string, computed = false): { hunks: Hunk[]; text: string; removed: number; hidden: boolean } {
   const clean = stripControl(patch);
-  const raw = parsePatch(patch.replaceAll('\r\n', '\n'));
-  const hidden = raw.some((h) => h.lines.some((l) => (l.kind === 'add' || l.kind === 'del') && hasHidden(l.text)));
+  const hidden = parsePatch(patch).some((h) =>
+    h.lines.some((l, i) => {
+      if (l.kind !== 'add' && l.kind !== 'del') return false;
+      const lineEnding = !computed && l.text.endsWith('\r') && !isNoNewlineMarker(h.lines[i + 1]);
+      return hasHidden(lineEnding ? l.text.slice(0, -1) : l.text);
+    }),
+  );
   return { hunks: parsePatch(clean.text), text: clean.text, removed: clean.removed, hidden };
 }
 
@@ -125,7 +137,7 @@ export async function buildFileContexts(
     let hidden = false;
     let skip: FileContext['skip'] = tooLarge ? 'too_large' : 'no_diff';
     if (patch !== null) {
-      const parsed = hunksOf(patch);
+      const parsed = hunksOf(patch, !fromService);
       // Characters stripped from computed hunks were already counted in the two contents.
       if (fromService) removed += parsed.removed;
       if (parsed.hunks.length > 0) {

@@ -5,6 +5,8 @@ import { packBatches } from './batches.ts';
 import { buildFileContexts, hunksOf } from './build.ts';
 import { blocksOf } from '../score/blocks.ts';
 import { fileSection } from './section.ts';
+import { reconcileScores } from '../reconcile/scores.ts';
+import { parseRepoFile } from '../score/floors.ts';
 
 const pr: PullRequestInfo = {
   ref: { service: 'github', owner: 'acme', repo: 'shop', number: 1 },
@@ -202,7 +204,7 @@ test('hunksOf: a hidden character on a removed line counts', () => {
 });
 test('hunksOf: a hidden character on a context line does not count, nor does a CRLF ending', () => {
   assert.equal(hunksOf('@@ -1,2 +1,2 @@\n a\u200b\n-b\n+c').hidden, false);
-  assert.equal(hunksOf('@@ -1,2 +1,2 @@\r\n a\r\n-b\r\n+c\r\n').hidden, false);
+  assert.equal(hunksOf('@@ -1,2 +1,2 @@\n a\r\n-b\r\n+c\r').hidden, false);
 });
 
 const renamedInDir = file('src/b.ts', { patch: null, status: 'renamed', previousPath: 'src/a.ts', additions: 0, deletions: 0 });
@@ -222,8 +224,8 @@ test('a hidden character on a context line only does not mark the file', async (
   assert.equal(contexts[0]!.hidden, false);
 });
 test('CRLF line endings are not hidden characters, and hash like LF', async () => {
-  const crlf = await buildFileContexts(pr, [file('src/a.ts', { patch: '@@ -1 +1 @@\r\n-a\r\n+b\r\n' })], stub({ 'head:src/a.ts': 'b\r\n' }));
-  const lf = await buildFileContexts(pr, [file('src/a.ts', { patch: '@@ -1 +1 @@\n-a\n+b\n' })], stub({ 'head:src/a.ts': 'b\n' }));
+  const crlf = await buildFileContexts(pr, [file('src/a.ts', { patch: '@@ -1 +1 @@\n-a\r\n+b\r' })], stub({ 'head:src/a.ts': 'b\r\n' }));
+  const lf = await buildFileContexts(pr, [file('src/a.ts', { patch: '@@ -1 +1 @@\n-a\n+b' })], stub({ 'head:src/a.ts': 'b\n' }));
   assert.equal(crlf.contexts[0]!.hidden, false);
   assert.equal(crlf.contexts[0]!.blocks[0]!.hash, lf.contexts[0]!.blocks[0]!.hash);
   const computed = await buildFileContexts(pr, [file('src/a.ts', { patch: null })], stub({ 'base:src/a.ts': 'a\r\n', 'head:src/a.ts': 'b\r\n' }));
@@ -240,4 +242,51 @@ test('a move to another directory that differs only by a zero-width space is sco
   const { contexts } = await buildFileContexts(pr, [moved], stub({ 'base:src/a.ts': 'ab\n', 'head:app/pages/b.ts': 'a\u200bb\n' }));
   assert.deepEqual(contexts[0]!.plan, { kind: 'model' });
   assert.equal(contexts[0]!.hidden, true);
+});
+
+// Patches below are in the shape the git service sends: lines joined by a line feed, a file's
+// carriage return kept at the end of each content line, none on the header, no line feed at the end.
+const noNewline = '\\ No newline at end of file';
+test('hunksOf: a CRLF file changed on its last line is not hidden', () => {
+  assert.equal(hunksOf('@@ -1 +1 @@\n-a\r\n+b\r').hidden, false);
+});
+test('an added CRLF file whose patch ends on its last added line is not hidden and keeps its block score', async () => {
+  const added = file('src/n.ts', { patch: '@@ -0,0 +1,3 @@\n+a\r\n+b\r\n+c\r', status: 'added', additions: 3, deletions: 0 });
+  assert.equal(hunksOf(added.patch!).hidden, false);
+  const { contexts } = await buildFileContexts(pr, [added], stub({}));
+  const value = { overview: 'o', findings: [], files: [{ path: 'src/n.ts', change_summary: 's', blocks: [{ id: 'B1', score: 5, category: 'fix' }] }] };
+  const [s] = reconcileScores([{ value, files: ['src/n.ts'] }], contexts, new Set(), parseRepoFile(null)).scores;
+  assert.deepEqual([s!.finalScore, s!.covered], [5, true]);
+});
+test('hunksOf: a carriage return added on a last line with no line ending is hidden', () => {
+  assert.equal(hunksOf(['@@ -1 +1 @@', '-exec app', noNewline, '+exec app\r', noNewline].join('\n')).hidden, true);
+});
+test('hunksOf: an added line ending in two carriage returns is hidden', () => {
+  assert.equal(hunksOf('@@ -1,2 +1,2 @@\n-a\r\n+a\r\r\n k\r').hidden, true);
+});
+test('hunksOf: a line that changes from LF to CRLF alone is not hidden', () => {
+  assert.equal(hunksOf('@@ -1,2 +1,2 @@\n-a\n+a\r\n k').hidden, false);
+});
+test('hunksOf on a computed patch: any carriage return left on a changed line is hidden', () => {
+  assert.equal(hunksOf('@@ -1 +1 @@\n-a\n+b\r', true).hidden, true);
+  assert.equal(hunksOf('@@ -1 +1 @@\n-a\n+b').hidden, false);
+});
+for (const computed of [false, true]) {
+  test(`hunksOf: U+200B and U+202E on an added line are hidden (computed ${computed})`, () => {
+    assert.equal(hunksOf('@@ -1 +1 @@\n-a\n+a\u200b', computed).hidden, true);
+    assert.equal(hunksOf('@@ -1 +1 @@\n-a\n+a\u202e', computed).hidden, true);
+  });
+}
+test('a computed diff where a line gains a carriage return in its text is hidden', async () => {
+  const { contexts } = await buildFileContexts(pr, [file('src/a.ts', { patch: null })], stub({ 'base:src/a.ts': 'ab\n', 'head:src/a.ts': 'a\rb\n' }));
+  assert.equal(contexts[0]!.hidden, true);
+});
+test('a computed diff where a line ending goes from LF to CR CR LF is hidden', async () => {
+  const { contexts } = await buildFileContexts(pr, [file('src/a.ts', { patch: null })], stub({ 'base:src/a.ts': 'a\nb\n', 'head:src/a.ts': 'a\r\r\nb\n' }));
+  assert.equal(contexts[0]!.hidden, true);
+});
+test('a computed diff of two contents equal apart from LF against CRLF is unchanged', async () => {
+  const { contexts } = await buildFileContexts(pr, [file('src/a.ts', { patch: null })], stub({ 'base:src/a.ts': 'a\nb\n', 'head:src/a.ts': 'a\r\nb\r\n' }));
+  assert.equal(contexts[0]!.skip, 'unchanged');
+  assert.equal(contexts[0]!.hidden, false);
 });
