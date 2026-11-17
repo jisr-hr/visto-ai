@@ -78,6 +78,7 @@ function deps(spec: { files: ChangedFile[]; answers?: Step[]; answerFor?: Record
   const source: Source = {
     listFiles: () => (spec.listError ? Promise.reject(spec.listError) : Promise.resolve(spec.files)),
     getFileContent: () => Promise.resolve(null),
+    getDefaultBranchFile: () => Promise.resolve(null),
   };
   const d = {
     source, model, contract: CONTRACT, clock: () => new Date(0), logged, tokens: 0,

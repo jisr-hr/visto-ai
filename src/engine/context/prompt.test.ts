@@ -134,7 +134,7 @@ test('headerStripCounts counts what is stripped from title and description', () 
 async function assertCallsFit(files: ChangedFile[], heads: Record<string, string>): Promise<number> {
   const limit = 20_000;
   const contract = 'Rules of the review. '.repeat(200);
-  const source: Source = { listFiles: async () => files, getFileContent: async (_p, path, sha) => (sha === pr.headSha ? heads[path] ?? null : null) };
+  const source: Source = { listFiles: async () => files, getFileContent: async (_p, path, sha) => (sha === pr.headSha ? heads[path] ?? null : null), getDefaultBranchFile: async () => null };
   const built = await buildFileContexts(pr, files, source);
   const packed = packBatches(built.contexts, limit - fixedTokens(contract, pr), 1000);
   assert.deepEqual(packed.notReviewed, []);

@@ -23,6 +23,7 @@ function stub(record: Record<string, string | null>): Source & { calls: string[]
   return {
     calls,
     listFiles: async () => [],
+    getDefaultBranchFile: async () => null,
     getFileContent: async (_pr, path, sha) => {
       const key = `${sha}:${path}`;
       calls.push(key);

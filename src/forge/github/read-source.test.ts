@@ -245,3 +245,23 @@ test('a status named like an inherited property maps to modified', async () => {
   queue(json({ files: [{ filename: 'a', status: 'constructor' }, { filename: 'b', status: 'toString' }] }));
   assert.deepEqual((await source().listFiles(pr)).map((f) => f.status), ['modified', 'modified']);
 });
+
+test('the default branch file is requested without a ref, and read as text', async () => {
+  queue(new Response('human_review: []\n', { status: 200 }));
+  assert.equal(await source().getDefaultBranchFile(pr, '.visto-ai.yml'), 'human_review: []\n');
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]!.url, 'https://api.github.com/repos/acme/shop/contents/.visto-ai.yml');
+  assert.equal(calls[0]!.method, 'GET');
+  assert.equal(calls[0]!.headers.accept, 'application/vnd.github.raw+json');
+});
+
+test('a missing default branch file is null', async () => {
+  queue(new Response('', { status: 404 }));
+  assert.equal(await source().getDefaultBranchFile(pr, '.visto-ai.yml'), null);
+});
+
+test('a default branch file read retries a 500 once, then reports it', async () => {
+  queue(new Response('', { status: 500 }), new Response('', { status: 500 }));
+  await assert.rejects(source().getDefaultBranchFile(pr, '.visto-ai.yml'), (e: Error) => e.message === 'github_500');
+  assert.equal(calls.length, 2);
+});

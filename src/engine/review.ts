@@ -200,6 +200,7 @@ export async function review(input: ReviewInput, deps: ReviewDeps): Promise<Revi
     const source: Source = {
       listFiles: (p) => guard(() => deps.source.listFiles(p)),
       getFileContent: (p, path, sha) => guard(() => deps.source.getFileContent(p, path, sha)),
+      getDefaultBranchFile: (p, path) => guard(() => deps.source.getDefaultBranchFile(p, path)),
     };
 
     const files = await source.listFiles(pr);
