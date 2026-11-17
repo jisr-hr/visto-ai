@@ -1,4 +1,5 @@
-import { writeFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs';
+import { dirname } from 'node:path';
 
 import { stripControl } from '../../engine/context/untrusted.ts';
 import type {
@@ -100,18 +101,22 @@ export async function runImport(
   source: HistorySource,
   out: (line: string) => void,
 ): Promise<void> {
+  // Create the file first so an unusable path fails before any request is made.
+  mkdirSync(dirname(args.outFile), { recursive: true });
+  writeFileSync(args.outFile, '');
   const listed = await source.listMergedPullRequests(args.repo, { since: args.since, until: args.until }, args.maxPrs);
-  const lines: string[] = [];
+  let written = 0;
   const skipped = new Map<ImportSkip, number>();
-  // One at a time: the source is rate limited, and a failure then stops the run early.
+  // One at a time: the source is rate limited. Each line is appended at once, so a failure keeps what was read.
   for (const pr of listed) {
     const result = await importPullRequest(args.repo, pr, source);
-    if ('case' in result) lines.push(serializeCase(result.case));
-    else skipped.set(result.skipped, (skipped.get(result.skipped) ?? 0) + 1);
+    if ('case' in result) {
+      appendFileSync(args.outFile, serializeCase(result.case) + '\n');
+      written += 1;
+    } else skipped.set(result.skipped, (skipped.get(result.skipped) ?? 0) + 1);
   }
-  writeFileSync(args.outFile, lines.map((l) => l + '\n').join(''));
-  const skippedTotal = listed.length - lines.length;
-  out(`pull requests ${listed.length}, written ${lines.length}, skipped ${skippedTotal}`);
+  const skippedTotal = listed.length - written;
+  out(`pull requests ${listed.length}, written ${written}, skipped ${skippedTotal}`);
   for (const reason of SKIPS) {
     const n = skipped.get(reason);
     if (n !== undefined) out(`${reason} ${n}`);

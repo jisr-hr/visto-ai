@@ -121,13 +121,12 @@ function isoDate(value: string): boolean {
   return !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === value;
 }
 
+function isDirectory(path: string): boolean {
+  try { return statSync(path).isDirectory(); } catch { return false; }
+}
+
 function isNonEmptyFile(path: string): boolean {
-  try {
-    const stat = statSync(path);
-    return stat.isDirectory() || stat.size > 0;
-  } catch {
-    return false;
-  }
+  try { return statSync(path).size > 0; } catch { return false; }
 }
 
 async function importHistory(argv: string[], env: Record<string, string | undefined>, out: (line: string) => void): Promise<void> {
@@ -153,6 +152,7 @@ async function importHistory(argv: string[], env: Record<string, string | undefi
   if (githubToken === undefined || githubToken === '') throw new UsageError('usage: GITHUB_TOKEN is not set');
   const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
   outsideProject(outFile, projectRoot, 'out');
+  if (isDirectory(outFile)) throw new UsageError('usage: --out must be a file');
   if (!parsed.flags.has('force') && isNonEmptyFile(outFile)) throw new UsageError('usage: --out is not empty; use --force to overwrite it');
 
   const source = createGithubHistorySource({ token: githubToken, fetch: globalThis.fetch });

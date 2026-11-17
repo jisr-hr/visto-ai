@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import test from 'node:test';
@@ -60,4 +60,14 @@ test('the dates are checked before anything else', async () => {
 test('the usage line of an unknown command names import-history', async () => {
   const [, lines] = await run(['bogus']);
   assert.match(lines[0]!, /import-history/);
+});
+
+test('--out naming an existing directory is a usage error, with and without --force', async () => {
+  const folder = join(dir, 'a-folder');
+  mkdirSync(folder);
+  for (const extra of [[], ['--force']]) {
+    const [code, lines] = await run([...importArgs({ out: folder }), ...extra]);
+    assert.equal(code, 2);
+    assert.deepEqual(lines, ['usage: --out must be a file']);
+  }
 });

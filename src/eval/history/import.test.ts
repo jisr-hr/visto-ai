@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -155,4 +155,33 @@ test('runImport with nothing to import writes an empty file', async () => {
   assert.equal(existsSync(outFile), true);
   assert.equal(readFileSync(outFile, 'utf8'), '');
   assert.deepEqual(lines, ['pull requests 0, written 0, skipped 0']);
+});
+
+test('runImport creates the file, and a missing parent directory, before the first request', async () => {
+  const outFile = join(mkdtempSync(tmpdir() + '/'), 'nested', 'deeper', 'history.jsonl');
+  let existedAtFirstRead: boolean | null = null;
+  await runImport({ repo, ...window, maxPrs: 200, outFile }, stub({
+    listReviews: async () => { existedAtFirstRead ??= existsSync(outFile); return []; },
+  }), () => {});
+  assert.equal(existedAtFirstRead, true);
+});
+
+test('runImport empties an existing file before the first request', async () => {
+  const outFile = tempFile();
+  writeFileSync(outFile, 'old\n');
+  let contentAtFirstRead: string | null = null;
+  await runImport({ repo, ...window, maxPrs: 200, outFile }, stub({
+    listMergedPullRequests: async () => [pr],
+    listReviews: async () => { contentAtFirstRead ??= readFileSync(outFile, 'utf8'); return []; },
+  }), () => {});
+  assert.equal(contentAtFirstRead, '');
+});
+
+test('a failure in the middle keeps the lines written before it', async () => {
+  const outFile = tempFile();
+  await assert.rejects(runImport({ repo, ...window, maxPrs: 200, outFile }, stub({
+    listMergedPullRequests: async () => [pr, { ...pr, number: 13 }, { ...pr, number: 14 }],
+    listReviews: async (_r, n) => { if (n === 14) throw new Error('github_500'); return []; },
+  }), () => {}), /github_500/);
+  assert.deepEqual(parseHistory(readFileSync(outFile, 'utf8')).map((c) => c.pr_number), [12, 13]);
 });
