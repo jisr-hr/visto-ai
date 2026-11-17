@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { ChangedFile, PullRequestInfo, Source } from '../types.ts';
+import { packBatches } from './batches.ts';
 import { buildFileContexts } from './build.ts';
+import { fileSection } from './section.ts';
 
 const pr: PullRequestInfo = {
   ref: { service: 'github', owner: 'acme', repo: 'shop', number: 1 },
@@ -146,4 +148,42 @@ test('a failure fetching the file own content still fails', async () => {
   source.getFileContent = async () => { throw new Error('github_502'); };
   await assert.rejects(buildFileContexts(pr, [file('src/a.ts', { patch: null })], source), { message: 'github_502' });
   await assert.rejects(buildFileContexts(pr, [file('src/a.ts')], source), { message: 'github_502' });
+});
+test('blocks and plan are set, and a block is the same object in the context', async () => {
+  const { contexts } = await buildFileContexts(pr, [file('src/a.ts')], stub({ 'head:src/a.ts': 'b\n' }));
+  assert.deepEqual(contexts[0]!.blocks.map((b) => b.id), ['B1']);
+  assert.deepEqual(contexts[0]!.plan, { kind: 'model' });
+  assert.deepEqual(packBatches(contexts, 100000, 6).batches[0]!.files[0]!.blocks, contexts[0]!.blocks);
+  assert.equal(packBatches(contexts, 100000, 6).batches[0]!.files[0]!.blocks[0], contexts[0]!.blocks[0]);
+});
+test('a file with a diff says a whole-file score is allowed', async () => {
+  const { contexts } = await buildFileContexts(pr, [file('src/a.ts')], stub({ 'head:src/a.ts': 'b\n' }));
+  const section = fileSection(contexts[0]!, 1, 1, 'tok');
+  assert.match(section, /deletions: 1\nwhole-file score: allowed\n/);
+});
+const moved = file('app/pages/b.ts', { patch: null, status: 'renamed', previousPath: 'src/a.ts', additions: 0, deletions: 0 });
+test('a file moved to another directory with the same content is sent with no diff and a required whole-file score', async () => {
+  const { contexts } = await buildFileContexts(pr, [moved], stub({ 'base:src/a.ts': 'same\n', 'head:app/pages/b.ts': 'same\n' }));
+  assert.deepEqual(contexts[0]!.plan, { kind: 'model_whole' });
+  assert.equal(contexts[0]!.skip, 'unchanged');
+  const section = fileSection(contexts[0]!, 1, 1, 'tok');
+  assert.match(section, /deletions: 0\nprevious path: src\/a\.ts\nwhole-file score: required\. The file moved to another directory and its content did not change\. Score the move itself\./);
+  assert.doesNotMatch(section, /<<<data/);
+  assert.doesNotMatch(section, /Full file|Paired test/);
+  const packed = packBatches(contexts, 100000, 6);
+  assert.equal(packed.batches[0]!.files.length, 1);
+  assert.deepEqual([packed.notReviewed, packed.audit], [[], []]);
+});
+test('a rename inside its directory is scored by rule: not packed, not listed, one audit entry', async () => {
+  const renamed = file('src/b.ts', { patch: null, status: 'renamed', previousPath: 'src/a.ts', additions: 0, deletions: 0 });
+  const { contexts } = await buildFileContexts(pr, [renamed], stub({ 'base:src/a.ts': 'same\n', 'head:src/b.ts': 'same\n' }));
+  const { batches, notReviewed, audit } = packBatches(contexts, 100000, 6);
+  assert.deepEqual([batches, notReviewed], [[], []]);
+  assert.deepEqual(audit, [{ stage: 'context', action: 'scored_by_rule', subject: 'src/b.ts', reason: 'rule_rename' }]);
+});
+test('an image with no text diff is scored by rule and not listed as not reviewed', async () => {
+  const { contexts } = await buildFileContexts(pr, [file('img/logo.png', { patch: null, status: 'added' })], stub({}));
+  const { batches, notReviewed, audit } = packBatches(contexts, 100000, 6);
+  assert.deepEqual([batches, notReviewed], [[], []]);
+  assert.deepEqual(audit, [{ stage: 'context', action: 'scored_by_rule', subject: 'img/logo.png', reason: 'rule_asset' }]);
 });

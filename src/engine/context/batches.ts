@@ -26,12 +26,14 @@ export function packBatches(
 
   for (const original of contexts) {
     const path = original.file.path;
-    if (original.skip === 'unchanged') {
-      audit.push({ stage: 'context', action: 'skipped', subject: path, reason: 'unchanged' });
+    const plan = original.plan;
+    if (plan.kind === 'rule') {
+      audit.push({ stage: 'context', action: 'scored_by_rule', subject: path, reason: plan.source });
       continue;
     }
-    if (original.skip !== null) {
-      notReviewed.push({ path, reason: original.skip });
+    if (plan.kind === 'none') {
+      if (plan.reason === 'unchanged') audit.push({ stage: 'context', action: 'skipped', subject: path, reason: 'unchanged' });
+      else notReviewed.push({ path, reason: plan.reason });
       continue;
     }
     // Shed the test, then the full file, until the unit fits an empty call.

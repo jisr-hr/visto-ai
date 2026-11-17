@@ -1,4 +1,8 @@
 import type { AuditEntry, ChangedFile, PullRequestInfo, Source } from '../types.ts';
+import { blocksOf } from '../score/blocks.ts';
+import { scorePlan } from '../score/rules.ts';
+import type { ScorePlan } from '../score/rules.ts';
+import type { Block } from '../score/types.ts';
 import { commentableRanges, parsePatch, patchFromContents, renderAnchoredDiff } from './diff.ts';
 import type { Hunk, Ranges } from './diff.ts';
 import { fullFileContext, numberLines } from './full-file.ts';
@@ -16,6 +20,8 @@ export interface FileContext {
   test: { path: string; text: string } | null;
   // Why the file has nothing to send; null when it has a diff.
   skip: 'no_diff' | 'too_large' | 'unchanged' | null;
+  blocks: Block[]; // one per hunk; the same objects are passed on, never copied
+  plan: ScorePlan; // who scores the file: the model, a fixed rule, or nobody
 }
 
 const MAX_TEST_PROBES = 20;
@@ -131,7 +137,7 @@ export async function buildFileContexts(
       }
     }
     audit.push(...stripped(removed, file.path));
-    contexts.push({ file, hunks, ranges, diffText, full, test, skip });
+    contexts.push({ file, hunks, ranges, diffText, full, test, skip, blocks: blocksOf(hunks), plan: scorePlan(file, skip) });
   }
   return { contexts, audit };
 }

@@ -15,6 +15,8 @@ function ctx(path: string, diff: number, extra: { full?: number; test?: number }
     full: extra.full === undefined ? null : { kind: 'full', totalLines: 1, text: text(extra.full) },
     test: extra.test === undefined ? null : { path: `${path}.test`, text: text(extra.test) },
     skip: null,
+    blocks: [],
+    plan: { kind: 'model' },
   };
 }
 
@@ -60,15 +62,15 @@ test('files past the batch limit are named', () => {
   assert.deepEqual(notReviewed, [{ path: 'c', reason: 'over_batch_limit' }, { path: 'd', reason: 'over_batch_limit' }]);
 });
 test('a file skipped for no diff or for size is named with that reason', () => {
-  const none: FileContext = { ...ctx('n', 1), ranges: null, diffText: null, skip: 'no_diff' };
-  const huge: FileContext = { ...ctx('h', 1), ranges: null, diffText: null, skip: 'too_large' };
+  const none: FileContext = { ...ctx('n', 1), ranges: null, diffText: null, skip: 'no_diff', plan: { kind: 'none', reason: 'no_diff' } };
+  const huge: FileContext = { ...ctx('h', 1), ranges: null, diffText: null, skip: 'too_large', plan: { kind: 'none', reason: 'too_large' } };
   const { batches, notReviewed, audit } = packBatches([none, huge, ctx('b', 10)], overhead + 100, 6);
   assert.deepEqual(notReviewed, [{ path: 'n', reason: 'no_diff' }, { path: 'h', reason: 'too_large' }]);
   assert.deepEqual(audit, []);
   assert.equal(batches.length, 1);
 });
 test('an unchanged file is audited once and is not listed as not reviewed', () => {
-  const same: FileContext = { ...ctx('s', 1), ranges: null, diffText: null, skip: 'unchanged' };
+  const same: FileContext = { ...ctx('s', 1), ranges: null, diffText: null, skip: 'unchanged', plan: { kind: 'none', reason: 'unchanged' } };
   const { batches, notReviewed, audit } = packBatches([same, ctx('b', 10)], overhead + 100, 6);
   assert.deepEqual(notReviewed, []);
   assert.deepEqual(audit, [{ stage: 'context', action: 'skipped', subject: 's', reason: 'unchanged' }]);

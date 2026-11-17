@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 
-import type { Hunk, HunkLine, Range, Ranges } from '../context/diff.ts';
+import { toRanges } from '../context/diff.ts';
+import type { Hunk, HunkLine, Ranges } from '../context/diff.ts';
 import type { Anchor, Block, Span } from './types.ts';
 
 export const SPLIT_ABOVE = 30; // a block may be split when it has more changed lines than this
@@ -64,17 +65,6 @@ export function blocksOf(hunks: Hunk[]): Block[] {
 export function fileDiffHash(hunks: Hunk[]): string | null {
   if (hunks.length === 0) return null;
   return hashOf(hunks.flatMap((h) => h.lines));
-}
-
-function toRanges(numbers: number[]): Range[] {
-  const sorted = [...new Set(numbers)].sort((a, b) => a - b);
-  const ranges: Range[] = [];
-  for (const n of sorted) {
-    const last = ranges[ranges.length - 1];
-    if (last && n === last[1] + 1) last[1] = n;
-    else ranges.push([n, n]);
-  }
-  return ranges;
 }
 
 export function linesOf(block: Block): Ranges {

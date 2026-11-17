@@ -18,6 +18,11 @@ export function fileSection(c: FileContext, k: number, fileCount: number, token:
   if (c.file.previousPath !== null) {
     lines.push(`previous path: ${inlineText(c.file.previousPath)}`);
   }
+  if (c.plan.kind === 'model') {
+    lines.push('whole-file score: allowed');
+  } else if (c.plan.kind === 'model_whole') {
+    lines.push('whole-file score: required. The file moved to another directory and its content did not change. Score the move itself.');
+  }
   if (c.diffText !== null) {
     lines.push(wrapData(`diff ${path}`, c.diffText, token));
   }

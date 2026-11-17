@@ -69,7 +69,9 @@ function anchor(prefix: 'R' | 'L', n: number): string {
 
 export function renderAnchoredDiff(hunks: Hunk[]): string {
   const out: string[] = [];
-  for (const hunk of hunks) {
+  for (const [i, hunk] of hunks.entries()) {
+    const changed = hunk.lines.filter((l) => l.kind === 'add' || l.kind === 'del').length;
+    out.push(`### Block B${i + 1} (${changed} changed ${changed === 1 ? 'line' : 'lines'}, not scored)`);
     out.push(hunk.header);
     for (const line of hunk.lines) {
       if (line.kind === 'meta') out.push(line.text);
@@ -81,7 +83,7 @@ export function renderAnchoredDiff(hunks: Hunk[]): string {
   return out.join('\n');
 }
 
-function toRanges(numbers: number[]): Range[] {
+export function toRanges(numbers: number[]): Range[] {
   const sorted = [...new Set(numbers)].sort((a, b) => a - b);
   const ranges: Range[] = [];
   for (const n of sorted) {

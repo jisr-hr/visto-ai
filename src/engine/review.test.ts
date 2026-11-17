@@ -20,7 +20,7 @@ const input: ReviewInput = {
   limits: { inputTokensPerCall: 200_000, batchesPerReview: 6, modelTimeoutSeconds: 30 }, asOf: new Date(0), earlier: null,
 };
 const smallLimits: ReviewInput = {
-  ...input, limits: { ...input.limits, inputTokensPerCall: fixedTokens(CONTRACT, input.pullRequest) + 400 },
+  ...input, limits: { ...input.limits, inputTokensPerCall: fixedTokens(CONTRACT, input.pullRequest) + 420 },
 };
 
 const bulk = Array.from({ length: 30 }, (_, i) => `+const value${i} = ${i * 7919};`).join('\n');
@@ -114,13 +114,13 @@ test('files but nothing reviewable: ok, no call, files listed', async () => {
   assert.deepEqual(r.coverage.notReviewed, [{ path: 'logo.bin', reason: 'no_diff' }]);
 });
 
-test('a pure rename is neither reviewed nor listed as not reviewed, and is audited', async () => {
+test('a rename inside its directory is neither reviewed nor listed as not reviewed, and is audited', async () => {
   const rename: ChangedFile = { path: 'src/new.ts', previousPath: 'src/old.ts', status: 'renamed', additions: 0, deletions: 0, patch: null };
   const d = deps({ files: [fileA, rename], answers: [answerOnA] });
   d.source.getFileContent = async (_p, path) => (path === 'src/old.ts' || path === 'src/new.ts' ? 'same\n' : null);
   const r = await review(input, d);
   assert.deepEqual(r.coverage, { reviewed: ['src/a.ts'], notReviewed: [] });
-  assert.deepEqual(r.audit.filter((e) => e.subject === 'src/new.ts'), [{ stage: 'context', action: 'skipped', subject: 'src/new.ts', reason: 'unchanged' }]);
+  assert.deepEqual(r.audit.filter((e) => e.subject === 'src/new.ts'), [{ stage: 'context', action: 'scored_by_rule', subject: 'src/new.ts', reason: 'rule_rename' }]);
 });
 
 test('characters stripped from the title and the description reach the audit', async () => {

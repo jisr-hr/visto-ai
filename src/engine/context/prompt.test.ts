@@ -30,6 +30,8 @@ function ctx(path: string, extra: Partial<FileContext> = {}): FileContext {
     full: { kind: 'full', totalLines: 3, text: 'one\ntwo\nthree' },
     test: null,
     skip: null,
+    blocks: [],
+    plan: { kind: 'model' },
     ...extra,
   };
 }
@@ -81,7 +83,7 @@ test('per-file lines follow the heading, previous path only when renamed', () =>
     ...args,
     batch: { files: [ctx('src/n.ts', { file: { path: 'src/n.ts', previousPath: 'src/o.ts', status: 'renamed', additions: 0, deletions: 0, patch: '' } })], tokens: 1 },
   });
-  assert.match(renamed[2]!.content, /## File 1\/3: src\/n\.ts\nstatus: renamed\nadditions: 0\ndeletions: 0\nprevious path: src\/o\.ts\n<<<data/);
+  assert.match(renamed[2]!.content, /## File 1\/3: src\/n\.ts\nstatus: renamed\nadditions: 0\ndeletions: 0\nprevious path: src\/o\.ts\nwhole-file score: allowed\n<<<data/);
   assert.doesNotMatch(msgs[2]!.content, /previous path/);
 });
 test('an excerpt and a paired test are labelled', () => {
