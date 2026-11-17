@@ -68,9 +68,15 @@ test('characters special in regular expressions match only themselves', () => {
   assert.equal(floored('a+b/(x).rb', 'aab/x.rb'), false);
   assert.equal(floored('a.b', 'axb'), false);
 });
+test('brackets are ordinary characters', () => {
+  assert.equal(team('app/[id]/page.tsx').invalid, null);
+  assert.equal(floored('app/[id]/page.tsx', 'app/[id]/page.tsx'), true);
+  assert.equal(floored('app/[id]/page.tsx', 'app/i/page.tsx'), false);
+});
 test('matching is case-sensitive', () => assert.equal(matchesPattern('Db/x', '**/db'), false));
 test('patterns that cannot be used make the file invalid', () => {
   for (const p of ['!db/schema.rb', '/', 'a//b', 'a'.repeat(201), '   ']) assert.equal(team(p).invalid, 'bad_patterns', p);
+  for (const p of ['app/{models,policies}/**', './db/migrate/', 'db\\migrate', 'db/../secrets', 'a}b']) assert.equal(team(p).invalid, 'bad_patterns', p);
   assert.equal(team(...Array.from({ length: 201 }, (_, i) => `p${i}`)).invalid, 'bad_patterns');
   assert.equal(parseRepoFile('human_review: [1]\n').invalid, 'bad_patterns');
 });

@@ -47,7 +47,7 @@ function failedResult(
   answered: Answered = noneAnswered(),
 ): ReviewResult {
   return {
-    scores: [], verdict: { threshold, needsHuman: true, highest: 100 },
+    scores: [], verdict: { threshold, needsHuman: true, highest: 100 }, teamFileInvalid: null,
     status: 'failed', failure: { stage, code }, mode: 'full', overview: '', findings: [], unplaced: [], beyondDiff: [],
     coverage: { reviewed: [], notReviewed: [] }, usage, ...answered, dependencies: { model }, audit,
   };
@@ -55,7 +55,7 @@ function failedResult(
 
 function okResult(overview: string, threshold: number, rest: Partial<ReviewResult>): ReviewResult {
   return {
-    scores: [], verdict: verdictOf([], threshold),
+    scores: [], verdict: verdictOf([], threshold), teamFileInvalid: null,
     status: 'ok', failure: null, mode: 'full', overview, findings: [], unplaced: [], beyondDiff: [],
     coverage: { reviewed: [], notReviewed: [] }, usage: zeroUsage(), models: [], providers: [], dependencies: { model: 'ok' }, audit: [], ...rest,
   };
@@ -215,6 +215,8 @@ export async function review(input: ReviewInput, deps: ReviewDeps): Promise<Revi
 
     // Read only when there is something to floor; a rejection fails the review here, like any source error.
     const floors = parseRepoFile(await source.getDefaultBranchFile(pr, REPO_FILE));
+    const teamFileInvalid = floors.invalid;
+    if (teamFileInvalid !== null) audit.push({ stage: 'context', action: 'team_file_invalid', subject: REPO_FILE, reason: teamFileInvalid });
 
     const budget = input.limits.inputTokensPerCall - fixedTokens(deps.contract, pr);
     if (budget <= 0) return failedResult('context', 'budget_too_small', usage, audit, 'ok', threshold);
@@ -230,7 +232,7 @@ export async function review(input: ReviewInput, deps: ReviewDeps): Promise<Revi
       const scored = reconcileScores([], built.contexts, new Set(packed.notReviewed.map((n) => n.path)), floors);
       return okResult('No reviewable changes.', threshold, {
         coverage: { reviewed: [], notReviewed: packed.notReviewed }, audit: [...audit, ...scored.audit],
-        scores: scored.scores, verdict: verdictOf(scored.scores, threshold),
+        scores: scored.scores, verdict: verdictOf(scored.scores, threshold), teamFileInvalid,
       });
     }
 
@@ -279,7 +281,7 @@ export async function review(input: ReviewInput, deps: ReviewDeps): Promise<Revi
       findings: rec.findings, unplaced: rec.unplaced, beyondDiff: rec.beyondDiff,
       coverage: { reviewed: outcomes.flatMap((o) => o.reviewed), notReviewed },
       usage, ...answered, dependencies: { model: modelState }, audit,
-      scores: scored.scores, verdict: verdictOf(scored.scores, threshold),
+      scores: scored.scores, verdict: verdictOf(scored.scores, threshold), teamFileInvalid,
     });
   } catch (error) {
     let code = 'internal_error';

@@ -56,6 +56,7 @@ export interface ReviewResult {
   audit: AuditEntry[];
   scores: FileScore[];        // one per changed file; empty when the review failed
   verdict: Verdict;
+  teamFileInvalid: string | null; // why the repository's .visto-ai.yml cannot be used; null when it can, or on a failed review
 }
 export type { ChangedFile, PullRequestInfo, Side, Source };
 export type {

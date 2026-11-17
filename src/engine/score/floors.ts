@@ -42,6 +42,9 @@ export function parseRepoFile(text: string | null): TeamFloors {
 function normalisePattern(entry: string): string | null {
   const trimmed = entry.trim();
   if (trimmed.length < 1 || trimmed.length > MAX_PATTERN_CHARS || trimmed.startsWith('!')) return null;
+  // The matcher knows no escapes, no alternatives and no relative segments: such a pattern would
+  // match nothing and protect nothing without a word, so the file is refused instead.
+  if (/[\\{}]/.test(trimmed) || trimmed.split('/').some((segment) => segment === '.' || segment === '..')) return null;
   let pattern = trimmed.replace(/\/+$/, '');
   if (pattern === '') return null;
   if (pattern.startsWith('/')) pattern = pattern.slice(1);

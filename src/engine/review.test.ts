@@ -528,4 +528,23 @@ test('a repository file that is not text floors every file', async () => {
   const r = await review(input, d);
   assert.deepEqual(r.scores[0]!.fileLevel, { score: 100, source: 'team_file_invalid' });
   assert.equal(r.verdict.needsHuman, true);
+  assert.equal(r.teamFileInvalid, 'not_text');
+});
+
+test('the reason the repository file cannot be used reaches the result and the audit', async () => {
+  const d = deps({ files: [fileA], answers: [scored('src/a.ts', 10)] });
+  withRepoFile(d, 'human_review:\n  - "./db/migrate/"\n');
+  const r = await review(input, d);
+  assert.equal(r.teamFileInvalid, 'bad_patterns');
+  assert.ok(r.audit.some((e) => e.stage === 'context' && e.action === 'team_file_invalid' && e.subject === '.visto-ai.yml' && e.reason === 'bad_patterns'));
+});
+
+test('a usable repository file, a failed review and no files leave teamFileInvalid null', async () => {
+  const ok = deps({ files: [fileA], answers: [scored('src/a.ts', 10)] });
+  withRepoFile(ok, 'human_review:\n  - docs/\n');
+  assert.equal((await review(input, ok)).teamFileInvalid, null);
+  const failed = deps({ files: [fileA], answers: [scored('src/a.ts', 10)] });
+  withRepoFile(failed, '- a\n');
+  assert.equal((await review({ ...input, limits: { ...input.limits, inputTokensPerCall: 10 } }, failed)).teamFileInvalid, null);
+  assert.equal((await review(input, deps({ files: [] }))).teamFileInvalid, null);
 });

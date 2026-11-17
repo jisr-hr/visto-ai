@@ -17,7 +17,7 @@ const beyond = (over: Partial<RawFinding> = {}): RawFinding => ({
 const result = (over: Partial<ReviewResult> = {}): ReviewResult => ({
   status: 'ok', failure: null, mode: 'full', overview: 'Changes a.ts.', findings: [], unplaced: [], beyondDiff: [],
   coverage: { reviewed: [], notReviewed: [] }, usage, models: [], providers: [], dependencies: { model: 'ok' }, audit: [],
-  scores: [], verdict: { threshold: 70, needsHuman: false, highest: 0 }, ...over,
+  scores: [], verdict: { threshold: 70, needsHuman: false, highest: 0 }, teamFileInvalid: null, ...over,
 });
 const auto = { trigger: 'automatic', requestedBy: null, lineUrl: null } as const;
 const notReviewed = (n: number): NotReviewed[] =>
@@ -321,14 +321,14 @@ test('every whole-file source has its text', () => {
   const text: Record<string, string> = {
     builtin_floor: "it changes the reviewer's own file, code owners or CI",
     team_floor: 'a path the team marked as always needing a person',
-    team_file_invalid: "the repository's .visto-ai.yml cannot be used, so every file needs a person",
+    team_file_invalid: "the repository's .visto-ai.yml cannot be used (not_yaml), so every file needs a person",
     not_scored: 'not read, or left without a score',
     hidden_characters: 'a changed line holds invisible or direction-changing characters',
     rule_rename: 'scored by rule',
     rule_asset: 'scored by rule',
   };
   for (const [source, expected] of Object.entries(text)) {
-    const r = scored([file('a.ts', { fileLevel: level(100, source as FileLevelSource) })]);
+    const r = { ...scored([file('a.ts', { fileLevel: level(100, source as FileLevelSource) })]), teamFileInvalid: 'not_yaml' };
     assert.ok(section(renderReview(r, auto).body).includes(`- whole file, 100% \u2014 ${expected}`), source);
   }
 });
@@ -336,9 +336,9 @@ test('a whole-file score from the model shows its category and reason', () => {
   const r = scored([file('a.ts', { fileLevel: level(88, 'whole_file'), wholeFile: { score: 88, category: 'permission', reason: 'Widens access.' } })]);
   assert.ok(section(renderReview(r, auto).body).includes('- whole file, 88% `permission` \u2014 Widens access.'));
 });
-test('an unusable repository file is named', () => {
-  const r = scored([file('a.ts', { fileLevel: level(100, 'team_file_invalid') })]);
-  assert.match(renderReview(r, auto).body, /whole file, 100% \u2014 the repository's \.visto-ai\.yml cannot be used/);
+test('an unusable repository file is named, with the reason', () => {
+  const r = { ...scored([file('a.ts', { fileLevel: level(100, 'team_file_invalid') })]), teamFileInvalid: 'bad_patterns' };
+  assert.ok(renderReview(r, auto).body.includes("- whole file, 100% \u2014 the repository's .visto-ai.yml cannot be used (bad_patterns), so every file needs a person"));
 });
 test('without a link builder the label is plain text', () => {
   const r = scored([file('a.ts', { blocks: [block('B1', span(40, 58), 85, 'calculation', 'Changes tax.')] })]);
