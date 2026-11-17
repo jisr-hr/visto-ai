@@ -23,6 +23,7 @@ const WHOLE_FILE_TEXT: Record<Exclude<FileLevelSource, 'whole_file'>, string> = 
   builtin_floor: "it changes the reviewer's own file, code owners or CI",
   team_floor: 'a path the team marked as always needing a person',
   team_file_invalid: "the repository's .visto-ai.yml cannot be used, so every file needs a person",
+  hidden_characters: 'a changed line holds invisible or direction-changing characters',
   not_scored: 'not read, or left without a score',
   rule_rename: 'scored by rule',
   rule_asset: 'scored by rule',

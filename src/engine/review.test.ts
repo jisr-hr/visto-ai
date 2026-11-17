@@ -503,3 +503,21 @@ test('the score audit entries follow the findings audit entries', async () => {
   const r = await review(input, deps({ files: [fileA], answers: [bad] }));
   assert.equal(r.audit.at(-1)!.action, 'score_path_not_in_pull_request');
 });
+
+test('a rename whose only change is a hidden character needs a person', async () => {
+  const rename: ChangedFile = { path: 'src/new.ts', previousPath: 'src/old.ts', status: 'renamed', additions: 0, deletions: 0, patch: null };
+  const d = deps({ files: [rename], answers: [scored('src/new.ts', 5)] });
+  const contents: Record<string, string> = { 'src/old.ts': 'const s = "ab";\n', 'src/new.ts': 'const s = "a\u200bb";\n' };
+  d.source.getFileContent = (_pr, path) => Promise.resolve(contents[path] ?? null);
+  const r = await review(input, d);
+  assert.deepEqual(r.scores[0]!.fileLevel, { score: 100, source: 'hidden_characters' });
+  assert.equal(r.scores[0]!.covered, false);
+  assert.equal(r.verdict.needsHuman, true);
+});
+
+test('a service patch with a direction override on an added line needs a person', async () => {
+  const f: ChangedFile = { path: 'src/a.ts', previousPath: null, status: 'modified', additions: 1, deletions: 1, patch: '@@ -1 +1 @@\n-a\n+a\u202e' };
+  const r = await review(input, deps({ files: [f], answers: [scored('src/a.ts', 5)] }));
+  assert.deepEqual(r.scores[0]!.fileLevel, { score: 100, source: 'hidden_characters' });
+  assert.equal(r.verdict.needsHuman, true);
+});

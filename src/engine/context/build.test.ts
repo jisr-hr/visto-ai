@@ -2,7 +2,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { ChangedFile, PullRequestInfo, Source } from '../types.ts';
 import { packBatches } from './batches.ts';
-import { buildFileContexts } from './build.ts';
+import { buildFileContexts, hunksOf } from './build.ts';
+import { blocksOf } from '../score/blocks.ts';
 import { fileSection } from './section.ts';
 
 const pr: PullRequestInfo = {
@@ -187,4 +188,56 @@ test('an image with no text diff is scored by rule and not listed as not reviewe
   const { batches, notReviewed, audit } = packBatches(contexts, 100000, 6);
   assert.deepEqual([batches, notReviewed], [[], []]);
   assert.deepEqual(audit, [{ stage: 'context', action: 'scored_by_rule', subject: 'img/logo.png', reason: 'rule_asset' }]);
+});
+
+test('hunksOf strips the patch, counts what it removed, and marks a hidden character on a changed line', () => {
+  const out = hunksOf('@@ -1 +1 @@\n-a\n+a\u200b');
+  assert.equal(out.text, '@@ -1 +1 @@\n-a\n+a');
+  assert.equal(out.removed, 1);
+  assert.equal(out.hidden, true);
+  assert.deepEqual(out.hunks.map((h) => h.lines.map((l) => l.text)), [['a', 'a']]);
+});
+test('hunksOf: a hidden character on a removed line counts', () => {
+  assert.equal(hunksOf('@@ -1 +1 @@\n-a\u202e\n+b').hidden, true);
+});
+test('hunksOf: a hidden character on a context line does not count, nor does a CRLF ending', () => {
+  assert.equal(hunksOf('@@ -1,2 +1,2 @@\n a\u200b\n-b\n+c').hidden, false);
+  assert.equal(hunksOf('@@ -1,2 +1,2 @@\r\n a\r\n-b\r\n+c\r\n').hidden, false);
+});
+
+const renamedInDir = file('src/b.ts', { patch: null, status: 'renamed', previousPath: 'src/a.ts', additions: 0, deletions: 0 });
+test('a rename inside its directory that differs only by a zero-width space is sent to the model, marked hidden', async () => {
+  const { contexts } = await buildFileContexts(pr, [renamedInDir], stub({ 'base:src/a.ts': 'const s = "ab";\n', 'head:src/b.ts': 'const s = "a\u200bb";\n' }));
+  assert.equal(contexts[0]!.skip, null);
+  assert.deepEqual(contexts[0]!.plan, { kind: 'model' });
+  assert.equal(contexts[0]!.hidden, true);
+  assert.equal(contexts[0]!.blocks.length, 1);
+});
+test('a service patch whose added line holds a direction override is marked hidden', async () => {
+  const { contexts } = await buildFileContexts(pr, [file('src/a.ts', { patch: '@@ -1 +1 @@\n-a\n+a\u202e' })], stub({ 'head:src/a.ts': 'a\n' }));
+  assert.deepEqual([contexts[0]!.skip, contexts[0]!.plan, contexts[0]!.hidden], [null, { kind: 'model' }, true]);
+});
+test('a hidden character on a context line only does not mark the file', async () => {
+  const { contexts } = await buildFileContexts(pr, [file('src/a.ts', { patch: '@@ -1,2 +1,2 @@\n k\u200b\n-a\n+b' })], stub({ 'head:src/a.ts': 'k\nb\n' }));
+  assert.equal(contexts[0]!.hidden, false);
+});
+test('CRLF line endings are not hidden characters, and hash like LF', async () => {
+  const crlf = await buildFileContexts(pr, [file('src/a.ts', { patch: '@@ -1 +1 @@\r\n-a\r\n+b\r\n' })], stub({ 'head:src/a.ts': 'b\r\n' }));
+  const lf = await buildFileContexts(pr, [file('src/a.ts', { patch: '@@ -1 +1 @@\n-a\n+b\n' })], stub({ 'head:src/a.ts': 'b\n' }));
+  assert.equal(crlf.contexts[0]!.hidden, false);
+  assert.equal(crlf.contexts[0]!.blocks[0]!.hash, lf.contexts[0]!.blocks[0]!.hash);
+  const computed = await buildFileContexts(pr, [file('src/a.ts', { patch: null })], stub({ 'base:src/a.ts': 'a\r\n', 'head:src/a.ts': 'b\r\n' }));
+  assert.equal(computed.contexts[0]!.hidden, false);
+  assert.equal(computed.contexts[0]!.blocks[0]!.hash, blocksOf(hunksOf('@@ -1 +1 @@\n-a\n+b').hunks)[0]!.hash);
+});
+test('a rename inside its directory with identical contents that start with a byte order mark is still unchanged', async () => {
+  const { contexts } = await buildFileContexts(pr, [renamedInDir], stub({ 'base:src/a.ts': '\ufeffsame\n', 'head:src/b.ts': '\ufeffsame\n' }));
+  assert.equal(contexts[0]!.skip, 'unchanged');
+  assert.equal(contexts[0]!.hidden, false);
+  assert.deepEqual(contexts[0]!.plan, { kind: 'rule', score: 30, source: 'rule_rename' });
+});
+test('a move to another directory that differs only by a zero-width space is scored by blocks, marked hidden', async () => {
+  const { contexts } = await buildFileContexts(pr, [moved], stub({ 'base:src/a.ts': 'ab\n', 'head:app/pages/b.ts': 'a\u200bb\n' }));
+  assert.deepEqual(contexts[0]!.plan, { kind: 'model' });
+  assert.equal(contexts[0]!.hidden, true);
 });

@@ -21,7 +21,7 @@ function ctx(path: string, text: string | null, extra: Partial<ChangedFile> = {}
   const file: ChangedFile = { path, previousPath: null, status: 'modified', additions: 3, deletions: 1, patch: text, ...extra };
   const hunks = text === null ? [] : parsePatch(text);
   const skip = text !== null ? null : file.status === 'renamed' && file.previousPath !== null ? 'unchanged' : 'no_diff';
-  return { file, hunks, ranges: null, diffText: null, full: null, test: null, skip, blocks: blocksOf(hunks), plan: scorePlan(file, skip) };
+  return { file, hunks, ranges: null, diffText: null, full: null, test: null, skip, blocks: blocksOf(hunks), plan: scorePlan(file, skip), hidden: false };
 }
 
 const b = (id: string, score: number, category = 'fix', reason?: string): RawBlock =>
@@ -300,4 +300,18 @@ test('the verdict', () => {
   assert.deepEqual(verdictOf([score(69)], 70), { threshold: 70, needsHuman: false, highest: 69 });
   assert.deepEqual(verdictOf([score(69), score(70)], 70), { threshold: 70, needsHuman: true, highest: 70 });
   assert.deepEqual(verdictOf([], 70), { threshold: 70, needsHuman: false, highest: 0 });
+});
+
+test('a file whose changed lines hold hidden characters needs a person whatever its blocks score', () => {
+  const hidden = { ...ctx('src/b.ts', patch(10), { status: 'renamed', previousPath: 'src/a.ts' }), hidden: true };
+  const [s] = run([file('src/b.ts', [b('B1', 5)])], [hidden]).scores;
+  assert.deepEqual(s!.fileLevel, { score: 100, source: 'hidden_characters' });
+  assert.equal(s!.finalScore, 100);
+  assert.equal(s!.covered, false);
+});
+
+test('hidden_characters loses a tie to the team file, wins it against not_scored', () => {
+  const hidden = { ...ctx('src/a.ts', twoHunks), hidden: true };
+  assert.equal(run([], [hidden], { floors: parseRepoFile('nonsense: 1') }).scores[0]!.fileLevel!.source, 'team_file_invalid');
+  assert.equal(run([], [hidden]).scores[0]!.fileLevel!.source, 'hidden_characters');
 });

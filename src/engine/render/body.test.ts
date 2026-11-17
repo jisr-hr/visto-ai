@@ -323,6 +323,7 @@ test('every whole-file source has its text', () => {
     team_floor: 'a path the team marked as always needing a person',
     team_file_invalid: "the repository's .visto-ai.yml cannot be used, so every file needs a person",
     not_scored: 'not read, or left without a score',
+    hidden_characters: 'a changed line holds invisible or direction-changing characters',
     rule_rename: 'scored by rule',
     rule_asset: 'scored by rule',
   };

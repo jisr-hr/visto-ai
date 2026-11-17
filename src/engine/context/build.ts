@@ -9,7 +9,7 @@ import { fullFileContext, numberLines } from './full-file.ts';
 import type { FullFile } from './full-file.ts';
 import { isLowPriority, orderByPriority } from './priority.ts';
 import { testCandidates } from './test-pair.ts';
-import { stripControl } from './untrusted.ts';
+import { hasHidden, stripControl } from './untrusted.ts';
 
 export interface FileContext {
   file: ChangedFile;
@@ -22,6 +22,19 @@ export interface FileContext {
   skip: 'no_diff' | 'too_large' | 'unchanged' | null;
   blocks: Block[]; // one per hunk; the same objects are passed on, never copied
   plan: ScorePlan; // who scores the file: the model, a fixed rule, or nobody
+  // An added or removed line held a character that was stripped before anyone saw it.
+  hidden: boolean;
+}
+
+/**
+ * The one way a patch becomes hunks. The hunks are built from the cleaned text, so a
+ * character stripped from a changed line leaves no trace in them: `hidden` keeps it.
+ */
+export function hunksOf(patch: string): { hunks: Hunk[]; text: string; removed: number; hidden: boolean } {
+  const clean = stripControl(patch);
+  const raw = parsePatch(patch.replaceAll('\r\n', '\n'));
+  const hidden = raw.some((h) => h.lines.some((l) => (l.kind === 'add' || l.kind === 'del') && hasHidden(l.text)));
+  return { hunks: parsePatch(clean.text), text: clean.text, removed: clean.removed, hidden };
 }
 
 const MAX_TEST_PROBES = 20;
@@ -78,6 +91,7 @@ export async function buildFileContexts(
     let patch: string | null = null;
     let tooLarge = false;
     let head: string | null = null; // cleaned head content, fetched at most once
+    let headRaw: string | null = null; // the same content with only CRLF turned into LF
     let headFetched = false;
     const loadHead = async (): Promise<void> => {
       if (headFetched) return;
@@ -87,19 +101,20 @@ export async function buildFileContexts(
       const clean = stripControl(raw);
       removed += clean.removed;
       head = clean.text;
+      headRaw = raw.replaceAll('\r\n', '\n');
     };
 
+    let fromService = false;
     if (file.patch !== null) {
-      const clean = stripControl(file.patch);
-      patch = clean.text;
-      removed += clean.removed;
+      patch = file.patch;
+      fromService = true;
     } else if (file.status !== 'removed') {
       const old = file.status === 'added' ? '' : await fetchContent(file.previousPath ?? file.path, pr.baseSha);
       await loadHead();
-      if (old !== null && head !== null) {
-        const cleanOld = stripControl(old);
-        removed += cleanOld.removed;
-        patch = patchFromContents(cleanOld.text, head);
+      if (old !== null && headRaw !== null) {
+        // Diffed before stripping, so two contents that differ only in a stripped character still differ.
+        removed += stripControl(old).removed;
+        patch = patchFromContents(old.replaceAll('\r\n', '\n'), headRaw);
         tooLarge = patch === null;
       }
     }
@@ -107,13 +122,17 @@ export async function buildFileContexts(
     let hunks: Hunk[] = [];
     let ranges: Ranges | null = null;
     let diffText: string | null = null;
+    let hidden = false;
     let skip: FileContext['skip'] = tooLarge ? 'too_large' : 'no_diff';
     if (patch !== null) {
-      const parsed = parsePatch(patch);
-      if (parsed.length > 0) {
-        hunks = parsed;
+      const parsed = hunksOf(patch);
+      // Characters stripped from computed hunks were already counted in the two contents.
+      if (fromService) removed += parsed.removed;
+      if (parsed.hunks.length > 0) {
+        hunks = parsed.hunks;
         ranges = commentableRanges(hunks);
         diffText = renderAnchoredDiff(hunks);
+        hidden = parsed.hidden;
         skip = null;
       } else {
         skip = 'unchanged';
@@ -137,7 +156,7 @@ export async function buildFileContexts(
       }
     }
     audit.push(...stripped(removed, file.path));
-    contexts.push({ file, hunks, ranges, diffText, full, test, skip, blocks: blocksOf(hunks), plan: scorePlan(file, skip) });
+    contexts.push({ file, hunks, ranges, diffText, full, test, skip, blocks: blocksOf(hunks), plan: scorePlan(file, skip), hidden });
   }
   return { contexts, audit };
 }

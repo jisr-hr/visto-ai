@@ -13,7 +13,7 @@ const REASON_REQUIRED_FROM = 40;
 
 // The order that settles a tie between candidates for the file's level.
 const SOURCE_ORDER: FileLevelSource[] = [
-  'builtin_floor', 'team_floor', 'team_file_invalid', 'not_scored', 'whole_file', 'rule_rename', 'rule_asset',
+  'builtin_floor', 'team_floor', 'team_file_invalid', 'hidden_characters', 'not_scored', 'whole_file', 'rule_rename', 'rule_asset',
 ];
 
 const isScore = (value: unknown): value is number =>
@@ -177,6 +177,8 @@ function scoreFile(
   const floor = floorFor(file, floors);
   if (floor !== null) candidates.push({ score: 100, source: floor });
   if (plan.kind === 'rule') candidates.push({ score: plan.score, source: plan.source });
+  // The model and any person reading the diff saw the cleaned text, not what was changed.
+  if (context.hidden) candidates.push({ score: 100, source: 'hidden_characters' });
   if (notScored) candidates.push({ score: 100, source: 'not_scored' });
   if (wholeFile !== null) candidates.push({ score: wholeFile.score, source: 'whole_file' });
   candidates.sort((a, c) => c.score - a.score || SOURCE_ORDER.indexOf(a.source) - SOURCE_ORDER.indexOf(c.source));
@@ -185,7 +187,8 @@ function scoreFile(
   const finalScore = Math.max(fileLevel?.score ?? 0, ...blocks.map((b) => b.entry?.score ?? 0));
 
   let covered: boolean;
-  if (plan.kind === 'rule') covered = true;
+  if (context.hidden) covered = false;
+  else if (plan.kind === 'rule') covered = true;
   else if (plan.kind === 'none') covered = false;
   else covered = entry !== undefined && !notRead.has(path) && (wholeFile !== null || (plan.kind === 'model' && blocks.every((b) => b.entry !== null)));
 

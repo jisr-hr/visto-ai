@@ -33,7 +33,8 @@ export interface BlockScore {
 }
 
 export type FileLevelSource =
-  | 'builtin_floor' | 'team_floor' | 'team_file_invalid' | 'not_scored' | 'whole_file' | 'rule_rename' | 'rule_asset';
+  | 'builtin_floor' | 'team_floor' | 'team_file_invalid' | 'hidden_characters' | 'not_scored' | 'whole_file' | 'rule_rename'
+  | 'rule_asset';
 
 export interface FileScore {
   path: string; previousPath: string | null;

@@ -22,7 +22,7 @@ const fortyAdded = ['@@ -0,0 +1,40 @@', ...Array.from({ length: 40 }, (_, i) => 
 function ctx(path: string, text: string, extra: Partial<ChangedFile> = {}): FileContext {
   const file: ChangedFile = { path, previousPath: null, status: 'modified', additions: 3, deletions: 1, patch: text, ...extra };
   const hunks = parsePatch(text);
-  return { file, hunks, ranges: null, diffText: null, full: null, test: null, skip: null, blocks: blocksOf(hunks), plan: scorePlan(file, null) };
+  return { file, hunks, ranges: null, diffText: null, full: null, test: null, skip: null, blocks: blocksOf(hunks), plan: scorePlan(file, null), hidden: false };
 }
 
 function scoresOf(files: [string, string][]): FileScore[] {
