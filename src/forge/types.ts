@@ -40,7 +40,10 @@ export interface HumanInlineComment {
 export interface GeneralComment { id: string; author: string; authorIsBot: boolean; association: Association; at: string; body: string }
 export interface Comparison { mergeBase: string; files: ChangedFile[] }
 export interface HistorySource {
-  listMergedPullRequests(repo: RepoRef, window: { since: string; until: string }, limit: number): Promise<MergedPullRequest[]>;
+  /** pageLimitReached: the listing ran out of pages, so older pull requests in the window may be missing. */
+  listMergedPullRequests(
+    repo: RepoRef, window: { since: string; until: string }, limit: number,
+  ): Promise<{ pullRequests: MergedPullRequest[]; pageLimitReached: boolean }>;
   listReviews(repo: RepoRef, number: number): Promise<HumanReview[]>;
   listInlineComments(repo: RepoRef, number: number): Promise<HumanInlineComment[]>;
   listGeneralComments(repo: RepoRef, number: number): Promise<GeneralComment[]>;

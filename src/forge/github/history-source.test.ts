@@ -57,17 +57,18 @@ test('keeps merged pull requests inside the window and stops at the first one up
   ];
   queue(json(first), json(second));
   const out = await source().listMergedPullRequests(repo, window, 50);
-  assert.deepEqual(out.map((p) => p.number), [7, 6, 5]);
+  assert.deepEqual(out.pullRequests.map((p) => p.number), [7, 6, 5]);
+  assert.equal(out.pageLimitReached, false);
   assert.equal(calls.length, 2);
   assert.match(calls[0]!.url, /\/repos\/acme\/shop\/pulls\?state=closed&sort=updated&direction=desc&per_page=100&page=1$/);
   assert.match(calls[1]!.url, /page=2$/);
-  assert.deepEqual(out[0], {
+  assert.deepEqual(out.pullRequests[0], {
     number: 7, title: 'Change 7', description: 'Does a thing', author: 'dev-one', authorIsBot: false,
     baseBranch: 'main', headBranch: 'feature-7', baseSha: 'base7', headSha: 'head7', mergedAt: '2026-03-20T10:00:00Z',
   });
-  assert.equal(out[1]!.description, '');
-  assert.equal(out[1]!.author, 'ghost');
-  assert.equal(out[1]!.authorIsBot, false);
+  assert.equal(out.pullRequests[1]!.description, '');
+  assert.equal(out.pullRequests[1]!.author, 'ghost');
+  assert.equal(out.pullRequests[1]!.authorIsBot, false);
 });
 
 test('the window start is midnight UTC and the end is exclusive', async () => {
@@ -79,7 +80,7 @@ test('the window start is midnight UTC and the end is exclusive', async () => {
     pull(0, '2026-03-10T00:00:00Z', '2026-02-28T23:59:59Z'),
   ]));
   const out = await source().listMergedPullRequests(repo, window, 50);
-  assert.deepEqual(out.map((p) => p.number), [4, 2]);
+  assert.deepEqual(out.pullRequests.map((p) => p.number), [4, 2]);
 });
 
 test('stops at the limit', async () => {
@@ -88,15 +89,32 @@ test('stops at the limit', async () => {
     pull(2, '2026-03-09T00:00:00Z', '2026-03-10T00:00:00Z'),
     pull(1, '2026-03-08T00:00:00Z', '2026-03-09T00:00:00Z'),
   ]));
-  assert.deepEqual((await source().listMergedPullRequests(repo, window, 2)).map((p) => p.number), [3, 2]);
+  const out = await source().listMergedPullRequests(repo, window, 2);
+  assert.deepEqual(out.pullRequests.map((p) => p.number), [3, 2]);
+  assert.equal(out.pageLimitReached, false);
 });
 
 test('stops after 20 pages without an error', async () => {
   for (let i = 0; i < 20; i += 1) {
     queue(json(Array.from({ length: 100 }, (_, j) => pull(i * 100 + j, null, '2026-03-20T00:00:00Z'))));
   }
-  assert.deepEqual(await source().listMergedPullRequests(repo, window, 50), []);
+  assert.deepEqual(await source().listMergedPullRequests(repo, window, 50), { pullRequests: [], pageLimitReached: true });
   assert.equal(calls.length, 20);
+});
+
+test('a twentieth page that is not full ends the listing without reaching the page limit', async () => {
+  for (let i = 0; i < 20; i += 1) {
+    queue(json(Array.from({ length: i === 19 ? 40 : 100 }, (_, j) => pull(i * 100 + j, null, '2026-03-20T00:00:00Z'))));
+  }
+  assert.deepEqual(await source().listMergedPullRequests(repo, window, 50), { pullRequests: [], pageLimitReached: false });
+});
+
+test('the limit reached on the twentieth full page is not the page limit', async () => {
+  for (let i = 0; i < 20; i += 1) {
+    queue(json(Array.from({ length: 100 }, (_, j) => pull(i * 100 + j, i === 19 && j === 99 ? '2026-03-19T00:00:00Z' : null, '2026-03-20T00:00:00Z'))));
+  }
+  const out = await source().listMergedPullRequests(repo, window, 1);
+  assert.deepEqual([out.pullRequests.length, out.pageLimitReached], [1, false]);
 });
 
 test('a bot author is flagged', async () => {
@@ -105,7 +123,7 @@ test('a bot author is flagged', async () => {
     pull(1, '2026-03-09T00:00:00Z', '2026-03-10T00:00:00Z', { user: { login: 'release-helper', type: 'Bot' } }),
   ]));
   const out = await source().listMergedPullRequests(repo, window, 50);
-  assert.deepEqual(out.map((p) => p.authorIsBot), [true, true]);
+  assert.deepEqual(out.pullRequests.map((p) => p.authorIsBot), [true, true]);
 });
 
 test('a bad window is refused before any request', async () => {

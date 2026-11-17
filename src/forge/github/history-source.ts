@@ -5,6 +5,7 @@ import { changedFilesOf, createGithubHttp, isObject, jsonOf } from './http.ts';
 
 const LIST_PAGES = 10;
 const PULL_PAGES = 20;
+const PAGE_SIZE = 100; // the page size the client asks for
 const DAY = /^\d{4}-\d{2}-\d{2}$/;
 
 const bad = (): Error => new Error('github_bad_response');
@@ -69,24 +70,27 @@ export function createGithubHistorySource(opts: { token: string; fetch: typeof f
       const until = dayStart(window.until);
       const url = `${http.repoUrl(repo)}/pulls?state=closed&sort=updated&direction=desc`;
       const kept: MergedPullRequest[] = [];
+      const done = (pageLimitReached: boolean) => ({ pullRequests: kept, pageLimitReached });
       let pagesRead = 0;
       // Newest update first: once an item was last touched before the window, no later item can have merged inside it.
       for await (const items of http.pages(url, PULL_PAGES)) {
         pagesRead += 1;
         for (const raw of items) {
-          if (kept.length >= limit) return kept;
+          if (kept.length >= limit) return done(false);
           const p = objectItem(raw);
           const updated = Date.parse(text(p.updated_at));
           if (Number.isNaN(updated)) throw bad();
-          if (updated < since) return kept;
+          if (updated < since) return done(false);
           if (typeof p.merged_at !== 'string') continue;
           const merged = Date.parse(p.merged_at);
           if (Number.isNaN(merged)) throw bad();
           if (merged >= since && merged < until) kept.push(pullOf(p));
         }
-        if (kept.length >= limit || pagesRead >= PULL_PAGES) break;
+        if (kept.length >= limit) return done(false);
+        // A full last page means more items were there to read.
+        if (pagesRead >= PULL_PAGES) return done(items.length >= PAGE_SIZE);
       }
-      return kept;
+      return done(false);
     },
 
     async listReviews(repo, number) {

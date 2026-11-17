@@ -104,7 +104,7 @@ export async function runImport(
   // Create the file first so an unusable path fails before any request is made.
   mkdirSync(dirname(args.outFile), { recursive: true });
   writeFileSync(args.outFile, '');
-  const listed = await source.listMergedPullRequests(args.repo, { since: args.since, until: args.until }, args.maxPrs);
+  const { pullRequests: listed, pageLimitReached } = await source.listMergedPullRequests(args.repo, { since: args.since, until: args.until }, args.maxPrs);
   let written = 0;
   const skipped = new Map<ImportSkip, number>();
   // One at a time: the source is rate limited. Each line is appended at once, so a failure keeps what was read.
@@ -122,4 +122,5 @@ export async function runImport(
     if (n !== undefined) out(`${reason} ${n}`);
   }
   if (listed.length === args.maxPrs) out(`the limit of ${args.maxPrs} pull requests was reached; older ones in the window were not read`);
+  if (pageLimitReached) out('the listing stopped at its page limit; older pull requests in the window were not read');
 }

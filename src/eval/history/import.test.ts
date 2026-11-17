@@ -48,9 +48,11 @@ test('nobody reviewed: the last head, at the merge time', () => {
   assert.deepEqual(firstReviewedHead(pr, [], []), { head: pr.headSha, at: pr.mergedAt, byPerson: false });
 });
 
+const listed = (pullRequests: MergedPullRequest[], pageLimitReached = false) => ({ pullRequests, pageLimitReached });
+
 function stub(over: Partial<HistorySource> = {}): HistorySource {
   return {
-    listMergedPullRequests: async () => [pr],
+    listMergedPullRequests: async () => listed([pr]),
     listReviews: async () => reviews,
     listInlineComments: async () => inline,
     listGeneralComments: async () => comments,
@@ -123,7 +125,7 @@ test('runImport writes one line per imported pull request and prints the counts'
   const calls: number[] = [];
   const lines: string[] = [];
   await runImport({ repo, ...window, maxPrs: 200, outFile }, stub({
-    listMergedPullRequests: async () => [pr, pr2, pr3],
+    listMergedPullRequests: async () => listed([pr, pr2, pr3]),
     listReviews: async (_r, n) => { calls.push(n); return reviews; },
     compare: async (_r, _b, head) => (head === 'c4' && calls.at(-1) === 14 ? null : { mergeBase: 'mb', files: [] }),
   }), (l) => lines.push(l));
@@ -142,7 +144,7 @@ test('runImport imports one pull request at a time', async () => {
   let running = 0;
   let peak = 0;
   await runImport({ repo, ...window, maxPrs: 200, outFile: tempFile() }, stub({
-    listMergedPullRequests: async () => [pr, { ...pr, number: 13 }],
+    listMergedPullRequests: async () => listed([pr, { ...pr, number: 13 }]),
     listReviews: async () => { running += 1; peak = Math.max(peak, running); await new Promise((r) => { setTimeout(r, 5); }); running -= 1; return []; },
   }), () => {});
   assert.equal(peak, 1);
@@ -151,7 +153,7 @@ test('runImport imports one pull request at a time', async () => {
 test('runImport with nothing to import writes an empty file', async () => {
   const outFile = tempFile();
   const lines: string[] = [];
-  await runImport({ repo, ...window, maxPrs: 200, outFile }, stub({ listMergedPullRequests: async () => [] }), (l) => lines.push(l));
+  await runImport({ repo, ...window, maxPrs: 200, outFile }, stub({ listMergedPullRequests: async () => listed([]) }), (l) => lines.push(l));
   assert.equal(existsSync(outFile), true);
   assert.equal(readFileSync(outFile, 'utf8'), '');
   assert.deepEqual(lines, ['pull requests 0, written 0, skipped 0']);
@@ -171,7 +173,7 @@ test('runImport empties an existing file before the first request', async () => 
   writeFileSync(outFile, 'old\n');
   let contentAtFirstRead: string | null = null;
   await runImport({ repo, ...window, maxPrs: 200, outFile }, stub({
-    listMergedPullRequests: async () => [pr],
+    listMergedPullRequests: async () => listed([pr]),
     listReviews: async () => { contentAtFirstRead ??= readFileSync(outFile, 'utf8'); return []; },
   }), () => {});
   assert.equal(contentAtFirstRead, '');
@@ -180,8 +182,17 @@ test('runImport empties an existing file before the first request', async () => 
 test('a failure in the middle keeps the lines written before it', async () => {
   const outFile = tempFile();
   await assert.rejects(runImport({ repo, ...window, maxPrs: 200, outFile }, stub({
-    listMergedPullRequests: async () => [pr, { ...pr, number: 13 }, { ...pr, number: 14 }],
+    listMergedPullRequests: async () => listed([pr, { ...pr, number: 13 }, { ...pr, number: 14 }]),
     listReviews: async (_r, n) => { if (n === 14) throw new Error('github_500'); return []; },
   }), () => {}), /github_500/);
   assert.deepEqual(parseHistory(readFileSync(outFile, 'utf8')).map((c) => c.pr_number), [12, 13]);
+});
+
+test('runImport says when the listing stopped at its page limit', async () => {
+  const lines: string[] = [];
+  await runImport({ repo, ...window, maxPrs: 200, outFile: tempFile() }, stub({ listMergedPullRequests: async () => listed([pr], true) }), (l) => lines.push(l));
+  assert.equal(lines.at(-1), 'the listing stopped at its page limit; older pull requests in the window were not read');
+  const quiet: string[] = [];
+  await runImport({ repo, ...window, maxPrs: 200, outFile: tempFile() }, stub(), (l) => quiet.push(l));
+  assert.ok(!quiet.some((l) => l.includes('page limit')));
 });
