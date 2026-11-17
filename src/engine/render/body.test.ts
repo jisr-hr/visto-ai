@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { fitBody, MAX_BODY_CHARS, renderReview } from './body.ts';
 import type { Finding, NotReviewed, RawFinding, ReviewResult, UnplacedFinding } from '../types.ts';
+import type { BlockScore, Category, FileLevelSource, FileScore, Span } from '../score/types.ts';
 
 const usage = { calls: 0, inputTokens: 0, outputTokens: 0, cachedTokens: 0, cost: 0 };
 const finding = (over: Partial<Finding> = {}): Finding => ({
@@ -18,7 +19,7 @@ const result = (over: Partial<ReviewResult> = {}): ReviewResult => ({
   coverage: { reviewed: [], notReviewed: [] }, usage, models: [], providers: [], dependencies: { model: 'ok' }, audit: [],
   scores: [], verdict: { threshold: 70, needsHuman: false, highest: 0 }, ...over,
 });
-const auto = { trigger: 'automatic', requestedBy: null } as const;
+const auto = { trigger: 'automatic', requestedBy: null, lineUrl: null } as const;
 const notReviewed = (n: number): NotReviewed[] =>
   (['no_diff', 'too_large', 'over_batch_limit', 'batch_failed'] as const).slice(0, n).map((reason, i) => ({ path: `f${i}.bin`, reason }));
 const full = result({
@@ -29,11 +30,11 @@ const full = result({
 });
 
 test('no findings', () => {
-  assert.match(renderReview(result(), auto).body, /## Summary\n\nChanges a\.ts\.\n\n## Overall\n\nNo findings\.$/);
-  assert.equal(renderReview(result(), auto).body, '## Summary\n\nChanges a.ts.\n\n## Overall\n\nNo findings.');
+  assert.match(renderReview(result(), auto).body, /## Summary\n\nChanges a\.ts\.\n\n## Human review\n\nNothing here is at or above 70%\. The highest score is 0%\.\n\n## Overall\n\nNo findings\. Human review: not needed \(highest score 0%\)\.$/);
+  assert.equal(renderReview(result(), auto).body, '## Summary\n\nChanges a.ts.\n\n## Human review\n\nNothing here is at or above 70%. The highest score is 0%.\n\n## Overall\n\nNo findings. Human review: not needed (highest score 0%).');
 });
 test('an empty overview leaves the summary out', () => {
-  assert.equal(renderReview(result({ overview: '  ' }), auto).body, '## Overall\n\nNo findings.');
+  assert.equal(renderReview(result({ overview: '  ' }), auto).body, '## Human review\n\nNothing here is at or above 70%. The highest score is 0%.\n\n## Overall\n\nNo findings. Human review: not needed (highest score 0%).');
 });
 test('an inline comment carries its tag, and a moved one its note', () => {
   const { comments } = renderReview(result({ findings: [finding({ line: 12, requestedLine: 15 })] }), auto);
@@ -49,22 +50,22 @@ test('the left side says old line', () => {
 });
 test('sections appear in order and only when they have content', () => {
   const b = renderReview(full, auto).body;
-  const order = ['## Summary', '## Findings', '## Findings not placed on the diff', '## Beyond the diff', '## Coverage', '## Overall'].map((h) => b.indexOf(h + '\n'));
+  const order = ['## Summary', '## Human review', '## Findings', '## Findings not placed on the diff', '## Beyond the diff', '## Coverage', '## Overall'].map((h) => b.indexOf(h + '\n'));
   assert.deepEqual(order, [...order].sort((x, y) => x - y));
   assert.ok(order.every((i) => i >= 0));
   const bare = renderReview(result(), auto).body;
   for (const h of ['## Findings', '## Beyond the diff', '## Coverage']) assert.equal(bare.includes(h), false);
 });
 test('the overall line counts', () => {
-  assert.match(renderReview(full, auto).body, /1 blocker, 2 major, 0 minor\. 1 could not be placed on the diff\. 3 files were not reviewed\.$/);
+  assert.match(renderReview(full, auto).body, /1 blocker, 2 major, 0 minor\. 1 could not be placed on the diff\. 3 files were not reviewed\. Human review: not needed \(highest score 0%\)\.$/);
 });
 test('overall: unplaced only, and not-reviewed only', () => {
-  assert.match(renderReview(result({ unplaced: [unplaced()] }), auto).body, /## Overall\n\n0 blocker, 0 major, 0 minor\. 1 could not be placed on the diff\.$/);
-  assert.match(renderReview(result({ coverage: { reviewed: [], notReviewed: notReviewed(2) } }), auto).body, /## Overall\n\nNo findings\. 2 files were not reviewed\.$/);
-  assert.match(renderReview(result({ findings: [finding()], coverage: { reviewed: [], notReviewed: notReviewed(1) } }), auto).body, /0 blocker, 1 major, 0 minor\. 1 files were not reviewed\.$/);
+  assert.match(renderReview(result({ unplaced: [unplaced()] }), auto).body, /## Overall\n\n0 blocker, 0 major, 0 minor\. 1 could not be placed on the diff\. Human review: not needed \(highest score 0%\)\.$/);
+  assert.match(renderReview(result({ coverage: { reviewed: [], notReviewed: notReviewed(2) } }), auto).body, /## Overall\n\nNo findings\. 2 files were not reviewed\. Human review: not needed \(highest score 0%\)\.$/);
+  assert.match(renderReview(result({ findings: [finding()], coverage: { reviewed: [], notReviewed: notReviewed(1) } }), auto).body, /0 blocker, 1 major, 0 minor\. 1 files were not reviewed\. Human review: not needed \(highest score 0%\)\.$/);
 });
 test('beyond-the-diff items do not count in the overall line', () => {
-  assert.match(renderReview(result({ beyondDiff: [beyond()] }), auto).body, /## Overall\n\nNo findings\.$/);
+  assert.match(renderReview(result({ beyondDiff: [beyond()] }), auto).body, /## Overall\n\nNo findings\. Human review: not needed \(highest score 0%\)\.$/);
 });
 test('finding, unplaced, beyond and coverage bullets have the exact shape', () => {
   const b = renderReview(full, auto).body;
@@ -93,8 +94,8 @@ test('a path with a backtick is shown between double backticks', () => {
   assert.ok(b.includes('`` x`y:7 `` \u2014'));
 });
 test('a manual run is prefixed', () => {
-  assert.match(renderReview(result(), { trigger: 'manual', requestedBy: 'dev-one' }).body, /^\*\*Full review\*\* requested by @dev-one\.\n\n## Summary/);
-  assert.match(renderReview(result(), { trigger: 'manual', requestedBy: null }).body, /^\*\*Full review\*\* requested\.\n\n## Summary/);
+  assert.match(renderReview(result(), { trigger: 'manual', requestedBy: 'dev-one', lineUrl: null }).body, /^\*\*Full review\*\* requested by @dev-one\.\n\n## Summary/);
+  assert.match(renderReview(result(), { trigger: 'manual', requestedBy: null, lineUrl: null }).body, /^\*\*Full review\*\* requested\.\n\n## Summary/);
   assert.doesNotMatch(renderReview(result(), auto).body, /Full review/);
 });
 test('a long list is capped at 25', () => {
@@ -102,7 +103,7 @@ test('a long list is capped at 25', () => {
   const b = renderReview(result({ unplaced: many }), auto).body;
   assert.equal((b.match(/^- `src\/b\.ts:/gm) ?? []).length, 25);
   assert.ok(b.includes('\n- \u2026and 5 more.\n'));
-  assert.match(b, /30 could not be placed on the diff\.$/);
+  assert.match(b, /30 could not be placed on the diff\. Human review: not needed \(highest score 0%\)\.$/);
 });
 test('the other lists are capped too', () => {
   const nr = Array.from({ length: 27 }, (_, i): NotReviewed => ({ path: `p${i}`, reason: 'no_diff' }));
@@ -116,7 +117,7 @@ test('renderReview returns a body within the limit', () => {
   const { body } = renderReview(huge, auto);
   assert.ok(body.length <= MAX_BODY_CHARS);
   assert.match(body, /cut to fit GitHub's limit\]_/);
-  assert.match(body, /## Overall\n\n0 blocker, 1 major, 0 minor\.$/);
+  assert.match(body, /## Overall\n\n0 blocker, 1 major, 0 minor\. Human review: not needed \(highest score 0%\)\.$/);
 });
 
 const MARKER_RE = /^_\[\u2026 (\d+) characters of the review were cut to fit GitHub's limit\]_$/m;
@@ -209,21 +210,21 @@ test('the default limit is 65,536', () => {
 
 test('a failed review renders only its Overall line, after the manual prefix', () => {
   const failed = result({ status: 'failed', failure: { stage: 'model', code: 'no_credit' }, overview: 'x', findings: [finding()], unplaced: [unplaced()] });
-  assert.deepEqual(renderReview(failed, auto), { body: '## Overall\n\nThe review could not be completed (model: no_credit).', comments: [] });
-  const manual = renderReview(failed, { trigger: 'manual', requestedBy: 'dev-one' });
-  assert.equal(manual.body, '**Full review** requested by @dev-one.\n\n## Overall\n\nThe review could not be completed (model: no_credit).');
+  assert.deepEqual(renderReview(failed, auto), { body: '## Overall\n\nThe review could not be completed (model: no_credit).\n\nHuman review: needed, because the review did not finish.', comments: [] });
+  const manual = renderReview(failed, { trigger: 'manual', requestedBy: 'dev-one', lineUrl: null });
+  assert.equal(manual.body, '**Full review** requested by @dev-one.\n\n## Overall\n\nThe review could not be completed (model: no_credit).\n\nHuman review: needed, because the review did not finish.');
   assert.deepEqual(manual.comments, []);
 });
 test('an Overall line written by the model cannot move the cut', () => {
   const overview = `Intro.\n## Overall\n\nAll fine.\n${'w\n'.repeat(40_000)}`;
   const plain = renderReview(result({ overview, findings: [finding()] }), auto).body;
   assert.ok(plain.length <= MAX_BODY_CHARS);
-  assert.match(plain, /cut to fit GitHub's limit\]_\n\n## Overall\n\n0 blocker, 1 major, 0 minor\.$/);
+  assert.match(plain, /cut to fit GitHub's limit\]_\n\n## Overall\n\n0 blocker, 1 major, 0 minor\. Human review: not needed \(highest score 0%\)\.$/);
   const withUnplaced = renderReview(result({ overview, findings: [finding()], unplaced: [unplaced()] }), auto).body;
   assert.ok(withUnplaced.length <= MAX_BODY_CHARS);
   assert.ok(withUnplaced.includes('## Findings not placed on the diff\n'));
   assert.ok(withUnplaced.includes('\n- `src/b.ts:4` \u2014 Name is unclear.\n'));
-  assert.match(withUnplaced, /\n## Overall\n\n0 blocker, 1 major, 0 minor\. 1 could not be placed on the diff\.$/);
+  assert.match(withUnplaced, /\n## Overall\n\n0 blocker, 1 major, 0 minor\. 1 could not be placed on the diff\. Human review: not needed \(highest score 0%\)\.$/);
 });
 test('an HTML comment opener written by the model is neutralised', () => {
   const r = renderReview(result({ overview: 'See <!-- hidden -->.', findings: [finding({ body: 'Bad <!-- x' })], beyondDiff: [beyond({ body: 'Also <!-- y' })] }), auto);
@@ -235,7 +236,7 @@ test('an HTML comment opener written by the model is neutralised', () => {
 });
 test('a heading line in the overview is escaped', () => {
   const b = renderReview(result({ overview: 'Text.\n## Overall\n   # Title\n    # code\nnot # a heading' }), auto).body;
-  assert.ok(b.includes('## Summary\n\nText.\n\\## Overall\n   \\# Title\n    # code\nnot # a heading\n\n## Overall\n\nNo findings.'));
+  assert.ok(b.includes('## Summary\n\nText.\n\\## Overall\n   \\# Title\n    # code\nnot # a heading\n\n## Human review\n\nNothing here is at or above 70%. The highest score is 0%.\n\n## Overall\n\nNo findings. Human review: not needed (highest score 0%).'));
   assert.equal((b.match(/^## Overall$/gm) ?? []).length, 1);
 });
 test('a path with a newline or a tab stays on its bullet line', () => {
@@ -243,4 +244,143 @@ test('a path with a newline or a tab stays on its bullet line', () => {
   assert.ok(b.includes('- **[minor]** `src/c.ts ## Overall x:7` \u2014 Caller ignores the error.\n'));
   assert.ok(b.includes('- `src/b  .ts:4` \u2014 Name is unclear.\n'));
   assert.equal((b.match(/^## Overall$/gm) ?? []).length, 1);
+});
+
+const lineUrl = (f: { path: string }, s: Span): string => 'u:' + f.path + ':' + s.first;
+const withUrl = { trigger: 'automatic', requestedBy: null, lineUrl } as const;
+const span = (first: number, last: number, side: Span['side'] = 'RIGHT'): Span => ({ side, first, last });
+const block = (id: string, s: Span, score: number | null, category: Category = 'calculation', reason = ''): BlockScore => ({
+  id, hunk: id, hunkHash: 'h', hash: 'h', changedLines: s.last - s.first + 1, span: s,
+  lines: { old: [], new: [] } as unknown as BlockScore['lines'],
+  entry: score === null ? null : { score, category, reason },
+});
+const file = (path: string, over: Partial<FileScore> = {}): FileScore => {
+  const blocks = over.blocks ?? [];
+  const best = Math.max(0, over.fileLevel?.score ?? 0, ...blocks.map((b) => b.entry?.score ?? 0));
+  return { path, previousPath: null, diffHash: 'd', changeSummary: '', changedLines: 1, blocks, wholeFile: null, fileLevel: null, finalScore: best, covered: true, ...over };
+};
+const level = (score: number, source: FileLevelSource): FileScore['fileLevel'] => ({ score, source });
+const verdictOf = (scores: FileScore[], threshold = 70) => {
+  const highest = Math.max(0, ...scores.map((f) => f.finalScore));
+  return { threshold, needsHuman: highest >= threshold, highest };
+};
+const scored = (scores: FileScore[], threshold = 70): ReviewResult => result({ scores, verdict: verdictOf(scores, threshold) });
+const section = (body: string): string => /## Human review\n\n([\s\S]*?)(?=\n\n## |$)/.exec(body)![1]!;
+
+test('nothing at or above the threshold is one line', () => {
+  const r = scored([file('src/a.ts', { blocks: [block('B1', span(1, 2), 45)] })]);
+  const b = renderReview(r, withUrl).body;
+  assert.ok(b.includes('## Human review\n\nNothing here is at or above 70%. The highest score is 45%.\n\n## Overall'));
+});
+test('the section lists what a person should read', () => {
+  const r = scored([
+    file('db/migrate/20260101_add_plan.rb', { fileLevel: level(100, 'team_floor') }),
+    file('src/billing/invoice.ts', {
+      blocks: [block('B1', span(85, 90), 40, 'refactor', 'Moves code.'), block('B2', span(12, 14, 'LEFT'), 72, 'business_rule', 'Removes the refund limit.'), block('B3', span(40, 58), 85, 'calculation', 'Changes how tax is rounded.')],
+    }),
+  ]);
+  const b = renderReview(r, { ...withUrl }).body;
+  assert.equal(section(b), [
+    'A person should read these parts. Each is at or above 70%.',
+    '',
+    '**`db/migrate/20260101_add_plan.rb`**',
+    '- whole file, 100% \u2014 a path the team marked as always needing a person',
+    '',
+    '**`src/billing/invoice.ts`**',
+    '- [lines 40-58](u:src/billing/invoice.ts:40), 85% `calculation` \u2014 Changes how tax is rounded.',
+    '- [old lines 12-14](u:src/billing/invoice.ts:12), 72% `business_rule` \u2014 Removes the refund limit.',
+  ].join('\n'));
+});
+test('the section sits between Summary and Findings', () => {
+  const b = renderReview(scored([file('src/a.ts', { blocks: [block('B1', span(1, 1), 90)] })]), { ...withUrl }).body;
+  const order = ['## Summary', '## Human review'].map((h) => b.indexOf(h + '\n'));
+  assert.ok(order[0]! >= 0 && order[0]! < order[1]!);
+  const withFinding = renderReview({ ...scored([file('src/a.ts', { blocks: [block('B1', span(1, 1), 90)] })]), findings: [finding()] }, withUrl).body;
+  assert.ok(withFinding.indexOf('## Human review') < withFinding.indexOf('## Findings\n'));
+});
+test('files are ordered by final score, then path', () => {
+  const r = scored([
+    file('b.ts', { blocks: [block('B1', span(1, 1), 80)] }),
+    file('c.ts', { blocks: [block('B1', span(1, 1), 95)] }),
+    file('a.ts', { blocks: [block('B1', span(1, 1), 80)] }),
+  ]);
+  const heads = section(renderReview(r, auto).body).split('\n').filter((l) => l.startsWith('**'));
+  assert.deepEqual(heads, ['**`c.ts`**', '**`a.ts`**', '**`b.ts`**']);
+});
+test('blocks are ordered by score, then by position in the diff', () => {
+  const r = scored([file('a.ts', { blocks: [block('B1', span(1, 1), 75), block('B2', span(5, 5), 90), block('B3', span(9, 9), 75)] })]);
+  const lines = section(renderReview(r, auto).body).split('\n').filter((l) => l.startsWith('- '));
+  assert.deepEqual(lines.map((l) => l.split(' `')[0]), ['- line 5, 90%', '- line 1, 75%', '- line 9, 75%']);
+});
+test('a file flagged as a whole gets its whole file line first, then its blocks', () => {
+  const r = scored([file('a.ts', { fileLevel: level(100, 'not_scored'), blocks: [block('B1', span(2, 3), 80, 'fix', 'Fixes it.'), block('B2', span(9, 9), 20)] })]);
+  const lines = section(renderReview(r, auto).body).split('\n').filter((l) => l.startsWith('- '));
+  assert.deepEqual(lines, ['- whole file, 100% \u2014 not read, or left without a score', '- lines 2-3, 80% `fix` \u2014 Fixes it.']);
+});
+test('every whole-file source has its text', () => {
+  const text: Record<string, string> = {
+    builtin_floor: "it changes the reviewer's own file, code owners or CI",
+    team_floor: 'a path the team marked as always needing a person',
+    team_file_invalid: "the repository's .visto-ai.yml cannot be used, so every file needs a person",
+    not_scored: 'not read, or left without a score',
+    rule_rename: 'scored by rule',
+    rule_asset: 'scored by rule',
+  };
+  for (const [source, expected] of Object.entries(text)) {
+    const r = scored([file('a.ts', { fileLevel: level(100, source as FileLevelSource) })]);
+    assert.ok(section(renderReview(r, auto).body).includes(`- whole file, 100% \u2014 ${expected}`), source);
+  }
+});
+test('a whole-file score from the model shows its category and reason', () => {
+  const r = scored([file('a.ts', { fileLevel: level(88, 'whole_file'), wholeFile: { score: 88, category: 'permission', reason: 'Widens access.' } })]);
+  assert.ok(section(renderReview(r, auto).body).includes('- whole file, 88% `permission` \u2014 Widens access.'));
+});
+test('an unusable repository file is named', () => {
+  const r = scored([file('a.ts', { fileLevel: level(100, 'team_file_invalid') })]);
+  assert.match(renderReview(r, auto).body, /whole file, 100% \u2014 the repository's \.visto-ai\.yml cannot be used/);
+});
+test('without a link builder the label is plain text', () => {
+  const r = scored([file('a.ts', { blocks: [block('B1', span(40, 58), 85, 'calculation', 'Changes tax.')] })]);
+  assert.ok(section(renderReview(r, auto).body).includes('\n- lines 40-58, 85% `calculation` \u2014 Changes tax.'));
+});
+test('a block below 40 at a low threshold shows its category and no reason', () => {
+  const r = scored([file('a.ts', { blocks: [block('B1', span(7, 7), 25, 'rename')] })], 20);
+  const b = renderReview(r, auto).body;
+  assert.ok(section(b).includes('Each is at or above 20%.'));
+  assert.ok(section(b).endsWith('\n- line 7, 25% `rename`'));
+});
+test('the list stops at 50 entries', () => {
+  const blocks = Array.from({ length: 60 }, (_, i) => block(`B${i + 1}`, span(i + 1, i + 1), 80));
+  const lines = section(renderReview(scored([file('a.ts', { blocks })]), auto).body).split('\n');
+  assert.equal(lines.filter((l) => l.startsWith('- ')).length, 51);
+  assert.equal(lines.at(-1), '- \u2026and 10 more.');
+  assert.equal(lines.at(-2), '- line 50, 80% `calculation`');
+});
+test('heading lines do not count toward the 50 entries, and a file with nothing written has no heading', () => {
+  const a = file('a.ts', { blocks: Array.from({ length: 50 }, (_, i) => block(`B${i + 1}`, span(i + 1, i + 1), 90)) });
+  const c = file('c.ts', { blocks: [block('B1', span(1, 1), 80), block('B2', span(2, 2), 80)] });
+  const text = section(renderReview(scored([a, c]), auto).body);
+  assert.equal(text.includes('c.ts'), false);
+  assert.ok(text.endsWith('\n- \u2026and 2 more.'));
+});
+test('Overall says whether a person is needed', () => {
+  const high = renderReview(scored([file('a.ts', { blocks: [block('B1', span(1, 1), 85)] })]), auto).body;
+  assert.match(high, /## Overall\n\nNo findings\. Human review: needed \(highest score 85%\)\.$/);
+  const low = renderReview(scored([file('a.ts', { blocks: [block('B1', span(1, 1), 45)] })]), auto).body;
+  assert.match(low, /## Overall\n\nNo findings\. Human review: not needed \(highest score 45%\)\.$/);
+});
+test('a failed review says a person is needed', () => {
+  const failed = result({ status: 'failed', failure: { stage: 'model', code: 'no_credit' } });
+  const b = renderReview(failed, auto).body;
+  assert.ok(b.endsWith('(model: no_credit).\n\nHuman review: needed, because the review did not finish.'));
+});
+test('a reason cannot open an HTML comment', () => {
+  const r = scored([file('a.ts', { blocks: [block('B1', span(1, 1), 90, 'fix', 'x <!-- y')] })]);
+  const b = renderReview(r, auto).body;
+  assert.equal(b.includes('<!--'), false);
+  assert.ok(b.includes('x &lt;!-- y'));
+});
+test('a file path with a backtick is a safe code span', () => {
+  const r = scored([file('a`b.ts', { blocks: [block('B1', span(1, 1), 90)] })]);
+  assert.ok(renderReview(r, auto).body.includes('**`` a`b.ts ``**'));
 });
