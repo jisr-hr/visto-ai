@@ -99,10 +99,15 @@ test('two cases produce the four files, and the numbers have one row per thresho
   assert.match(md, /\n\nComments by a person left out because a bot started their thread: 0\. Labelled blocks and files with no final patch: 0\.\n$/);
 });
 
-test('the numbers follow the scores: at 70 one of two pull requests is clear', async () => {
-  const s = await runBacktest(baseArgs());
+test('the numbers follow the scores: at 70 one of two pull requests is clear, and a commented block left out counts against safety', async () => {
+  // src/b.ts scores 10 and a person commented on it; its final patch differs, so its label is strict.
+  const changed = patch.replace('+const value0 = 0;', '+const value0 = 1;');
+  const b = mkCase(2, 'src/b.ts', { final_files: [{ path: 'src/b.ts', previous_path: null, status: 'modified', patch: changed }] });
+  const s = await runBacktest(baseArgs({ cases: [caseA, b] }));
   const at70 = s.numbers.find((n) => n.threshold === 70)!;
   assert.deepEqual([at70.benefit, at70.benefit_n, at70.focus_n], [0.5, 2, 1]);
+  assert.deepEqual([at70.safety_blocks, at70.safety_blocks_n], [1, 1]);
+  assert.deepEqual([at70.safety_blocks_loose, at70.safety_blocks_loose_n], [0.5, 2]);
 });
 
 test('scores.jsonl reads back into the shape scoreNoise takes', async () => {

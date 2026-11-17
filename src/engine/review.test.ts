@@ -248,6 +248,8 @@ test('a key out of credit fails the review and marks the model', async () => {
   const r = await review(input, d);
   assert.deepEqual([r.status, r.failure, r.dependencies.model], ['failed', { stage: 'model', code: 'no_credit' }, 'error']);
   assert.equal(d.model.requests.length, 1);
+  assert.equal(r.verdict.needsHuman, true);
+  assert.deepEqual(r.scores, []);
 });
 
 test('auth fails the review even when another batch succeeded', async () => {
@@ -257,6 +259,8 @@ test('auth fails the review even when another batch succeeded', async () => {
   }));
   assert.deepEqual([r.status, r.failure], ['failed', { stage: 'model', code: 'auth' }]);
   assert.deepEqual(r.findings, []);
+  assert.equal(r.verdict.needsHuman, true);
+  assert.deepEqual(r.scores, []);
 });
 
 test('a source error is a failed result, not an exception', async () => {
@@ -334,6 +338,8 @@ test('an unexpected error in the model phase is internal_error', async () => {
   const r = await review(input, d);
   assert.deepEqual([r.status, r.failure], ['failed', { stage: 'model', code: 'internal_error' }]);
   assert.deepEqual(d.logged.filter((e) => e.event === 'internal_error'), [{ event: 'internal_error', stage: 'model', name: 'Error' }]);
+  assert.equal(r.verdict.needsHuman, true);
+  assert.deepEqual(r.scores, []);
 });
 
 test('one marker token is used for the whole review', async () => {
@@ -485,7 +491,8 @@ test('files but no batch: the scores come from rules, floors and not_scored', as
   const r = await review(input, deps({ files: [binaryNoPatch] }));
   assert.equal(r.scores.length, 1);
   assert.equal(r.scores[0]!.path, 'logo.bin');
-  assert.equal(r.verdict.needsHuman, r.scores[0]!.finalScore >= 70);
+  assert.equal(r.scores[0]!.fileLevel?.source, 'not_scored');
+  assert.equal(r.verdict.needsHuman, true);
 });
 
 test('files in a failed batch are not scored', async () => {

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { createGithubReadSource } from './read-source.ts';
 import type { PullRequestInfo } from '../types.ts';
 
-interface Call { url: string; method: string; headers: Record<string, string> }
+interface Call { url: string; method: string | undefined; headers: Record<string, string> }
 
 let calls: Call[] = [];
 let responses: Array<Response | Error> = [];
@@ -15,7 +15,7 @@ const queue = (...r: Array<Response | Error>): void => {
 const stubFetch = ((input: string | URL | Request, init?: RequestInit) => {
   const headers: Record<string, string> = {};
   for (const [k, v] of new Headers(init?.headers).entries()) headers[k.toLowerCase()] = v;
-  calls.push({ url: String(input), method: init?.method ?? 'GET', headers });
+  calls.push({ url: String(input), method: init?.method, headers });
   const next = responses.shift();
   if (next === undefined) return Promise.reject(new Error('no response queued'));
   if (next instanceof Error) return Promise.reject(next);

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { createGithubHistorySource } from './history-source.ts';
 import type { RepoRef } from '../types.ts';
 
-interface Call { url: string; method: string }
+interface Call { url: string; method: string | undefined }
 
 let calls: Call[] = [];
 let responses: Array<Response | Error> = [];
@@ -13,7 +13,7 @@ const queue = (...r: Array<Response | Error>): void => {
 };
 
 const stubFetch = ((input: string | URL | Request, init?: RequestInit) => {
-  calls.push({ url: String(input), method: init?.method ?? 'GET' });
+  calls.push({ url: String(input), method: init?.method });
   const next = responses.shift();
   if (next === undefined) return Promise.reject(new Error('no response queued'));
   if (next instanceof Error) return Promise.reject(next);
