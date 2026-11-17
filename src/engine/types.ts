@@ -55,3 +55,15 @@ export interface ReviewResult {
   audit: AuditEntry[];
 }
 export type { ChangedFile, PullRequestInfo, Side, Source };
+export type {
+  Anchor,
+  Block,
+  BlockScore,
+  Category,
+  FileLevelSource,
+  FileScore,
+  ScoreEntry,
+  Span,
+  Verdict,
+} from './score/types.ts';
+export { CATEGORIES } from './score/types.ts';
