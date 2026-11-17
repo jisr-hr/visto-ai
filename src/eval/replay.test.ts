@@ -17,7 +17,7 @@ const config: DeploymentConfig = {
     effort: { default: {}, elevated: {} }, extraBody: {}, extraHeaders: {}, prices: null, timeoutSeconds: 45,
   },
   limits: { inputTokensPerCall: 200_000, batchesPerReview: 6 },
-  repositories: { defaults: { primaryBranches: ['main'] }, overrides: {} },
+  repositories: { defaults: { primaryBranches: ['main'], scoreThreshold: 70 }, overrides: {} },
 };
 
 const mkCase = (pr: number, extra: Partial<EvalCase> = {}): EvalCase => ({
@@ -59,7 +59,7 @@ test('a case becomes a full review at its frozen base and head, with no earlier 
   assert.deepEqual(i.pullRequest.ref, { service: 'github', owner: 'acme', repo: 'shop', number: 7 });
   assert.deepEqual([i.pullRequest.description, i.pullRequest.headBranch, i.pullRequest.baseBranch, i.pullRequest.draft], ['Adds things.', 'topic', 'main', false]);
   assert.deepEqual(i.limits, { inputTokensPerCall: 200_000, batchesPerReview: 6, modelTimeoutSeconds: 45 });
-  assert.deepEqual(i.repoConfig, { primaryBranches: ['main'] });
+  assert.deepEqual(i.repoConfig, { primaryBranches: ['main'], scoreThreshold: 70 });
 });
 
 test('a repo that is not owner/name throws bad_case_repo', () => {

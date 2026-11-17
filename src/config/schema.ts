@@ -43,11 +43,21 @@ const limits = z
   })
   .strict();
 
+const threshold = z.number().int().min(1).max(100);
+
 const repoConfig = z
-  .object({ primaryBranches: z.array(z.string().min(1)).default(['main', 'master']) })
+  .object({
+    primaryBranches: z.array(z.string().min(1)).default(['main', 'master']),
+    score: z.object({ threshold: threshold.default(70) }).strict().prefault({}),
+  })
   .strict();
 
-const repoOverride = z.object({ primaryBranches: z.array(z.string().min(1)).optional() }).strict();
+const repoOverride = z
+  .object({
+    primaryBranches: z.array(z.string().min(1)).optional(),
+    score: z.object({ threshold: threshold.optional() }).strict().optional(),
+  })
+  .strict();
 
 const repositories = z
   .object({

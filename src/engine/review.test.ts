@@ -9,7 +9,7 @@ import type {
 } from './types.ts';
 
 const CONTRACT = 'You review pull requests.';
-const repo: RepoConfig = { primaryBranches: ['main'] };
+const repo: RepoConfig = { primaryBranches: ['main'], scoreThreshold: 70 };
 const prTo = (baseBranch: string): PullRequestInfo => ({
   ref: { service: 'github', owner: 'acme', repo: 'shop', number: 7 },
   title: 'Add things', description: 'Adds things.', author: 'dev-one',

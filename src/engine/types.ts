@@ -13,7 +13,7 @@ export interface ModelResponse { toolName: string | null; toolArguments: string 
 export interface ModelClient { complete(request: ModelRequest): Promise<ModelResponse> }
 
 export interface Limits { inputTokensPerCall: number; batchesPerReview: number; modelTimeoutSeconds: number }
-export interface RepoConfig { primaryBranches: string[] }
+export interface RepoConfig { primaryBranches: string[]; scoreThreshold: number }
 
 export interface ReviewInput {
   pullRequest: PullRequestInfo;

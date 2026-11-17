@@ -54,10 +54,22 @@ export function parseConfig(yamlText: string, env: Record<string, string | undef
   if (apiKey === undefined || apiKey === '') {
     throw new ConfigError([`model.apiKey: environment variable ${varName} is not set`]);
   }
+  const { defaults, overrides } = raw.repositories;
   return {
     model: { ...raw.model, apiKey },
     limits: raw.limits,
-    repositories: raw.repositories,
+    repositories: {
+      defaults: { primaryBranches: defaults.primaryBranches, scoreThreshold: defaults.score.threshold },
+      overrides: Object.fromEntries(
+        Object.entries(overrides).map(([name, o]) => [
+          name,
+          {
+            ...(o.primaryBranches === undefined ? {} : { primaryBranches: o.primaryBranches }),
+            ...(o.score?.threshold === undefined ? {} : { scoreThreshold: o.score.threshold }),
+          },
+        ]),
+      ),
+    },
   };
 }
 
