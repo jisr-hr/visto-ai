@@ -131,6 +131,11 @@ function scoreNoiseCommand(argv: string[], out: (line: string) => void): void {
   const first = readRun(parsed.positional[0]!);
   const second = readRun(parsed.positional[1]!);
   if (first.summary.history_sha256 !== second.summary.history_sha256) throw new Error('different_history_files');
+  if (first.summary.contract_sha256 !== second.summary.contract_sha256) throw new Error('different_contracts');
+  const models = (s: BacktestSummary): string => (Array.isArray(s.models) ? s.models.join(', ') : '');
+  if (models(first.summary) !== models(second.summary)) {
+    out(`warning: the runs were answered by different models: ${models(first.summary)}; ${models(second.summary)}`);
+  }
   const rows = scoreNoise(first.scores, second.scores, THRESHOLDS);
   const share = (value: number | null): string => (value === null ? EM_DASH : String(value));
   out('| threshold | blocks_flipped | blocks_n | prs_flipped | prs_n |');

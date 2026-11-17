@@ -1,6 +1,7 @@
 // Replays the score on frozen pull requests and writes the run's results. It builds no clients: the
 // caller hands in `deps`. Everything written here holds paths and model-written text, so it is as
 // private as the history file.
+import { createHash } from 'node:crypto';
 import { appendFileSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { repoConfigFor } from '../../config/load.ts';
@@ -20,6 +21,8 @@ export interface BacktestSummary {
   label: string; history_file: string; history_sha256: string; case_count: number; max_cases: number;
   stopped_reason: 'max_cost' | null; cases_not_started: number; cases: number; failed_cases: number;
   reviewed_by_person: number; total_cost: number;
+  models: string[];        // the models that answered, distinct, in first-seen order
+  contract_sha256: string; // sha256 of the contract text the run used
   comments: Labels['comments'];
   final_missing: number;
   numbers: Numbers[]; // one per THRESHOLDS entry, then 'own'
@@ -34,7 +37,7 @@ interface ScoresLine {
   key: string; threshold: number; status: 'ok' | 'failed'; scores: FileScore[];
   labels: { blocks: Record<string, Label>; files: Record<string, Label>; comments: Labels['comments']; final_missing: number };
 }
-interface Outcome { total_cost: number; row: ResultRow; scores: CaseScores; reviewedByPerson: boolean }
+interface Outcome { total_cost: number; row: ResultRow; scores: CaseScores; reviewedByPerson: boolean; models: string[] }
 
 const SHORT_CODE = /^[a-z][a-z0-9_]*$/;
 const EM_DASH = '\u2014';
@@ -80,6 +83,7 @@ async function backtestCase(c: HistoryCase, config: DeploymentConfig, deps: Revi
     return {
       total_cost: result.usage.cost,
       reviewedByPerson: c.reviewed_by_person,
+      models: result.models,
       row: {
         key, status: result.status, failure_stage: result.failure?.stage ?? null, failure_code: result.failure?.code ?? null,
         cost: result.usage.cost, tokens: result.usage.inputTokens + result.usage.outputTokens, duration_ms: Date.now() - started,
@@ -93,6 +97,7 @@ async function backtestCase(c: HistoryCase, config: DeploymentConfig, deps: Revi
     return {
       total_cost: 0,
       reviewedByPerson: c.reviewed_by_person,
+      models: [],
       row: {
         key, status: 'failed', failure_stage: 'eval', failure_code: code, cost: 0, tokens: 0, duration_ms: Date.now() - started,
         calls: 0, verdict: null, blocks: 0, blocks_unscored: 0, files_flagged_whole: 0,
@@ -194,6 +199,8 @@ export async function runBacktest(args: {
     cases: done.length, failed_cases: done.filter((o) => o.row.status === 'failed').length,
     reviewed_by_person: done.filter((o) => o.reviewedByPerson).length,
     total_cost: Number(done.reduce((sum, o) => sum + o.total_cost, 0).toFixed(6)),
+    models: [...new Set(done.flatMap((o) => o.models))],
+    contract_sha256: createHash('sha256').update(args.deps.contract).digest('hex'),
     comments,
     final_missing: finalMissing,
     numbers: [...THRESHOLDS, 'own' as const].map((t) => measure(scored, t)),

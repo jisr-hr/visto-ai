@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -221,4 +222,10 @@ test('files_flagged_whole counts only files flagged as a whole at the case thres
   await runBacktest(args);
   const [row] = lines(join(args.outDir, 'results.jsonl')) as { verdict: { highest: number }; files_flagged_whole: number }[];
   assert.deepEqual([row!.verdict.highest, row!.files_flagged_whole], [30, 0]);
+});
+
+test('the summary records the models that answered and the contract the run used', async () => {
+  const s = await runBacktest(baseArgs());
+  assert.deepEqual(s.models, ['m']);
+  assert.equal(s.contract_sha256, createHash('sha256').update('You review pull requests.').digest('hex'));
 });

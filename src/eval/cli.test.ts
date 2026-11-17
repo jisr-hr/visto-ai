@@ -110,10 +110,10 @@ test('backtest usage errors exit 2 with one exact line', async () => {
   }
 });
 
-function runDir(name: string, sha: string, scores: string): string {
+function runDir(name: string, sha: string, scores: string, extra: { contract_sha256?: string; models?: string[] } = {}): string {
   const d = join(dir, name);
   mkdirSync(d);
-  writeFileSync(join(d, 'summary.json'), JSON.stringify({ label: name, history_sha256: sha }));
+  writeFileSync(join(d, 'summary.json'), JSON.stringify({ label: name, history_sha256: sha, contract_sha256: 'd'.repeat(64), models: ['m'], ...extra }));
   writeFileSync(join(d, 'scores.jsonl'), scores);
   return d;
 }
@@ -139,6 +139,20 @@ test('score-noise prints one row per threshold, with a dash where nothing was co
   assert.equal(lines.length, 6);
   assert.equal(lines[2], '| 20 | \u2014 | 0 | \u2014 | 0 |');
   assert.match(lines[5]!, /^\| 90 \|/);
+});
+
+test('score-noise on two runs made with different contracts refuses', async () => {
+  const [code, lines] = await run(['score-noise', runDir('k1', 'c'.repeat(64), ''), runDir('k2', 'c'.repeat(64), '', { contract_sha256: 'e'.repeat(64) })]);
+  assert.notEqual(code, 0);
+  assert.deepEqual(lines, ['different_contracts']);
+});
+
+test('score-noise warns in one line when the runs were answered by different models', async () => {
+  const [code, lines] = await run(['score-noise', runDir('w1', 'c'.repeat(64), '', { models: ['m'] }), runDir('w2', 'c'.repeat(64), '', { models: ['m', 'fallback-m'] })]);
+  assert.equal(code, 0);
+  assert.equal(lines.length, 7);
+  assert.equal(lines[0], 'warning: the runs were answered by different models: m; m, fallback-m');
+  assert.match(lines[1]!, /^\| threshold \|/);
 });
 
 test('the usage line of an unknown command names backtest and score-noise', async () => {
