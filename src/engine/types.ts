@@ -1,5 +1,6 @@
 // src/engine/types.ts
 import type { ChangedFile, PullRequestInfo, Side, Source } from '../forge/types.ts';
+import type { FileScore, Verdict } from './score/types.ts';
 
 export type Severity = 'blocker' | 'major' | 'minor';
 export interface AuditEntry { stage: string; action: string; subject: string; reason: string }
@@ -53,6 +54,8 @@ export interface ReviewResult {
   providers: string[];        // upstream providers that answered, distinct, in first-seen order
   dependencies: { model: 'ok' | 'error' };
   audit: AuditEntry[];
+  scores: FileScore[];        // one per changed file; empty when the review failed
+  verdict: Verdict;
 }
 export type { ChangedFile, PullRequestInfo, Side, Source };
 export type {

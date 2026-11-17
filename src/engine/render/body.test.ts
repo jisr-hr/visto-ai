@@ -15,7 +15,8 @@ const beyond = (over: Partial<RawFinding> = {}): RawFinding => ({
 });
 const result = (over: Partial<ReviewResult> = {}): ReviewResult => ({
   status: 'ok', failure: null, mode: 'full', overview: 'Changes a.ts.', findings: [], unplaced: [], beyondDiff: [],
-  coverage: { reviewed: [], notReviewed: [] }, usage, models: [], providers: [], dependencies: { model: 'ok' }, audit: [], ...over,
+  coverage: { reviewed: [], notReviewed: [] }, usage, models: [], providers: [], dependencies: { model: 'ok' }, audit: [],
+  scores: [], verdict: { threshold: 70, needsHuman: false, highest: 0 }, ...over,
 });
 const auto = { trigger: 'automatic', requestedBy: null } as const;
 const notReviewed = (n: number): NotReviewed[] =>

@@ -403,3 +403,103 @@ test('a logger that always throws changes nothing in the result', async () => {
   assert.equal(r.usage.calls, 2);
   assert.deepEqual(r, normal);
 });
+
+// Scores and the verdict.
+const scored = (path: string, score: number): unknown => ({
+  overview: `${path} reviewed.`, findings: [],
+  files: [{ path, change_summary: 'Changes the retry delay.', blocks: [{ id: 'B1', score, category: 'fix', reason: 'Changes the retry delay.' }] }],
+});
+const withRepoFile = (d: ReturnType<typeof deps>, text: string | Error): void => {
+  d.source.getDefaultBranchFile = () => (text instanceof Error ? Promise.reject(text) : Promise.resolve(text));
+};
+
+test('a review returns scores and a verdict', async () => {
+  const r = await review(input, deps({ files: [fileA], answers: [scored('src/a.ts', 45)] }));
+  assert.equal(r.scores.length, 1);
+  assert.deepEqual(r.verdict, { threshold: 70, needsHuman: false, highest: 45 });
+});
+
+test('the threshold comes from the repository config', async () => {
+  const r = await review({ ...input, repoConfig: { ...repo, scoreThreshold: 40 } }, deps({ files: [fileA], answers: [scored('src/a.ts', 45)] }));
+  assert.deepEqual(r.verdict, { threshold: 40, needsHuman: true, highest: 45 });
+});
+
+test('a model that returns no files sends the pull request to a person', async () => {
+  const r = await review(input, deps({ files: [fileA], answers: [{ overview: 'src/a.ts is fine.', findings: [], files: [] }] }));
+  assert.deepEqual(r.verdict, { threshold: 70, needsHuman: true, highest: 100 });
+  assert.equal(r.scores[0]!.fileLevel?.source, 'not_scored');
+});
+
+test('a team floor is read from the default branch', async () => {
+  const d = deps({ files: [fileA], answers: [scored('src/a.ts', 10)] });
+  withRepoFile(d, 'human_review:\n  - src/\n');
+  const r = await review(input, d);
+  assert.deepEqual(r.scores[0]!.fileLevel, { score: 100, source: 'team_floor' });
+  assert.equal(r.verdict.needsHuman, true);
+});
+
+test('an unusable repository file floors every file', async () => {
+  const d = deps({ files: [fileA], answers: [scored('src/a.ts', 10)] });
+  withRepoFile(d, '- a\n');
+  const r = await review(input, d);
+  assert.equal(r.scores[0]!.fileLevel?.source, 'team_file_invalid');
+  assert.equal(r.verdict.needsHuman, true);
+});
+
+test('a failed read of the repository file fails the review at the context stage', async () => {
+  const d = deps({ files: [fileA], answers: [scored('src/a.ts', 10)] });
+  withRepoFile(d, new Error('github_500'));
+  const r = await review(input, d);
+  assert.deepEqual([r.status, r.failure, r.scores], ['failed', { stage: 'context', code: 'github_500' }, []]);
+  assert.deepEqual(r.verdict, { threshold: 70, needsHuman: true, highest: 100 });
+  assert.equal(d.model.requests.length, 0);
+});
+
+test('the repository file is not read when there are no files', async () => {
+  const d = deps({ files: [] });
+  let reads = 0;
+  d.source.getDefaultBranchFile = () => { reads += 1; return Promise.resolve(null); };
+  await review(input, d);
+  assert.equal(reads, 0);
+});
+
+test('a failed review needs a person', async () => {
+  const down = new ProviderError('provider', 'p', 502, null);
+  const r = await review({ ...input, repoConfig: { ...repo, scoreThreshold: 33 } }, deps({ files: [fileA], answers: [down, down] }));
+  assert.equal(r.status, 'failed');
+  assert.deepEqual(r.scores, []);
+  assert.deepEqual(r.verdict, { threshold: 33, needsHuman: true, highest: 100 });
+});
+
+test('a budget that is too small needs a person', async () => {
+  const r = await review({ ...input, limits: { ...input.limits, inputTokensPerCall: 10 } }, deps({ files: [fileA] }));
+  assert.deepEqual([r.scores, r.verdict], [[], { threshold: 70, needsHuman: true, highest: 100 }]);
+});
+
+test('no files: nothing to judge', async () => {
+  const r = await review(input, deps({ files: [] }));
+  assert.deepEqual([r.scores, r.verdict], [[], { threshold: 70, needsHuman: false, highest: 0 }]);
+});
+
+test('files but no batch: the scores come from rules, floors and not_scored', async () => {
+  const r = await review(input, deps({ files: [binaryNoPatch] }));
+  assert.equal(r.scores.length, 1);
+  assert.equal(r.scores[0]!.path, 'logo.bin');
+  assert.equal(r.verdict.needsHuman, r.scores[0]!.finalScore >= 70);
+});
+
+test('files in a failed batch are not scored', async () => {
+  const r = await review(smallLimits, deps({
+    files: [fileA, fileB], answerFor: { 'src/a.ts': scored('src/a.ts', 10), 'src/b.ts': ungrounded },
+  }));
+  const byPath = new Map(r.scores.map((s) => [s.path, s]));
+  assert.equal(byPath.get('src/b.ts')!.fileLevel?.source, 'not_scored');
+  assert.equal(byPath.get('src/a.ts')!.fileLevel, null);
+  assert.deepEqual(r.verdict, { threshold: 70, needsHuman: true, highest: 100 });
+});
+
+test('the score audit entries follow the findings audit entries', async () => {
+  const bad = { overview: 'src/a.ts has a problem.', findings: [], files: [{ path: 'src/zzz.ts', change_summary: 'x', blocks: [] }] };
+  const r = await review(input, deps({ files: [fileA], answers: [bad] }));
+  assert.equal(r.audit.at(-1)!.action, 'score_path_not_in_pull_request');
+});
