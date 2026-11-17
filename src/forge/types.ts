@@ -22,3 +22,28 @@ export interface Source {
   /** The file's text on the repository's default branch; null when it is absent or is not text. */
   getDefaultBranchFile(pr: PullRequestInfo, path: string): Promise<string | null>;
 }
+
+export type Association = 'owner' | 'member' | 'collaborator' | 'none';
+export interface RepoRef { owner: string; repo: string }
+export interface MergedPullRequest {
+  number: number; title: string; description: string; author: string; authorIsBot: boolean;
+  baseBranch: string; headBranch: string; baseSha: string; headSha: string; mergedAt: string;
+}
+export interface HumanReview {
+  id: string; author: string; authorIsBot: boolean; association: Association;
+  state: 'approved' | 'changes_requested' | 'commented' | 'dismissed'; commit: string | null; at: string; body: string;
+}
+export interface HumanInlineComment {
+  id: string; author: string; authorIsBot: boolean; association: Association; at: string;
+  commit: string; path: string; side: Side; line: number | null; startLine: number | null; fileLevel: boolean; replyTo: string | null; body: string;
+}
+export interface GeneralComment { id: string; author: string; authorIsBot: boolean; association: Association; at: string; body: string }
+export interface Comparison { mergeBase: string; files: ChangedFile[] }
+export interface HistorySource {
+  listMergedPullRequests(repo: RepoRef, window: { since: string; until: string }, limit: number): Promise<MergedPullRequest[]>;
+  listReviews(repo: RepoRef, number: number): Promise<HumanReview[]>;
+  listInlineComments(repo: RepoRef, number: number): Promise<HumanInlineComment[]>;
+  listGeneralComments(repo: RepoRef, number: number): Promise<GeneralComment[]>;
+  /** null when either commit can no longer be read */
+  compare(repo: RepoRef, base: string, head: string): Promise<Comparison | null>;
+}

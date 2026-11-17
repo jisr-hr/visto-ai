@@ -1,61 +1,17 @@
-import type { ChangedFile, FileStatus, PullRequestInfo, Source } from '../types.ts';
+import type { PullRequestInfo, Source } from '../types.ts';
+import { changedFilesOf, createGithubHttp, jsonOf, ReadOnlyViolation } from './http.ts';
 
-export class ReadOnlyViolation extends Error {}
+export { ReadOnlyViolation };
 
-interface CompareFile {
-  filename: string;
-  previous_filename?: string;
-  status?: string;
-  additions?: number;
-  deletions?: number;
-  patch?: string;
-}
-
-const MAX_LISTED_FILES = 300;
 const MAX_CONTENT_CHARS = 2_000_000;
 const BINARY_SCAN_BYTES = 8000;
 
-const STATUS = new Map<string, FileStatus>([['added', 'added'], ['removed', 'removed'], ['renamed', 'renamed']]);
-
-const isObject = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
-
 const encodePath = (path: string): string => path.split('/').map(encodeURIComponent).join('/');
 
-const NAME = /^[A-Za-z0-9_.-]+$/;
-const isName = (name: string): boolean => NAME.test(name) && name !== '.' && name !== '..';
-
 export function createGithubReadSource(opts: { token: string; fetch: typeof fetch; apiBase?: string }): Source {
-  const apiBase = (opts.apiBase ?? 'https://api.github.com').replace(/\/+$/, '');
-
-  // The only place a request is sent. Anything but GET is refused.
-  // A 5xx status or a network failure is retried once, immediately.
-  async function send(method: string, url: string, accept: string): Promise<Response> {
-    if (method !== 'GET') throw new ReadOnlyViolation('read_only');
-    for (let attempt = 0; ; attempt += 1) {
-      const last = attempt === 1;
-      let res: Response;
-      try {
-        res = await opts.fetch(url, {
-          method,
-          headers: {
-            Authorization: `Bearer ${opts.token}`,
-            'X-GitHub-Api-Version': '2022-11-28',
-            'User-Agent': 'visto-ai',
-            Accept: accept,
-          },
-        });
-      } catch {
-        if (last) throw new Error('github_network');
-        continue;
-      }
-      if (res.status < 500 || last) return res;
-    }
-  }
-
-  const repoUrl = (pr: PullRequestInfo): string => {
-    if (!isName(pr.ref.owner) || !isName(pr.ref.repo)) throw new Error('github_bad_path');
-    return `${apiBase}/repos/${encodeURIComponent(pr.ref.owner)}/${encodeURIComponent(pr.ref.repo)}`;
-  };
+  const http = createGithubHttp(opts);
+  const { send } = http;
+  const repoUrl = (pr: PullRequestInfo): string => http.repoUrl(pr.ref);
 
   async function readText(pr: PullRequestInfo, path: string, query: string): Promise<string | null> {
     if (path.split('/').some((seg) => seg === '' || seg === '.' || seg === '..')) throw new Error('github_bad_path');
@@ -73,24 +29,7 @@ export function createGithubReadSource(opts: { token: string; fetch: typeof fetc
       const url = `${repoUrl(pr)}/compare/${encodeURIComponent(pr.baseSha)}...${encodeURIComponent(pr.headSha)}?per_page=1`;
       const res = await send('GET', url, 'application/vnd.github+json');
       if (!res.ok) throw new Error(`github_${res.status}`);
-      let body: unknown;
-      try {
-        body = JSON.parse(await res.text());
-      } catch {
-        throw new Error('github_bad_response');
-      }
-      if (!isObject(body) || !Array.isArray(body.files)) throw new Error('github_bad_response');
-      const files: unknown[] = body.files;
-      if (!files.every((f) => isObject(f) && typeof f.filename === 'string')) throw new Error('github_bad_response');
-      if (files.length >= MAX_LISTED_FILES) throw new Error('too_many_files');
-      return (files as CompareFile[]).map((f): ChangedFile => ({
-        path: f.filename,
-        previousPath: f.previous_filename ?? null,
-        status: STATUS.get(f.status ?? '') ?? 'modified',
-        additions: f.additions ?? 0,
-        deletions: f.deletions ?? 0,
-        patch: f.patch ?? null,
-      }));
+      return changedFilesOf(await jsonOf(res));
     },
 
     async getFileContent(pr, path, sha) {
