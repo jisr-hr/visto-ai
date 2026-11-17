@@ -27,8 +27,8 @@ function stubModel(...steps: Array<ModelResponse | Error>): ModelClient & { requ
 }
 
 const finding = { path: 'src/a.ts', side: 'RIGHT', line: 3, severity: 'minor', body: 'Off by one.', quote: '', beyond_diff: false };
-const valid = { overview: 'Looks fine.', findings: [finding] };
-const ungrounded = { overview: 'A long article about city gardens and soil.', findings: [] };
+const valid = { overview: 'Looks fine.', findings: [finding], files: [] };
+const ungrounded = { overview: 'A long article about city gardens and soil.', findings: [], files: [] };
 const UNGROUNDED = 'ungrounded: the overview must name at least one changed file by its path';
 const messages: ChatMessage[] = [{ role: 'system', content: 's' }, { role: 'user', content: 'u' }];
 const args = { messages, effort: 'elevated' as const, timeoutMs: 1234, prPaths: ['src/a.ts'] };
@@ -80,7 +80,7 @@ test('a rejected answer is cut to 2000 characters, the reason to 200', async () 
   const model = stubModel(prose('x'.repeat(5000)), toolCall(valid));
   await callBatch(args, model);
   assert.equal(model.requests[1]!.messages.at(-2)!.content.length, 2000);
-  const long = { overview: 'o', findings: [], ['k'.repeat(500)]: 1 };
+  const long = { overview: 'o', findings: [], files: [], ['k'.repeat(500)]: 1 };
   const second = stubModel(toolCall(long), toolCall(valid));
   await callBatch(args, second);
   const reply = second.requests[1]!.messages.at(-1)!.content;
@@ -90,7 +90,7 @@ test('a rejected answer is cut to 2000 characters, the reason to 200', async () 
 });
 
 test('the retry audit entry carries the cut reason', async () => {
-  const long = { overview: 'o', findings: [], ['k'.repeat(500)]: 1 };
+  const long = { overview: 'o', findings: [], files: [], ['k'.repeat(500)]: 1 };
   const r = await callBatch(args, stubModel(toolCall(long), toolCall(valid)));
   assert.equal(r.audit[0]!.action, 'retry');
   assert.equal(r.audit[0]!.reason.length, 200);
@@ -106,13 +106,13 @@ test('the models and providers that answered are listed in call order', async ()
 });
 
 test('a finding path is normalised before it grounds an answer', async () => {
-  const onPrefixed = { overview: 'A short summary.', findings: [{ ...finding, path: 'a/src/a.ts' }] };
+  const onPrefixed = { overview: 'A short summary.', findings: [{ ...finding, path: 'a/src/a.ts' }], files: [] };
   const r = await callBatch(args, stubModel(toolCall(onPrefixed)));
   assert.ok(r.ok);
 });
 
 test('only the files of the batch ground an answer', async () => {
-  const other = { overview: 'The change to src/b.ts looks right.', findings: [] };
+  const other = { overview: 'The change to src/b.ts looks right.', findings: [], files: [] };
   const r = await callBatch({ ...args, prPaths: ['src/a.ts'] }, stubModel(toolCall(other), toolCall(other)));
   assert.ok(!r.ok && r.code === 'invalid_output' && r.reason === UNGROUNDED);
 });
@@ -180,7 +180,7 @@ test('an error that is not a provider error is not caught', async () => {
 });
 
 test('a clean pull request answer is retried until the overview names a file', async () => {
-  const model = stubModel(toolCall({ overview: 'Looks good to me.', findings: [] }), toolCall({ overview: 'Looks good; src/cart/total.ts is fine.', findings: [] }));
+  const model = stubModel(toolCall({ overview: 'Looks good to me.', findings: [], files: [] }), toolCall({ overview: 'Looks good; src/cart/total.ts is fine.', findings: [], files: [] }));
   const r = await callBatch({ ...args, prPaths: ['src/cart/total.ts'] }, model);
   assert.ok(r.ok);
   assert.equal(model.calls, 2);

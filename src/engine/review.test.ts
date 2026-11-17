@@ -35,9 +35,10 @@ const binaryNoPatch: ChangedFile = { path: 'logo.bin', previousPath: null, statu
 const answerOnA = {
   overview: 'src/a.ts has a problem.',
   findings: [{ path: 'src/a.ts', side: 'RIGHT', line: 2, severity: 'major', body: 'Wrong value.', quote: '', beyond_diff: false }],
+  files: [],
 };
-const answerOnB = { overview: 'src/b.ts is fine.', findings: [] };
-const ungrounded = { overview: 'A long article about city gardens.', findings: [] };
+const answerOnB = { overview: 'src/b.ts is fine.', findings: [], files: [] };
+const ungrounded = { overview: 'A long article about city gardens.', findings: [], files: [] };
 
 const usage = (): Usage => ({ calls: 1, inputTokens: 100, outputTokens: 10, cachedTokens: 5, cost: 0.5 });
 const respond = (answer: unknown): ModelResponse =>
@@ -150,7 +151,7 @@ test('effort', () => {
 
 test('never more than two batches in flight', async () => {
   const files = ['a', 'b', 'c', 'd', 'e'].map((n) => fileAt(`src/${n}.ts`));
-  const answerFor = Object.fromEntries(files.map((f) => [f.path, { overview: `${f.path} ok`, findings: [] }]));
+  const answerFor = Object.fromEntries(files.map((f) => [f.path, { overview: `${f.path} ok`, findings: [], files: [] }]));
   const d = deps({ files, answerFor, delayMs: 10 });
   const r = await review(smallLimits, d);
   assert.equal(d.model.requests.length, 5);
@@ -301,7 +302,7 @@ test('a failed probe for a paired test does not fail the review', async () => {
 });
 
 test('an answer is grounded only by the files of its own batch', async () => {
-  const namesOther = { overview: 'The change in src/a.ts is fine.', findings: [] };
+  const namesOther = { overview: 'The change in src/a.ts is fine.', findings: [], files: [] };
   const d = deps({ files: [fileA, fileB], answerFor: { 'src/a.ts': answerOnA, 'src/b.ts': namesOther } });
   const r = await review(smallLimits, d);
   assert.deepEqual(r.coverage.reviewed, ['src/a.ts']);
@@ -310,7 +311,7 @@ test('an answer is grounded only by the files of its own batch', async () => {
 });
 
 test('a finding on a file of another batch is dropped', async () => {
-  const crossing = { overview: 'src/b.ts is fine.', findings: [{ ...answerOnA.findings[0]!, severity: 'blocker' }] };
+  const crossing = { overview: 'src/b.ts is fine.', findings: [{ ...answerOnA.findings[0]!, severity: 'blocker' }], files: [] };
   const r = await review(smallLimits, deps({ files: [fileA, fileB], answerFor: { 'src/a.ts': answerOnB, 'src/b.ts': crossing } }));
   assert.deepEqual(r.findings, []);
   assert.ok(r.audit.some((e) => e.action === 'dropped' && e.subject === 'src/a.ts' && e.reason === 'path_not_in_batch'));
@@ -366,7 +367,7 @@ test('a retry inside the model call shows in usage and audit', async () => {
 });
 
 const fourFiles = ['a', 'b', 'c', 'd'].map((n) => fileAt(`src/${n}.ts`));
-const okFor = (f: ChangedFile): { overview: string; findings: never[] } => ({ overview: `${f.path} ok`, findings: [] });
+const okFor = (f: ChangedFile): { overview: string; findings: never[]; files: never[] } => ({ overview: `${f.path} ok`, findings: [], files: [] });
 
 test('an unexpected error stops the pool: nothing runs after review returns', async () => {
   const answerFor: Record<string, unknown> = Object.fromEntries(fourFiles.map((f) => [f.path, okFor(f)]));

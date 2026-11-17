@@ -18,7 +18,7 @@ const ctxWith = (path: string, r: Ranges | null): FileContext => ({
 const ctxs = [ctxWith('src/a.ts', ranges), ctxWith('src/b.ts', ranges), ctxWith('img/logo.bin', null)];
 const allFiles = ctxs.map((c) => c.file.path);
 const answerIn = (files: string[], overview: string, ...findings: RawFinding[]): { value: SubmitReviewArgs; files: string[] } =>
-  ({ value: { overview, findings }, files });
+  ({ value: { overview, findings, files: [] }, files });
 const answer = (overview: string, ...findings: RawFinding[]): { value: SubmitReviewArgs; files: string[] } => answerIn(allFiles, overview, ...findings);
 
 test('prefixes normalise; unknown paths are dropped with an audit entry', () => {

@@ -39,7 +39,7 @@ function stubDeps(findings: unknown[] = [finding(2)], overrides: Partial<ReviewD
   const model: ModelClient = {
     complete: (): Promise<ModelResponse> => Promise.resolve({
       toolName: SUBMIT_REVIEW,
-      toolArguments: JSON.stringify({ overview: 'src/a.ts has a problem.', findings }),
+      toolArguments: JSON.stringify({ overview: 'src/a.ts has a problem.', findings, files: [] }),
       text: null, model: 'm', provider: null, usage: { calls: 1, inputTokens: 100, outputTokens: 10, cachedTokens: 0, cost: 0.0123 },
     }),
   };
@@ -81,7 +81,7 @@ test('a case result explains the run: calls, cached tokens, models, unplaced and
   const model: ModelClient = {
     complete: (): Promise<ModelResponse> => Promise.resolve({
       toolName: SUBMIT_REVIEW,
-      toolArguments: JSON.stringify({ overview: 'src/a.ts has a problem.', findings: [finding(2), finding(500)] }),
+      toolArguments: JSON.stringify({ overview: 'src/a.ts has a problem.', findings: [finding(2), finding(500)], files: [] }),
       text: null, model: 'vendor/model-a', provider: 'Up One', usage: { calls: 1, inputTokens: 100, outputTokens: 10, cachedTokens: 40, cost: 0.01 },
     }),
   };
