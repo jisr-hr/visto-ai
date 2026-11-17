@@ -19,3 +19,6 @@ test('a RIGHT span of a renamed file links the new path at the head', () => {
 test('a LEFT span without a previous path uses the path, and each segment is encoded', () => {
   assert.equal(githubLineUrl(pr, { path: 'a#b/c?d.ts', previousPath: null }, { side: 'LEFT', first: 1, last: 2 }), 'https://github.com/acme/shop/blob/base000/a%23b/c%3Fd.ts#L1-L2');
 });
+test('parentheses in a path are encoded so the markdown link holds', () => {
+  assert.equal(githubLineUrl(pr, { path: 'src/a(1).ts', previousPath: null }, { side: 'RIGHT', first: 1, last: 1 }), 'https://github.com/acme/shop/blob/head111/src/a%281%29.ts#L1');
+});

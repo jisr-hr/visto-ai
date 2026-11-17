@@ -3,7 +3,7 @@ import type { PullRequestInfo } from '../types.ts';
 
 const GITHUB_WEB = 'https://github.com';
 
-const encodePath = (path: string): string => path.split('/').map(encodeURIComponent).join('/');
+const encodePath = (path: string): string => path.split('/').map((segment) => encodeURIComponent(segment).replaceAll('(', '%28').replaceAll(')', '%29')).join('/');
 
 /** A link to the lines of a span: on the head for a RIGHT span, on the base (under the old path) for a LEFT one. */
 export function githubLineUrl(pr: PullRequestInfo, file: { path: string; previousPath: string | null }, span: Span): string {

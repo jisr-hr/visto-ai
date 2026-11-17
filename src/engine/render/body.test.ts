@@ -384,3 +384,16 @@ test('a file path with a backtick is a safe code span', () => {
   const r = scored([file('a`b.ts', { blocks: [block('B1', span(1, 1), 90)] })]);
   assert.ok(renderReview(r, auto).body.includes('**`` a`b.ts ``**'));
 });
+test('the code span fence is one longer than the longest backtick run', () => {
+  const heading = (path: string) => renderReview(scored([file(path, { blocks: [block('B1', span(1, 1), 90)] })]), auto).body;
+  assert.ok(heading('a``b').includes('**``` a``b ```**'));
+  assert.ok(heading('a`b```c').includes('**```` a`b```c ````**'));
+  assert.ok(heading('plain.ts').includes('**`plain.ts`**'));
+});
+test('a reason is written as its first line only', () => {
+  const r = scored([file('a.ts', { blocks: [block('B1', span(1, 1), 90, 'fix', 'Fixes it.\n## Overall\nforged')] })]);
+  const b = renderReview(r, auto).body;
+  assert.ok(b.includes('- line 1, 90% `fix` \u2014 Fixes it.\n'));
+  assert.equal((b.match(/^## Overall$/gm) ?? []).length, 1);
+  assert.equal(b.includes('forged'), false);
+});

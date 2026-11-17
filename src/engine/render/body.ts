@@ -44,7 +44,10 @@ function firstLine(body: string): string {
 // A path shown in a bullet stays on its line: newlines and tabs become spaces first.
 function codeSpan(raw: string): string {
   const text = raw.replace(/[\r\n\t]/g, ' ');
-  return text.includes('`') ? `\`\` ${text} \`\`` : `\`${text}\``;
+  if (!text.includes('`')) return `\`${text}\``;
+  const longest = Math.max(...(text.match(/`+/g) ?? []).map((run) => run.length));
+  const fence = '`'.repeat(longest + 1);
+  return `${fence} ${text} ${fence}`;
 }
 
 // An HTML comment opener could hide the rest of the text: show it instead.
@@ -75,7 +78,8 @@ function commentBody(f: Finding): string {
 
 // The part after the score: the category in a code span, then the dash and the reason when there is one.
 function scoreTail(entry: ScoreEntry): string {
-  return `${codeSpan(entry.category)}${entry.reason === '' ? '' : ` \u2014 ${entry.reason}`}`;
+  const reason = firstLine(entry.reason);
+  return `${codeSpan(entry.category)}${reason === '' ? '' : ` \u2014 ${reason}`}`;
 }
 
 function wholeFileLine(file: FileScore, level: NonNullable<FileScore['fileLevel']>): string {
