@@ -521,3 +521,11 @@ test('a service patch with a direction override on an added line needs a person'
   assert.deepEqual(r.scores[0]!.fileLevel, { score: 100, source: 'hidden_characters' });
   assert.equal(r.verdict.needsHuman, true);
 });
+
+test('a repository file that is not text floors every file', async () => {
+  const d = deps({ files: [fileA], answers: [scored('src/a.ts', 10)] });
+  withRepoFile(d, 'human_review:\n  - docs/\n# \u0000\n');
+  const r = await review(input, d);
+  assert.deepEqual(r.scores[0]!.fileLevel, { score: 100, source: 'team_file_invalid' });
+  assert.equal(r.verdict.needsHuman, true);
+});

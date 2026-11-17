@@ -14,6 +14,8 @@ const unusable = (invalid: string): TeamFloors => ({ patterns: [], invalid });
 export function parseRepoFile(text: string | null): TeamFloors {
   if (text === null) return { patterns: [], invalid: null };
   if (text.length > MAX_FILE_CHARS) return unusable('too_large');
+  // A NUL byte means the file is not text, such as one saved as UTF-16.
+  if (text.includes('\u0000')) return unusable('not_text');
   let doc: unknown;
   try {
     doc = parse(text);

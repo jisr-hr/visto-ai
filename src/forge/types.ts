@@ -19,7 +19,7 @@ export interface Source {
   listFiles(pr: PullRequestInfo): Promise<ChangedFile[]>;
   /** null when the file is absent at that commit or is not text */
   getFileContent(pr: PullRequestInfo, path: string, sha: string): Promise<string | null>;
-  /** The file's text on the repository's default branch; null when it is absent or is not text. */
+  /** The file's text on the repository's default branch, whatever its bytes; null only when it is absent. */
   getDefaultBranchFile(pr: PullRequestInfo, path: string): Promise<string | null>;
 }
 

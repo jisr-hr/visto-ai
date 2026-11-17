@@ -265,3 +265,14 @@ test('a default branch file read retries a 500 once, then reports it', async () 
   await assert.rejects(source().getDefaultBranchFile(pr, '.visto-ai.yml'), (e: Error) => e.message === 'github_500');
   assert.equal(calls.length, 2);
 });
+
+test('a default branch file with a NUL byte is returned as text, for the parser to refuse', async () => {
+  queue(new Response(new Uint8Array([0x68, 0x00, 0x69, 0x00]), { status: 200 }));
+  assert.equal(await source().getDefaultBranchFile(pr, '.visto-ai.yml'), 'h\u0000i\u0000');
+});
+
+test('an oversized default branch file is returned cut to the size limit', async () => {
+  queue(new Response('x'.repeat(2_000_005), { status: 200 }));
+  const text = await source().getDefaultBranchFile(pr, '.visto-ai.yml');
+  assert.equal(text?.length, 2_000_000);
+});

@@ -19,6 +19,8 @@ test('a file that cannot be used says why', () => {
   assert.equal(parseRepoFile('human_review: db/migrate\n').invalid, 'bad_patterns');
   assert.equal(parseRepoFile('human_review: [""]\n').invalid, 'bad_patterns');
   assert.equal(parseRepoFile('x'.repeat(20001)).invalid, 'too_large');
+  assert.equal(parseRepoFile('h\u0000u\u0000m\u0000').invalid, 'not_text');
+  assert.equal(parseRepoFile(`${'x'.repeat(20001)}\u0000`).invalid, 'too_large');
 });
 const floors = parseRepoFile('human_review:\n  - db/migrate/\n');
 test('a file moved out of a protected path is still floored', () => {
