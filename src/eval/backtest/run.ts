@@ -197,7 +197,7 @@ export async function runBacktest(args: {
     case_count: args.cases.length, max_cases: args.maxCases,
     stopped_reason: stoppedByCost && notStarted > 0 ? 'max_cost' : null, cases_not_started: notStarted,
     cases: done.length, failed_cases: done.filter((o) => o.row.status === 'failed').length,
-    reviewed_by_person: done.filter((o) => o.reviewedByPerson).length,
+    reviewed_by_person: done.filter((o) => o.row.status === 'ok' && o.reviewedByPerson).length,
     total_cost: Number(done.reduce((sum, o) => sum + o.total_cost, 0).toFixed(6)),
     models: [...new Set(done.flatMap((o) => o.models))],
     contract_sha256: createHash('sha256').update(args.deps.contract).digest('hex'),

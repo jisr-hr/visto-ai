@@ -229,3 +229,9 @@ test('the summary records the models that answered and the contract the run used
   assert.deepEqual(s.models, ['m']);
   assert.equal(s.contract_sha256, createHash('sha256').update('You review pull requests.').digest('hex'));
 });
+
+test('reviewed_by_person counts only cases that ran', async () => {
+  const args = baseArgs({ cases: [caseA, mkCase(3, 'src/a.ts'), caseB], deps: stubDeps([3]) });
+  const s = await runBacktest(args);
+  assert.deepEqual([s.cases, s.failed_cases, s.reviewed_by_person], [3, 1, 2]);
+});
