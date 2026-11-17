@@ -5,9 +5,9 @@ These notes record what happened while `2026-11-17-score-engine-and-backtest.md`
 ## Status
 
 - Tasks 1 to 15 were built on the branch `stage-3`, one implementer and one independent reviewer per task, then a review of the whole branch, one fix wave of fifteen items, and one re-review of that wave.
-- At the end of the wave: 699 tests pass, the type check and the lint are clean, source and tests are ASCII.
+- The re-review left three things open. The owner asked for them to be closed; that follow-up took two small passes, each re-reviewed. Nothing from the reviews is open now.
+- At the end: 724 tests pass, the type check and the lint are clean, source and tests are ASCII.
 - Task 16, the paid measurements, was not run. It needs the owner's go-ahead.
-- The re-review left three things open. They are listed under "Open after the final review".
 
 ## Decisions taken while building
 
@@ -35,20 +35,26 @@ Each has what it costs if it is wrong.
 **In the final fix wave**
 
 14. A file with an added or removed line that holds a character the engine strips before showing the diff gets a file-level 100 (`hidden_characters`) and is not covered. The final review showed a change made only of such characters scored as a rename at 30 with no model call. Cost if wrong: files with a byte order mark, joined emoji or direction marks on a changed line, right-to-left text among them, go to a person. The backtest will show how often.
-15. A block that an answer named but scored unusably is voided: it counts as 100 even when the file has a whole-file score. Duplicate items for one block take the highest score, or void the block if any of them is unusable. Duplicate entries for one file are pooled. Cost if wrong: more files count as not scored when a model answers sloppily.
+15. A block that an answer named but scored unusably is voided: it counts as 100 even when the file has a whole-file score. Duplicate entries for one file are pooled. How several items for one block are resolved was tightened in the follow-up (decision 20). Cost if wrong: more files count as not scored when a model answers sloppily.
 16. For the team's file only a 404 means "no file". Content that is not text or is too large makes the file unusable, which floors every file and says why. A file saved as UTF-16 used to make a team's floors vanish silently. Cost if wrong: none; it fails closed.
 17. A team pattern with a backslash, a brace, or a `.` or `..` segment is refused. Brackets stay ordinary characters, because folders such as `app/[id]/` are common. The review result and body carry the reason a file is unusable. Cost if wrong: a team that writes a character class in brackets gets a pattern that matches nothing; the README says brackets are literal.
 18. The engine and the labels read every patch through one function, `hunksOf`, so the hashes of the replayed diff and of the final diff are computed alike. Strict labels were wrong for files with `\r\n` line endings. Cost if wrong: none.
 
-## Open after the final review
+**In the follow-up the owner asked for**
 
-The process allows one fix wave. The re-review of that wave confirmed thirteen of its fifteen items and left these open. Each is real; none can make the engine say "no person needed" for a change it was shown correctly.
+19. In the scan for hidden characters, a line of a patch from the git service loses one trailing carriage return before it is checked, unless the next line is the no-newline marker. A patch the engine computes from two contents loses nothing. Before this, a file with `\r\n` line endings was flagged whenever its patch ended on a changed line, and a carriage return added to a line with no line ending was missed. Cost if wrong: none known; a change of line ending alone is not flagged, by design.
+20. What a model says unusably is never read in its favour. Any dropped part voids its whole block, long or short. An item with both a score and parts voids its block. Several items for one block stand only when every one is a plain valid score, and then the highest wins; in every other case the block is voided. An invalid whole-file score voids the file. Cost if wrong: more files at 100 on malformed answers.
+21. An empty `parts` list is read as no `parts`. Models fill optional lists with empty arrays, and decision 20 would otherwise have voided every such block. Cost if wrong: none.
+22. An item that names a block the file does not have voids the file. It was the last shape found in which a covered file could score below something the answer said. Cost if wrong: a model that invents one extra block id sends that file to a person.
 
-1. **Carriage returns at the end of a patch.** A file with `\r\n` line endings is flagged `hidden_characters` whenever the service's patch ends on an added or removed line, because that last line keeps its carriage return with no line feed after it. Every added or removed file with such line endings therefore counts as 100, with the wrong reason. It fails closed, but it distorts Benefit and Focus in a repository with such files. Fix: when scanning a patch from the service, drop one trailing carriage return from a line unless the next line is the no-newline marker; never drop one for a patch computed from two contents.
-2. **A lone carriage return.** A carriage return added at the end of a file's last line, when the file has no final newline, is not flagged: the model is shown two identical lines and its score stands. The same rule as in point 1 closes it.
-3. **Five malformed answers that still resolve to the lower score.** An invalid whole-file score with every block scored low; the same across two entries for one file; a long block whose second part overlaps the first and carries the higher score; a split with a rejected part followed by a plain score for the same block; one item that has both a score and parts. Each needs a malformed answer, so it is rare, but it is in the costly direction. Fix, three rules: an invalid whole-file score voids the file; any dropped part voids its whole block, long or short; an item with both a score and parts voids its block.
+## What the final review left open, and how it was closed
 
-Until point 1 is fixed, a backtest on a repository with `\r\n` files will over-count what needs a person.
+The process allows one fix wave. Its re-review confirmed thirteen of the fifteen items and left three points open: carriage returns at the end of a patch (over-flagging files with `\r\n` line endings), a lone carriage return that was missed, and five shapes of malformed answer that still resolved to the lower score. Decisions 19 to 22 closed them. The re-review of the follow-up probed 82 carriage-return cases and several hundred thousand combinations of answer items, and found no case in which a covered file scores below something the answer said about it.
+
+Two things it noted remain as they are:
+
+- A change of line ending alone (`\n` to `\r\n` or back) is not flagged, and the model is shown the removed and the added line as identical text. For a shell script that change alters behaviour.
+- A file with `\r\n` line endings whose patch ends on a changed line gets an audit entry for one stripped character. It affects nothing else.
 
 ## Text in the plan that these decisions made stale
 
@@ -73,6 +79,7 @@ Until point 1 is fixed, a backtest on a repository with `\r\n` files will over-c
 - The strict label uses the whole hunk's hash, so a later change next to a block that merges into its hunk makes the block strict.
 - A comment that spans lines is read on one side only; the history file has no start side.
 - After a split, a context line outside every part belongs to no block, so a comment there labels the file only.
+- Show the model when a pair of lines differs only in its line ending, so that such a change is scored on what it is.
 
 **Small, can wait**
 
