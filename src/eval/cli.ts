@@ -1,19 +1,22 @@
 // The composition root: the only place real clients are built.
 import { randomBytes } from 'node:crypto';
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ConfigError, loadConfig } from '../config/load.ts';
 import { createModelClient } from '../engine/model/client.ts';
 import type { ReviewDeps } from '../engine/types.ts';
+import { createGithubHistorySource } from '../forge/github/history-source.ts';
 import { createGithubReadSource } from '../forge/github/read-source.ts';
 import { compareSummaries } from './compare.ts';
 import { loadCases } from './cases.ts';
+import { runImport } from './history/import.ts';
 import { assertOutsideProject, runReplay } from './replay.ts';
 import type { SummaryFile } from './replay.ts';
 
 class UsageError extends Error {}
 const SHORT_CODE = /^[a-z][a-z0-9_]*$/;
+const IMPORT_OPTIONS = ['repo', 'since', 'until', 'out', 'max-prs'];
 const REPLAY_OPTIONS = ['cases', 'out', 'label', 'config', 'max-cases', 'max-cost', 'concurrency'];
 
 interface Parsed { options: Map<string, string>; flags: Set<string>; positional: string[] }
@@ -111,6 +114,51 @@ function readSummary(path: string): SummaryFile {
   return data as SummaryFile;
 }
 
+// YYYY-MM-DD that is a real calendar date: 2026-02-30 does not round-trip.
+function isoDate(value: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const date = new Date(`${value}T00:00:00Z`);
+  return !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === value;
+}
+
+function isNonEmptyFile(path: string): boolean {
+  try {
+    const stat = statSync(path);
+    return stat.isDirectory() || stat.size > 0;
+  } catch {
+    return false;
+  }
+}
+
+async function importHistory(argv: string[], env: Record<string, string | undefined>, out: (line: string) => void): Promise<void> {
+  const parsed = parse(argv, IMPORT_OPTIONS, ['force']);
+  if (parsed.positional.length > 0) throw new UsageError('usage: import-history takes no positional arguments');
+  const get = (name: string): string => {
+    const v = parsed.options.get(name);
+    if (v === undefined) throw new UsageError(`usage: import-history needs --${name}`);
+    return v;
+  };
+  const since = get('since');
+  const until = get('until');
+  if (!isoDate(since)) throw new UsageError('usage: --since must be a date as YYYY-MM-DD');
+  if (!isoDate(until)) throw new UsageError('usage: --until must be a date as YYYY-MM-DD');
+  if (since >= until) throw new UsageError('usage: --since must be before --until');
+  const repoName = get('repo');
+  const repoMatch = /^([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)$/.exec(repoName);
+  if (repoMatch === null) throw new UsageError('usage: --repo must be <owner/name>');
+  const outFile = get('out');
+  const maxPrs = positive(parsed, 'max-prs', 200);
+  if (!Number.isInteger(maxPrs)) throw new UsageError('usage: --max-prs must be a whole number');
+  const githubToken = env.GITHUB_TOKEN;
+  if (githubToken === undefined || githubToken === '') throw new UsageError('usage: GITHUB_TOKEN is not set');
+  const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
+  outsideProject(outFile, projectRoot, 'out');
+  if (!parsed.flags.has('force') && isNonEmptyFile(outFile)) throw new UsageError('usage: --out is not empty; use --force to overwrite it');
+
+  const source = createGithubHistorySource({ token: githubToken, fetch: globalThis.fetch });
+  await runImport({ repo: { owner: repoMatch[1]!, repo: repoMatch[2]! }, since, until, maxPrs, outFile }, source, out);
+}
+
 function compare(argv: string[], out: (line: string) => void): void {
   const parsed = parse(argv, ['noise'], []);
   if (parsed.positional.length !== 2) throw new UsageError('usage: compare <baseline summary.json> <candidate summary.json> [--noise <second baseline summary.json>]');
@@ -124,7 +172,8 @@ export async function main(argv: string[], env: Record<string, string | undefine
     const [command, ...rest] = argv;
     if (command === 'replay') await replay(rest, env, out);
     else if (command === 'compare') compare(rest, out);
-    else throw new UsageError('usage: cli <replay|compare> ...');
+    else if (command === 'import-history') await importHistory(rest, env, out);
+    else throw new UsageError('usage: cli <replay|compare|import-history> ...');
     return 0;
   } catch (error) {
     if (error instanceof UsageError) { out(error.message); return 2; }
