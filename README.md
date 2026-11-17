@@ -51,7 +51,7 @@ The full design, with every decision and its reason, is in [docs/superpowers/spe
 | Skeleton: typed configuration, the review contract, a test harness that blocks the network, CI | Built |
 | Engine: findings | Built. Compared with the predecessor on a frozen case set |
 | Offline replay of past pull requests | Built and run |
-| Engine: the score | In progress |
+| Engine: the score | Built. Measured only where its owner has run the backtest |
 | Service: webhooks, queue, publishing a review to GitHub | Planned |
 | Merge gate | Planned |
 | Extensions and MCP tools | Planned |
@@ -104,6 +104,40 @@ npm run eval:compare -- ../runs/baseline/summary.json ../runs/first/summary.json
 ```
 
 The case file and the output folder must be outside the project folder, so that private data cannot be committed by accident. A case file is JSON Lines: each line names a pull request at a fixed head and base, with the review comments people left, labelled by whether they were valid. This repository has no command that builds a case file yet.
+
+## Backtest
+
+The backtest replays the score on past pull requests and measures it against where people actually commented. Like the replay, it reads from GitHub, calls the model, makes paid calls bounded by `--max-cases` and `--max-cost`, and posts nothing. Its input is a history file written by `import-history`, and its files, like the history file, must be outside the project folder: they hold paths and model-written reasons.
+
+```bash
+npm run eval:import-history -- --repo owner/name --since 2026-01-01 --until 2026-04-01 --out ../history.jsonl
+npm run eval:backtest -- --history ../history.jsonl --out ../runs/score-one --label score-one --config config.local.yml
+npm run eval:score-noise -- ../runs/score-one ../runs/score-two
+```
+
+- **Safety**: of the blocks and files a person had to look at, the share the score would have left below the threshold, that is, missed. Lower is better, and it is the number that guards against a missed change.
+- **Benefit**: the share of pull requests in which no block reaches the threshold, so that a person need not be asked at all.
+- **Focus**: in the pull requests that do go to a person, the share of changed lines flagged. Lower means the person reads less.
+
+`score-noise` compares two runs of the same history file and prints how often a block, and a whole pull request, falls on a different side of each threshold between them.
+
+## The file a team commits
+
+A team may commit `.visto-ai.yml` at the root of its repository, listing paths that always need a human reviewer. It is read from the default branch and can only add protection.
+
+```yaml
+human_review:
+  - migrations/
+  - "**/billing/*.ts"
+```
+
+- A name with no slash matches at any depth: `Dockerfile` matches `Dockerfile` and `services/api/Dockerfile`.
+- A leading slash ties the pattern to the repository root: `/docs` matches only the top-level `docs`.
+- A pattern that names a directory covers everything under it, dot-files included.
+- The wildcards are `*` (any run of characters within one name), `?` (one character) and `**` (any number of directories).
+- A pattern starting with `!` is refused.
+
+A file that cannot be used (invalid YAML, an unknown key, a refused pattern, or one that is too large) sends every pull request to a person.
 
 ## Repository layout
 

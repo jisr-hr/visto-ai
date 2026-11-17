@@ -20,7 +20,7 @@ function mkCase(labels: Label[], pr = 1): EvalCase {
 function ok(findings: ReplayFinding[], extra: Partial<CaseResult> = {}): CaseResult {
   return {
     key: 'k', status: 'ok', failure_stage: null, failure_reason: null, total_cost: 0, total_tokens: 0, duration_ms: 0,
-    calls: 0, cached_tokens: 0, models: [], unplaced: 0, files_reviewed: 0, not_reviewed: {}, findings, ...extra,
+    calls: 0, cached_tokens: 0, models: [], unplaced: 0, files_reviewed: 0, not_reviewed: {}, findings, highest_score: 0, needs_human: false, ...extra,
   };
 }
 function failed(cost: number): CaseResult {

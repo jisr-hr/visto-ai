@@ -116,6 +116,14 @@ test('a failed review fills the failure stage and reason', async () => {
   assert.equal(typeof r.failure_reason, 'string');
 });
 
+test('a result carries the verdict of the review, and null when the case failed in the eval', async () => {
+  const r = await replayCase(caseA, config, stubDeps());
+  assert.equal(typeof r.highest_score, 'number');
+  assert.equal(typeof r.needs_human, 'boolean');
+  const bad = await replayCase(mkCase(1, { repo: 'shop' }), config, stubDeps());
+  assert.deepEqual([bad.highest_score, bad.needs_human], [null, null]);
+});
+
 test('a bad repo gives a failed result at stage eval and never throws', async () => {
   const r = await replayCase(mkCase(1, { repo: 'shop' }), config, stubDeps());
   assert.deepEqual([r.status, r.failure_stage, r.failure_reason, r.findings], ['failed', 'eval', 'bad_case_repo', []]);

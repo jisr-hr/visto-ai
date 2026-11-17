@@ -13,7 +13,9 @@
     "lint": "eslint .",
     "eval:replay": "node src/eval/cli.ts replay",
     "eval:compare": "node src/eval/cli.ts compare",
-    "eval:import-history": "node src/eval/cli.ts import-history"
+    "eval:import-history": "node src/eval/cli.ts import-history",
+    "eval:backtest": "node src/eval/cli.ts backtest",
+    "eval:score-noise": "node src/eval/cli.ts score-noise"
   },
   "dependencies": {
     "diff": "^9.0.0",

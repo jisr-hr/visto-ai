@@ -1,0 +1,161 @@
+import assert from 'node:assert/strict';
+import { existsSync, mkdtempSync, readdirSync, readFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import test from 'node:test';
+import type { DeploymentConfig } from '../../config/load.ts';
+import { SUBMIT_REVIEW } from '../../engine/model/submit-review.ts';
+import type { ChangedFile, ModelClient, ModelResponse, ReviewDeps, Source } from '../../engine/types.ts';
+import type { HistoryCase } from '../history/file.ts';
+import { readCaseScores, runBacktest, toBacktestInput } from './run.ts';
+import type { BacktestSummary } from './run.ts';
+
+const config: DeploymentConfig = {
+  model: {
+    baseUrl: 'https://models.example.test/v1', apiKey: 'k', model: 'm', fallbacks: [],
+    effort: { default: {}, elevated: {} }, extraBody: {}, extraHeaders: {}, prices: null, timeoutSeconds: 45,
+  },
+  limits: { inputTokensPerCall: 200_000, batchesPerReview: 6 },
+  repositories: { defaults: { primaryBranches: ['main'], scoreThreshold: 70 }, overrides: {} },
+};
+
+const bulk = Array.from({ length: 30 }, (_, i) => `+const value${i} = ${i * 7919};`).join('\n');
+const patch = `@@ -1,1 +1,31 @@\n head\n${bulk}`;
+const fileAt = (path: string): ChangedFile => ({ path, previousPath: null, status: 'modified', additions: 30, deletions: 0, patch });
+
+// The path decides the score, as a model reading the file would.
+const table: Record<string, number> = { 'src/a.ts': 80, 'src/b.ts': 10 };
+
+const mkCase = (pr: number, path: string, extra: Partial<HistoryCase> = {}): HistoryCase => ({
+  version: 1, repo: 'acme/shop', pr_number: pr, title: 'Add things', body: 'Adds things.', author: 'dev-one', branch: 'topic', base_branch: 'main',
+  merged_at: '2026-01-02T00:00:00Z', review_head: `head${pr}`.padEnd(12, '0'), review_base: 'base0000', review_at: '2026-01-01T00:00:00Z',
+  reviewed_by_person: true, final_head: 'final000', final_base: 'base0000',
+  final_files: [{ path, previous_path: null, status: 'modified', patch }],
+  activity: [{
+    kind: 'inline', id: `c${pr}`, author: 'bob', bot: false, association: 'member', at: '2026-01-01T01:00:00Z', body: 'x',
+    commit: `head${pr}`.padEnd(12, '0'), path, side: 'RIGHT', line: 5,
+  }],
+  ...extra,
+});
+const caseA = mkCase(1, 'src/a.ts');
+const caseB = mkCase(2, 'src/b.ts');
+
+function stubDeps(failPr: number[] = []): ReviewDeps {
+  const model: ModelClient = {
+    complete: (request): Promise<ModelResponse> => {
+      const text = request.messages[2]!.content;
+      const path = Object.keys(table).find((p) => text.includes(p))!;
+      const answer = {
+        overview: `${path} is changed.`, findings: [],
+        files: [{ path, change_summary: 'Adds values.', blocks: [{ id: 'B1', score: table[path], category: 'other', reason: 'Plain change.' }] }],
+      };
+      return Promise.resolve({
+        toolName: SUBMIT_REVIEW, toolArguments: JSON.stringify(answer), text: null, model: 'm', provider: null,
+        usage: { calls: 1, inputTokens: 100, outputTokens: 10, cachedTokens: 0, cost: 0.5 },
+      });
+    },
+  };
+  const source: Source = {
+    listFiles: (pr) => (failPr.includes(pr.ref.number) ? Promise.reject(new Error('boom')) : Promise.resolve([fileAt(pr.ref.number === 2 ? 'src/b.ts' : 'src/a.ts')])),
+    getFileContent: () => Promise.resolve(null), getDefaultBranchFile: () => Promise.resolve(null),
+  };
+  return { source, model, contract: 'You review pull requests.', clock: () => new Date(0), token: () => 'abcdef0123456789', log: () => {} };
+}
+
+const tmp = (): string => mkdtempSync(tmpdir() + '/');
+const baseArgs = (extra: Record<string, unknown> = {}) => ({
+  cases: [caseA, caseB], historyFile: 'history.jsonl', historySha256: 'a'.repeat(64), label: 'run-one',
+  outDir: join(tmp(), 'out'), maxCases: 60, maxCost: 10, concurrency: 2, config, deps: stubDeps(), ...extra,
+});
+const lines = (path: string): unknown[] => readFileSync(path, 'utf8').trim().split('\n').map((l) => JSON.parse(l) as unknown);
+
+test('a case becomes a review at its frozen base and head, as of the review time', () => {
+  const i = toBacktestInput(caseA, config);
+  assert.deepEqual([i.pullRequest.baseSha, i.pullRequest.headSha, i.earlier, i.trigger], ['base0000', 'head10000000', null, 'automatic']);
+  assert.deepEqual(i.pullRequest.ref, { service: 'github', owner: 'acme', repo: 'shop', number: 1 });
+  assert.equal(i.asOf.toISOString(), '2026-01-01T00:00:00.000Z');
+  assert.deepEqual(i.repoConfig, { primaryBranches: ['main'], scoreThreshold: 70 });
+  assert.deepEqual(i.limits, { inputTokensPerCall: 200_000, batchesPerReview: 6, modelTimeoutSeconds: 45 });
+  assert.throws(() => toBacktestInput(mkCase(1, 'x', { repo: 'shop' }), config), /^Error: bad_case_repo$/);
+});
+
+test('two cases produce the four files, and the numbers have one row per threshold then own', async () => {
+  const args = baseArgs();
+  const s = await runBacktest(args);
+  assert.deepEqual(readdirSync(args.outDir).sort(), ['results.jsonl', 'scores.jsonl', 'summary.json', 'summary.md']);
+  const onDisk = JSON.parse(readFileSync(join(args.outDir, 'summary.json'), 'utf8')) as BacktestSummary;
+  assert.deepEqual(onDisk, s);
+  assert.deepEqual(s.numbers.map((n) => n.threshold), [20, 40, 70, 90, 'own']);
+  assert.deepEqual([s.label, s.cases, s.failed_cases, s.reviewed_by_person, s.stopped_reason, s.cases_not_started, s.total_cost], ['run-one', 2, 0, 2, null, 0, 1]);
+  assert.deepEqual(s.comments, { counted: 2, off_head: 0, outside_diff: 0 });
+  const results = lines(join(args.outDir, 'results.jsonl')) as { key: string; status: string; verdict: { highest: number; needsHuman: boolean }; blocks: number; blocks_unscored: number; files_flagged_whole: number }[];
+  assert.equal(results.length, 2);
+  const a = results.find((r) => r.key === 'acme/shop#1@head10000000')!;
+  assert.deepEqual([a.status, a.verdict.highest, a.verdict.needsHuman, a.blocks, a.blocks_unscored, a.files_flagged_whole], ['ok', 80, true, 1, 0, 0]);
+  const md = readFileSync(join(args.outDir, 'summary.md'), 'utf8');
+  assert.match(md, /^\| threshold \| safety_blocks \| safety_blocks_n /);
+  assert.equal(md.trim().split('\n').length, 7);
+});
+
+test('the numbers follow the scores: at 70 one of two pull requests is clear', async () => {
+  const s = await runBacktest(baseArgs());
+  const at70 = s.numbers.find((n) => n.threshold === 70)!;
+  assert.deepEqual([at70.benefit, at70.benefit_n, at70.focus_n], [0.5, 2, 1]);
+});
+
+test('scores.jsonl reads back into the shape scoreNoise takes', async () => {
+  const args = baseArgs();
+  await runBacktest(args);
+  const back = readCaseScores(join(args.outDir, 'scores.jsonl'));
+  const a = back.find((c) => c.key === 'acme/shop#1@head10000000')!;
+  assert.deepEqual([a.threshold, a.status, a.scores[0]!.path, a.scores[0]!.finalScore], [70, 'ok', 'src/a.ts', 80]);
+  assert.equal(a.labels.blocks.get('src/a.ts\nB1')!.loose, true);
+  assert.equal(a.labels.files.get('src/a.ts')!.loose, true);
+  assert.deepEqual(a.labels.comments, { counted: 1, off_head: 0, outside_diff: 0 });
+});
+
+test('a failed review is counted, written with its status and left out of the numbers', async () => {
+  const args = baseArgs({ cases: [caseA, mkCase(3, 'src/a.ts'), caseB], deps: stubDeps([3]) });
+  const s = await runBacktest(args);
+  assert.deepEqual([s.cases, s.failed_cases], [3, 1]);
+  assert.equal(s.numbers[2]!.benefit_n, 2);
+  const failed = (lines(join(args.outDir, 'scores.jsonl')) as { key: string; status: string; scores: unknown[] }[]).find((l) => l.key.includes('#3@'))!;
+  assert.deepEqual([failed.status, failed.scores], ['failed', []]);
+  const row = (lines(join(args.outDir, 'results.jsonl')) as { key: string; status: string; failure_stage: string }[]).find((l) => l.key.includes('#3@'))!;
+  assert.deepEqual([row.status, typeof row.failure_stage], ['failed', 'string']);
+});
+
+test('a case that fails in the eval records a short code and no private text', async () => {
+  const args = baseArgs({ cases: [mkCase(1, 'src/a.ts', { repo: 'shop' })] });
+  const s = await runBacktest(args);
+  assert.equal(s.failed_cases, 1);
+  const row = lines(join(args.outDir, 'results.jsonl'))[0] as { failure_stage: string; failure_code: string; verdict: unknown };
+  assert.deepEqual([row.failure_stage, row.failure_code, row.verdict], ['eval', 'bad_case_repo', null]);
+});
+
+test('the run stops starting cases at the cost limit', async () => {
+  const s = await runBacktest({ ...baseArgs(), cases: [caseA, caseB, mkCase(3, 'src/a.ts')], maxCost: 0.5, concurrency: 1 });
+  assert.deepEqual([s.stopped_reason, s.cases_not_started, s.cases], ['max_cost', 2, 1]);
+});
+
+test('max_cases takes the first cases in file order', async () => {
+  const s = await runBacktest({ ...baseArgs(), maxCases: 1 });
+  assert.deepEqual([s.cases, s.case_count, s.max_cases, s.stopped_reason], [1, 2, 1, null]);
+});
+
+test('two cases with the same key are refused before any case runs', async () => {
+  const args = baseArgs({ cases: [caseA, caseA] });
+  let requests = 0;
+  const base = stubDeps();
+  const deps = { ...base, model: { complete: (r: Parameters<typeof base.model.complete>[0]) => { requests += 1; return base.model.complete(r); } } };
+  await assert.rejects(runBacktest({ ...args, deps }), /^Error: duplicate_history_case$/);
+  assert.equal(requests, 0);
+  assert.ok(!existsSync(args.outDir));
+});
+
+test('stale summary files are removed when a run begins', async () => {
+  const args = baseArgs();
+  await runBacktest(args);
+  await runBacktest({ ...args, cases: [caseA] });
+  assert.equal(lines(join(args.outDir, 'results.jsonl')).length, 1);
+});
