@@ -130,10 +130,62 @@ test('change_summary is cleaned to one line of at most 300 characters', () => {
   assert.equal(s!.changeSummary.length, 300);
 });
 
-test('a block id that is not in the file, or seen twice, is recorded and ignored', () => {
-  const out = run([file('src/a.ts', [b('B1', 10), b('B9', 99), b('B1', 90), b('B2', 20)])], [ctx('src/a.ts', twoHunks)]);
-  assert.deepEqual(out.scores[0]!.blocks.map((x) => x.entry?.score), [10, 20]);
+test('a block id that is not in the file is ignored; one seen twice takes the higher score; both are recorded', () => {
+  const out = run([file('src/a.ts', [b('B1', 10), b('B9', 99), b('B1', 90, 'fix', 'x'), b('B2', 20)])], [ctx('src/a.ts', twoHunks)]);
+  assert.deepEqual(out.scores[0]!.blocks.map((x) => x.entry?.score), [90, 20]);
   assert.deepEqual(out.audit.map((a) => [a.action, a.subject]), [['block_not_in_file', 'src/a.ts B9'], ['block_duplicate', 'src/a.ts B1']]);
+});
+
+test('two items for one block, 10 and 85.5: the block has no score and the file is not_scored', () => {
+  const out = run([{ ...file('src/a.ts', [b('B1', 10), b('B1', 85.5, 'fix', 'x'), b('B2', 5)]), score: 30, category: 'refactor' }], [ctx('src/a.ts', twoHunks)]);
+  assert.equal(out.scores[0]!.blocks[0]!.entry, null);
+  assert.deepEqual(out.scores[0]!.fileLevel, { score: 100, source: 'not_scored' });
+  assert.equal(out.scores[0]!.covered, false);
+});
+
+test('a whole-file score does not stand for a block whose score was rejected', () => {
+  const [s] = run([{ ...file('src/a.ts', [b('B2', 85.5, 'fix', 'x')]), score: 30, category: 'refactor' }], [ctx('src/a.ts', twoHunks)]).scores;
+  assert.deepEqual(s!.fileLevel, { score: 100, source: 'not_scored' });
+  assert.equal(s!.covered, false);
+});
+
+test('a whole-file score does not stand for a short block whose parts leave a changed line out', () => {
+  const [s] = run([{ ...file('src/a.ts', [{ id: 'B1', parts: [part('R11', 'R11', 90, 'fix', 'x')] }]), score: 30, category: 'refactor' }], [ctx('src/a.ts', twoHunks)]).scores;
+  assert.deepEqual(s!.fileLevel, { score: 100, source: 'not_scored' });
+  assert.equal(s!.covered, false);
+});
+
+test('a whole-file score does not stand for the rest of a split', () => {
+  const added = ctx('src/new.ts', fortyAdded, { status: 'added', additions: 40, deletions: 0 });
+  const [s] = run([{ ...file('src/new.ts', [{ id: 'B1', parts: [part('R1', 'R20', 30, 'test')] }]), score: 30, category: 'test' }], [added]).scores;
+  assert.deepEqual(s!.blocks.map((x) => [x.id, x.entry?.score ?? null]), [['B1.1', 30], ['B1.rest', null]]);
+  assert.deepEqual(s!.fileLevel, { score: 100, source: 'not_scored' });
+  assert.equal(s!.covered, false);
+});
+
+test('a whole-file score still stands for a block no item named', () => {
+  const [s] = run([{ ...file('src/a.ts', [b('B1', 10)]), score: 30, category: 'refactor' }], [ctx('src/a.ts', twoHunks)]).scores;
+  assert.deepEqual(s!.fileLevel, { score: 30, source: 'whole_file' });
+  assert.equal(s!.finalScore, 30);
+  assert.equal(s!.covered, true);
+});
+
+test('two entries for one file: the whole-file score is the higher one', () => {
+  const out = run([{ ...file('src/a.ts', []), score: 20, category: 'refactor' }, { ...file('src/a.ts', []), score: 80, category: 'fix', reason: 'x' }], [ctx('src/a.ts', twoHunks)]);
+  assert.equal(out.scores[0]!.wholeFile!.score, 80);
+});
+
+test('two entries for one file: an invalid whole-file score in either leaves the file with none', () => {
+  const out = run([{ ...file('src/a.ts', []), score: 20, category: 'refactor' }, { ...file('src/a.ts', []), score: 80.5, category: 'fix', reason: 'x' }], [ctx('src/a.ts', twoHunks)]);
+  assert.equal(out.scores[0]!.wholeFile, null);
+  assert.deepEqual(out.scores[0]!.fileLevel, { score: 100, source: 'not_scored' });
+});
+
+test('two entries for one file: the first scores B1, the second B2, and both stand', () => {
+  const out = run([{ ...file('src/a.ts', [b('B1', 10)]), change_summary: 'First.' }, { ...file('src/a.ts', [b('B2', 20)]), change_summary: 'Second.' }], [ctx('src/a.ts', twoHunks)]);
+  assert.deepEqual(out.scores[0]!.blocks.map((x) => x.entry?.score), [10, 20]);
+  assert.equal(out.scores[0]!.changeSummary, 'First.');
+  assert.equal(out.scores[0]!.covered, true);
 });
 
 test('an item with neither score nor parts leaves its block alone and adds nothing of its own', () => {
@@ -276,11 +328,11 @@ test('scores for another batch or another pull request are dropped', () => {
   assert.deepEqual(out.audit.map((a) => [a.action, a.subject]), [['score_path_not_in_batch', 'src/b.ts'], ['score_path_not_in_pull_request', 'elsewhere.ts']]);
 });
 
-test('the first entry counts, a later one is a duplicate, and prefixes normalise', () => {
+test('a later entry for a file is recorded as a duplicate and pooled with the first, and prefixes normalise', () => {
   const contexts = [ctx('src/a.ts', twoHunks)];
-  const out = run([file('a/src/a.ts', [b('B1', 5), b('B2', 5)]), file('src/a.ts', [b('B1', 90), b('B2', 90)])], contexts);
-  assert.equal(out.scores[0]!.finalScore, 5);
-  assert.deepEqual(out.audit.map((a) => [a.action, a.subject]), [['score_duplicate', 'src/a.ts']]);
+  const out = run([file('a/src/a.ts', [b('B1', 5), b('B2', 5)]), file('src/a.ts', [b('B1', 90, 'fix', 'x'), b('B2', 90, 'fix', 'x')])], contexts);
+  assert.equal(out.scores[0]!.finalScore, 90);
+  assert.deepEqual(out.audit.map((a) => [a.action, a.subject]), [['score_duplicate', 'src/a.ts'], ['block_duplicate', 'src/a.ts B1'], ['block_duplicate', 'src/a.ts B2']]);
 });
 
 test('an entry in a batch that did not hold the file does not hide a later one that did', () => {
