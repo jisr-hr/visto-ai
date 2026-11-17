@@ -87,14 +87,16 @@ test('two cases produce the four files, and the numbers have one row per thresho
   assert.deepEqual(onDisk, s);
   assert.deepEqual(s.numbers.map((n) => n.threshold), [20, 40, 70, 90, 'own']);
   assert.deepEqual([s.label, s.cases, s.failed_cases, s.reviewed_by_person, s.stopped_reason, s.cases_not_started, s.total_cost], ['run-one', 2, 0, 2, null, 0, 1]);
-  assert.deepEqual(s.comments, { counted: 2, off_head: 0, outside_diff: 0 });
+  assert.deepEqual(s.comments, { counted: 2, off_head: 0, outside_diff: 0, in_bot_thread: 0 });
+  assert.equal(s.final_missing, 0);
   const results = lines(join(args.outDir, 'results.jsonl')) as { key: string; status: string; verdict: { highest: number; needsHuman: boolean }; blocks: number; blocks_unscored: number; files_flagged_whole: number }[];
   assert.equal(results.length, 2);
   const a = results.find((r) => r.key === 'acme/shop#1@head10000000')!;
   assert.deepEqual([a.status, a.verdict.highest, a.verdict.needsHuman, a.blocks, a.blocks_unscored, a.files_flagged_whole], ['ok', 80, true, 1, 0, 0]);
   const md = readFileSync(join(args.outDir, 'summary.md'), 'utf8');
   assert.match(md, /^\| threshold \| safety_blocks \| safety_blocks_n /);
-  assert.equal(md.trim().split('\n').length, 7);
+  assert.equal(md.trim().split('\n').length, 9);
+  assert.match(md, /\n\nComments by a person left out because a bot started their thread: 0\. Labelled blocks and files with no final patch: 0\.\n$/);
 });
 
 test('the numbers follow the scores: at 70 one of two pull requests is clear', async () => {
@@ -111,7 +113,8 @@ test('scores.jsonl reads back into the shape scoreNoise takes', async () => {
   assert.deepEqual([a.threshold, a.status, a.scores[0]!.path, a.scores[0]!.finalScore], [70, 'ok', 'src/a.ts', 80]);
   assert.equal(a.labels.blocks.get('src/a.ts\nB1')!.loose, true);
   assert.equal(a.labels.files.get('src/a.ts')!.loose, true);
-  assert.deepEqual(a.labels.comments, { counted: 1, off_head: 0, outside_diff: 0 });
+  assert.deepEqual(a.labels.comments, { counted: 1, off_head: 0, outside_diff: 0, in_bot_thread: 0 });
+  assert.equal(a.labels.final_missing, 0);
 });
 
 test('a failed review is counted, written with its status and left out of the numbers', async () => {
@@ -191,4 +194,14 @@ test('a share with nothing to divide by is written as an em dash', async () => {
   const md = readFileSync(join(args.outDir, 'summary.md'), 'utf8');
   assert.match(md, /^\| 20 \| \u2014 \| 0 \|/m);
   assert.ok(!md.includes('null'));
+});
+
+test('the summary totals comments left out in bot threads and labels with no final patch', async () => {
+  const bot = { kind: 'inline' as const, id: 'b1', author: 'ci', bot: true, association: 'none' as const, at: '2026-01-01T00:30:00Z', body: 'x', commit: 'head10000000', path: 'src/a.ts', side: 'RIGHT' as const, line: 5 };
+  const inBot = { ...bot, id: 'r1', author: 'bob', bot: false, association: 'member' as const, reply_to: 'b1' };
+  const args = baseArgs({ cases: [mkCase(1, 'src/a.ts', { final_files: [], activity: [...caseA.activity, bot, inBot] })] });
+  const s = await runBacktest(args);
+  assert.equal(s.comments.in_bot_thread, 1);
+  assert.equal(s.final_missing, 2); // the labelled block and its file
+  assert.match(readFileSync(join(args.outDir, 'summary.md'), 'utf8'), /bot started their thread: 1\. Labelled blocks and files with no final patch: 2\./);
 });

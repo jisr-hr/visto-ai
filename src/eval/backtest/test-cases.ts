@@ -24,7 +24,8 @@ export function labels(blocks: [string, string, Label][], files: [string, Label]
   return {
     blocks: new Map(blocks.map(([path, id, l]) => [blockKey(path, id), l])),
     files: new Map(files),
-    comments: { counted: 0, off_head: 0, outside_diff: 0 },
+    comments: { counted: 0, off_head: 0, outside_diff: 0, in_bot_thread: 0 },
+    final_missing: 0,
   };
 }
 

@@ -1,5 +1,4 @@
-import { parsePatch } from '../../engine/context/diff.ts';
-import type { Hunk } from '../../engine/context/diff.ts';
+import { hunksOf } from '../../engine/context/build.ts';
 import { blocksOf, fileDiffHash } from '../../engine/score/blocks.ts';
 import type { FileScore } from '../../engine/score/types.ts';
 import type { HistoryActivity, HistoryCase } from '../history/file.ts';
@@ -8,7 +7,9 @@ export interface Label { loose: boolean; strict: boolean }
 export interface Labels {
   blocks: Map<string, Label>; // key: path, a line feed, the block id
   files: Map<string, Label>;  // key: path
-  comments: { counted: number; off_head: number; outside_diff: number };
+  // in_bot_thread: comments by a person left out because a bot started their thread.
+  comments: { counted: number; off_head: number; outside_diff: number; in_bot_thread: number };
+  final_missing: number; // labelled (loose) blocks and files whose path has no final patch
 }
 
 interface FinalFile { diffHash: string | null; hunkHashes: Set<string> }
@@ -34,7 +35,8 @@ function finalFiles(c: HistoryCase): Map<string, FinalFile> {
   const out = new Map<string, FinalFile>();
   for (const f of c.final_files) {
     if (f.patch === null) continue;
-    const hunks: Hunk[] = parsePatch(f.patch);
+    // Built the way the engine builds the replayed hunks, so that equal patches hash equal.
+    const { hunks } = hunksOf(f.patch);
     out.set(f.path, { diffHash: fileDiffHash(hunks), hunkHashes: new Set(blocksOf(hunks).map((b) => b.hash)) });
   }
   return out;
@@ -43,7 +45,7 @@ function finalFiles(c: HistoryCase): Map<string, FinalFile> {
 export function labelCase(c: HistoryCase, scores: FileScore[]): Labels {
   const blocks = new Map<string, Label>();
   const files = new Map<string, Label>();
-  const comments = { counted: 0, off_head: 0, outside_diff: 0 };
+  const comments = { counted: 0, off_head: 0, outside_diff: 0, in_bot_thread: 0 };
   const loose = new Set<string>();
   const looseFiles = new Set<string>();
   const byPath = new Map(scores.map((s) => [s.path, s]));
@@ -51,7 +53,7 @@ export function labelCase(c: HistoryCase, scores: FileScore[]): Labels {
 
   for (const a of c.activity) {
     if (a.kind !== 'inline' || a.bot || a.author === c.author) continue;
-    if (startedByBot(a, byId)) continue;
+    if (startedByBot(a, byId)) { comments.in_bot_thread += 1; continue; }
     const score = a.path === undefined ? undefined : byPath.get(a.path);
     if (score === undefined) { comments.outside_diff += 1; continue; }
     if (a.commit !== c.review_head) { comments.off_head += 1; looseFiles.add(score.path); continue; }
@@ -66,15 +68,18 @@ export function labelCase(c: HistoryCase, scores: FileScore[]): Labels {
   }
 
   const final = finalFiles(c);
+  let finalMissing = 0;
   for (const s of scores) {
     const f = final.get(s.path);
     for (const b of s.blocks) {
       const key = blockKey(s.path, b.id);
       const isLoose = loose.has(key);
+      if (isLoose && f === undefined) finalMissing += 1;
       blocks.set(key, { loose: isLoose, strict: isLoose && (f === undefined || !f.hunkHashes.has(b.hunkHash)) });
     }
     const isLoose = looseFiles.has(s.path);
+    if (isLoose && f === undefined) finalMissing += 1;
     files.set(s.path, { loose: isLoose, strict: isLoose && (f === undefined || f.diffHash !== s.diffHash) });
   }
-  return { blocks, files, comments };
+  return { blocks, files, comments, final_missing: finalMissing };
 }

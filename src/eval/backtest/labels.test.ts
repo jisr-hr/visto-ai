@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import type { FileContext } from '../../engine/context/build.ts';
-import { parsePatch } from '../../engine/context/diff.ts';
+import { hunksOf } from '../../engine/context/build.ts';
 import { reconcileScores } from '../../engine/reconcile/scores.ts';
 import { blocksOf } from '../../engine/score/blocks.ts';
 import { parseRepoFile } from '../../engine/score/floors.ts';
@@ -21,7 +21,7 @@ const fortyAdded = ['@@ -0,0 +1,40 @@', ...Array.from({ length: 40 }, (_, i) => 
 
 function ctx(path: string, text: string, extra: Partial<ChangedFile> = {}): FileContext {
   const file: ChangedFile = { path, previousPath: null, status: 'modified', additions: 3, deletions: 1, patch: text, ...extra };
-  const hunks = parsePatch(text);
+  const hunks = hunksOf(text).hunks; // as the engine builds them
   return { file, hunks, ranges: null, diffText: null, full: null, test: null, skip: null, blocks: blocksOf(hunks), plan: scorePlan(file, null), hidden: false };
 }
 
@@ -56,7 +56,7 @@ test('a comment on a changed line of the replayed head labels its block', () => 
   assert.equal(l.blocks.get(A2)!.loose, false);
   assert.equal(l.files.get('src/a.ts')!.loose, true);
   assert.equal(l.files.get('src/b.ts')!.loose, false);
-  assert.deepEqual(l.comments, { counted: 1, off_head: 0, outside_diff: 0 });
+  assert.deepEqual(l.comments, { counted: 1, off_head: 0, outside_diff: 0, in_bot_thread: 0 });
   assert.equal(l.blocks.size, 4);
   assert.equal(l.files.size, 2);
 });
@@ -74,7 +74,7 @@ test('a comment on the old number of a context line labels its block', () => {
   const final = [same('src/a.ts', patchA), same('src/c.ts', shifted)];
   const l = labelCase({ ...bare, final_files: final, activity: [note('c1', { path: 'src/c.ts', side: 'LEFT', line: 21 })] }, s);
   assert.deepEqual(l.blocks.get('src/c.ts\nB1'), { loose: true, strict: false });
-  assert.deepEqual(l.comments, { counted: 1, off_head: 0, outside_diff: 0 });
+  assert.deepEqual(l.comments, { counted: 1, off_head: 0, outside_diff: 0, in_bot_thread: 0 });
   const none20 = labelCase({ ...bare, final_files: final, activity: [note('c2', { path: 'src/c.ts', side: 'LEFT', line: 26 })] }, s);
   assert.equal(none20.blocks.get('src/c.ts\nB1')!.loose, false);
 });
@@ -113,7 +113,7 @@ test('a comment on a line outside every block, and a file-level comment, count f
   for (const key of [A1, A2]) assert.deepEqual(l.blocks.get(key), none);
   assert.equal(l.files.get('src/a.ts')!.loose, true);
   assert.equal(l.files.get('src/b.ts')!.loose, true);
-  assert.deepEqual(l.comments, { counted: 0, off_head: 0, outside_diff: 0 });
+  assert.deepEqual(l.comments, { counted: 0, off_head: 0, outside_diff: 0, in_bot_thread: 0 });
 });
 
 test('the author, a bot, and a person replying inside a bot thread do not count', () => {
@@ -126,7 +126,7 @@ test('the author, a bot, and a person replying inside a bot thread do not count'
   ]), scores());
   for (const [, v] of l.blocks) assert.deepEqual(v, none);
   for (const [, v] of l.files) assert.deepEqual(v, none);
-  assert.deepEqual(l.comments, { counted: 0, off_head: 0, outside_diff: 0 });
+  assert.deepEqual(l.comments, { counted: 0, off_head: 0, outside_diff: 0, in_bot_thread: 1 });
 });
 
 test('a person replying inside a person thread counts', () => {
@@ -148,6 +148,7 @@ test('a reply deep in a bot thread does not count, a loop is treated as no bot, 
   assert.equal(l.blocks.get('src/b.ts\nB1')!.loose, true);
   assert.equal(l.blocks.get('src/b.ts\nB2')!.loose, true);
   assert.equal(l.comments.counted, 3);
+  assert.equal(l.comments.in_bot_thread, 2);
 });
 
 test('strict: the block changed before the merge', () => {
@@ -169,6 +170,18 @@ test('a path missing from the final files, or with no patch, counts as changed',
   const nulled = labelCase(caseOf(act, [{ path: 'src/a.ts', previous_path: null, status: 'removed', patch: null }, same('src/b.ts', patchA)]), scores());
   assert.deepEqual(nulled.blocks.get(A1), { loose: true, strict: true });
   assert.deepEqual(nulled.files.get('src/b.ts'), { loose: true, strict: false });
+  assert.equal(missing.final_missing, 4); // two labelled blocks and two labelled files
+  assert.equal(nulled.final_missing, 2); // src/a.ts: its block and the file
+  assert.equal(labelCase(caseOf(act), scores()).final_missing, 0);
+});
+
+test('a final patch with CRLF line endings that equals the replayed one is not strict', () => {
+  const crlf = patchA.replaceAll('\n', '\r\n');
+  const s = scoresOf([['src/a.ts', crlf]]);
+  const l = labelCase(caseOf([note('c1')], [same('src/a.ts', crlf)]), s);
+  assert.deepEqual(l.blocks.get(A1), { loose: true, strict: false });
+  assert.deepEqual(l.files.get('src/a.ts'), { loose: true, strict: false });
+  assert.equal(l.final_missing, 0);
 });
 
 test('a part of a split block is strict by its hunk', () => {

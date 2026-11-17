@@ -20,7 +20,8 @@ export interface BacktestSummary {
   label: string; history_file: string; history_sha256: string; case_count: number; max_cases: number;
   stopped_reason: 'max_cost' | null; cases_not_started: number; cases: number; failed_cases: number;
   reviewed_by_person: number; total_cost: number;
-  comments: { counted: number; off_head: number; outside_diff: number };
+  comments: Labels['comments'];
+  final_missing: number;
   numbers: Numbers[]; // one per THRESHOLDS entry, then 'own'
 }
 
@@ -31,7 +32,7 @@ interface ResultRow {
 }
 interface ScoresLine {
   key: string; threshold: number; status: 'ok' | 'failed'; scores: FileScore[];
-  labels: { blocks: Record<string, Label>; files: Record<string, Label>; comments: Labels['comments'] };
+  labels: { blocks: Record<string, Label>; files: Record<string, Label>; comments: Labels['comments']; final_missing: number };
 }
 interface Outcome { total_cost: number; row: ResultRow; scores: CaseScores; reviewedByPerson: boolean }
 
@@ -57,7 +58,9 @@ export function toBacktestInput(c: HistoryCase, config: DeploymentConfig): Revie
   };
 }
 
-const emptyLabels = (): Labels => ({ blocks: new Map(), files: new Map(), comments: { counted: 0, off_head: 0, outside_diff: 0 } });
+const emptyLabels = (): Labels => ({
+  blocks: new Map(), files: new Map(), comments: { counted: 0, off_head: 0, outside_diff: 0, in_bot_thread: 0 }, final_missing: 0,
+});
 
 function counts(scores: FileScore[]): Pick<ResultRow, 'blocks' | 'blocks_unscored' | 'files_flagged_whole'> {
   return {
@@ -102,7 +105,10 @@ async function backtestCase(c: HistoryCase, config: DeploymentConfig, deps: Revi
 function scoresLine(c: CaseScores): ScoresLine {
   return {
     key: c.key, threshold: c.threshold, status: c.status, scores: c.scores,
-    labels: { blocks: Object.fromEntries(c.labels.blocks), files: Object.fromEntries(c.labels.files), comments: c.labels.comments },
+    labels: {
+      blocks: Object.fromEntries(c.labels.blocks), files: Object.fromEntries(c.labels.files), comments: c.labels.comments,
+      final_missing: c.labels.final_missing,
+    },
   };
 }
 
@@ -116,13 +122,21 @@ export function readCaseScores(path: string): CaseScores[] {
     if (typeof data.key !== 'string' || !Array.isArray(data.scores) || typeof data.labels !== 'object' || data.labels === null) throw new Error(`bad_scores_line_${index + 1}`);
     out.push({
       key: data.key, threshold: data.threshold, status: data.status, scores: data.scores,
-      labels: { blocks: new Map(Object.entries(data.labels.blocks)), files: new Map(Object.entries(data.labels.files)), comments: data.labels.comments },
+      labels: {
+        blocks: new Map(Object.entries(data.labels.blocks)), files: new Map(Object.entries(data.labels.files)), comments: data.labels.comments,
+        final_missing: data.labels.final_missing,
+      },
     });
   });
   return out;
 }
 
 const cell = (value: number | null): string => (value === null ? EM_DASH : String(value));
+
+function summaryMarkdown(summary: BacktestSummary): string {
+  return `${summaryTable(summary.numbers)}\nComments by a person left out because a bot started their thread: ${summary.comments.in_bot_thread}. ` +
+    `Labelled blocks and files with no final patch: ${summary.final_missing}.\n`;
+}
 
 function summaryTable(numbers: Numbers[]): string {
   const names = ['safety_blocks', 'safety_blocks_loose', 'safety_files', 'safety_files_loose', 'benefit', 'focus'] as const;
@@ -163,12 +177,15 @@ export async function runBacktest(args: {
 
   const done = outcomes.filter((o): o is Outcome => o !== undefined);
   const scored = done.map((o) => o.scores);
-  const comments = { counted: 0, off_head: 0, outside_diff: 0 };
+  const comments = { counted: 0, off_head: 0, outside_diff: 0, in_bot_thread: 0 };
+  let finalMissing = 0;
   for (const c of scored) {
     if (c.status !== 'ok') continue;
     comments.counted += c.labels.comments.counted;
     comments.off_head += c.labels.comments.off_head;
     comments.outside_diff += c.labels.comments.outside_diff;
+    comments.in_bot_thread += c.labels.comments.in_bot_thread;
+    finalMissing += c.labels.final_missing;
   }
   const summary: BacktestSummary = {
     label: args.label, history_file: args.historyFile, history_sha256: args.historySha256,
@@ -178,9 +195,10 @@ export async function runBacktest(args: {
     reviewed_by_person: done.filter((o) => o.reviewedByPerson).length,
     total_cost: Number(done.reduce((sum, o) => sum + o.total_cost, 0).toFixed(6)),
     comments,
+    final_missing: finalMissing,
     numbers: [...THRESHOLDS, 'own' as const].map((t) => measure(scored, t)),
   };
   writeFileSync(join(args.outDir, 'summary.json'), JSON.stringify(summary, null, 2) + '\n');
-  writeFileSync(join(args.outDir, 'summary.md'), summaryTable(summary.numbers));
+  writeFileSync(join(args.outDir, 'summary.md'), summaryMarkdown(summary));
   return summary;
 }
