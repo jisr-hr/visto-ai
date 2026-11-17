@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -195,4 +195,14 @@ test('runImport says when the listing stopped at its page limit', async () => {
   const quiet: string[] = [];
   await runImport({ repo, ...window, maxPrs: 200, outFile: tempFile() }, stub(), (l) => quiet.push(l));
   assert.ok(!quiet.some((l) => l.includes('page limit')));
+});
+
+test('a dangling link at the output path is replaced, never followed', async () => {
+  const outFile = join(mkdtempSync(tmpdir() + '/'), 'history.jsonl');
+  const target = join(mkdtempSync(tmpdir() + '/'), 'elsewhere.jsonl');
+  symlinkSync(target, outFile);
+  await runImport({ repo, ...window, maxPrs: 200, outFile }, stub(), () => {});
+  assert.equal(lstatSync(outFile).isFile(), true);
+  assert.equal(existsSync(target), false);
+  assert.equal(parseHistory(readFileSync(outFile, 'utf8')).length, 1);
 });

@@ -1,4 +1,4 @@
-import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 
 import { stripControl } from '../../engine/context/untrusted.ts';
@@ -103,6 +103,8 @@ export async function runImport(
 ): Promise<void> {
   // Create the file first so an unusable path fails before any request is made.
   mkdirSync(dirname(args.outFile), { recursive: true });
+  // A link at the path would send the writes to its target, even one that does not exist yet: remove it, never follow it.
+  rmSync(args.outFile, { force: true });
   writeFileSync(args.outFile, '');
   const { pullRequests: listed, pageLimitReached } = await source.listMergedPullRequests(args.repo, { since: args.since, until: args.until }, args.maxPrs);
   let written = 0;
