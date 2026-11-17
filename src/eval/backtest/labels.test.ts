@@ -210,3 +210,12 @@ test('a comment on a path outside the diff is counted apart', () => {
   assert.equal(l.comments.counted, 0);
   for (const [, v] of l.files) assert.deepEqual(v, none);
 });
+
+test('reply_to is resolved among inline comments only: a review with the same id is not the parent', () => {
+  const l = labelCase(caseOf([
+    { ...note('77', { author: 'ci', bot: true }), kind: 'review' },
+    note('c2', { reply_to: '77' }),
+  ]), scores());
+  assert.equal(l.blocks.get(A1)!.loose, true);
+  assert.deepEqual(l.comments, { counted: 1, off_head: 0, outside_diff: 0, in_bot_thread: 0 });
+});

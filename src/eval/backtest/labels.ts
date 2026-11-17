@@ -49,7 +49,8 @@ export function labelCase(c: HistoryCase, scores: FileScore[]): Labels {
   const loose = new Set<string>();
   const looseFiles = new Set<string>();
   const byPath = new Map(scores.map((s) => [s.path, s]));
-  const byId = new Map(c.activity.map((a) => [a.id, a]));
+  // Reviews, inline comments and general comments are numbered apart: a reply points at an inline comment.
+  const byId = new Map(c.activity.filter((a) => a.kind === 'inline').map((a) => [a.id, a]));
 
   for (const a of c.activity) {
     if (a.kind !== 'inline' || a.bot || a.author === c.author) continue;
