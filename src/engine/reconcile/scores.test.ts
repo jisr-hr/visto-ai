@@ -130,9 +130,10 @@ test('change_summary is cleaned to one line of at most 300 characters', () => {
   assert.equal(s!.changeSummary.length, 300);
 });
 
-test('a block id that is not in the file is ignored; one seen twice takes the higher score; both are recorded', () => {
+test('a block id that is not in the file voids the file; one seen twice takes the higher score; both are recorded', () => {
   const out = run([file('src/a.ts', [b('B1', 10), b('B9', 99), b('B1', 90, 'fix', 'x'), b('B2', 20)])], [ctx('src/a.ts', twoHunks)]);
   assert.deepEqual(out.scores[0]!.blocks.map((x) => x.entry?.score), [90, 20]);
+  assertVoided(out.scores[0]!);
   assert.deepEqual(out.audit.map((a) => [a.action, a.subject]), [['block_not_in_file', 'src/a.ts B9'], ['block_duplicate', 'src/a.ts B1']]);
 });
 
@@ -410,5 +411,48 @@ test('two items for one block, a complete valid split and a plain 20, void the b
 test('a long block with one valid part that leaves lines out: the part and a voided rest', () => {
   const out = run([file('src/new.ts', [{ id: 'B1', parts: [part('R1', 'R20', 30, 'test')] }])], [forty()]);
   assert.deepEqual(out.scores[0]!.blocks.map((x) => [x.id, x.entry?.score ?? null]), [['B1.1', 30], ['B1.rest', null]]);
+  assertVoided(out.scores[0]!);
+});
+
+test('an empty parts array beside a score is a plain score', () => {
+  const out = run([file('src/a.ts', [{ id: 'B1', score: 10, category: 'fix', parts: [] }, b('B2', 10)])], [ctx('src/a.ts', twoHunks)]);
+  assert.equal(out.scores[0]!.blocks[0]!.entry!.score, 10);
+  assert.deepEqual([out.scores[0]!.finalScore, out.scores[0]!.covered], [10, true]);
+  assert.ok(!out.audit.some((a) => a.action === 'score_and_parts'));
+});
+
+test('an empty parts array alone is an item with neither a score nor parts', () => {
+  const [s] = run([{ ...file('src/a.ts', [{ id: 'B1', parts: [] }]), score: 30, category: 'refactor' }], [ctx('src/a.ts', twoHunks)]).scores;
+  assert.equal(s!.blocks[0]!.entry, null);
+  assert.deepEqual(s!.fileLevel, { score: 30, source: 'whole_file' });
+  assert.deepEqual([s!.finalScore, s!.covered], [30, true]);
+});
+
+test('a score for a block id that is not in the file voids the file', () => {
+  const out = run([file('src/a.ts', [b('B1', 10), b('B2', 10), b('B9', 99, 'fix', 'x')])], [ctx('src/a.ts', twoHunks)]);
+  assertVoided(out.scores[0]!);
+  assert.ok(out.audit.some((a) => a.action === 'block_not_in_file' && a.subject === 'src/a.ts B9'));
+});
+
+test('part ids used as block ids void the file', () => {
+  const out = run([{ ...file('src/new.ts', [b('B1.1', 10), b('B1.2', 90, 'fix', 'x')]), score: 10, category: 'test' }], [forty()]);
+  assertVoided(out.scores[0]!);
+});
+
+test('a moved file with a whole-file score and an item for a block it does not have is voided', () => {
+  const moved = ctx('lib/a.ts', null, { status: 'renamed', previousPath: 'src/a.ts', additions: 0, deletions: 0 });
+  const out = run([{ ...file('lib/a.ts', [b('B1', 95, 'fix', 'x')]), score: 20, category: 'structure' }], [moved]);
+  assertVoided(out.scores[0]!);
+});
+
+test('an item with neither a score nor parts beside a plain 10 for the same block voids the block', () => {
+  const out = run([file('src/a.ts', [{ id: 'B1' }, b('B1', 10), b('B2', 10)])], [ctx('src/a.ts', twoHunks)]);
+  assert.equal(out.scores[0]!.blocks[0]!.entry, null);
+  assertVoided(out.scores[0]!);
+});
+
+test('an invalid whole-file score on a file scored by a fixed rule leaves it not_scored', () => {
+  const rename = ctx('src/new-name.ts', null, { status: 'renamed', previousPath: 'src/old-name.ts', additions: 0, deletions: 0 });
+  const out = run([{ ...file('src/new-name.ts', []), score: 72.5, category: 'rename', reason: 'x' }], [rename]);
   assertVoided(out.scores[0]!);
 });

@@ -178,6 +178,14 @@ function wholeFileOf(entries: RawFile[], path: string, audit: AuditEntry[]): { e
   return { entry: invalid ? null : best, invalid };
 }
 
+// Models often fill an optional list with an empty array; an empty `parts` says nothing.
+function withoutEmptyParts(item: RawBlock): RawBlock {
+  if (item.parts === undefined || item.parts.length > 0) return item;
+  const rest = { ...item };
+  delete rest.parts;
+  return rest;
+}
+
 function scoreFile(
   context: FileContext,
   entries: RawFile[],
@@ -192,10 +200,13 @@ function scoreFile(
   const { entry: wholeFile, invalid: wholeFileInvalid } = wholeFileOf(entries, path, audit);
 
   const scored: Scored[] = [];
+  // An item for a block the file does not have may have been the model's score for lines it does: the file is not scored.
+  let strayItem = false;
   if (answered) {
     const items = new Map<string, RawBlock[]>();
-    for (const item of entries.flatMap((e) => e.blocks)) {
+    for (const item of entries.flatMap((e) => e.blocks).map(withoutEmptyParts)) {
       if (!context.blocks.some((b) => b.id === item.id)) {
+        strayItem = true;
         audit.push({ stage: 'reconcile', action: 'block_not_in_file', subject: `${path} ${item.id}`, reason: 'dropped' });
       } else if (items.has(item.id)) {
         audit.push({ stage: 'reconcile', action: 'block_duplicate', subject: `${path} ${item.id}`, reason: 'pooled' });
@@ -220,6 +231,7 @@ function scoreFile(
   const notScored =
     plan.kind === 'none' ||
     wholeFileInvalid ||
+    strayItem ||
     notRead.has(path) ||
     (plan.kind !== 'rule' && !answered) ||
     (plan.kind === 'model_whole' && wholeFile === null) ||
@@ -240,7 +252,7 @@ function scoreFile(
 
   let covered: boolean;
   if (context.hidden) covered = false;
-  else if (wholeFileInvalid) covered = false;
+  else if (wholeFileInvalid || strayItem) covered = false;
   else if (plan.kind === 'rule') covered = true;
   else if (plan.kind === 'none') covered = false;
   else covered = answered && !notRead.has(path) && (plan.kind === 'model_whole' ? wholeFile !== null : !unscored);

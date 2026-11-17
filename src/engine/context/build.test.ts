@@ -261,6 +261,9 @@ test('an added CRLF file whose patch ends on its last added line is not hidden a
 test('hunksOf: a carriage return added on a last line with no line ending is hidden', () => {
   assert.equal(hunksOf(['@@ -1 +1 @@', '-exec app', noNewline, '+exec app\r', noNewline].join('\n')).hidden, true);
 });
+test('hunksOf: a zero-length line between a line ending in a carriage return and the marker keeps it hidden', () => {
+  assert.equal(hunksOf(['@@ -1 +1 @@', '-exec app', '+exec app\r', '', noNewline].join('\n')).hidden, true);
+});
 test('hunksOf: an added line ending in two carriage returns is hidden', () => {
   assert.equal(hunksOf('@@ -1,2 +1,2 @@\n-a\r\n+a\r\r\n k\r').hidden, true);
 });
@@ -269,7 +272,7 @@ test('hunksOf: a line that changes from LF to CRLF alone is not hidden', () => {
 });
 test('hunksOf on a computed patch: any carriage return left on a changed line is hidden', () => {
   assert.equal(hunksOf('@@ -1 +1 @@\n-a\n+b\r', true).hidden, true);
-  assert.equal(hunksOf('@@ -1 +1 @@\n-a\n+b').hidden, false);
+  assert.equal(hunksOf('@@ -1 +1 @@\n-a\n+b', true).hidden, false);
 });
 for (const computed of [false, true]) {
   test(`hunksOf: U+200B and U+202E on an added line are hidden (computed ${computed})`, () => {
