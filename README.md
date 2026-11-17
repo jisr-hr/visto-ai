@@ -49,9 +49,9 @@ The full design, with every decision and its reason, is in [docs/superpowers/spe
 | Part | State |
 |---|---|
 | Skeleton: typed configuration, the review contract, a test harness that blocks the network, CI | Built |
-| Engine: findings | Built. Tested against stubs only; not yet measured against a real model |
-| Offline replay of past pull requests | Built. Not yet run |
-| Engine: the score | Planned, next |
+| Engine: findings | Built. Compared with the predecessor on a frozen case set |
+| Offline replay of past pull requests | Built and run |
+| Engine: the score | In progress |
 | Service: webhooks, queue, publishing a review to GitHub | Planned |
 | Merge gate | Planned |
 | Extensions and MCP tools | Planned |

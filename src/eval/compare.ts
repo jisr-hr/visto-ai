@@ -1,4 +1,5 @@
-// Compares two run summaries, with an optional second baseline as a noise band.
+// Compares two run summaries, with an optional second run of the baseline as a noise band:
+// the band is the distance between the two baseline runs.
 import { METRICS } from './score.ts';
 import type { SummaryFile } from './replay.ts';
 

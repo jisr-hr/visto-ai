@@ -43,6 +43,11 @@ test('order: score, then size, then path', () => {
   assert.deepEqual(out.map((x) => x.path), ['README.md', 'src/x.ts', 'a.txt', 'z.txt']);
 });
 
+test('equal scores: the larger change comes first, then the path', () => {
+  const out = orderByPriority([f('src/b.rb', 10), f('tmp/a.rb', 130), f('src/a.rb', 10)]);
+  assert.deepEqual(out.map((x) => x.path), ['tmp/a.rb', 'src/a.rb', 'src/b.rb']);
+});
+
 test('ordering does not mutate its input', () => {
   const input = [f('b.txt'), f('src/a.ts')];
   orderByPriority(input);

@@ -113,7 +113,7 @@ function readSummary(path: string): SummaryFile {
 
 function compare(argv: string[], out: (line: string) => void): void {
   const parsed = parse(argv, ['noise'], []);
-  if (parsed.positional.length !== 2) throw new UsageError('usage: compare <baseline summary.json> <candidate summary.json> [--noise <summary.json>]');
+  if (parsed.positional.length !== 2) throw new UsageError('usage: compare <baseline summary.json> <candidate summary.json> [--noise <second baseline summary.json>]');
   const noisePath = parsed.options.get('noise');
   const table = compareSummaries(readSummary(parsed.positional[0]!), readSummary(parsed.positional[1]!), noisePath === undefined ? null : readSummary(noisePath));
   for (const line of table.split('\n')) out(line);

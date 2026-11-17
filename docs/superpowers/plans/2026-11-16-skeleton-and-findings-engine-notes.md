@@ -7,7 +7,7 @@ These notes record what happened when `2026-11-16-skeleton-and-findings-engine.m
 - Tasks 1 to 18 were each built by one implementer and checked by one reviewer, with fix rounds where the review found something. A whole-branch review followed, then one fix wave of 26 items and a re-review of that wave.
 - At the end: 407 tests pass, the type check and the lint are clean, source and tests are plain ASCII.
 - The scoring port was checked against the predecessor's scoring on 4,000 seeded random cases: no difference in any match, count or metric.
-- Task 19, the paid comparison with the predecessor, was not run. It needs inputs only the owner has.
+- Task 19 ran on 2026-11-17. The owner accepted the result with one caveat: one metric was worse on a small sample with no like-for-like baseline. The numbers are private.
 
 ## Decisions taken during execution
 

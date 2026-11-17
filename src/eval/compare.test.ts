@@ -100,6 +100,11 @@ test('usage errors exit 2 with one line', async () => {
   }
 });
 
+test('the compare usage line says --noise is a second baseline run', async () => {
+  const [, lines] = await run(['compare', 'one.json']);
+  assert.deepEqual(lines, ['usage: compare <baseline summary.json> <candidate summary.json> [--noise <second baseline summary.json>]']);
+});
+
 test('a non-empty --out needs --force', async () => {
   const full = mkdtempSync(tmpdir() + '/');
   writeFileSync(join(full, 'old.txt'), 'x');
