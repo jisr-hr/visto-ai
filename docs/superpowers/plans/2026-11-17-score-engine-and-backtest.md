@@ -10,6 +10,8 @@
 
 **Spec:** `docs/superpowers/specs/2026-11-13-visto-ai-design.md`. Executors read both. Section numbers below refer to it. Plan 1 is `docs/superpowers/plans/2026-11-16-skeleton-and-findings-engine.md`; the decisions taken while it ran are in the notes file beside it.
 
+**Notes:** `docs/superpowers/plans/2026-11-17-score-engine-and-backtest-notes.md` records the decisions taken while this plan was built and what its final review left open. Where this plan and the notes differ, the notes say what was built.
+
 ## Scope
 
 This is plan 2 of several. It covers build stage 3 of section 18.
