@@ -62,11 +62,11 @@ const emptyLabels = (): Labels => ({
   blocks: new Map(), files: new Map(), comments: { counted: 0, off_head: 0, outside_diff: 0, in_bot_thread: 0 }, final_missing: 0,
 });
 
-function counts(scores: FileScore[]): Pick<ResultRow, 'blocks' | 'blocks_unscored' | 'files_flagged_whole'> {
+function counts(scores: FileScore[], threshold: number): Pick<ResultRow, 'blocks' | 'blocks_unscored' | 'files_flagged_whole'> {
   return {
     blocks: scores.reduce((n, f) => n + f.blocks.length, 0),
     blocks_unscored: scores.reduce((n, f) => n + f.blocks.filter((b) => b.entry === null).length, 0),
-    files_flagged_whole: scores.filter((f) => f.fileLevel !== null).length,
+    files_flagged_whole: scores.filter((f) => f.fileLevel !== null && f.fileLevel.score >= threshold).length,
   };
 }
 
@@ -83,7 +83,7 @@ async function backtestCase(c: HistoryCase, config: DeploymentConfig, deps: Revi
       row: {
         key, status: result.status, failure_stage: result.failure?.stage ?? null, failure_code: result.failure?.code ?? null,
         cost: result.usage.cost, tokens: result.usage.inputTokens + result.usage.outputTokens, duration_ms: Date.now() - started,
-        calls: result.usage.calls, verdict: result.verdict, ...counts(result.scores),
+        calls: result.usage.calls, verdict: result.verdict, ...counts(result.scores, result.verdict.threshold),
       },
       scores: { key, threshold: result.verdict.threshold, status: result.status, scores: result.scores, labels },
     };

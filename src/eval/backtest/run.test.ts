@@ -210,3 +210,15 @@ test('the summary totals comments left out in bot threads and labels with no fin
   assert.equal(s.final_missing, 2); // the labelled block and its file
   assert.match(readFileSync(join(args.outDir, 'summary.md'), 'utf8'), /bot started their thread: 1\. Labelled blocks and files with no final patch: 2\./);
 });
+
+test('files_flagged_whole counts only files flagged as a whole at the case threshold', async () => {
+  const rename: ChangedFile = { path: 'src/new.ts', previousPath: 'src/old.ts', status: 'renamed', additions: 0, deletions: 0, patch: null };
+  const base = stubDeps();
+  const source: Source = {
+    listFiles: () => Promise.resolve([rename]), getFileContent: () => Promise.resolve('same\n'), getDefaultBranchFile: () => Promise.resolve(null),
+  };
+  const args = baseArgs({ cases: [mkCase(1, 'src/new.ts')], deps: { ...base, source } });
+  await runBacktest(args);
+  const [row] = lines(join(args.outDir, 'results.jsonl')) as { verdict: { highest: number }; files_flagged_whole: number }[];
+  assert.deepEqual([row!.verdict.highest, row!.files_flagged_whole], [30, 0]);
+});
