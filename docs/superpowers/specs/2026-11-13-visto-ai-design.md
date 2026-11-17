@@ -1,6 +1,6 @@
 # Visto AI: design
 
-Status: draft for the owner's approval, revised after the owner's first read and after a review against the predecessor's production record. Date: 2026-11-13.
+Status: approved by the owner on 2026-11-16, after the owner's first read and a review against the predecessor's production record. First draft: 2026-11-13.
 Name: Visto AI, written `visto-ai` in identifiers (section 11.4).
 
 ## 1. Why this exists
@@ -59,7 +59,7 @@ These would make the project a failure even if it works.
 | # | Decision | Whose |
 |---|---|---|
 | O1 | Fresh codebase. Engine, webhook receiver, queue, publisher and UI live in this one repository. | Owner |
-| O2 | Open source under Apache-2.0. The repository stays private until the owner confirms sign-off. | Owner |
+| O2 | Open source under Apache-2.0. The repository stayed private until the owner confirmed sign-off, and has been public since 2026-11-16. | Owner |
 | O3 | Built for broad adoption. Runs through Docker with the database included; no external database is required. | Owner |
 | O4 | Whoever runs it creates their own app and connects it. The project owns no app and runs no hosted service. | Owner |
 | O5 | GitHub first, GitLab later. | Owner |
@@ -812,7 +812,7 @@ Stages 2 and 3 need a case file, read access to the repositories it came from an
 
 - No history from the predecessor. Files are copied in deliberately.
 - Nothing internal to any deployment: no logins or people, no hostnames, no repository names, no review history, no eval cases, no learned records, no incident notes.
-- Ported code is not cleared for release until the owner confirms sign-off.
+- Ported code was not released until the owner confirmed sign-off (O2).
 - Before release, the repository is scanned against a term list that is itself kept privately.
 - No secrets in the repository or in prompts.
 
@@ -842,7 +842,7 @@ Still open:
 
 1. **How O15 was read.** "Goes to human review" is implemented as: the bot does not approve, the files are listed for a person, and the gate's check does not fail for that reason alone (section 9). In a repository that does not require an approving review, nothing makes the human look happen. The alternative is a check that stays red until a person other than the author approves.
 2. **Where 70% sits** (section 6.1). As placed, a local behaviour change that follows an existing pattern is approvable by default.
-3. **Copyright holder and sign-off.** The licence notice needs a name, and ported code stays unreleased until sign-off is confirmed.
+3. **Copyright holder.** The licence notice needs a name. Sign-off is settled (O2).
 
 ## 22. Left to the builder
 
