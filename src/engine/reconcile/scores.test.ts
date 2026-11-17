@@ -203,18 +203,19 @@ test('a long block is split into parts, each a block of its own', () => {
   assert.equal(out.scores[0]!.covered, true);
 });
 
-test('a dropped part leaves its lines without a score', () => {
+test('a part dropped as overlapping voids the whole block, unsplit', () => {
   const out = run([file('src/new.ts', [{ id: 'B1', parts: [part('R1', 'R20', 30, 'test'), part('R15', 'R30', 80, 'data_model', 'Adds a table.')] }])], [ctx('src/new.ts', fortyAdded, { status: 'added', additions: 40, deletions: 0 })]);
-  assert.deepEqual(out.scores[0]!.blocks.map((x) => [x.id, x.entry?.score ?? null]), [['B1.1', 30], ['B1.rest', null]]);
+  assert.deepEqual(out.scores[0]!.blocks.map((x) => [x.id, x.entry?.score ?? null]), [['B1', null]]);
   assert.deepEqual(out.scores[0]!.fileLevel, { score: 100, source: 'not_scored' });
   assert.equal(out.scores[0]!.covered, false);
   assert.ok(out.audit.some((a) => a.action === 'part_invalid' && a.subject === 'src/new.ts B1'));
 });
 
-test('a part with bad anchors or a bad score is dropped', () => {
+test('a part with bad anchors or a bad score voids the whole block, unsplit', () => {
   const out = run([file('src/new.ts', [{ id: 'B1', parts: [part('X1', 'R20', 30, 'test'), part('R1', 'R20', 130, 'test'), part('R21', 'R40', 80, 'data_model', 'Adds a table.')] }])], [ctx('src/new.ts', fortyAdded, { status: 'added', additions: 40, deletions: 0 })]);
   assert.equal(out.audit.filter((a) => a.action === 'part_invalid').length, 2);
-  assert.deepEqual(out.scores[0]!.blocks.map((x) => [x.id, x.entry?.score ?? null]), [['B1.1', 80], ['B1.rest', null]]);
+  assert.deepEqual(out.scores[0]!.blocks.map((x) => [x.id, x.entry?.score ?? null]), [['B1', null]]);
+  assert.deepEqual(out.scores[0]!.fileLevel, { score: 100, source: 'not_scored' });
 });
 
 test('parts on a short block are not a split: the highest part stands', () => {
@@ -263,9 +264,11 @@ test('on a tie between parts of a short block the first stands', () => {
   assert.equal(out.scores[0]!.blocks[0]!.entry!.category, 'fix');
 });
 
-test('parts are ignored when the item also has a score', () => {
-  const out = run([file('src/new.ts', [{ id: 'B1', score: 20, category: 'test', parts: [part('R1', 'R20', 90, 'test', 'x')] }])], [ctx('src/new.ts', fortyAdded, { status: 'added', additions: 40, deletions: 0 })]);
-  assert.deepEqual(out.scores[0]!.blocks.map((x) => [x.id, x.entry?.score]), [['B1', 20]]);
+test('an item with both a score and parts voids its block', () => {
+  const out = run([file('src/a.ts', [{ id: 'B1', score: 10, category: 'fix', parts: [part('R12', 'R12', 90, 'fix', 'x')] }, b('B2', 10)])], [ctx('src/a.ts', twoHunks)]);
+  assert.deepEqual(out.scores[0]!.blocks.map((x) => [x.id, x.entry?.score ?? null]), [['B1', null], ['B2', 10]]);
+  assertVoided(out.scores[0]!);
+  assert.ok(out.audit.some((a) => a.action === 'score_and_parts' && a.subject === 'src/a.ts B1'));
 });
 
 test('a rename inside its directory scores 30 by rule and is covered', () => {
@@ -366,4 +369,46 @@ test('hidden_characters loses a tie to the team file, wins it against not_scored
   const hidden = { ...ctx('src/a.ts', twoHunks), hidden: true };
   assert.equal(run([], [hidden], { floors: parseRepoFile('nonsense: 1') }).scores[0]!.fileLevel!.source, 'team_file_invalid');
   assert.equal(run([], [hidden]).scores[0]!.fileLevel!.source, 'hidden_characters');
+});
+
+function assertVoided(s: FileScore): void {
+  assert.deepEqual(s.fileLevel, { score: 100, source: 'not_scored' });
+  assert.equal(s.finalScore, 100);
+  assert.equal(s.covered, false);
+}
+const forty = () => ctx('src/new.ts', fortyAdded, { status: 'added', additions: 40, deletions: 0 });
+
+test('an invalid whole-file score voids the file even when every block is scored', () => {
+  const out = run([{ ...file('src/a.ts', [b('B1', 10), b('B2', 10)]), score: 85.5, category: 'fix', reason: 'x' }], [ctx('src/a.ts', twoHunks)]);
+  assertVoided(out.scores[0]!);
+  assert.ok(out.audit.some((a) => a.action === 'score_invalid' && a.subject === 'src/a.ts'));
+});
+
+test('an invalid whole-file score in a second entry voids the file', () => {
+  const out = run([{ ...file('src/a.ts', [b('B1', 10), b('B2', 10)]), score: 80, category: 'fix', reason: 'x' }, { ...file('src/a.ts', []), score: 85.5, category: 'fix', reason: 'x' }], [ctx('src/a.ts', twoHunks)]);
+  assertVoided(out.scores[0]!);
+});
+
+test('a long block whose second part overlaps the first is voided', () => {
+  const out = run([file('src/new.ts', [{ id: 'B1', parts: [part('R1', 'R40', 10, 'test'), part('R10', 'R20', 90, 'test', 'x')] }])], [forty()]);
+  assert.deepEqual(out.scores[0]!.blocks.map((x) => [x.id, x.entry]), [['B1', null]]);
+  assertVoided(out.scores[0]!);
+});
+
+test('a long block split with an invalid part, then scored 20 by a second item, is voided', () => {
+  const out = run([file('src/new.ts', [{ id: 'B1', parts: [part('R1', 'R20', 10, 'test'), part('R21', 'R40', 85.5, 'test', 'x')] }, b('B1', 20, 'test')])], [forty()]);
+  assertVoided(out.scores[0]!);
+});
+
+test('two items for one block, a complete valid split and a plain 20, void the block', () => {
+  const out = run([file('src/new.ts', [{ id: 'B1', parts: [part('R1', 'R20', 10, 'test'), part('R21', 'R40', 10, 'test')] }, b('B1', 20, 'test')])], [forty()]);
+  assert.deepEqual(out.scores[0]!.blocks.map((x) => [x.id, x.entry]), [['B1', null]]);
+  assertVoided(out.scores[0]!);
+  assert.ok(out.audit.some((a) => a.action === 'block_duplicate' && a.subject === 'src/new.ts B1'));
+});
+
+test('a long block with one valid part that leaves lines out: the part and a voided rest', () => {
+  const out = run([file('src/new.ts', [{ id: 'B1', parts: [part('R1', 'R20', 30, 'test')] }])], [forty()]);
+  assert.deepEqual(out.scores[0]!.blocks.map((x) => [x.id, x.entry?.score ?? null]), [['B1.1', 30], ['B1.rest', null]]);
+  assertVoided(out.scores[0]!);
 });

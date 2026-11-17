@@ -77,6 +77,11 @@ const scoredWith = (blocks: Scored[]): Outcome =>
 
 function outcomeOf(path: string, block: Block, item: RawBlock, audit: AuditEntry[]): Outcome {
   const subject = `${path} ${block.id}`;
+  if (item.score !== undefined && item.parts !== undefined) {
+    // Two answers for one block: neither can be trusted over the other.
+    audit.push({ stage: 'reconcile', action: 'score_and_parts', subject, reason: 'voided' });
+    return { kind: 'void' };
+  }
   if (item.score !== undefined) {
     const entry = entryOf(item, subject, audit);
     return entry === null ? { kind: 'void' } : scoredWith([{ score: blockScore(block, entry), voided: false }]);
@@ -96,28 +101,33 @@ function outcomeOf(path: string, block: Block, item: RawBlock, audit: AuditEntry
   }
 
   if (block.changed.length <= SPLIT_ABOVE) {
-    // Not split, so the parts only vouch for the block when they cover all of it and none was dropped.
+    // Not split, so the parts only vouch for the block when they cover all of it.
     audit.push({ stage: 'reconcile', action: 'split_ignored', subject, reason: 'block_has_30_changed_lines_or_fewer' });
-    if (dropped || split.rest !== null) return { kind: 'void' };
+  }
+  // A dropped part may have been the one that scored the block higher, so no part stands.
+  if (dropped) return { kind: 'void' };
+
+  if (block.changed.length <= SPLIT_ABOVE) {
+    if (split.rest !== null) return { kind: 'void' };
     let best = parts[0]!;
     for (const part of parts) if (part.entry.score > best.entry.score) best = part;
     return scoredWith([{ score: blockScore(block, best.entry), voided: false }]);
   }
 
-  // Nothing kept means nothing was split: the block stays whole, without a score.
-  if (split.parts.every((made) => made === null)) return { kind: 'void' };
-  const out: Scored[] = [];
-  for (const [i, made] of split.parts.entries()) {
-    if (made !== null) out.push({ score: blockScore(made, parts[i]!.entry), voided: false });
-  }
+  const out: Scored[] = split.parts.map((made, i) => ({ score: blockScore(made!, parts[i]!.entry), voided: false }));
   if (split.rest !== null) out.push({ score: blockScore(split.rest, null), voided: true });
   return scoredWith(out);
 }
 
-// Every item that named `block`: one that voids it voids it; otherwise the highest score stands, the first on a tie.
+const isPlainScore = (item: RawBlock): boolean => item.score !== undefined && item.parts === undefined;
+
+// Every item that named `block`. Several items stand only when each is a plain valid score: then the
+// highest stands, the first on a tie. Any other mix voids the block, since it cannot be read as one answer.
 function blocksFor(path: string, block: Block, items: RawBlock[], audit: AuditEntry[]): Scored[] {
+  const voided = [{ score: blockScore(block, null), voided: true }];
   const outcomes = items.map((item) => outcomeOf(path, block, item, audit));
-  if (outcomes.some((o) => o.kind === 'void')) return [{ score: blockScore(block, null), voided: true }];
+  if (outcomes.some((o) => o.kind === 'void')) return voided;
+  if (items.length > 1 && !items.every(isPlainScore)) return voided;
   let best: Outcome & { kind: 'scored' } | null = null;
   for (const o of outcomes) if (o.kind === 'scored' && (best === null || o.top > best.top)) best = o;
   return best === null ? [{ score: blockScore(block, null), voided: false }] : best.blocks;
@@ -155,8 +165,8 @@ export function reconcileScores(
   return { scores, audit };
 }
 
-// The highest valid whole-file score among the entries; none when any of them gave one that is not valid.
-function wholeFileOf(entries: RawFile[], path: string, audit: AuditEntry[]): ScoreEntry | null {
+// The highest valid whole-file score among the entries; none, and `invalid`, when any of them gave one that is not valid.
+function wholeFileOf(entries: RawFile[], path: string, audit: AuditEntry[]): { entry: ScoreEntry | null; invalid: boolean } {
   let best: ScoreEntry | null = null;
   let invalid = false;
   for (const entry of entries) {
@@ -165,7 +175,7 @@ function wholeFileOf(entries: RawFile[], path: string, audit: AuditEntry[]): Sco
     if (checked === null) invalid = true;
     else if (best === null || checked.score > best.score) best = checked;
   }
-  return invalid ? null : best;
+  return { entry: invalid ? null : best, invalid };
 }
 
 function scoreFile(
@@ -178,7 +188,8 @@ function scoreFile(
   const { file, plan } = context;
   const path = file.path;
   const answered = entries.length > 0;
-  const wholeFile = wholeFileOf(entries, path, audit);
+  // An unusable whole-file score may have been the model's warning about the file: the file is not scored.
+  const { entry: wholeFile, invalid: wholeFileInvalid } = wholeFileOf(entries, path, audit);
 
   const scored: Scored[] = [];
   if (answered) {
@@ -208,6 +219,7 @@ function scoreFile(
 
   const notScored =
     plan.kind === 'none' ||
+    wholeFileInvalid ||
     notRead.has(path) ||
     (plan.kind !== 'rule' && !answered) ||
     (plan.kind === 'model_whole' && wholeFile === null) ||
@@ -228,6 +240,7 @@ function scoreFile(
 
   let covered: boolean;
   if (context.hidden) covered = false;
+  else if (wholeFileInvalid) covered = false;
   else if (plan.kind === 'rule') covered = true;
   else if (plan.kind === 'none') covered = false;
   else covered = answered && !notRead.has(path) && (plan.kind === 'model_whole' ? wholeFile !== null : !unscored);
