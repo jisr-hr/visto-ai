@@ -1,3 +1,5 @@
+<img src="assets/icon.svg" width="96" alt="Visto AI icon">
+
 # Visto AI
 
 An open-source, self-hosted AI reviewer for pull requests. It looks for defects it can demonstrate, and it scores which parts of a change still need a human reviewer.
