@@ -67,11 +67,17 @@ export function fileDiffHash(hunks: Hunk[]): string | null {
   return hashOf(hunks.flatMap((h) => h.lines));
 }
 
+// A person can comment on an unchanged line from either column, so a context line is listed
+// on both sides: with its new number on the right and its old number on the left.
 export function linesOf(block: Block): Ranges {
-  return {
-    RIGHT: toRanges(block.anchors.filter((a) => a.side === 'RIGHT').map((a) => a.line)),
-    LEFT: toRanges(block.anchors.filter((a) => a.side === 'LEFT').map((a) => a.line)),
-  };
+  const lines = sourceLines.get(block) ?? [];
+  const right: number[] = [];
+  const left: number[] = [];
+  for (const line of lines) {
+    if (line.kind !== 'del') right.push(line.newLine!);
+    if (line.kind !== 'add') left.push(line.oldLine!);
+  }
+  return { RIGHT: toRanges(right), LEFT: toRanges(left) };
 }
 
 export function parseAnchor(text: string): Anchor | null {

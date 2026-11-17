@@ -67,8 +67,28 @@ test('a comment on a context line of a block counts', () => {
   assert.equal(l.blocks.get(A1)!.loose, false);
 });
 
+test('a comment on the old number of a context line labels its block', () => {
+  // Old and new numbers differ: the block anchors RIGHT 25-28 and LEFT 20-22.
+  const shifted = ['@@ -20,3 +25,4 @@', ' keep', '+added', ' keep', ' keep'].join('\n');
+  const s = scoresOf([['src/a.ts', patchA], ['src/c.ts', shifted]]);
+  const final = [same('src/a.ts', patchA), same('src/c.ts', shifted)];
+  const l = labelCase({ ...bare, final_files: final, activity: [note('c1', { path: 'src/c.ts', side: 'LEFT', line: 21 })] }, s);
+  assert.deepEqual(l.blocks.get('src/c.ts\nB1'), { loose: true, strict: false });
+  assert.deepEqual(l.comments, { counted: 1, off_head: 0, outside_diff: 0 });
+  const none20 = labelCase({ ...bare, final_files: final, activity: [note('c2', { path: 'src/c.ts', side: 'LEFT', line: 26 })] }, s);
+  assert.equal(none20.blocks.get('src/c.ts\nB1')!.loose, false);
+});
+
 test('a comment on the old side matches the old lines', () => {
   const l = labelCase(caseOf([note('c1', { side: 'LEFT', line: 51 })]), scores());
+  assert.equal(l.blocks.get(A2)!.loose, true);
+  assert.equal(l.blocks.get(A1)!.loose, false);
+});
+
+test('a comment with no side is read as the new side', () => {
+  const noSide = note('c1', { line: 52 });
+  delete noSide.side;
+  const l = labelCase(caseOf([noSide]), scores());
   assert.equal(l.blocks.get(A2)!.loose, true);
   assert.equal(l.blocks.get(A1)!.loose, false);
 });

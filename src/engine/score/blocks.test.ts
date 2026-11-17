@@ -24,7 +24,12 @@ test('one block per hunk, with anchors, changed lines and span', () => {
   assert.deepEqual(b!.changed, [{ side: 'LEFT', line: 11 }, { side: 'RIGHT', line: 11 }, { side: 'RIGHT', line: 12 }]);
   assert.equal(b!.anchors.length, 6);
   assert.deepEqual(b!.span, { side: 'RIGHT', first: 11, last: 12 });
-  assert.deepEqual(linesOf(b!), { RIGHT: [[10, 14]], LEFT: [[11, 11]] });
+  assert.deepEqual(linesOf(b!), { RIGHT: [[10, 14]], LEFT: [[10, 13]] });
+});
+
+test('lines holds a context line on both sides, with its old and its new number', () => {
+  const [b] = blocksOf(parsePatch(['@@ -20,3 +25,4 @@', ' keep', '+added', ' keep', ' keep'].join('\n')));
+  assert.deepEqual(linesOf(b!), { RIGHT: [[25, 28]], LEFT: [[20, 22]] });
 });
 
 test('a block that only moved keeps its hash; a changed line changes it; a context line does not', () => {

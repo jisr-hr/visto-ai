@@ -28,7 +28,7 @@ export interface BlockScore {
   id: string; hunk: string; hunkHash: string; hash: string;
   changedLines: number;
   span: Span;
-  lines: Ranges;      // the block's anchored lines on each side, context included
+  lines: Ranges;      // the block's lines on each side; a context line is on both, with its old and its new number
   entry: ScoreEntry | null; // null: the model gave this block no score of its own
 }
 
