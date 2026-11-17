@@ -115,3 +115,17 @@ test('0, 101, 69.5 and an unknown key in score are errors', () => {
     (e: ConfigError) => e.issues.some((i) => i.startsWith('repositories.overrides.acme/shop.score')),
   );
 });
+
+test('a repository override applies whatever the letter case of the name', () => {
+  const c = parseConfig(minimal + 'repositories:\n  overrides:\n    Acme/Shop: { score: { threshold: 40 } }\n', { MODEL_KEY: 'k' });
+  assert.equal(repoConfigFor(c, 'acme/shop').scoreThreshold, 40);
+  assert.equal(repoConfigFor(c, 'ACME/SHOP').scoreThreshold, 40);
+  assert.equal(repoConfigFor(c, 'acme/other').scoreThreshold, 70);
+});
+
+test('two override keys that differ only by letter case are refused', () => {
+  assert.throws(
+    () => parseConfig(minimal + 'repositories:\n  overrides:\n    acme/shop: { score: { threshold: 40 } }\n    Acme/Shop: { score: { threshold: 90 } }\n', { MODEL_KEY: 'k' }),
+    (e: ConfigError) => e instanceof ConfigError && e.issues.some((i) => i.startsWith('repositories.overrides')),
+  );
+});

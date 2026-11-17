@@ -55,6 +55,13 @@ export function parseConfig(yamlText: string, env: Record<string, string | undef
     throw new ConfigError([`model.apiKey: environment variable ${varName} is not set`]);
   }
   const { defaults, overrides } = raw.repositories;
+  // Repository names are case-insensitive on the git service, so two such keys name one repository.
+  const seen = new Map<string, string>();
+  for (const name of Object.keys(overrides)) {
+    const other = seen.get(name.toLowerCase());
+    if (other !== undefined) throw new ConfigError([`repositories.overrides: ${other} and ${name} name the same repository`]);
+    seen.set(name.toLowerCase(), name);
+  }
   return {
     model: { ...raw.model, apiKey },
     limits: raw.limits,
@@ -77,8 +84,10 @@ export function loadConfig(path: string, env: Record<string, string | undefined>
   return parseConfig(readFileSync(path, 'utf8'), env);
 }
 
-/** `fullName` is "owner/name". An override replaces only the keys it sets. */
+/** `fullName` is "owner/name", matched without regard to case. An override replaces only the keys it sets. */
 export function repoConfigFor(config: DeploymentConfig, fullName: string): RepoConfig {
-  const override = config.repositories.overrides[fullName] ?? {};
+  const wanted = fullName.toLowerCase();
+  const key = Object.keys(config.repositories.overrides).find((name) => name.toLowerCase() === wanted);
+  const override = key === undefined ? {} : config.repositories.overrides[key]!;
   return { ...config.repositories.defaults, ...override };
 }
