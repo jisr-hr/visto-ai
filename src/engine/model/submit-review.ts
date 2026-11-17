@@ -20,28 +20,31 @@ const findingSchema = z.object({
 // Only the shape is checked here. A bad score, category or block id is judged
 // later, where it costs one block and not the whole answer, so unknown keys in
 // files are ignored rather than rejected.
+// Models often send null for a field they leave out: in files, that reads as the field being absent.
+const optional = <T extends z.ZodType>(schema: T) => z.preprocess((v) => (v === null ? undefined : v), schema.optional());
+
 const partSchema = z.object({
   first: z.string(),
   last: z.string(),
   score: z.number(),
   category: z.string(),
-  reason: z.string().optional(),
+  reason: optional(z.string()),
 });
 
 const blockSchema = z.object({
   id: z.string().min(1),
-  score: z.number().optional(),
-  category: z.string().optional(),
-  reason: z.string().optional(),
-  parts: z.array(partSchema).optional(),
+  score: optional(z.number()),
+  category: optional(z.string()),
+  reason: optional(z.string()),
+  parts: optional(z.array(partSchema)),
 });
 
 const fileSchema = z.object({
   path: z.string().trim().min(1),
   change_summary: z.string(),
-  score: z.number().optional(),
-  category: z.string().optional(),
-  reason: z.string().optional(),
+  score: optional(z.number()),
+  category: optional(z.string()),
+  reason: optional(z.string()),
   blocks: z.array(blockSchema).default([]),
 });
 

@@ -144,3 +144,27 @@ test('an unknown key in a finding is still rejected', () => {
   const t = structuredClone(ok) as { findings: Record<string, unknown>[] }; t.findings[0]!.extra = 1;
   assert.match(reasonOf(t), /^findings\[0\]: unexpected key extra/);
 });
+
+test('null for an optional field of a file is read as the field being absent', () => {
+  const v = parsed({ ...ok, files: [{ path: 'src/a.ts', change_summary: 's', score: null, category: null, reason: null, blocks: [] }] });
+  assert.deepEqual([v.files[0]!.score, v.files[0]!.category, v.files[0]!.reason], [undefined, undefined, undefined]);
+});
+test('null for an optional field of a block is read as the field being absent', () => {
+  const v = parsed(withBlock({ id: 'B1', score: 45, category: 'fix', reason: null, parts: null }));
+  const block = v.files[0]!.blocks[0]!;
+  assert.deepEqual([block.score, block.category, block.reason, block.parts], [45, 'fix', undefined, undefined]);
+  const bare = parsed(withBlock({ id: 'B1', score: null, category: null })).files[0]!.blocks[0]!;
+  assert.deepEqual([bare.score, bare.category], [undefined, undefined]);
+});
+test('null for the reason of a part is read as the reason being absent', () => {
+  const v = parsed(withBlock({ id: 'B1', score: null, parts: [{ first: 'R1', last: 'R20', score: 30, category: 'test', reason: null }] }));
+  const block = v.files[0]!.blocks[0]!;
+  assert.equal(block.score, undefined);
+  assert.equal(block.parts![0]!.reason, undefined);
+  assert.equal(block.parts![0]!.score, 30);
+});
+test('null is still refused for a required field of a part, and in findings', () => {
+  assert.match(reasonOf(withBlock({ id: 'B1', parts: [{ first: 'R1', last: 'R20', score: null, category: 'test' }] })), /^files\[0\]\.blocks\[0\]\.parts\[0\]\.score: /);
+  const t = structuredClone(ok) as { findings: Record<string, unknown>[] }; t.findings[0]!.quote = null;
+  assert.match(reasonOf(t), /^findings\[0\]\.quote: /);
+});
