@@ -7,9 +7,12 @@ import { buildMessages, fixedTokens, headerStripCounts } from './context/prompt.
 import { callBatch } from './model/call.ts';
 import type { BatchAnswer } from './model/call.ts';
 import type { SubmitReviewArgs } from './model/submit-review.ts';
+import { inPool } from './pool.ts';
+import type { Control } from './pool.ts';
 import { reconcile } from './reconcile/index.ts';
 import { reconcileScores, verdictOf } from './reconcile/scores.ts';
 import { REPO_FILE, parseRepoFile } from './score/floors.ts';
+import { askScorer, summariesOf } from './scorer/ask.ts';
 import type {
   AuditEntry, ChangedFile, Effort, NotReviewed, PullRequestInfo, RepoConfig, ReviewDeps, ReviewInput, ReviewResult, Source, Usage,
 } from './types.ts';
@@ -111,8 +114,6 @@ async function oneCall(run: Run, files: FileContext[], firstFileNumber: number, 
   return answer;
 }
 
-interface Control { stopped: boolean; error: unknown; failed: boolean }
-
 // Never rejects: an unexpected error is recorded in `ctl`, which stops every worker from starting more work.
 async function runBatch(run: Run, ctl: Control, batch: Batch, firstFileNumber: number, batchIndex: number): Promise<BatchOutcome> {
   const out: BatchOutcome = { answers: [], reviewed: [], failedFiles: [], failedCodes: [], usage: zeroUsage(), models: [], providers: [], audit: [] };
@@ -171,20 +172,6 @@ async function attempt(run: Run, ctl: Control, out: BatchOutcome, batch: Batch, 
     }
     number += part.length;
   }
-}
-
-async function inPool<T>(count: number, width: number, ctl: Control, work: (index: number) => Promise<T>): Promise<Array<T | undefined>> {
-  const results: Array<T | undefined> = new Array<T | undefined>(count).fill(undefined);
-  let next = 0;
-  const worker = async (): Promise<void> => {
-    while (next < count && !ctl.stopped) {
-      const index = next;
-      next += 1;
-      results[index] = await work(index);
-    }
-  };
-  await Promise.all(Array.from({ length: Math.min(width, count) }, worker));
-  return results;
 }
 
 export async function review(input: ReviewInput, deps: ReviewDeps): Promise<ReviewResult> {
@@ -275,7 +262,19 @@ export async function review(input: ReviewInput, deps: ReviewDeps): Promise<Revi
       ...outcomes.flatMap((o) => o.failedFiles.map((path): NotReviewed => ({ path, reason: 'batch_failed' }))),
     ];
     const notRead = new Set(notReviewed.map((n) => n.path));
-    const scored = reconcileScores(outcomes.flatMap((o) => o.answers), built.contexts, notRead, floors);
+    let scoreAnswers = outcomes.flatMap((o) => o.answers);
+    if (deps.scorer !== undefined) {
+      const reviewed = new Set(outcomes.flatMap((o) => o.reviewed));
+      const asked = await askScorer({
+        scorer: deps.scorer,
+        contexts: built.contexts.filter((c) => reviewed.has(c.file.path) && (c.plan.kind === 'model' || c.plan.kind === 'model_whole')),
+        pr, token: run.token, summaries: summariesOf(scoreAnswers, built.contexts), log: (entry) => safeLog(deps, entry),
+      });
+      usage = addUsage(usage, asked.usage);
+      audit.push(...asked.audit);
+      scoreAnswers = asked.answers;
+    }
+    const scored = reconcileScores(scoreAnswers, built.contexts, notRead, floors);
     audit.push(...scored.audit);
     return okResult(rec.overview, threshold, {
       findings: rec.findings, unplaced: rec.unplaced, beyondDiff: rec.beyondDiff,
