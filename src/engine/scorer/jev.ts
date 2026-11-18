@@ -3,7 +3,7 @@ import { ProviderError, classify, isTimeout } from '../model/errors.ts';
 import type { ScoreAnswer, ScoreRequest, ScoredItem, Scorer, Usage } from '../types.ts';
 import { combine } from './jev-combine.ts';
 import type { Answers } from './jev-combine.ts';
-import { SIGNAL_NAMES, WHOLE_LEAD, WHOLE_PREFIX, blockLead, questionsFor } from './jev-questions.ts';
+import { SIGNAL_NAMES, blockLead, questionsFor } from './jev-questions.ts';
 import type { NoulQuestion } from './jev-questions.ts';
 
 export const BLOCKS_PER_REQUEST = 4;
@@ -82,11 +82,9 @@ export function createJevScorer(config: ScorerConfig, io: Io): Scorer {
   async function score(request: ScoreRequest): Promise<ScoreAnswer> {
     const usage: Usage = { calls: 0, inputTokens: 0, outputTokens: 0, cachedTokens: 0, cost: 0 };
     const blocks: Record<string, ScoredItem> = {};
-    let whole: ScoredItem | null = null;
     let failure: string | null = null;
 
     const groups: { prefix: string; lead: string }[][] = [];
-    if (request.blocks.length === 0) groups.push([{ prefix: WHOLE_PREFIX, lead: WHOLE_LEAD }]);
     for (let i = 0; i < request.blocks.length; i += BLOCKS_PER_REQUEST) {
       groups.push(request.blocks.slice(i, i + BLOCKS_PER_REQUEST).map((id) => ({ prefix: id, lead: blockLead(id) })));
     }
@@ -104,11 +102,10 @@ export function createJevScorer(config: ScorerConfig, io: Io): Scorer {
       for (const { prefix } of group) {
         const item = itemFor(prefix, answers);
         if (item === null) failure ??= 'bad_answer';
-        else if (request.blocks.length === 0) whole = item;
         else blocks[prefix] = item;
       }
     }
-    return { blocks, whole, usage, failure };
+    return { blocks, usage, failure };
   }
 
   return { score };

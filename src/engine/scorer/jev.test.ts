@@ -62,21 +62,15 @@ test('six blocks go out as two requests of four and two', async () => {
   assert.equal(Object.keys(calls[1]!.body.questions).length, 26);
   assert.ok(calls[0]!.signal instanceof AbortSignal);
   assert.deepEqual(Object.keys(answer.blocks), ['b1', 'b2', 'b3', 'b4', 'b5', 'b6']);
-  assert.equal(answer.whole, null);
   assert.equal(answer.failure, null);
 });
 
-test('no blocks asks one whole-file request', async () => {
+test('an empty blocks list sends nothing and answers with no items', async () => {
   const { scorer, calls, queue } = setup();
   queue(ok(answersFor('file')));
   const answer = await scorer.score({ text: 'moved file', blocks: [] });
-  assert.equal(calls.length, 1);
-  const keys = Object.keys(calls[0]!.body.questions);
-  assert.equal(keys.length, 13);
-  assert.ok(keys.every((k) => k.startsWith('file_')));
-  assert.notEqual(answer.whole, null);
-  assert.deepEqual(answer.blocks, {});
-  assert.equal(answer.failure, null);
+  assert.equal(calls.length, 0);
+  assert.deepEqual(answer, { blocks: {}, usage: { calls: 0, inputTokens: 0, outputTokens: 0, cachedTokens: 0, cost: 0 }, failure: null });
 });
 
 test('usage adds up over responses and a response without usage adds nothing', async () => {

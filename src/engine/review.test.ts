@@ -568,7 +568,7 @@ function scorerStub(reply: (request: ScoreRequest) => Partial<ScoreAnswer>): Sco
     requests,
     score: (request) => {
       requests.push(request);
-      return Promise.resolve({ blocks: {}, whole: null, usage: scorerUsage(), failure: null, ...reply(request) });
+      return Promise.resolve({ blocks: {}, usage: scorerUsage(), failure: null, ...reply(request) });
     },
   };
 }
@@ -627,4 +627,36 @@ test('nothing reviewable, or every batch failed: the scorer is never asked', asy
   const r = await review(input, deps({ files: [fileA], answers: [down, down], scorer: failed }));
   assert.equal(r.status, 'failed');
   assert.deepEqual([none.requests.length, failed.requests.length], [0, 0]);
+});
+
+const movedAway: ChangedFile = { path: 'lib/x.ts', previousPath: 'src/x.ts', status: 'renamed', additions: 0, deletions: 0, patch: null };
+const movedAndA = {
+  overview: 'Moves lib/x.ts and changes src/a.ts.', findings: [],
+  files: [
+    { path: 'lib/x.ts', change_summary: 'Moves the file.', blocks: [], score: 35, category: 'rename', reason: 'Moves the file.' },
+    { path: 'src/a.ts', change_summary: 'Changes the retry delay.', score: 95, category: 'fix', reason: 'Changes the retry delay.', blocks: [{ id: 'B1', score: 20, category: 'fix', reason: 'Changes the retry delay.' }] },
+  ],
+};
+
+test('with a scorer set, a file moved to another directory keeps the review model\'s whole-file score', async () => {
+  const scorer = scorerStub(() => ({ blocks: { B1: refunds } }));
+  const d = deps({ files: [fileA, movedAway], answers: [movedAndA], scorer });
+  d.source.getFileContent = async (_p, path) => (path === 'src/x.ts' || path === 'lib/x.ts' ? 'same\n' : null);
+  const r = await review(input, d);
+  assert.equal(scorer.requests.length, 1);
+  assert.ok(!scorer.requests[0]!.text.includes('lib/x.ts'));
+  const byPath = new Map(r.scores.map((s) => [s.path, s]));
+  assert.deepEqual(byPath.get('lib/x.ts')!.fileLevel, { score: 35, source: 'whole_file' });
+  assert.deepEqual(byPath.get('src/a.ts')!.blocks.map((b) => b.entry), [refunds]);
+  assert.ok(!r.audit.some((e) => e.action === 'score_path_not_in_batch'));
+});
+
+test('with a scorer set, a review-model whole-file score for a file with a diff is not used', async () => {
+  const scorer = scorerStub(() => ({ blocks: { B1: { ...refunds, score: 15 } } }));
+  const d = deps({ files: [fileA, movedAway], answers: [movedAndA], scorer });
+  d.source.getFileContent = async (_p, path) => (path === 'src/x.ts' || path === 'lib/x.ts' ? 'same\n' : null);
+  const r = await review(input, d);
+  const a = r.scores.find((s) => s.path === 'src/a.ts')!;
+  assert.equal(a.fileLevel, null);
+  assert.equal(a.finalScore, 15);
 });

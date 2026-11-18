@@ -19,9 +19,6 @@ export const SIGNAL_NAMES = Object.keys(SIGNALS) as SignalName[];
 
 export interface NoulQuestion { type: 'noul'; instructions: string; criteria: { true: string; false: string } }
 
-export const WHOLE_PREFIX = 'file';
-export const WHOLE_LEAD = 'This file moved to another directory and its content did not change. Judge the move itself.';
-
 export function blockLead(id: string): string {
   return `Look only at block ${id}: the lines under the header "### Block ${id}", up to the next block header or the end of the diff.`;
 }

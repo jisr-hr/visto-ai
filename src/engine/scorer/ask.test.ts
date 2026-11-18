@@ -34,7 +34,7 @@ function moved(path: string, previousPath: string): FileContext {
 
 const usage = (calls = 1): Usage => ({ calls, inputTokens: 10, outputTokens: 2, cachedTokens: 0, cost: 0.1 * calls });
 const item = (score: number, category = 'fix', reason = 'Changes a value.'): ScoredItem => ({ score, category, reason });
-const answer = (over: Partial<ScoreAnswer> = {}): ScoreAnswer => ({ blocks: {}, whole: null, usage: usage(), failure: null, ...over });
+const answer = (over: Partial<ScoreAnswer> = {}): ScoreAnswer => ({ blocks: {}, usage: usage(), failure: null, ...over });
 
 type Reply = (request: ScoreRequest) => ScoreAnswer | Promise<ScoreAnswer>;
 function stub(reply: Reply): Scorer & { requests: ScoreRequest[]; maxInFlight: number } {
@@ -77,15 +77,14 @@ test('each file is sent alone with the note and the pull request header', async 
   assert.deepEqual(s.requests[1]!.blocks, ['B1']);
 });
 
-test('a file moved as a whole is asked for a whole-file score, and only there is one used', async () => {
-  const s = stub((r) => answer({ whole: item(35, 'rename', 'Moves the file.'), blocks: r.blocks.length > 0 ? { B1: item(15) } : {} }));
+test('a raw file built from a scorer answer never carries a file-level score', async () => {
+  // An answer with extra fields, as a scorer that is not this one might give.
+  const s = stub(() => Object.assign(answer({ blocks: { B1: item(15) } }), { whole: item(35, 'rename', 'Moves the file.') }));
   const out = await ask(s, [moved('lib/x.ts', 'src/x.ts'), ctx('src/a.ts')]);
-  assert.deepEqual(s.requests.map((r) => r.blocks), [[], ['B1']]);
   assert.deepEqual(out.answers.map((a) => a.value.files[0]), [
-    { path: 'lib/x.ts', change_summary: '', blocks: [], score: 35, category: 'rename', reason: 'Moves the file.' },
+    { path: 'lib/x.ts', change_summary: '', blocks: [] },
     { path: 'src/a.ts', change_summary: '', blocks: [{ id: 'B1', score: 15, category: 'fix', reason: 'Changes a value.' }] },
   ]);
-  assert.deepEqual(out.answers.map((a) => a.files), [['lib/x.ts'], ['src/a.ts']]);
 });
 
 test('an id that was not asked is dropped and the blocks come out in diff order', async () => {

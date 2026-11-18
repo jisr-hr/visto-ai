@@ -10,6 +10,7 @@ import type { SubmitReviewArgs } from './model/submit-review.ts';
 import { inPool } from './pool.ts';
 import type { Control } from './pool.ts';
 import { reconcile } from './reconcile/index.ts';
+import { normalizePath } from './reconcile/placement.ts';
 import { reconcileScores, verdictOf } from './reconcile/scores.ts';
 import { REPO_FILE, parseRepoFile } from './score/floors.ts';
 import { askScorer, summariesOf } from './scorer/ask.ts';
@@ -267,12 +268,19 @@ export async function review(input: ReviewInput, deps: ReviewDeps): Promise<Revi
       const reviewed = new Set(outcomes.flatMap((o) => o.reviewed));
       const asked = await askScorer({
         scorer: deps.scorer,
-        contexts: built.contexts.filter((c) => reviewed.has(c.file.path) && (c.plan.kind === 'model' || c.plan.kind === 'model_whole')),
+        contexts: built.contexts.filter((c) => reviewed.has(c.file.path) && c.plan.kind === 'model'),
         pr, token: run.token, summaries: summariesOf(scoreAnswers, built.contexts), log: (entry) => safeLog(deps, entry),
       });
       usage = addUsage(usage, asked.usage);
       audit.push(...asked.audit);
-      scoreAnswers = asked.answers;
+      // A file moved to another directory with no content change keeps the review model's own score.
+      const known: ReadonlySet<string> = new Set(built.contexts.map((c) => c.file.path));
+      const whole: ReadonlySet<string> = new Set(built.contexts.filter((c) => c.plan.kind === 'model_whole').map((c) => c.file.path));
+      const wholeAnswers = scoreAnswers.map((a) => ({
+        value: { ...a.value, files: a.value.files.filter((raw) => whole.has(normalizePath(raw.path, known) ?? '')) },
+        files: a.files.filter((path) => whole.has(path)),
+      }));
+      scoreAnswers = [...asked.answers, ...wholeAnswers];
     }
     const scored = reconcileScores(scoreAnswers, built.contexts, notRead, floors);
     audit.push(...scored.audit);

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { blockLead, questionsFor, SIGNAL_NAMES, SIGNALS, WHOLE_LEAD, WHOLE_PREFIX } from './jev-questions.ts';
+import { blockLead, questionsFor, SIGNAL_NAMES, SIGNALS } from './jev-questions.ts';
 
 test('SIGNAL_NAMES lists the thirteen signals in order', () => {
   assert.deepEqual(SIGNAL_NAMES, [
@@ -27,11 +27,6 @@ test('questionsFor builds one noul question per signal, keyed by prefix and name
       criteria: { true: SIGNALS[name].yes, false: SIGNALS[name].no },
     });
   }
-});
-
-test('the whole-file prefix and lead are set', () => {
-  assert.equal(WHOLE_PREFIX, 'file');
-  assert.equal(Object.keys(questionsFor(WHOLE_PREFIX, WHOLE_LEAD))[0], 'file_calculation');
 });
 
 test('no question text holds "and/or" and every ask ends with a question mark', () => {

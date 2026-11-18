@@ -24,11 +24,10 @@ export interface ReviewInput {
   asOf: Date;
   earlier: null;              // a pull request's earlier state arrives with a later plan
 }
-export interface ScoreRequest { text: string; blocks: string[] } // blocks: ids to score, in diff order; empty when the file is scored as a whole
+export interface ScoreRequest { text: string; blocks: string[] } // blocks: ids to score, in diff order; never empty
 export interface ScoredItem { score: number; category: string; reason: string }
 export interface ScoreAnswer {
   blocks: Record<string, ScoredItem>; // by block id; a block the scorer could not answer for is absent
-  whole: ScoredItem | null;           // set only when `blocks` was empty
   usage: Usage;
   failure: string | null;             // a short code when some request for this file failed; what was answered before it is kept
 }

@@ -28,20 +28,14 @@ export function summariesOf(answers: Answer[], contexts: FileContext[]): Map<str
   return summaries;
 }
 
-// Only the ids that were asked are kept, in diff order; a whole-file score only for a file asked as a whole.
+// Only the ids that were asked are kept, in diff order; never a whole-file score.
 function rawFileOf(context: FileContext, asked: string[], answer: ScoreAnswer, summary: string): RawFile {
   const blocks: RawBlock[] = [];
   for (const id of asked) {
     const item = answer.blocks[id];
     if (item !== undefined) blocks.push({ id, score: item.score, category: item.category, reason: item.reason });
   }
-  const raw: RawFile = { path: context.file.path, change_summary: summary, blocks };
-  if (context.plan.kind === 'model_whole' && answer.whole !== null) {
-    raw.score = answer.whole.score;
-    raw.category = answer.whole.category;
-    raw.reason = answer.whole.reason;
-  }
-  return raw;
+  return { path: context.file.path, change_summary: summary, blocks };
 }
 
 /**
@@ -62,13 +56,13 @@ export async function askScorer(args: {
   const ctl: Control = { stopped: false, error: null, failed: false };
   const settled = await inPool(contexts.length, SCORER_CONCURRENCY, ctl, async (i) => {
     const context = contexts[i]!;
-    const blocks = context.plan.kind === 'model' ? context.blocks.map((b) => b.id) : [];
+    const blocks = context.blocks.map((b) => b.id);
     const text = [SCORER_NOTE, header, fileSection(context, i + 1, contexts.length, args.token)].join('\n\n');
     let answer: ScoreAnswer;
     try {
       answer = await args.scorer.score({ text, blocks });
     } catch {
-      answer = { blocks: {}, whole: null, usage: noUsage(), failure: 'internal_error' };
+      answer = { blocks: {}, usage: noUsage(), failure: 'internal_error' };
     }
     if (answer.failure === 'auth' || answer.failure === 'no_credit') ctl.stopped = true;
     args.log({ event: 'scorer_call', blocks: blocks.length, code: answer.failure ?? 'ok', usage: answer.usage });
