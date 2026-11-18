@@ -16,7 +16,8 @@
     "eval:import-history": "node src/eval/cli.ts import-history",
     "eval:backtest": "node src/eval/cli.ts backtest",
     "eval:score-noise": "node src/eval/cli.ts score-noise",
-    "start": "node src/main.ts"
+    "start": "node src/main.ts",
+    "dev:send-webhook": "node src/forge/github/send-sample.ts"
   },
   "dependencies": {
     "diff": "^9.0.0",
