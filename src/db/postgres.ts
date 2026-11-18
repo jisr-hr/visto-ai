@@ -1,7 +1,10 @@
 import pg from 'pg';
 import type { Db } from './types.ts';
 
-export interface ClientLike { query(text: string, params?: unknown[]): Promise<{ rows: unknown[] }>; release(): void }
+export interface ClientLike { query(text: string, params?: unknown[]): Promise<{ rows: unknown[] }>; release(destroy?: boolean): void;
+  on(event: 'error', listener: (error: Error) => void): unknown;
+  off(event: 'error', listener: (error: Error) => void): unknown;
+}
 export interface PoolLike extends Pick<ClientLike, 'query'> {
   connect(): Promise<ClientLike>; end(): Promise<void>;
   on(event: 'error', listener: (error: Error) => void): unknown;
@@ -19,13 +22,21 @@ function over(runner: Pick<ClientLike, 'query'>, rest: Pick<Db, 'transaction' | 
 /** The Db over a pool. A client taken for a transaction is always released. */
 export function postgresDbFrom(pool: PoolLike, log: Log): Db {
   // An idle client that loses its connection emits `error` on the pool; with no listener that ends the process.
-  pool.on('error', (error) => {
-    const code = (error as { code?: unknown }).code;
-    log({ event: 'database_error', error: error.name, code: typeof code === 'string' ? code : null });
-  });
+  const onError = (error: Error): void => {
+    try {
+      const code = (error as { code?: unknown }).code;
+      log({ event: 'database_error', error: error.name, code: typeof code === 'string' ? code : null });
+    } catch {
+      // a logger that fails must not end the process
+    }
+  };
+  pool.on('error', onError);
   return over(pool, {
     transaction: async (work) => {
       const client = await pool.connect();
+      // The pool drops its own listener while a client is checked out; an unhandled `error` would end the process.
+      client.on('error', onError);
+      let destroy = false;
       try {
         await client.query('begin');
         const tx = over(client, {
@@ -39,11 +50,13 @@ export function postgresDbFrom(pool: PoolLike, log: Log): Db {
         try {
           await client.query('rollback');
         } catch {
-          // the original failure is the one to report
+          // the original failure is the one to report; this client may hold an open transaction
+          destroy = true;
         }
         throw error;
       } finally {
-        client.release();
+        client.off('error', onError);
+        client.release(destroy ? true : undefined);
       }
     },
     close: () => pool.end(),

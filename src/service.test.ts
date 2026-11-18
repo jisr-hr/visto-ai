@@ -5,7 +5,7 @@ import { testDb } from './db/testing.ts';
 import type { Db } from './db/types.ts';
 import type { ForgeEvent, WebhookReader } from './forge/types.ts';
 import { serviceConfig, parseConfig } from './config/load.ts';
-import { startService } from './service.ts';
+import { CLOSE_WAIT_MS, startService, STOP_WAIT_MS } from './service.ts';
 import type { Listening } from './service.ts';
 import type { RequestLike, ResponseLike } from './shell/http.ts';
 
@@ -92,4 +92,63 @@ test('when a migration rejects startService rejects and the database is closed',
   }));
   assert.equal(listened, false);
   assert.deepEqual(log, ['db closed']);
+});
+
+const never = (): Promise<void> => new Promise(() => {});
+
+test('stop goes on to close the database once STOP_WAIT_MS has passed when a request never finishes', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const log: string[] = [];
+  const real = await testDb();
+  const db: Db = { ...recording(real, log), transaction: () => never() as Promise<never> };
+  let listener!: (req: RequestLike, res: ResponseLike) => void;
+  const service = await startService(config, {
+    db, reader, clock: () => new Date(), log: () => {},
+    listen: async (l) => { listener = l; return { close: async () => {} }; },
+  });
+  listener(request(), response(() => {}));
+  await new Promise((r) => setImmediate(r));
+  const stopped = service.stop();
+  await new Promise((r) => setImmediate(r));
+  assert.deepEqual(log, []);
+  t.mock.timers.tick(STOP_WAIT_MS);
+  await stopped;
+  assert.deepEqual(log, ['db closed']);
+});
+
+test('stop resolves once CLOSE_WAIT_MS has passed when the database never closes', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const logs: Record<string, unknown>[] = [];
+  const db: Db = { ...(await testDb()), close: never };
+  const service = await startService(config, {
+    db, reader, clock: () => new Date(), log: (e) => logs.push(e), listen: async () => ({ close: async () => {} }),
+  });
+  const stopped = service.stop();
+  await new Promise((r) => setImmediate(r));
+  t.mock.timers.tick(CLOSE_WAIT_MS);
+  await stopped;
+  assert.deepEqual(logs, [{ event: 'database_close_timeout' }]);
+});
+
+test('stop called twice returns the same promise and closes the database once', async () => {
+  const log: string[] = [];
+  const db = recording(await testDb(), log);
+  const service = await startService(config, {
+    db, reader, clock: () => new Date(), log: () => {}, listen: async () => ({ close: async () => {} }),
+  });
+  const first = service.stop();
+  assert.equal(service.stop(), first);
+  await first;
+  assert.deepEqual(log, ['db closed']);
+});
+
+test('a database whose close rejects does not make stop reject, and its message is not logged', async () => {
+  const logs: Record<string, unknown>[] = [];
+  const db: Db = { ...(await testDb()), close: () => Promise.reject(Object.assign(new Error('do-not-log-this'), { code: 'X1' })) };
+  const service = await startService(config, {
+    db, reader, clock: () => new Date(), log: (e) => logs.push(e), listen: async () => ({ close: async () => {} }),
+  });
+  await service.stop();
+  assert.deepEqual(logs, [{ event: 'database_close_failed', error: 'Error', code: 'X1' }]);
+  assert.ok(!JSON.stringify(logs).includes('do-not-log-this'));
 });
