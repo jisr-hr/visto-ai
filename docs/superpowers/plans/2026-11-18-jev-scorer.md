@@ -251,3 +251,22 @@ export async function askScorer(args: {
 - [ ] **Step 1: Write the failing tests:** `run.test.ts`: the summary's `scorer` is the configured model, and null without one; `summary.md` holds the line. `cli.test.ts`: `score-noise` on two run folders with different `scorer` values fails with `different_scorers`, and passes when one summary lacks the field and the other has null.
 - [ ] **Step 2: Run them and see them fail. Step 3: implement. Step 4: run the files, then the three commands.**
 - [ ] **Step 5: Commit** (`feat: the eval commands use the configured scorer and record which one scored a run`).
+
+---
+
+## Changed after the whole-branch review
+
+The tasks above are what was planned. The whole-branch review changed five things. Where this section and a task differ, this section says what was built.
+
+1. **Files without blocks.** The scorer is asked only about files whose plan is `model`. A `model_whole` file keeps the review model's whole-file score. `ScoreAnswer.whole`, `WHOLE_PREFIX`, `WHOLE_LEAD` and the request with no blocks are gone. The whole-file questions said that the file only moved, so the answer that lowers a score for a mechanical change was yes by construction: such a file would have scored near zero, below the 30 a rename inside one directory gets by rule.
+2. **What the scorer reads.** The file sections come from the batches the review model was sent, so a test or a full file cut to fit the input limit is cut for the scorer too.
+3. **The example config** ships with the default threshold commented out, and a test checks that the example with its scorer block switched on is refused.
+4. **Files the scorer did not get to** after a refused key or no credit each get an audit entry, and the backtest counts the files the scorer failed on or was not asked about, per case and in total.
+5. **The worked examples** in Task 1 are invented values.
+
+Left as they are, by decision:
+
+- The summary's `scorer` comes from the config, not from what answered. The command line builds both from one config.
+- An unreadable response body on a refused key is tried again as a provider error. It still ends with a person.
+- The `replay` summary does not name the scorer.
+- The pull request's title and description are part of what the scorer reads. They can move a probability and nothing else.
