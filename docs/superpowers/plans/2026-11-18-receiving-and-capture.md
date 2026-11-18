@@ -842,6 +842,9 @@ export const STOP_WAIT_MS = 10_000;
 /** Migrates, then listens. `stop` closes the listener, waits for requests in flight (at most STOP_WAIT_MS), then closes the database. */
 export function startService(config: ServiceConfig, deps: ServiceDeps): Promise<{ stop(): Promise<void> }>;
 // src/main.ts
+export const REQUEST_TIMEOUT_MS = 30_000;
+export const HEADERS_TIMEOUT_MS = 10_000;
+export function createServer(listener: (req: RequestLike, res: ResponseLike) => void): import('node:http').Server;
 export function main(argv: string[], env: Record<string, string | undefined>, out: (line: string) => void): Promise<number>;
 ```
 
@@ -867,6 +870,7 @@ export function main(argv: string[], env: Record<string, string | undefined>, ou
 - `main(['--config', '<a path that does not exist>'], {}, out)` returns 2 and prints `usage: cannot read --config`.
 - A config file without the `app` block returns 2 and prints `config: app: required to run the service` among its lines. Write the file under `os.tmpdir()`.
 - No line printed in these cases contains a value of an environment variable passed in.
+- `createServer(listener)` returns a server whose `requestTimeout` is `REQUEST_TIMEOUT_MS` (30000) and whose `headersTimeout` is `HEADERS_TIMEOUT_MS` (10000). The test never calls `listen`.
 
 - [ ] **Step 2: Run them and see them fail**
 
@@ -876,6 +880,7 @@ Expected: FAIL: the modules do not exist.
 - [ ] **Step 3: Implement**
 
 - `main` takes one option, `--config <path>`. It loads the config, builds `postgresDb`, the GitHub reader and an `http.createServer` listener, starts the service and returns only when it has stopped. It logs one JSON line per entry to standard output.
+- The server it creates has `requestTimeout` set to 30,000 ms and `headersTimeout` to 10,000 ms, exported as `REQUEST_TIMEOUT_MS` and `HEADERS_TIMEOUT_MS`. Node's default lets a caller take five minutes to send a request, and each such caller holds one of the 20 places (call 18). Build the server in a small exported function, `createServer(listener)`, so a test can assert both values on the server object without opening a port.
 - Exit codes: 2 for a usage error or a `ConfigError` (it prints `usage: ...` or one `config: <issue>` line per issue); 1 when the service cannot start for another reason (it prints the single line `start_failed` and logs `{ event: 'start_failed', error: <name>, code: <code or null> }`); 0 after a clean stop. It never prints a stack trace, an error's message, the database URL or a secret.
 - **PM-drain:** on `SIGTERM` or `SIGINT` it calls `stop` and exits with 0. A second signal exits at once with 1.
 - The path that opens a port and connects to Postgres has no unit test: Task 9 exercises it.
@@ -922,7 +927,7 @@ Run as a command: `npm run dev:send-webhook -- --url http://localhost:8080/webho
   - `app` is built from the `Dockerfile`, starts after `db` is healthy, reads its variables from a local `.env`, mounts `./config.local.yml` read-only at `/config/config.yml`, publishes port 8080, has `stop_grace_period: 20s` (longer than `STOP_WAIT_MS`), and has a health check that requests `http://127.0.0.1:8080/healthz` with `node -e` (the image has no curl).
 - `env.example` names every variable the Compose file and the example config read, with placeholder values and no real secret. (`.gitignore` ignores `.env*`, so the example cannot be named `.env.example`. `config.local.yml` is ignored already.)
 - `.dockerignore`: `node_modules`, `.git`, `.superpowers`, `docs`, `runs`, `*.jsonl`, `.env*`, `config.local.yml`.
-- `README.md`: a short section "Run the service" with the commands; the status table row for the service split in two, receiving and capture as built, queue and publishing as planned; and the two sentences that say there is no service and no Docker setup (in the status note at the top and under the status table) brought up to date: the service receives and records, and still reviews nothing.
+- `README.md`: a short section "Run the service" with the commands; the status table row for the service split in two, receiving and capture as built, queue and publishing as planned; and the two sentences that say there is no service and no Docker setup (in the status note at the top and under the status table) brought up to date: the service receives and records, and still reviews nothing. The "Run the service" section also says, in two or three sentences, that the service holds a request's body in memory before it can check the signature, at most 25 MB for each of at most 20 requests at once, so a caller with no secret can make it hold about 500 MB; and that TLS, and any limit on connections or body size per caller, belong to the proxy placed in front of it.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -962,6 +967,8 @@ send --kind review --delivery try-2
 send --kind comment --delivery try-3
 send --kind comment --delivery try-4 & send --kind comment --delivery try-4 & wait
 docker compose -p visto-ai-try exec db psql -U postgres -d visto -c "select kind, author, state from visto_ai.human_activity order by id" -c "select owner, repo, number, state, updated_at from visto_ai.pull_requests" -c "select id, outcome from visto_ai.deliveries order by id"
+node -e "fetch('http://localhost:8080/webhooks/github',{method:'POST',body:Buffer.alloc(26*1024*1024)}).then(async r=>console.log('big body:',r.status,await r.text()),e=>console.log('big body: no answer,',e.cause?.code??e.message))"
+node -e "const chunk=Buffer.alloc(1024*1024);let n=0;const body=new ReadableStream({pull(c){if(n++<26)c.enqueue(chunk);else c.close()}});fetch('http://localhost:8080/webhooks/github',{method:'POST',body,duplex:'half'}).then(async r=>console.log('big stream:',r.status,await r.text()),e=>console.log('big stream: no answer,',e.cause?.code??e.message))"
 docker compose -p visto-ai-try restart db && sleep 10 && send --kind comment --delivery try-5
 docker compose -p visto-ai-try stop app && docker compose -p visto-ai-try ps -a --format '{{.Service}} {{.ExitCode}}'
 docker compose -p visto-ai-try logs app | tail -20
@@ -972,6 +979,7 @@ Whatever happened, finish with: `docker compose -p visto-ai-try down -v && rm .e
 Expected:
 - `try-1` answers `202 accepted`; the first `try-2` `202 accepted` and the second `202 duplicate`; `try-3` `202 accepted`; the two `try-4` sent together give one `accepted` and one `duplicate`.
 - The first query shows one `review` row and the comments, the second the pull request of the sample, the third one row per delivery id.
+- The 26 MB body prints `big body: 413 payload_too_large` (refused from its declared length), and the 26 MB stream, which declares no length, prints `big stream: 413 payload_too_large` (refused while it is read). Unit tests cannot show these two: they need a real connection. If either prints "no answer", report exactly what it printed: do not change the code to make it pass.
 - After the database restarts, the app is still running and `try-5` is accepted (possibly after one 503).
 - `app` stops with exit code 0.
 - The log has one JSON line per delivery and no payload text.
