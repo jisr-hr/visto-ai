@@ -24,6 +24,16 @@ export interface ReviewInput {
   asOf: Date;
   earlier: null;              // a pull request's earlier state arrives with a later plan
 }
+export interface ScoreRequest { text: string; blocks: string[] } // blocks: ids to score, in diff order; empty when the file is scored as a whole
+export interface ScoredItem { score: number; category: string; reason: string }
+export interface ScoreAnswer {
+  blocks: Record<string, ScoredItem>; // by block id; a block the scorer could not answer for is absent
+  whole: ScoredItem | null;           // set only when `blocks` was empty
+  usage: Usage;
+  failure: string | null;             // a short code when some request for this file failed; what was answered before it is kept
+}
+export interface Scorer { score(request: ScoreRequest): Promise<ScoreAnswer> }
+
 export interface ReviewDeps {
   source: Source;
   model: ModelClient;
@@ -31,6 +41,7 @@ export interface ReviewDeps {
   clock: () => Date;
   token: () => string;        // fresh random text for data markers, 16 hex characters
   log: (entry: Record<string, unknown>) => void;
+  scorer?: Scorer;            // scores the blocks in place of the review model, when set
 }
 
 export interface RawFinding { path: string; side: Side; line: number; severity: Severity; body: string; quote: string; beyond_diff: boolean }
