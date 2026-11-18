@@ -1,7 +1,6 @@
-import type {
-  Association, GeneralComment, HistorySource, HumanInlineComment, HumanReview, MergedPullRequest, RepoRef,
-} from '../types.ts';
+import type { HistorySource, HumanReview, MergedPullRequest, RepoRef } from '../types.ts';
 import { changedFilesOf, createGithubHttp, isObject, jsonOf } from './http.ts';
+import { authorOf, generalCommentOf, inlineCommentOf, reviewOf } from './objects.ts';
 
 const LIST_PAGES = 10;
 const PULL_PAGES = 20;
@@ -16,28 +15,6 @@ function required(v: unknown): string {
   if (typeof v !== 'string' || v === '') throw bad();
   return v;
 }
-
-function idOf(v: unknown): string {
-  if (typeof v === 'number' && Number.isInteger(v)) return String(v);
-  if (typeof v === 'string' && v !== '') return v;
-  throw bad();
-}
-
-function numberOrNull(v: unknown): number | null {
-  return typeof v === 'number' && Number.isInteger(v) ? v : null;
-}
-
-function authorOf(v: unknown): { author: string; authorIsBot: boolean } {
-  if (!isObject(v) || typeof v.login !== 'string' || v.login === '') return { author: 'ghost', authorIsBot: false };
-  return { author: v.login, authorIsBot: v.type === 'Bot' || v.login.endsWith('[bot]') };
-}
-
-const ASSOCIATION = new Map<string, Association>([['OWNER', 'owner'], ['MEMBER', 'member'], ['COLLABORATOR', 'collaborator']]);
-const associationOf = (v: unknown): Association => ASSOCIATION.get(typeof v === 'string' ? v : '') ?? 'none';
-
-const REVIEW_STATE = new Map<string, HumanReview['state']>([
-  ['APPROVED', 'approved'], ['CHANGES_REQUESTED', 'changes_requested'], ['COMMENTED', 'commented'], ['DISMISSED', 'dismissed'],
-]);
 
 function objectItem(v: unknown): Record<string, unknown> {
   if (!isObject(v)) throw bad();
@@ -97,44 +74,20 @@ export function createGithubHistorySource(opts: { token: string; fetch: typeof f
       const items = await http.paged(`${http.repoUrl(repo)}/pulls/${number}/reviews`, LIST_PAGES);
       const out: HumanReview[] = [];
       for (const raw of items) {
-        const r = objectItem(raw);
-        const id = idOf(r.id);
-        if (r.state === 'PENDING') continue;
-        out.push({
-          id, ...authorOf(r.user), association: associationOf(r.author_association),
-          state: REVIEW_STATE.get(text(r.state)) ?? 'commented',
-          commit: typeof r.commit_id === 'string' ? r.commit_id : null,
-          at: required(r.submitted_at), body: text(r.body),
-        });
+        const review = reviewOf(raw);
+        if (review !== null) out.push(review);
       }
       return out;
     },
 
     async listInlineComments(repo, number) {
       const items = await http.paged(`${http.repoUrl(repo)}/pulls/${number}/comments`, LIST_PAGES);
-      return items.map((raw): HumanInlineComment => {
-        const c = objectItem(raw);
-        return {
-          id: idOf(c.id), ...authorOf(c.user), association: associationOf(c.author_association), at: required(c.created_at),
-          commit: required(c.original_commit_id), path: required(c.path),
-          side: c.side === 'LEFT' ? 'LEFT' : 'RIGHT',
-          line: numberOrNull(c.original_line), startLine: numberOrNull(c.original_start_line),
-          fileLevel: c.subject_type === 'file',
-          replyTo: c.in_reply_to_id === undefined || c.in_reply_to_id === null ? null : idOf(c.in_reply_to_id),
-          body: text(c.body),
-        };
-      });
+      return items.map(inlineCommentOf);
     },
 
     async listGeneralComments(repo, number) {
       const items = await http.paged(`${http.repoUrl(repo)}/issues/${number}/comments`, LIST_PAGES);
-      return items.map((raw): GeneralComment => {
-        const c = objectItem(raw);
-        return {
-          id: idOf(c.id), ...authorOf(c.user), association: associationOf(c.author_association),
-          at: required(c.created_at), body: text(c.body),
-        };
-      });
+      return items.map(generalCommentOf);
     },
 
     async compare(repo: RepoRef, base: string, head: string) {

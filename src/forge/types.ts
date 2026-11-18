@@ -61,3 +61,19 @@ export interface PullRequestFacts {
   installation: string | null;   // the app installation the event came through
   updatedAt: string;             // the git service's "updated at" of the pull request in this event
 }
+export type PullRequestAction = 'opened' | 'reopened' | 'ready_for_review' | 'synchronize' | 'retargeted' | 'closed' | 'other';
+export type ForgeEvent =
+  | { kind: 'ping' }
+  | { kind: 'pull_request'; action: PullRequestAction; facts: PullRequestFacts }
+  | { kind: 'review'; ref: PullRequestRef; review: HumanReview }
+  | { kind: 'inline_comment'; ref: PullRequestRef; comment: HumanInlineComment }
+  | { kind: 'general_comment'; ref: PullRequestRef; comment: GeneralComment }
+  | { kind: 'thread'; ref: PullRequestRef; action: 'resolved' | 'unresolved'; thread: string; rootComment: string | null; actor: string; actorIsBot: boolean }
+  | { kind: 'ignored'; reason: 'unknown_event' | 'unknown_action' | 'not_a_pull_request' | 'malformed' };
+export type WebhookReading =
+  | { ok: false; reason: 'bad_signature' | 'not_json' | 'no_delivery_id' | 'no_event_name' }
+  | { ok: true; delivery: string; name: string; action: string | null; event: ForgeEvent };
+export interface WebhookReader {
+  /** `headers`: the request's headers, names in lower case. `body`: the bytes as received. */
+  read(headers: Record<string, string | undefined>, body: Buffer): WebhookReading;
+}
