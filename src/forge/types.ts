@@ -50,3 +50,14 @@ export interface HistorySource {
   /** null when either commit can no longer be read */
   compare(repo: RepoRef, base: string, head: string): Promise<Comparison | null>;
 }
+
+export interface PullRequestFacts {
+  ref: PullRequestRef;
+  author: string; authorIsBot: boolean;
+  baseBranch: string; headBranch: string; headSha: string;
+  draft: boolean;
+  state: 'open' | 'closed' | 'merged';
+  mergedAt: string | null; closedAt: string | null; mergeCommit: string | null;
+  installation: string | null;   // the app installation the event came through
+  updatedAt: string;             // the git service's "updated at" of the pull request in this event
+}

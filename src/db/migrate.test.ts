@@ -59,6 +59,6 @@ test('loadMigrations reads the .sql files in name order', () => {
 });
 test('testDb resolves with the ledger in place', async () => {
   const db = await testDb();
-  assert.deepEqual(await db.query('select count(*)::int as n from visto_ai.schema_migrations'), [{ n: 0 }]);
+  assert.deepEqual(await db.query('select name from visto_ai.schema_migrations'), [{ name: '0001_receiving' }]);
   await db.close();
 });
