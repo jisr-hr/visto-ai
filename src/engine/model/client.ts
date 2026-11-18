@@ -1,6 +1,6 @@
 import type { ModelConfig } from '../../config/load.ts';
 import type { ModelClient, ModelRequest, ModelResponse, Usage } from '../types.ts';
-import { ProviderError, classify } from './errors.ts';
+import { ProviderError, classify, isTimeout } from './errors.ts';
 
 export { ProviderError, classify } from './errors.ts';
 export type { ProviderErrorKind } from './errors.ts';
@@ -27,15 +27,6 @@ function readUsage(body: unknown, prices: ModelConfig['prices']): Usage | null {
     cost = ((inputTokens - cachedTokens) * prices.inputPerMillion + cachedTokens * prices.cachedInputPerMillion + outputTokens * prices.outputPerMillion) / 1e6;
   }
   return { calls: 1, inputTokens, outputTokens, cachedTokens, cost };
-}
-
-// Node's fetch stops waiting for headers or body after its own limit, whatever signal it is given.
-const UNDICI_TIMEOUTS = new Set(['UND_ERR_HEADERS_TIMEOUT', 'UND_ERR_BODY_TIMEOUT']);
-
-function isTimeout(err: unknown): boolean {
-  if (!(err instanceof Error)) return false;
-  if (err.name === 'TimeoutError' || err.name === 'AbortError') return true;
-  return isRecord(err.cause) && typeof err.cause.code === 'string' && UNDICI_TIMEOUTS.has(err.cause.code);
 }
 
 // Header names the engine sets itself; configuration cannot replace them.

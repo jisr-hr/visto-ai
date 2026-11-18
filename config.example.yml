@@ -33,14 +33,28 @@ limits:
   # Batches of files allowed in one review.
   batchesPerReview: 6
 
+# Optional second scorer: a decision model that scores the changed blocks in place of the review model.
+# Naming one sends the reviewed code to that provider too, and then
+# repositories.defaults.score.threshold must be written below.
+# scorer:
+#   # Base URL of the scorer's API.
+#   baseUrl: https://openrouter.ai/api/alpha
+#   # The environment variable that holds the scorer's key.
+#   apiKey: { env: SCORER_API_KEY }
+#   # The decision model to call.
+#   model: vendor/decision-model
+#   # Seconds to wait for one scorer call (at most 300).
+#   timeoutSeconds: 60
+
 repositories:
   # Settings for every repository.
   defaults:
     # Branches that count as primary; a pull request targeting one gets elevated effort.
     primaryBranches: [main, master]
-    score:
-      # A changed block scored at or above this (1 to 100) is listed for a human reviewer.
-      threshold: 70
+    # A changed block scored at or above this (1 to 100) is listed for a human reviewer.
+    # It is 70 when not written, and must be written when a scorer is named.
+    # score:
+    #   threshold: 70
   # Per-repository changes, keyed by "owner/name"; each replaces only the keys it sets.
   overrides:
     acme/shop: { primaryBranches: [trunk], score: { threshold: 60 } }

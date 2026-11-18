@@ -103,6 +103,7 @@ These would make the project a failure even if it works.
 | D22 | Inline notes on flagged blocks are off unless a repository switches them on. When on, at most 50 are posted per review. | Owner |
 | D23 | A reply counts towards a lesson, or towards closing a thread under the strict approval rule, only when its writer has access to the repository. | Design call |
 | D24 | A pull request from a fork is never approved automatically. | Design call |
+| D25 | A deployment may name a second scorer that scores the blocks in place of the review model. It is off unless the deployment config names it. The review model is then not asked for block scores. Nothing else changes: floors, rules, the verdict and the gate work the same. | Owner |
 
 ## 4. System overview
 
@@ -239,7 +240,7 @@ The contract is one file in git. A test asserts its key rules, so a careless edi
 - `findings[]`: `path`, `side`, `line`, `severity`, `body`, `quote` (the code on that line, copied verbatim), and `beyond_diff` for concerns about code the pull request did not change.
 - `thread_verdicts[]`: `thread_id`, `verdict` (`fixed`, `answered` or `open`), `reply`.
 - `acceptance[]`: only when acceptance criteria were supplied. `item`, `status` (`met`, `not_met`, `not_verified`), `note`.
-- `files[]`: one entry per file in the batch. `path`, `change_summary`, an optional whole-file `score` with `category` and `reason`, and `blocks[]`, with one entry for each block the diff shows as not yet scored (section 6.2). Each block has its id and either a `score` (a whole number from 0 to 100) with `category` and `reason`, or `parts[]`, each with the anchors of its first and last line, a `score`, `category` and `reason`. A `reason` is required only for a score of 40% or more. Below that the category is enough: output is the expensive part of a call, and very long structured answers are the ones that fail to parse.
+- `files[]`: one entry per file in the batch. `path`, `change_summary`, an optional whole-file `score` with `category` and `reason`, and `blocks[]`, with one entry for each block the diff shows as not yet scored (section 6.2). Each block has its id and either a `score` (a whole number from 0 to 100) with `category` and `reason`, or `parts[]`, each with the anchors of its first and last line, a `score`, `category` and `reason`. A `reason` is required only for a score of 40% or more. Below that the category is enough: output is the expensive part of a call, and very long structured answers are the ones that fail to parse. With a second scorer named, the model is asked for no `blocks` (section 6.7).
 
 The rules for findings are the predecessor's evidence contract, ported: the pull request introduces or exposes the defect; it is anchored on a changed line; it states a specific input or state and the wrong outcome; its evidence is something the model was given; certainty is a separate bar from severity, so a failure path the model could not verify is never major or blocker. Zero findings is a correct result.
 
@@ -442,6 +443,22 @@ This label is a floor. A block that needed a person but was waved through looks 
 
 Whether the numbers justify switching approval on is the team's decision. The tool shows them and does not decide.
 
+### 6.7 A second scorer (optional)
+
+By default the review model scores the blocks in the same call that looks for bugs (section 5.5). A deployment may name a second scorer in its config (section 11.1). When it does, the block scores come from that scorer and the review model is not asked for block scores (D25). It exists so that the two ways of scoring can be compared on a repository's own history before either is relied on.
+
+The first scorer supported is a decision model reached through its provider's decisions endpoint: a model that answers yes/no questions about a text with a probability and writes no text of its own.
+
+- **What it reads.** For each file the review model read that has blocks, the pull request header and that file's section of the review prompt, as the review model received it: the diff cut into blocks, and the full file and the paired test unless they were cut to fit the input limit (section 5.3). A file the review model did not read is not sent and needs a person, as before.
+- **Files without blocks.** A file moved to another directory with no content change has no block to ask about, and the questions are about code. The review model's whole-file score is kept for it (section 6.2); that one score is on the bands of section 6.1. For every other file the scorer answers for each block, so the review model's whole-file scores are not used.
+- **What the review model is asked.** With a scorer named, the review model gets `contract/review-contract-scorer.md` in place of the review contract. It is the same text up to the section on blocks, and after that it asks for no block scores and for a whole-file score only on a moved file. The model still returns one sentence per file on what changed. If it scores a block anyway, that score is not used. Without a scorer the review contract is the one it always was.
+- **What it is asked.** For each block, thirteen yes/no questions, each about one thing that can be checked on its own. Nine raise the score: a calculation of money, time or counts; a business rule; something other code calls; server-side access; the database schema; security; an irreversible change to stored data; a dependency; a weakened test or check. Four lower it: the block changes only what the user sees; it holds only declarations; it is only a rename, a move, formatting or generated output; it is test code.
+- **How the answers become a score.** Three of the raising answers are soft (calculation, business rule, something other code calls) and six are hard (the rest). The highest soft answer is multiplied by one minus the highest lowering answer. A hard answer is never lowered. The score is the higher of the two, as a whole percentage. Test code stops lowering once the block weakens a test.
+- **Category and reason.** Both come from the answer that set the score: a fixed sentence with the probability, and a category from the list in section 6.1 when the score is 50% or more. Below that the category is `test` for test code and `other` otherwise. The scorer writes no text, so nothing it returns is printed.
+- **Failure.** A file the scorer cannot answer for, and a block it leaves out, count as not scored (100%). A review does not fail because the scorer failed: the findings stand. Every file the scorer failed on, and every file it was not asked about after a failure that stops the rest (a refused key, no credit), is recorded in the audit list. The backtest counts them per pull request and in total: each one is scored 100%, so a run with many of them would otherwise look safer than the scorer is.
+- **The scale.** These scores are probabilities turned into percentages. They are not placed on the bands of section 6.1, and the default threshold was not chosen for them. A config that names a scorer must therefore write its threshold, and is refused otherwise; the example config ships with the default threshold commented out, so that writing it is a choice. The threshold is chosen from a backtest run with the scorer on (section 6.6).
+- **What it costs.** One more provider, and more calls per review. The reviewed code is sent to that provider as well. The review model is not asked for block scores, so its answer should carry none that go unused. The tool definition it is sent is the same with and without a scorer. The scorer's cost is counted only when its provider reports a cost with each answer.
+
 ## 7. Memory
 
 ### 7.1 What is captured
@@ -641,6 +658,7 @@ One file, owned by whoever runs the deployment and kept in their own git reposit
 
 - The app's identity (id, key and webhook secret, by reference).
 - The model: endpoint and key (by reference), model, the request fragment for each effort level, fallbacks, request extras (body fields and headers), and prices per token for an endpoint that reports no cost.
+- The second scorer (section 6.7), optional: endpoint and key (by reference), model and time limit.
 - Limits and cost guards (section 12).
 - Repository defaults and per-repository overrides: primary branches, ignored authors, base filter, how a new head is reviewed (D4), the gate block, and the score block (threshold, automatic approval, audit share, the thread rule for approval, and inline notes).
 - MCP servers and extension modules.
@@ -829,8 +847,11 @@ Each of these comes from documentation or third-party reports, not from a test.
 7. The association the git service reports for a commenter (owner, member, collaborator) is right for a member of an organisation whose membership is private. If it is not, D15 and D23 need a lookup of the commenter's permission on the repository instead.
 8. Which permission lets an app read a branch's protection rules, in both of GitHub's forms (rulesets and classic branch protection), and whether the answer says that stale approvals are dismissed (section 6.4).
 9. One review can carry 50 inline notes on top of its findings.
+10. The decisions endpoint the second scorer uses (section 6.7) is marked alpha by its provider: its path, request and response may change.
+11. That a decision model's answer to one question does not depend on which other questions travel in the same request. The question set was reduced after it was first tried.
+12. That the review model's findings are the same under the contract it gets when a scorer is named (section 6.7) as under the review contract. The findings rules are the same text in both; the replay eval run with a scorer named is what shows it.
 
-Items 1 to 3 and 6 to 9 need a scratch repository and the owner's go-ahead. Item 4 needs an OpenRouter key and the owner's go-ahead, because it spends money.
+Items 1 to 3 and 6 to 9 need a scratch repository and the owner's go-ahead. Items 4 and 12 need an OpenRouter key and the owner's go-ahead, because they spend money.
 
 ## 21. Open points for the owner
 

@@ -3,9 +3,10 @@ import { randomBytes } from 'node:crypto';
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { ConfigError, loadConfig } from '../config/load.ts';
+import { ConfigError, contractFile, loadConfig } from '../config/load.ts';
 import type { DeploymentConfig } from '../config/load.ts';
 import { createModelClient } from '../engine/model/client.ts';
+import { createJevScorer } from '../engine/scorer/jev.ts';
 import type { ReviewDeps } from '../engine/types.ts';
 import { createGithubHistorySource } from '../forge/github/history-source.ts';
 import { createGithubReadSource } from '../forge/github/read-source.ts';
@@ -93,10 +94,11 @@ function prepareRun(command: string, inputName: string, argv: string[], env: Rec
   const deps: ReviewDeps = {
     source: createGithubReadSource({ token: githubToken, fetch: globalThis.fetch }),
     model: createModelClient(config.model, { fetch: globalThis.fetch, sleep }),
-    contract: readFileSync(join(projectRoot, 'contract', 'review-contract.md'), 'utf8'),
+    contract: readFileSync(join(projectRoot, 'contract', contractFile(config)), 'utf8'),
     clock: () => new Date(),
     token: () => randomBytes(8).toString('hex'),
     log: (entry) => { process.stderr.write(JSON.stringify(entry) + '\n'); },
+    ...(config.scorer === null ? {} : { scorer: createJevScorer(config.scorer, { fetch: globalThis.fetch, sleep }) }),
   };
   return { inputPath, outDir, label, maxCases, maxCost, concurrency, config, deps };
 }
@@ -132,6 +134,7 @@ function scoreNoiseCommand(argv: string[], out: (line: string) => void): void {
   const second = readRun(parsed.positional[1]!);
   if (first.summary.history_sha256 !== second.summary.history_sha256) throw new Error('different_history_files');
   if (first.summary.contract_sha256 !== second.summary.contract_sha256) throw new Error('different_contracts');
+  if ((first.summary.scorer ?? null) !== (second.summary.scorer ?? null)) throw new Error('different_scorers');
   const models = (s: BacktestSummary): string => (Array.isArray(s.models) ? s.models.join(', ') : '');
   if (models(first.summary) !== models(second.summary)) {
     out(`warning: the runs were answered by different models: ${models(first.summary)}; ${models(second.summary)}`);

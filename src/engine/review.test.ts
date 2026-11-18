@@ -5,7 +5,8 @@ import { ProviderError } from './model/errors.ts';
 import { SUBMIT_REVIEW } from './model/submit-review.ts';
 import { chooseEffort, review } from './review.ts';
 import type {
-  ChangedFile, ModelClient, ModelRequest, ModelResponse, PullRequestInfo, RepoConfig, ReviewDeps, ReviewInput, Source, Usage,
+  ChangedFile, ModelClient, ModelRequest, ModelResponse, PullRequestInfo, RepoConfig, ReviewDeps, ReviewInput, ScoreAnswer, ScoreRequest, Scorer,
+  Source, Usage,
 } from './types.ts';
 
 const CONTRACT = 'You review pull requests.';
@@ -45,7 +46,9 @@ const respond = (answer: unknown): ModelResponse =>
   ({ toolName: SUBMIT_REVIEW, toolArguments: JSON.stringify(answer), text: null, model: 'm', provider: null, usage: usage() });
 
 type Step = unknown | ProviderError;
-function deps(spec: { files: ChangedFile[]; answers?: Step[]; answerFor?: Record<string, Step>; delayMs?: number; listError?: Error }):
+function deps(spec: {
+  files: ChangedFile[]; answers?: Step[]; answerFor?: Record<string, Step>; delayMs?: number; listError?: Error; scorer?: Scorer;
+}):
   ReviewDeps & { model: ModelClient & { requests: ModelRequest[]; maxInFlight: number }; logged: Array<Record<string, unknown>>; tokens: number } {
   const requests: ModelRequest[] = [];
   const logged: Array<Record<string, unknown>> = [];
@@ -84,6 +87,7 @@ function deps(spec: { files: ChangedFile[]; answers?: Step[]; answerFor?: Record
     source, model, contract: CONTRACT, clock: () => new Date(0), logged, tokens: 0,
     token: () => { d.tokens += 1; return 'abcdef0123456789'; },
     log: (e: Record<string, unknown>) => { logged.push(e); },
+    ...(spec.scorer === undefined ? {} : { scorer: spec.scorer }),
   };
   return d;
 }
@@ -554,4 +558,130 @@ test('a usable repository file, a failed review and no files leave teamFileInval
   withRepoFile(failed, '- a\n');
   assert.equal((await review({ ...input, limits: { ...input.limits, inputTokensPerCall: 10 } }, failed)).teamFileInvalid, null);
   assert.equal((await review(input, deps({ files: [] }))).teamFileInvalid, null);
+});
+
+// A second scorer.
+const scorerUsage = (): Usage => ({ calls: 2, inputTokens: 40, outputTokens: 4, cachedTokens: 0, cost: 0.25 });
+function scorerStub(reply: (request: ScoreRequest) => Partial<ScoreAnswer>): Scorer & { requests: ScoreRequest[] } {
+  const requests: ScoreRequest[] = [];
+  return {
+    requests,
+    score: (request) => {
+      requests.push(request);
+      return Promise.resolve({ blocks: {}, usage: scorerUsage(), failure: null, ...reply(request) });
+    },
+  };
+}
+const refunds = { score: 85, category: 'business_rule', reason: 'Changes who may refund.' };
+
+test('with a scorer set, the scores are the scorer\'s and the summaries the review model\'s', async () => {
+  const scorer = scorerStub(() => ({ blocks: { B1: refunds } }));
+  const r = await review(input, deps({ files: [fileA], answers: [scored('src/a.ts', 20)], scorer }));
+  assert.equal(scorer.requests.length, 1);
+  assert.deepEqual(r.scores[0]!.blocks.map((b) => b.entry), [refunds]);
+  assert.deepEqual(r.verdict, { threshold: 70, needsHuman: true, highest: 85 });
+  assert.equal(r.scores[0]!.changeSummary, 'Changes the retry delay.');
+});
+
+test('with a scorer set, a review answer that scores no block loses nothing', async () => {
+  const scorer = scorerStub(() => ({ blocks: { B1: refunds } }));
+  const unscored = { ...answerOnA, files: [{ path: 'src/a.ts', change_summary: 'Changes the retry delay.', blocks: [] }] };
+  const r = await review(input, deps({ files: [fileA], answers: [unscored], scorer }));
+  assert.equal(r.status, 'ok');
+  assert.deepEqual(r.scores[0]!.blocks.map((b) => b.entry), [refunds]);
+  assert.equal(r.scores[0]!.fileLevel, null);
+  assert.equal(r.scores[0]!.covered, true);
+  assert.equal(r.scores[0]!.changeSummary, 'Changes the retry delay.');
+  assert.deepEqual(r.findings.map((f) => f.path), ['src/a.ts']);
+  assert.deepEqual(r.audit, []);
+});
+
+test('a file the scorer fails on is not scored, and the review and its findings stand', async () => {
+  const both = {
+    ...answerOnA,
+    files: ['src/a.ts', 'src/b.ts'].map((path) => ({ path, change_summary: 'x', blocks: [{ id: 'B1', score: 10, category: 'fix', reason: '' }] })),
+  };
+  const scorer = scorerStub((req) => (req.text.includes('src/b.ts') ? { failure: 'provider' } : { blocks: { B1: { ...refunds, score: 10 } } }));
+  const r = await review(input, deps({ files: [fileA, fileB], answers: [both], scorer }));
+  const byPath = new Map(r.scores.map((s) => [s.path, s]));
+  assert.deepEqual(byPath.get('src/b.ts')!.fileLevel, { score: 100, source: 'not_scored' });
+  assert.equal(byPath.get('src/a.ts')!.fileLevel, null);
+  assert.equal(r.status, 'ok');
+  assert.deepEqual(r.findings.map((f) => f.path), ['src/a.ts']);
+  assert.ok(r.audit.some((e) => e.stage === 'scorer' && e.action === 'file_failed' && e.subject === 'src/b.ts' && e.reason === 'provider'));
+});
+
+test('only files the review model read are sent to the scorer', async () => {
+  const fileC = fileAt('src/c.ts');
+  const asset: ChangedFile = { path: 'logo.png', previousPath: null, status: 'modified', additions: 0, deletions: 0, patch: null };
+  const scorer = scorerStub(() => ({ blocks: { B1: refunds } }));
+  const r = await review({ ...smallLimits, limits: { ...smallLimits.limits, batchesPerReview: 2 } }, deps({
+    files: [fileA, fileB, fileC, asset], answerFor: { 'src/a.ts': scored('src/a.ts', 10), 'src/b.ts': ungrounded }, scorer,
+  }));
+  assert.deepEqual(r.coverage.reviewed, ['src/a.ts']);
+  assert.deepEqual(r.coverage.notReviewed.map((n) => n.reason).sort(), ['batch_failed', 'over_batch_limit']);
+  assert.equal(scorer.requests.length, 1);
+  assert.ok(scorer.requests[0]!.text.includes('## File 1/1: src/a.ts'));
+  for (const path of ['src/b.ts', 'src/c.ts', 'logo.png']) assert.ok(!scorer.requests[0]!.text.includes(path));
+});
+
+test('the scorer\'s usage is added to the review\'s', async () => {
+  const scorer = scorerStub(() => ({ blocks: { B1: refunds } }));
+  const r = await review(input, deps({ files: [fileA], answers: [scored('src/a.ts', 20)], scorer }));
+  assert.equal(r.usage.calls, 1 + 2);
+  assert.equal(r.usage.cost, 0.5 + 0.25);
+});
+
+test('nothing reviewable, or every batch failed: the scorer is never asked', async () => {
+  const none = scorerStub(() => ({}));
+  await review(input, deps({ files: [binaryNoPatch], scorer: none }));
+  const down = new ProviderError('provider', 'p', 502, null);
+  const failed = scorerStub(() => ({}));
+  const r = await review(input, deps({ files: [fileA], answers: [down, down], scorer: failed }));
+  assert.equal(r.status, 'failed');
+  assert.deepEqual([none.requests.length, failed.requests.length], [0, 0]);
+});
+
+const movedAway: ChangedFile = { path: 'lib/x.ts', previousPath: 'src/x.ts', status: 'renamed', additions: 0, deletions: 0, patch: null };
+const movedAndA = {
+  overview: 'Moves lib/x.ts and changes src/a.ts.', findings: [],
+  files: [
+    { path: 'lib/x.ts', change_summary: 'Moves the file.', blocks: [], score: 35, category: 'rename', reason: 'Moves the file.' },
+    { path: 'src/a.ts', change_summary: 'Changes the retry delay.', score: 95, category: 'fix', reason: 'Changes the retry delay.', blocks: [{ id: 'B1', score: 20, category: 'fix', reason: 'Changes the retry delay.' }] },
+  ],
+};
+
+test('with a scorer set, a file moved to another directory keeps the review model\'s whole-file score', async () => {
+  const scorer = scorerStub(() => ({ blocks: { B1: refunds } }));
+  const d = deps({ files: [fileA, movedAway], answers: [movedAndA], scorer });
+  d.source.getFileContent = async (_p, path) => (path === 'src/x.ts' || path === 'lib/x.ts' ? 'same\n' : null);
+  const r = await review(input, d);
+  assert.equal(scorer.requests.length, 1);
+  assert.ok(!scorer.requests[0]!.text.includes('lib/x.ts'));
+  const byPath = new Map(r.scores.map((s) => [s.path, s]));
+  assert.deepEqual(byPath.get('lib/x.ts')!.fileLevel, { score: 35, source: 'whole_file' });
+  assert.deepEqual(byPath.get('src/a.ts')!.blocks.map((b) => b.entry), [refunds]);
+  assert.ok(!r.audit.some((e) => e.action === 'score_path_not_in_batch'));
+});
+
+test('with a scorer set, a review-model whole-file score for a file with a diff is not used', async () => {
+  const scorer = scorerStub(() => ({ blocks: { B1: { ...refunds, score: 15 } } }));
+  const d = deps({ files: [fileA, movedAway], answers: [movedAndA], scorer });
+  d.source.getFileContent = async (_p, path) => (path === 'src/x.ts' || path === 'lib/x.ts' ? 'same\n' : null);
+  const r = await review(input, d);
+  const a = r.scores.find((s) => s.path === 'src/a.ts')!;
+  assert.equal(a.fileLevel, null);
+  assert.equal(a.finalScore, 15);
+});
+
+test('the scorer is sent the file as the review model received it, with the full file cut', async () => {
+  const scorer = scorerStub(() => ({ blocks: { B1: refunds } }));
+  const d = deps({ files: [fileA], answers: [scored('src/a.ts', 20)], scorer });
+  const content = Array.from({ length: 60 }, (_, i) => `const line${i} = ${i * 104729};`).join('\n');
+  d.source.getFileContent = async (_p, path) => (path === 'src/a.ts' ? content : null);
+  const r = await review(smallLimits, d);
+  assert.ok(r.audit.some((e) => e.action === 'full_file_cut' && e.subject === 'src/a.ts'));
+  assert.equal(scorer.requests.length, 1);
+  assert.ok(!scorer.requests[0]!.text.includes('### Full file'));
+  assert.ok(!d.model.requests[0]!.messages[2]!.content.includes('### Full file'));
 });

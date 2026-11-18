@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import type { DeploymentConfig } from '../../config/load.ts';
 import { SUBMIT_REVIEW } from '../../engine/model/submit-review.ts';
-import type { ChangedFile, ModelClient, ModelResponse, ReviewDeps, Source } from '../../engine/types.ts';
+import type { ChangedFile, ModelClient, ModelResponse, ReviewDeps, ScoreAnswer, Scorer, Source } from '../../engine/types.ts';
 import type { HistoryCase } from '../history/file.ts';
 import { readCaseScores, runBacktest, toBacktestInput } from './run.ts';
 import type { BacktestSummary } from './run.ts';
@@ -16,6 +16,7 @@ const config: DeploymentConfig = {
     baseUrl: 'https://models.example.test/v1', apiKey: 'k', model: 'm', fallbacks: [],
     effort: { default: {}, elevated: {} }, extraBody: {}, extraHeaders: {}, prices: null, timeoutSeconds: 45,
   },
+  scorer: null,
   limits: { inputTokensPerCall: 200_000, batchesPerReview: 6 },
   repositories: { defaults: { primaryBranches: ['main'], scoreThreshold: 70 }, overrides: {} },
 };
@@ -96,8 +97,37 @@ test('two cases produce the four files, and the numbers have one row per thresho
   assert.deepEqual([a.status, a.verdict.highest, a.verdict.needsHuman, a.blocks, a.blocks_unscored, a.files_flagged_whole], ['ok', 80, true, 1, 0, 0]);
   const md = readFileSync(join(args.outDir, 'summary.md'), 'utf8');
   assert.match(md, /^\| threshold \| safety_blocks \| safety_blocks_n /);
-  assert.equal(md.trim().split('\n').length, 9);
-  assert.match(md, /\n\nComments by a person left out because a bot started their thread: 0\. Labelled blocks and files with no final patch: 0\.\n$/);
+  assert.equal(md.trim().split('\n').length, 10);
+  assert.match(md, /\n\nComments by a person left out because a bot started their thread: 0\. Labelled blocks and files with no final patch: 0\.\nScorer: the review model\n$/);
+});
+
+test('the summary names the configured scorer, or null, and summary.md has the line', async () => {
+  const without = await runBacktest(baseArgs());
+  assert.equal(without.scorer, null);
+  const args = baseArgs({ config: { ...config, scorer: { baseUrl: 'https://scorer.example.test/api', apiKey: 'k', model: 'vendor/decision-model', timeoutSeconds: 60 } } });
+  const s = await runBacktest(args);
+  assert.equal(s.scorer, 'vendor/decision-model');
+  assert.match(readFileSync(join(args.outDir, 'summary.md'), 'utf8'), /\nScorer: vendor\/decision-model\nFiles the scorer failed on or was not asked about: 0\n$/);
+});
+
+test('each row and the summary count the files the scorer failed on or was not asked about', async () => {
+  const scorerConfig = { ...config, scorer: { baseUrl: 'https://scorer.example.test/api', apiKey: 'k', model: 'vendor/decision-model', timeoutSeconds: 60 } };
+  const usage = { calls: 1, inputTokens: 0, outputTokens: 0, cachedTokens: 0, cost: 0 };
+  const failed: ScoreAnswer = { blocks: {}, usage, failure: 'provider' };
+  const answered: ScoreAnswer = { blocks: { B1: { score: 20, category: 'other', reason: 'Plain change.' } }, usage, failure: null };
+  const scorer: Scorer = { score: (request) => Promise.resolve(request.text.includes('src/b.ts') ? failed : answered) };
+  const args = baseArgs({ cases: [caseA, caseB, mkCase(3, 'src/a.ts')], config: scorerConfig, deps: { ...stubDeps([3]), scorer } });
+  const s = await runBacktest(args);
+  const rows = lines(join(args.outDir, 'results.jsonl')) as { key: string; scorer_failed_files: number }[];
+  const byPr = (n: number): number => rows.find((r) => r.key.includes(`#${n}@`))!.scorer_failed_files;
+  assert.deepEqual([byPr(1), byPr(2), byPr(3)], [0, 1, 0]);
+  assert.equal(s.scorer_failed_files, 1);
+  assert.match(readFileSync(join(args.outDir, 'summary.md'), 'utf8'), /\nScorer: vendor\/decision-model\nFiles the scorer failed on or was not asked about: 1\n$/);
+
+  const without = baseArgs();
+  const none = await runBacktest(without);
+  assert.equal(none.scorer_failed_files, 0);
+  assert.doesNotMatch(readFileSync(join(without.outDir, 'summary.md'), 'utf8'), /Files the scorer/);
 });
 
 test('the numbers follow the scores: at 70 one of two pull requests is clear, and a commented block left out counts against safety', async () => {
