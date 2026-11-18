@@ -3,7 +3,7 @@ import { randomBytes } from 'node:crypto';
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { ConfigError, loadConfig } from '../config/load.ts';
+import { ConfigError, contractFile, loadConfig } from '../config/load.ts';
 import type { DeploymentConfig } from '../config/load.ts';
 import { createModelClient } from '../engine/model/client.ts';
 import { createJevScorer } from '../engine/scorer/jev.ts';
@@ -94,7 +94,7 @@ function prepareRun(command: string, inputName: string, argv: string[], env: Rec
   const deps: ReviewDeps = {
     source: createGithubReadSource({ token: githubToken, fetch: globalThis.fetch }),
     model: createModelClient(config.model, { fetch: globalThis.fetch, sleep }),
-    contract: readFileSync(join(projectRoot, 'contract', 'review-contract.md'), 'utf8'),
+    contract: readFileSync(join(projectRoot, 'contract', contractFile(config)), 'utf8'),
     clock: () => new Date(),
     token: () => randomBytes(8).toString('hex'),
     log: (entry) => { process.stderr.write(JSON.stringify(entry) + '\n'); },

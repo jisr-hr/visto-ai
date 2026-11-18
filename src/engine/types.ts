@@ -36,7 +36,7 @@ export interface Scorer { score(request: ScoreRequest): Promise<ScoreAnswer> }
 export interface ReviewDeps {
   source: Source;
   model: ModelClient;
-  contract: string;
+  contract: string;           // the rules the review model is given; with a scorer, the contract that asks for no block scores
   clock: () => Date;
   token: () => string;        // fresh random text for data markers, 16 hex characters
   log: (entry: Record<string, unknown>) => void;

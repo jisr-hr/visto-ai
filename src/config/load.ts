@@ -110,6 +110,11 @@ export function loadConfig(path: string, env: Record<string, string | undefined>
   return parseConfig(readFileSync(path, 'utf8'), env);
 }
 
+/** The file in `contract/` the review model gets. With a second scorer it is the one that asks for no block scores. */
+export function contractFile(config: DeploymentConfig): string {
+  return config.scorer === null ? 'review-contract.md' : 'review-contract-scorer.md';
+}
+
 /** `fullName` is "owner/name", matched without regard to case. An override replaces only the keys it sets. */
 export function repoConfigFor(config: DeploymentConfig, fullName: string): RepoConfig {
   const wanted = fullName.toLowerCase();

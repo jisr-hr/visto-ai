@@ -583,6 +583,19 @@ test('with a scorer set, the scores are the scorer\'s and the summaries the revi
   assert.equal(r.scores[0]!.changeSummary, 'Changes the retry delay.');
 });
 
+test('with a scorer set, a review answer that scores no block loses nothing', async () => {
+  const scorer = scorerStub(() => ({ blocks: { B1: refunds } }));
+  const unscored = { ...answerOnA, files: [{ path: 'src/a.ts', change_summary: 'Changes the retry delay.', blocks: [] }] };
+  const r = await review(input, deps({ files: [fileA], answers: [unscored], scorer }));
+  assert.equal(r.status, 'ok');
+  assert.deepEqual(r.scores[0]!.blocks.map((b) => b.entry), [refunds]);
+  assert.equal(r.scores[0]!.fileLevel, null);
+  assert.equal(r.scores[0]!.covered, true);
+  assert.equal(r.scores[0]!.changeSummary, 'Changes the retry delay.');
+  assert.deepEqual(r.findings.map((f) => f.path), ['src/a.ts']);
+  assert.deepEqual(r.audit, []);
+});
+
 test('a file the scorer fails on is not scored, and the review and its findings stand', async () => {
   const both = {
     ...answerOnA,

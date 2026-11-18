@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
-import { ConfigError, parseConfig, repoConfigFor } from './load.ts';
+import { existsSync, readFileSync } from 'node:fs';
+import { ConfigError, contractFile, parseConfig, repoConfigFor } from './load.ts';
 
 const minimal = 'model:\n  apiKey: { env: MODEL_KEY }\n  model: vendor/model-a\n';
 
@@ -177,6 +177,14 @@ test('a scorer block with the threshold written gets its defaults and its resolv
     model: 'vendor/decider',
     timeoutSeconds: 60,
   });
+});
+
+test('the review model gets the contract without block scores when a scorer is named, and both files exist', () => {
+  const plain = contractFile(parseConfig(minimal, { MODEL_KEY: 'k' }));
+  const scored = contractFile(parseConfig(withScorer + writtenThreshold, scorerEnv));
+  assert.equal(plain, 'review-contract.md');
+  assert.equal(scored, 'review-contract-scorer.md');
+  for (const name of [plain, scored]) assert.ok(existsSync(new URL(`../../contract/${name}`, import.meta.url)), name);
 });
 
 test('a scorer key that is not set names its variable and prints no value', () => {
