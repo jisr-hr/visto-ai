@@ -30,6 +30,9 @@ function ctx(path: string, extra: Partial<FileContext> = {}): FileContext {
     full: { kind: 'full', totalLines: 3, text: 'one\ntwo\nthree' },
     test: null,
     skip: null,
+    blocks: [],
+    plan: { kind: 'model' },
+    hidden: false,
     ...extra,
   };
 }
@@ -81,7 +84,7 @@ test('per-file lines follow the heading, previous path only when renamed', () =>
     ...args,
     batch: { files: [ctx('src/n.ts', { file: { path: 'src/n.ts', previousPath: 'src/o.ts', status: 'renamed', additions: 0, deletions: 0, patch: '' } })], tokens: 1 },
   });
-  assert.match(renamed[2]!.content, /## File 1\/3: src\/n\.ts\nstatus: renamed\nadditions: 0\ndeletions: 0\nprevious path: src\/o\.ts\n<<<data/);
+  assert.match(renamed[2]!.content, /## File 1\/3: src\/n\.ts\nstatus: renamed\nadditions: 0\ndeletions: 0\nprevious path: src\/o\.ts\nwhole-file score: allowed\n<<<data/);
   assert.doesNotMatch(msgs[2]!.content, /previous path/);
 });
 test('an excerpt and a paired test are labelled', () => {
@@ -132,7 +135,7 @@ test('headerStripCounts counts what is stripped from title and description', () 
 async function assertCallsFit(files: ChangedFile[], heads: Record<string, string>): Promise<number> {
   const limit = 20_000;
   const contract = 'Rules of the review. '.repeat(200);
-  const source: Source = { listFiles: async () => files, getFileContent: async (_p, path, sha) => (sha === pr.headSha ? heads[path] ?? null : null) };
+  const source: Source = { listFiles: async () => files, getFileContent: async (_p, path, sha) => (sha === pr.headSha ? heads[path] ?? null : null), getDefaultBranchFile: async () => null };
   const built = await buildFileContexts(pr, files, source);
   const packed = packBatches(built.contexts, limit - fixedTokens(contract, pr), 1000);
   assert.deepEqual(packed.notReviewed, []);

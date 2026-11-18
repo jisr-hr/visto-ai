@@ -19,6 +19,11 @@ export function stripControl(text: string): { text: string; removed: number } {
   return { text: cleaned, removed };
 }
 
+// True when the text holds a character that stripControl would remove; a CRLF line ending is not one.
+export function hasHidden(text: string): boolean {
+  return stripControl(text).removed > 0;
+}
+
 // Single-line form of untrusted text: control characters stripped, each newline
 // and tab turned into one space, cut to INLINE_LIMIT characters.
 export function inlineText(text: string): string {

@@ -2,7 +2,10 @@ import { z } from 'zod';
 import type { RawFinding, ToolDefinition } from '../types.ts';
 
 export const SUBMIT_REVIEW = 'submit_review';
-export interface SubmitReviewArgs { overview: string; findings: RawFinding[] }
+export interface RawPart { first: string; last: string; score: number; category: string; reason?: string }
+export interface RawBlock { id: string; score?: number; category?: string; reason?: string; parts?: RawPart[] }
+export interface RawFile { path: string; change_summary: string; score?: number; category?: string; reason?: string; blocks: RawBlock[] }
+export interface SubmitReviewArgs { overview: string; findings: RawFinding[]; files: RawFile[] }
 
 const findingSchema = z.object({
   path: z.string().trim().min(1),
@@ -14,9 +17,41 @@ const findingSchema = z.object({
   beyond_diff: z.boolean(),
 }).strict();
 
+// Only the shape is checked here. A bad score, category or block id is judged
+// later, where it costs one block and not the whole answer, so unknown keys in
+// files are ignored rather than rejected.
+// Models often send null for a field they leave out: in files, that reads as the field being absent.
+const optional = <T extends z.ZodType>(schema: T) => z.preprocess((v) => (v === null ? undefined : v), schema.optional());
+
+const partSchema = z.object({
+  first: z.string(),
+  last: z.string(),
+  score: z.number(),
+  category: z.string(),
+  reason: optional(z.string()),
+});
+
+const blockSchema = z.object({
+  id: z.string().min(1),
+  score: optional(z.number()),
+  category: optional(z.string()),
+  reason: optional(z.string()),
+  parts: optional(z.array(partSchema)),
+});
+
+const fileSchema = z.object({
+  path: z.string().trim().min(1),
+  change_summary: z.string(),
+  score: optional(z.number()),
+  category: optional(z.string()),
+  reason: optional(z.string()),
+  blocks: z.array(blockSchema).default([]),
+});
+
 const argsSchema = z.object({
   overview: z.string().trim().min(1),
   findings: z.array(findingSchema),
+  files: z.array(fileSchema),
 }).strict();
 
 const parameters = z.toJSONSchema(argsSchema) as Record<string, unknown>;
@@ -26,7 +61,7 @@ export const submitReviewTool: ToolDefinition = {
   type: 'function',
   function: {
     name: SUBMIT_REVIEW,
-    description: 'Submit your review of the pull request. Call this tool exactly once, with your overview and all of your findings.',
+    description: 'Submit your review of the pull request. Call this tool exactly once, with your overview, all of your findings, and one entry for each file.',
     parameters,
   },
 };
@@ -78,5 +113,5 @@ function parseArgs(json: string): { ok: true; value: SubmitReviewArgs } | { ok: 
     if (body === '') return { ok: false, reason: `findings[${index}].body: empty after removing the severity tag` };
     findings.push({ ...finding, body });
   }
-  return { ok: true, value: { overview: parsed.data.overview, findings } };
+  return { ok: true, value: { overview: parsed.data.overview, findings, files: parsed.data.files } };
 }

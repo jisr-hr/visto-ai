@@ -13,11 +13,12 @@ const raw = (path: string, line: number, extra: Partial<RawFinding> = {}): RawFi
 const ctxWith = (path: string, r: Ranges | null): FileContext => ({
   file: { path, previousPath: null, status: 'modified', additions: 1, deletions: 0, patch: r ? 'p' : null },
   hunks: [], ranges: r, diffText: null, full: null, test: null, skip: r ? null : 'no_diff',
+  blocks: [], plan: r ? { kind: 'model' } : { kind: 'none', reason: 'no_diff' }, hidden: false,
 }) as FileContext;
 const ctxs = [ctxWith('src/a.ts', ranges), ctxWith('src/b.ts', ranges), ctxWith('img/logo.bin', null)];
 const allFiles = ctxs.map((c) => c.file.path);
 const answerIn = (files: string[], overview: string, ...findings: RawFinding[]): { value: SubmitReviewArgs; files: string[] } =>
-  ({ value: { overview, findings }, files });
+  ({ value: { overview, findings, files: [] }, files });
 const answer = (overview: string, ...findings: RawFinding[]): { value: SubmitReviewArgs; files: string[] } => answerIn(allFiles, overview, ...findings);
 
 test('prefixes normalise; unknown paths are dropped with an audit entry', () => {

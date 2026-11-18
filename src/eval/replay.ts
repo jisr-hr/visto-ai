@@ -9,6 +9,7 @@ import { review } from '../engine/review.ts';
 import type { ReviewDeps, ReviewInput } from '../engine/types.ts';
 import type { EvalCase } from './cases.ts';
 import { caseKey } from './cases.ts';
+import { runPool } from './pool.ts';
 import { METRICS, scoreCase, summarize } from './score.ts';
 import type { CaseResult, CaseScore, ReplayFinding, Summary } from './score.ts';
 
@@ -48,7 +49,7 @@ function evalFailure(c: EvalCase, error: unknown, duration_ms: number): CaseResu
   const reason = error instanceof Error && SHORT_CODE.test(error.message) ? error.message : 'unexpected_error';
   return {
     key: caseKey(c), status: 'failed', failure_stage: 'eval', failure_reason: reason, total_cost: 0, total_tokens: 0, duration_ms,
-    calls: 0, cached_tokens: 0, models: [], unplaced: 0, files_reviewed: 0, not_reviewed: {}, findings: [],
+    calls: 0, cached_tokens: 0, models: [], unplaced: 0, files_reviewed: 0, not_reviewed: {}, findings: [], highest_score: null, needs_human: null,
   };
 }
 
@@ -72,6 +73,8 @@ export async function replayCase(c: EvalCase, config: DeploymentConfig, deps: Re
       files_reviewed: result.coverage.reviewed.length,
       not_reviewed: countBy(result.coverage.notReviewed.map((n) => n.reason)),
       findings,
+      highest_score: result.verdict.highest,
+      needs_human: result.verdict.needsHuman,
     };
   } catch (error) {
     return evalFailure(c, error, Date.now() - started);
@@ -144,42 +147,22 @@ export async function runReplay(args: {
 }): Promise<SummaryFile> {
   mkdirSync(args.outDir, { recursive: true });
   // Files from an earlier run must not sit beside this run's files.
-  for (const name of ['summary.json', 'summary.md', 'unmatched-sample.jsonl']) rmSync(join(args.outDir, name), { force: true });
+  // A link left at results.jsonl would send the writes elsewhere, so it is removed, not truncated.
+  for (const name of ['summary.json', 'summary.md', 'unmatched-sample.jsonl', 'results.jsonl']) rmSync(join(args.outDir, name), { force: true });
   const resultsPath = join(args.outDir, 'results.jsonl');
   writeFileSync(resultsPath, '');
 
   const selected = args.cases.slice(0, args.maxCases);
   const results: (CaseResult | undefined)[] = new Array<CaseResult | undefined>(selected.length).fill(undefined);
-  let next = 0;
-  let spent = 0;
-  let stoppedByCost = false;
-  let failure: { error: unknown } | null = null;
-
-  async function worker(): Promise<void> {
-    for (;;) {
-      if (failure !== null || next >= selected.length) return;
-      if (spent >= args.maxCost) { stoppedByCost = true; return; }
-      const index = next;
-      next += 1;
-      const result = await replayCase(selected[index]!, args.config, args.deps);
-      results[index] = result;
-      spent += result.total_cost;
-      try {
-        appendFileSync(resultsPath, JSON.stringify(result) + '\n');
-      } catch (error) {
-        failure ??= { error };
-        return;
-      }
-    }
-  }
-  await Promise.all(Array.from({ length: args.concurrency }, () => worker()));
-  if (failure !== null) throw (failure as { error: unknown }).error;
+  const { stoppedByCost, notStarted } = await runPool(
+    selected, { concurrency: args.concurrency, maxCost: args.maxCost }, (c) => replayCase(c, args.config, args.deps),
+    (result, index) => { results[index] = result; appendFileSync(resultsPath, JSON.stringify(result) + '\n'); },
+  );
 
   const started: { c: EvalCase; r: CaseResult }[] = [];
   selected.forEach((c, i) => { const r = results[i]; if (r) started.push({ c, r }); });
   const scored = started.map(({ c, r }) => scoreCase(c, r));
   const summary = summarize(args.label, scored, started.map((s) => s.r));
-  const notStarted = selected.length - started.length;
   const file: SummaryFile = {
     summary, cases_file: args.casesFile, cases_sha256: args.casesSha256, case_count: args.cases.length, max_cases: args.maxCases,
     stopped_reason: stoppedByCost && notStarted > 0 ? 'max_cost' : null, cases_not_started: notStarted,

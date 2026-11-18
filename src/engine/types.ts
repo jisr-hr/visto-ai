@@ -1,5 +1,6 @@
 // src/engine/types.ts
 import type { ChangedFile, PullRequestInfo, Side, Source } from '../forge/types.ts';
+import type { FileScore, Verdict } from './score/types.ts';
 
 export type Severity = 'blocker' | 'major' | 'minor';
 export interface AuditEntry { stage: string; action: string; subject: string; reason: string }
@@ -13,7 +14,7 @@ export interface ModelResponse { toolName: string | null; toolArguments: string 
 export interface ModelClient { complete(request: ModelRequest): Promise<ModelResponse> }
 
 export interface Limits { inputTokensPerCall: number; batchesPerReview: number; modelTimeoutSeconds: number }
-export interface RepoConfig { primaryBranches: string[] }
+export interface RepoConfig { primaryBranches: string[]; scoreThreshold: number }
 
 export interface ReviewInput {
   pullRequest: PullRequestInfo;
@@ -53,5 +54,20 @@ export interface ReviewResult {
   providers: string[];        // upstream providers that answered, distinct, in first-seen order
   dependencies: { model: 'ok' | 'error' };
   audit: AuditEntry[];
+  scores: FileScore[];        // one per changed file; empty when the review failed
+  verdict: Verdict;
+  teamFileInvalid: string | null; // why the repository's .visto-ai.yml cannot be used; null when it can, or on a failed review
 }
 export type { ChangedFile, PullRequestInfo, Side, Source };
+export type {
+  Anchor,
+  Block,
+  BlockScore,
+  Category,
+  FileLevelSource,
+  FileScore,
+  ScoreEntry,
+  Span,
+  Verdict,
+} from './score/types.ts';
+export { CATEGORIES } from './score/types.ts';

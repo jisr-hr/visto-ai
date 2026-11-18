@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { createGithubReadSource } from './read-source.ts';
 import type { PullRequestInfo } from '../types.ts';
 
-interface Call { url: string; method: string; headers: Record<string, string> }
+interface Call { url: string; method: string | undefined; headers: Record<string, string> }
 
 let calls: Call[] = [];
 let responses: Array<Response | Error> = [];
@@ -15,7 +15,7 @@ const queue = (...r: Array<Response | Error>): void => {
 const stubFetch = ((input: string | URL | Request, init?: RequestInit) => {
   const headers: Record<string, string> = {};
   for (const [k, v] of new Headers(init?.headers).entries()) headers[k.toLowerCase()] = v;
-  calls.push({ url: String(input), method: init?.method ?? 'GET', headers });
+  calls.push({ url: String(input), method: init?.method, headers });
   const next = responses.shift();
   if (next === undefined) return Promise.reject(new Error('no response queued'));
   if (next instanceof Error) return Promise.reject(next);
@@ -244,4 +244,35 @@ test('odd content paths are refused before any request', async () => {
 test('a status named like an inherited property maps to modified', async () => {
   queue(json({ files: [{ filename: 'a', status: 'constructor' }, { filename: 'b', status: 'toString' }] }));
   assert.deepEqual((await source().listFiles(pr)).map((f) => f.status), ['modified', 'modified']);
+});
+
+test('the default branch file is requested without a ref, and read as text', async () => {
+  queue(new Response('human_review: []\n', { status: 200 }));
+  assert.equal(await source().getDefaultBranchFile(pr, '.visto-ai.yml'), 'human_review: []\n');
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]!.url, 'https://api.github.com/repos/acme/shop/contents/.visto-ai.yml');
+  assert.equal(calls[0]!.method, 'GET');
+  assert.equal(calls[0]!.headers.accept, 'application/vnd.github.raw+json');
+});
+
+test('a missing default branch file is null', async () => {
+  queue(new Response('', { status: 404 }));
+  assert.equal(await source().getDefaultBranchFile(pr, '.visto-ai.yml'), null);
+});
+
+test('a default branch file read retries a 500 once, then reports it', async () => {
+  queue(new Response('', { status: 500 }), new Response('', { status: 500 }));
+  await assert.rejects(source().getDefaultBranchFile(pr, '.visto-ai.yml'), (e: Error) => e.message === 'github_500');
+  assert.equal(calls.length, 2);
+});
+
+test('a default branch file with a NUL byte is returned as text, for the parser to refuse', async () => {
+  queue(new Response(new Uint8Array([0x68, 0x00, 0x69, 0x00]), { status: 200 }));
+  assert.equal(await source().getDefaultBranchFile(pr, '.visto-ai.yml'), 'h\u0000i\u0000');
+});
+
+test('an oversized default branch file is returned cut to the size limit', async () => {
+  queue(new Response('x'.repeat(2_000_005), { status: 200 }));
+  const text = await source().getDefaultBranchFile(pr, '.visto-ai.yml');
+  assert.equal(text?.length, 2_000_000);
 });

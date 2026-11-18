@@ -40,8 +40,15 @@ test('a header without a length means one line', () => {
 test('exact anchored format', () => {
   assert.equal(
     renderAnchoredDiff(parsePatch(patch)),
-    '@@ -10,3 +10,4 @@ def total\nR10     | ctx1\nL11     |-old\nR11     |+new1\nR12     |+new2\nR13     | ctx2',
+    '### Block B1 (3 changed lines, not scored)\n@@ -10,3 +10,4 @@ def total\nR10     | ctx1\nL11     |-old\nR11     |+new1\nR12     |+new2\nR13     | ctx2',
   );
+});
+
+test('each hunk opens with its block header', () => {
+  const twoHunks = patch + '\n@@ -40,2 +41,3 @@\n x\n+b\n y';
+  const text = renderAnchoredDiff(parsePatch(twoHunks));
+  assert.match(text, /^### Block B1 \(3 changed lines, not scored\)\n@@ /);
+  assert.match(text, /\n### Block B2 \(1 changed line, not scored\)\n@@ /);
 });
 
 test('commentable ranges', () => {
@@ -86,7 +93,7 @@ test('content that looks like diff syntax is numbered as content, not parsed as 
   const content = '@@ -5,3 +5,3 @@\n--- a/foo\n+++ b/foo\n @@ -9 +9 @@';
   assert.equal(
     renderAnchoredDiff(parsePatch(content)),
-    '@@ -5,3 +5,3 @@\nL5      |--- a/foo\nR5      |+++ b/foo\nR6      | @@ -9 +9 @@',
+    '### Block B1 (2 changed lines, not scored)\n@@ -5,3 +5,3 @@\nL5      |--- a/foo\nR5      |+++ b/foo\nR6      | @@ -9 +9 @@',
   );
   assert.deepEqual(commentableRanges(parsePatch(content)), { RIGHT: [[5, 6]], LEFT: [[5, 5]] });
 });

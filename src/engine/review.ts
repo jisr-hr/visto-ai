@@ -8,6 +8,8 @@ import { callBatch } from './model/call.ts';
 import type { BatchAnswer } from './model/call.ts';
 import type { SubmitReviewArgs } from './model/submit-review.ts';
 import { reconcile } from './reconcile/index.ts';
+import { reconcileScores, verdictOf } from './reconcile/scores.ts';
+import { REPO_FILE, parseRepoFile } from './score/floors.ts';
 import type {
   AuditEntry, ChangedFile, Effort, NotReviewed, PullRequestInfo, RepoConfig, ReviewDeps, ReviewInput, ReviewResult, Source, Usage,
 } from './types.ts';
@@ -39,17 +41,21 @@ export function chooseEffort(pr: PullRequestInfo, files: ChangedFile[], repo: Re
 type Answered = { models: string[]; providers: string[] };
 const noneAnswered = (): Answered => ({ models: [], providers: [] });
 
+// A review that did not finish never tells anyone that a pull request needs no person.
 function failedResult(
-  stage: 'context' | 'model', code: string, usage: Usage, audit: AuditEntry[], model: 'ok' | 'error', answered: Answered = noneAnswered(),
+  stage: 'context' | 'model', code: string, usage: Usage, audit: AuditEntry[], model: 'ok' | 'error', threshold: number,
+  answered: Answered = noneAnswered(),
 ): ReviewResult {
   return {
+    scores: [], verdict: { threshold, needsHuman: true, highest: 100 }, teamFileInvalid: null,
     status: 'failed', failure: { stage, code }, mode: 'full', overview: '', findings: [], unplaced: [], beyondDiff: [],
     coverage: { reviewed: [], notReviewed: [] }, usage, ...answered, dependencies: { model }, audit,
   };
 }
 
-function okResult(overview: string, rest: Partial<ReviewResult>): ReviewResult {
+function okResult(overview: string, threshold: number, rest: Partial<ReviewResult>): ReviewResult {
   return {
+    scores: [], verdict: verdictOf([], threshold), teamFileInvalid: null,
     status: 'ok', failure: null, mode: 'full', overview, findings: [], unplaced: [], beyondDiff: [],
     coverage: { reviewed: [], notReviewed: [] }, usage: zeroUsage(), models: [], providers: [], dependencies: { model: 'ok' }, audit: [], ...rest,
   };
@@ -200,13 +206,20 @@ export async function review(input: ReviewInput, deps: ReviewDeps): Promise<Revi
     const source: Source = {
       listFiles: (p) => guard(() => deps.source.listFiles(p)),
       getFileContent: (p, path, sha) => guard(() => deps.source.getFileContent(p, path, sha)),
+      getDefaultBranchFile: (p, path) => guard(() => deps.source.getDefaultBranchFile(p, path)),
     };
 
+    const threshold = input.repoConfig.scoreThreshold;
     const files = await source.listFiles(pr);
-    if (files.length === 0) return okResult('No changes to review.', {});
+    if (files.length === 0) return okResult('No changes to review.', threshold, {});
+
+    // Read only when there is something to floor; a rejection fails the review here, like any source error.
+    const floors = parseRepoFile(await source.getDefaultBranchFile(pr, REPO_FILE));
+    const teamFileInvalid = floors.invalid;
+    if (teamFileInvalid !== null) audit.push({ stage: 'context', action: 'team_file_invalid', subject: REPO_FILE, reason: teamFileInvalid });
 
     const budget = input.limits.inputTokensPerCall - fixedTokens(deps.contract, pr);
-    if (budget <= 0) return failedResult('context', 'budget_too_small', usage, audit, 'ok');
+    if (budget <= 0) return failedResult('context', 'budget_too_small', usage, audit, 'ok', threshold);
 
     const stripped = headerStripCounts(pr);
     for (const subject of ['title', 'description'] as const) {
@@ -216,7 +229,11 @@ export async function review(input: ReviewInput, deps: ReviewDeps): Promise<Revi
     const packed = packBatches(built.contexts, budget, input.limits.batchesPerReview);
     audit.push(...built.audit, ...packed.audit);
     if (packed.batches.length === 0) {
-      return okResult('No reviewable changes.', { coverage: { reviewed: [], notReviewed: packed.notReviewed }, audit });
+      const scored = reconcileScores([], built.contexts, new Set(packed.notReviewed.map((n) => n.path)), floors);
+      return okResult('No reviewable changes.', threshold, {
+        coverage: { reviewed: [], notReviewed: packed.notReviewed }, audit: [...audit, ...scored.audit],
+        scores: scored.scores, verdict: verdictOf(scored.scores, threshold), teamFileInvalid,
+      });
     }
 
     stage = 'model';
@@ -248,7 +265,7 @@ export async function review(input: ReviewInput, deps: ReviewDeps): Promise<Revi
     const fatal = codes.find((c) => c === 'auth' || c === 'no_credit');
     const everyBatchFailed = outcomes.every((o) => o.answers.length === 0);
     if (fatal !== undefined || everyBatchFailed) {
-      return failedResult('model', fatal ?? codes[0] ?? 'internal_error', usage, audit, modelState, answered);
+      return failedResult('model', fatal ?? codes[0] ?? 'internal_error', usage, audit, modelState, threshold, answered);
     }
 
     const rec = reconcile(outcomes.flatMap((o) => o.answers), built.contexts);
@@ -257,10 +274,14 @@ export async function review(input: ReviewInput, deps: ReviewDeps): Promise<Revi
       ...packed.notReviewed,
       ...outcomes.flatMap((o) => o.failedFiles.map((path): NotReviewed => ({ path, reason: 'batch_failed' }))),
     ];
-    return okResult(rec.overview, {
+    const notRead = new Set(notReviewed.map((n) => n.path));
+    const scored = reconcileScores(outcomes.flatMap((o) => o.answers), built.contexts, notRead, floors);
+    audit.push(...scored.audit);
+    return okResult(rec.overview, threshold, {
       findings: rec.findings, unplaced: rec.unplaced, beyondDiff: rec.beyondDiff,
       coverage: { reviewed: outcomes.flatMap((o) => o.reviewed), notReviewed },
       usage, ...answered, dependencies: { model: modelState }, audit,
+      scores: scored.scores, verdict: verdictOf(scored.scores, threshold), teamFileInvalid,
     });
   } catch (error) {
     let code = 'internal_error';
@@ -269,6 +290,6 @@ export async function review(input: ReviewInput, deps: ReviewDeps): Promise<Revi
     }
     const name = error instanceof Error ? error.name : 'unknown';
     safeLog(deps, { event: 'internal_error', stage, name });
-    return failedResult(stage, code, usage, audit, 'ok', answered);
+    return failedResult(stage, code, usage, audit, 'ok', input.repoConfig.scoreThreshold, answered);
   }
 }

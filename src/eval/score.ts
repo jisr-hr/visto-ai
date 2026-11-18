@@ -13,6 +13,7 @@ export interface CaseResult {
   key: string; status: 'ok' | 'failed'; failure_stage: string | null; failure_reason: string | null; total_cost: number; total_tokens: number; duration_ms: number;
   calls: number; cached_tokens: number; models: string[]; unplaced: number; files_reviewed: number; not_reviewed: Record<string, number>; // count by reason
   findings: ReplayFinding[];
+  highest_score: number | null; needs_human: boolean | null; // null when the case failed in the eval itself
 }
 export interface CaseScore { key: string; status: 'ok' | 'failed'; comment_count: number; blocking_count: number; labels: (Label & { matched: boolean; matched_severity: string })[]; unmatched: ReplayFinding[] }
 export type Summary = { label: string } & Record<string, number | string | null>;

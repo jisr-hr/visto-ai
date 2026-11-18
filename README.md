@@ -49,9 +49,9 @@ The full design, with every decision and its reason, is in [docs/superpowers/spe
 | Part | State |
 |---|---|
 | Skeleton: typed configuration, the review contract, a test harness that blocks the network, CI | Built |
-| Engine: findings | Built. Tested against stubs only; not yet measured against a real model |
-| Offline replay of past pull requests | Built. Not yet run |
-| Engine: the score | Planned, next |
+| Engine: findings | Built. Compared with the predecessor on a frozen case set |
+| Offline replay of past pull requests | Built and run |
+| Engine: the score | Built. Measured only where its owner has run the backtest |
 | Service: webhooks, queue, publishing a review to GitHub | Planned |
 | Merge gate | Planned |
 | Extensions and MCP tools | Planned |
@@ -70,7 +70,7 @@ The engine is one function, `review(input, deps)`. It reads a pull request and r
 3. **Mark untrusted text.** Everything that comes from the pull request is wrapped in data markers with a random token. The contract tells the model that text inside the markers is data, never instructions.
 4. **Ask the model.** The model must answer through one forced tool call, `submit_review`, so the answer is structured data and not prose. The rules it follows are in [contract/review-contract.md](contract/review-contract.md).
 5. **Check the answer.** An answer that names no changed file is sent back once, and then rejected. A finding on a file that is not in the pull request is dropped. A finding on a line that cannot take a comment is moved to the nearest line that can, within three lines, or listed separately.
-6. **Render.** The service builds the review text from the structured result. The layout, the severity tags and the lists are the service's. The model supplies only the overview and the text of each finding.
+6. **Render.** The service builds the review text from the structured result. The layout, the severity tags and the lists are the service's. The model supplies the overview, the text of each finding, and a score for each changed block, which the service checks before it counts: a score that is not a whole number from 0 to 100 leaves its block counted as 100.
 
 ## Development
 
@@ -105,13 +105,58 @@ npm run eval:compare -- ../runs/baseline/summary.json ../runs/first/summary.json
 
 The case file and the output folder must be outside the project folder, so that private data cannot be committed by accident. A case file is JSON Lines: each line names a pull request at a fixed head and base, with the review comments people left, labelled by whether they were valid. This repository has no command that builds a case file yet.
 
+## Backtest
+
+The backtest replays the score on past pull requests and measures it against where people actually commented. Like the replay, it reads from GitHub, calls the model, makes paid calls bounded by `--max-cases` and `--max-cost`, and posts nothing. Its input is a history file written by `import-history`, and its files, like the history file, must be outside the project folder: they hold paths and model-written reasons.
+
+```bash
+npm run eval:import-history -- --repo owner/name --since 2026-01-01 --until 2026-04-01 --out ../history.jsonl
+npm run eval:backtest -- --history ../history.jsonl --out ../runs/score-one --label score-one --config config.local.yml
+npm run eval:score-noise -- ../runs/score-one ../runs/score-two
+```
+
+- **Safety**: of the blocks and files a person had to look at, the share the score would have left below the threshold; lower is better.
+- **Benefit**: the share of pull requests in which nothing in the pull request reaches the threshold: no block and no file as a whole. A person need not be asked about those at all.
+- **Focus**: in the pull requests that do go to a person, the share of changed lines flagged. Lower means the person reads less.
+
+A block or file is labelled **loose** when a person who is not the author left an inline comment on it. It is labelled **strict** when, in addition, its lines (for a file, its diff) changed in a later commit before the merge; Safety is reported for both.
+
+`score-noise` compares two runs of the same history file and prints how often a block, and a whole pull request, falls on a different side of each threshold between them.
+
+## The file a team commits
+
+A team may commit `.visto-ai.yml` at the root of its repository, listing paths that always need a human reviewer. It is read from the default branch and can only add protection.
+
+```yaml
+# .visto-ai.yml
+human_review:
+  - db/migrate/
+  - "app/**/policy.rb"
+```
+
+- A trailing slash is ignored, and a pattern with no slash left matches at any depth: `migrations/` is the same as `migrations`, and covers `migrations/x.sql` and `services/api/migrations/x.sql`.
+- A pattern with a slash anywhere but at its end is matched from the repository root. `db/migrate/` therefore covers `db/migrate/001.rb` and never `services/db/migrate/001.rb`.
+- A leading slash also ties a pattern to the root: `/docs` matches only the top-level `docs`, while `docs` matches at any depth.
+- A pattern that names a directory covers everything under it, dot-files included.
+- The wildcards are `*` (any run of characters within one name), `?` (one character) and `**` (any number of directories): `app/**/policy.rb` covers `app/policy.rb` and `app/models/user/policy.rb`.
+- `**` is special only as a whole path segment; inside a name, such as `a**b`, it is two `*`.
+- Matching is case-sensitive.
+- A renamed file is checked by its old path as well as its new one.
+- Brackets are ordinary characters: `app/[id]/page.tsx` matches only that path.
+- A pattern with a backslash, a brace, a `.` or `..` segment, or a leading `!` is refused, and makes the file unusable.
+
+A file that cannot be used (invalid YAML, an unknown key, a refused pattern, content that is not text, or one that is too large) sends every pull request to a person, and the review says why the file cannot be used.
+
 ## Repository layout
 
 | Path | What |
 |---|---|
 | `src/engine` | The review engine: context, model call, checks on the answer, rendering |
-| `src/forge` | The boundary to git services. `forge/github` holds the read-only GitHub source |
-| `src/eval` | The replay and comparison commands |
+| `src/engine/score` | Blocks, the rules that score without the model, and the floors from `.visto-ai.yml` |
+| `src/forge` | The boundary to git services. `forge/github` holds the read-only GitHub sources |
+| `src/eval` | The `replay` and `compare` commands |
+| `src/eval/history` | The `import-history` command and the history file it writes |
+| `src/eval/backtest` | The `backtest` and `score-noise` commands: labels, the three numbers and the noise between runs |
 | `src/config` | Loading and validating configuration |
 | `contract` | The rules the model is given |
 | `docs/superpowers` | The design and the implementation plans |

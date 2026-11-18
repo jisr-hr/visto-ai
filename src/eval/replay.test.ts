@@ -17,7 +17,7 @@ const config: DeploymentConfig = {
     effort: { default: {}, elevated: {} }, extraBody: {}, extraHeaders: {}, prices: null, timeoutSeconds: 45,
   },
   limits: { inputTokensPerCall: 200_000, batchesPerReview: 6 },
-  repositories: { defaults: { primaryBranches: ['main'] }, overrides: {} },
+  repositories: { defaults: { primaryBranches: ['main'], scoreThreshold: 70 }, overrides: {} },
 };
 
 const mkCase = (pr: number, extra: Partial<EvalCase> = {}): EvalCase => ({
@@ -39,11 +39,11 @@ function stubDeps(findings: unknown[] = [finding(2)], overrides: Partial<ReviewD
   const model: ModelClient = {
     complete: (): Promise<ModelResponse> => Promise.resolve({
       toolName: SUBMIT_REVIEW,
-      toolArguments: JSON.stringify({ overview: 'src/a.ts has a problem.', findings }),
+      toolArguments: JSON.stringify({ overview: 'src/a.ts has a problem.', findings, files: [] }),
       text: null, model: 'm', provider: null, usage: { calls: 1, inputTokens: 100, outputTokens: 10, cachedTokens: 0, cost: 0.0123 },
     }),
   };
-  const source: Source = { listFiles: () => Promise.resolve([fileA]), getFileContent: () => Promise.resolve(null) };
+  const source: Source = { listFiles: () => Promise.resolve([fileA]), getFileContent: () => Promise.resolve(null), getDefaultBranchFile: () => Promise.resolve(null) };
   return { source, model, contract: 'You review pull requests.', clock: () => new Date(0), token: () => 'abcdef0123456789', log: () => {}, ...overrides };
 }
 
@@ -59,7 +59,7 @@ test('a case becomes a full review at its frozen base and head, with no earlier 
   assert.deepEqual(i.pullRequest.ref, { service: 'github', owner: 'acme', repo: 'shop', number: 7 });
   assert.deepEqual([i.pullRequest.description, i.pullRequest.headBranch, i.pullRequest.baseBranch, i.pullRequest.draft], ['Adds things.', 'topic', 'main', false]);
   assert.deepEqual(i.limits, { inputTokensPerCall: 200_000, batchesPerReview: 6, modelTimeoutSeconds: 45 });
-  assert.deepEqual(i.repoConfig, { primaryBranches: ['main'] });
+  assert.deepEqual(i.repoConfig, { primaryBranches: ['main'], scoreThreshold: 70 });
 });
 
 test('a repo that is not owner/name throws bad_case_repo', () => {
@@ -81,11 +81,11 @@ test('a case result explains the run: calls, cached tokens, models, unplaced and
   const model: ModelClient = {
     complete: (): Promise<ModelResponse> => Promise.resolve({
       toolName: SUBMIT_REVIEW,
-      toolArguments: JSON.stringify({ overview: 'src/a.ts has a problem.', findings: [finding(2), finding(500)] }),
+      toolArguments: JSON.stringify({ overview: 'src/a.ts has a problem.', findings: [finding(2), finding(500)], files: [] }),
       text: null, model: 'vendor/model-a', provider: 'Up One', usage: { calls: 1, inputTokens: 100, outputTokens: 10, cachedTokens: 40, cost: 0.01 },
     }),
   };
-  const r = await replayCase(caseA, config, stubDeps([], { model, source: { listFiles: () => Promise.resolve(files), getFileContent: () => Promise.resolve(null) } }));
+  const r = await replayCase(caseA, config, stubDeps([], { model, source: { listFiles: () => Promise.resolve(files), getFileContent: () => Promise.resolve(null), getDefaultBranchFile: () => Promise.resolve(null) } }));
   assert.deepEqual(
     [r.calls, r.cached_tokens, r.models, r.unplaced, r.files_reviewed, r.not_reviewed],
     [1, 40, ['vendor/model-a'], 1, 1, { no_diff: 1 }],
@@ -101,7 +101,7 @@ test('the summary file carries the coverage of the run, and the summary object i
   const twoFiles: ChangedFile[] = [fileA, { path: 'logo.bin', previousPath: null, status: 'modified', additions: 0, deletions: 0, patch: null }];
   const source: Source = {
     listFiles: (p) => Promise.resolve(p.ref.number === 8 ? twoFiles : [fileA]),
-    getFileContent: () => Promise.resolve(null),
+    getFileContent: () => Promise.resolve(null), getDefaultBranchFile: () => Promise.resolve(null),
   };
   const s = await runReplay(baseArgs({ deps: stubDeps([finding(2)], { source }) }));
   assert.deepEqual(s.coverage, { files_reviewed: 3, files_not_reviewed: { no_diff: 1 }, cases_with_files_not_reviewed: 1, calls: 3, models: ['m'] });
@@ -109,11 +109,19 @@ test('the summary file carries the coverage of the run, and the summary object i
 });
 
 test('a failed review fills the failure stage and reason', async () => {
-  const deps = stubDeps([], { source: { listFiles: () => Promise.reject(new Error('boom')), getFileContent: () => Promise.resolve(null) } });
+  const deps = stubDeps([], { source: { listFiles: () => Promise.reject(new Error('boom')), getFileContent: () => Promise.resolve(null), getDefaultBranchFile: () => Promise.resolve(null) } });
   const r = await replayCase(caseA, config, deps);
   assert.equal(r.status, 'failed');
   assert.equal(typeof r.failure_stage, 'string');
   assert.equal(typeof r.failure_reason, 'string');
+});
+
+test('a result carries the verdict of the review, and null when the case failed in the eval', async () => {
+  const r = await replayCase(caseA, config, stubDeps());
+  assert.equal(typeof r.highest_score, 'number');
+  assert.equal(typeof r.needs_human, 'boolean');
+  const bad = await replayCase(mkCase(1, { repo: 'shop' }), config, stubDeps());
+  assert.deepEqual([bad.highest_score, bad.needs_human], [null, null]);
 });
 
 test('a bad repo gives a failed result at stage eval and never throws', async () => {

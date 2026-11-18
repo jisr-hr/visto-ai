@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { parseSubmitReview, submitReviewTool, SUBMIT_REVIEW } from './submit-review.ts';
 
-const ok = { overview: 'Changes src/a.ts.', findings: [{ path: 'src/a.ts', side: 'RIGHT', line: 3, severity: 'major', body: 'Breaks on empty input.', quote: 'x()', beyond_diff: false }] };
+const ok = { overview: 'Changes src/a.ts.', findings: [{ path: 'src/a.ts', side: 'RIGHT', line: 3, severity: 'major', body: 'Breaks on empty input.', quote: 'x()', beyond_diff: false }], files: [{ path: 'src/a.ts', change_summary: 'Adds a guard.', blocks: [{ id: 'B1', score: 45, category: 'fix', reason: 'Changes when the job runs.' }] }] };
 
 function reasonOf(value: unknown): string {
   const r = parseSubmitReview(JSON.stringify(value));
@@ -11,7 +11,7 @@ function reasonOf(value: unknown): string {
 }
 
 test('accepts a valid answer', () => assert.equal(parseSubmitReview(JSON.stringify(ok)).ok, true));
-test('zero findings is valid', () => assert.equal(parseSubmitReview(JSON.stringify({ overview: 'x', findings: [] })).ok, true));
+test('zero findings is valid', () => assert.equal(parseSubmitReview(JSON.stringify({ overview: 'x', findings: [], files: [] })).ok, true));
 test('a finding without a severity is invalid and the reason names it', () => {
   const bad = structuredClone(ok); delete (bad.findings[0] as Record<string, unknown>).severity;
   const r = parseSubmitReview(JSON.stringify(bad));
@@ -65,7 +65,7 @@ test('a non-object answer is invalid', () => assert.equal(parseSubmitReview('[]'
 test('the tool definition is a JSON schema with the required fields', () => {
   assert.equal(submitReviewTool.function.name, SUBMIT_REVIEW);
   const p = submitReviewTool.function.parameters as { required: string[]; additionalProperties: unknown };
-  assert.deepEqual([...p.required].sort(), ['findings', 'overview']);
+  assert.deepEqual([...p.required].sort(), ['files', 'findings', 'overview']);
   assert.equal(p.additionalProperties, false);
   assert.ok(!('$schema' in p));
 });
@@ -96,8 +96,75 @@ test('the JSON schema still gives overview, body and path a minimum length of 1'
 });
 
 test('a reason is one line and at most 200 characters', () => {
-  const reason = reasonOf({ overview: 'o', findings: [], [`k\n${'k'.repeat(499)}`]: 1 });
+  const reason = reasonOf({ overview: 'o', findings: [], files: [], [`k\n${'k'.repeat(499)}`]: 1 });
   assert.equal(reason.length, 200);
   assert.doesNotMatch(reason, /\n/);
   assert.match(reason, /unexpected key k k/);
+});
+
+const withBlock = (block: Record<string, unknown>) => ({ ...ok, files: [{ path: 'src/a.ts', change_summary: 'Adds a guard.', blocks: [block] }] });
+function parsed(value: unknown) {
+  const r = parseSubmitReview(JSON.stringify(value));
+  assert.ok(r.ok);
+  return r.value;
+}
+
+test('a full answer parses', () => assert.deepEqual(parsed(ok).files[0]!.blocks[0], { id: 'B1', score: 45, category: 'fix', reason: 'Changes when the job runs.' }));
+test('files is required', () => assert.match(reasonOf({ overview: 'o', findings: [] }), /^files: /));
+test('files may be empty', () => assert.deepEqual(parsed({ overview: 'o', findings: [], files: [] }).files, []));
+test('a score written as text is rejected, naming where', () => assert.match(reasonOf(withBlock({ id: 'B1', score: '45', category: 'fix' })), /^files\[0\]\.blocks\[0\]\.score: /));
+test('an unknown key inside files is ignored', () => {
+  const t = withBlock({ id: 'B1', score: 45, category: 'fix', extra: 1 }) as { files: Record<string, unknown>[] };
+  t.files[0]!.note = 'x';
+  const v = parsed(t);
+  assert.deepEqual(v.files[0]!.blocks[0], { id: 'B1', score: 45, category: 'fix' });
+  assert.ok(!('note' in v.files[0]!));
+});
+test('a block may carry parts instead of a score', () => {
+  const part = { first: 'R1', last: 'R20', score: 30, category: 'test' };
+  assert.deepEqual(parsed(withBlock({ id: 'B1', parts: [part] })).files[0]!.blocks[0], { id: 'B1', parts: [part] });
+});
+test('a part needs first, last, category and a numeric score', () => {
+  const part = { first: 'R1', last: 'R20', score: 30, category: 'test' };
+  assert.match(reasonOf(withBlock({ id: 'B1', parts: [{ ...part, score: 'high' }] })), /^files\[0\]\.blocks\[0\]\.parts\[0\]\.score: /);
+  assert.match(reasonOf(withBlock({ id: 'B1', parts: [{ ...part, first: 3 }] })), /^files\[0\]\.blocks\[0\]\.parts\[0\]\.first: /);
+});
+test('blocks defaults to empty', () => assert.deepEqual(parsed({ ...ok, files: [{ path: 'src/a.ts', change_summary: 'Renamed.' }] }).files[0]!.blocks, []));
+test('a file path must be non-empty after trimming, a block id non-empty', () => {
+  assert.match(reasonOf({ ...ok, files: [{ path: '  ', change_summary: 's', blocks: [] }] }), /^files\[0\]\.path: /);
+  assert.match(reasonOf(withBlock({ id: '' })), /^files\[0\]\.blocks\[0\]\.id: /);
+});
+test('a file may carry its own score, category and reason', () => {
+  const v = parsed({ ...ok, files: [{ path: 'src/a.ts', change_summary: 's', score: 10, category: 'docs', reason: 'r', blocks: [] }] });
+  assert.deepEqual([v.files[0]!.score, v.files[0]!.category, v.files[0]!.reason], [10, 'docs', 'r']);
+});
+test('the tool schema names files', () => assert.ok(JSON.stringify(submitReviewTool).includes('"files"')));
+test('the tool description asks for one entry for each file', () => assert.match(submitReviewTool.function.description, /one entry for each file\.$/));
+test('an unknown key in a finding is still rejected', () => {
+  const t = structuredClone(ok) as { findings: Record<string, unknown>[] }; t.findings[0]!.extra = 1;
+  assert.match(reasonOf(t), /^findings\[0\]: unexpected key extra/);
+});
+
+test('null for an optional field of a file is read as the field being absent', () => {
+  const v = parsed({ ...ok, files: [{ path: 'src/a.ts', change_summary: 's', score: null, category: null, reason: null, blocks: [] }] });
+  assert.deepEqual([v.files[0]!.score, v.files[0]!.category, v.files[0]!.reason], [undefined, undefined, undefined]);
+});
+test('null for an optional field of a block is read as the field being absent', () => {
+  const v = parsed(withBlock({ id: 'B1', score: 45, category: 'fix', reason: null, parts: null }));
+  const block = v.files[0]!.blocks[0]!;
+  assert.deepEqual([block.score, block.category, block.reason, block.parts], [45, 'fix', undefined, undefined]);
+  const bare = parsed(withBlock({ id: 'B1', score: null, category: null })).files[0]!.blocks[0]!;
+  assert.deepEqual([bare.score, bare.category], [undefined, undefined]);
+});
+test('null for the reason of a part is read as the reason being absent', () => {
+  const v = parsed(withBlock({ id: 'B1', score: null, parts: [{ first: 'R1', last: 'R20', score: 30, category: 'test', reason: null }] }));
+  const block = v.files[0]!.blocks[0]!;
+  assert.equal(block.score, undefined);
+  assert.equal(block.parts![0]!.reason, undefined);
+  assert.equal(block.parts![0]!.score, 30);
+});
+test('null is still refused for a required field of a part, and in findings', () => {
+  assert.match(reasonOf(withBlock({ id: 'B1', parts: [{ first: 'R1', last: 'R20', score: null, category: 'test' }] })), /^files\[0\]\.blocks\[0\]\.parts\[0\]\.score: /);
+  const t = structuredClone(ok) as { findings: Record<string, unknown>[] }; t.findings[0]!.quote = null;
+  assert.match(reasonOf(t), /^findings\[0\]\.quote: /);
 });

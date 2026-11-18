@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { inlineText, stripControl, wrapData } from './untrusted.ts';
+import { hasHidden, inlineText, stripControl, wrapData } from './untrusted.ts';
 
 test('removes bidirectional and zero-width characters and counts them', () => {
   assert.deepEqual(stripControl('a\u202eb\u200bc\u2066d'), { text: 'abcd', removed: 3 });
@@ -83,4 +83,11 @@ test('a label containing the token cannot repeat it on the opening line', () => 
 test('a label cannot forge the token by deletion either', () => {
   const opening = wrapData('ttokok', 'x', 'tok').split('\n')[0]!;
   assert.equal(opening, '<<<data tok >>>');
+});
+
+test('hasHidden is true only when stripping would remove something', () => {
+  assert.equal(hasHidden('a\u200bb'), true);
+  assert.equal(hasHidden('a\u202eb'), true);
+  assert.equal(hasHidden('a\tb\r\nc'), false);
+  assert.equal(hasHidden('plain'), false);
 });

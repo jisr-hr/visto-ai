@@ -1,15 +1,32 @@
 import type { Finding, NotReviewed, RawFinding, ReviewResult, Side, UnplacedFinding } from '../types.ts';
+import type { BlockScore, FileLevelSource, FileScore, ScoreEntry, Span } from '../score/types.ts';
 
 export interface InlineComment { path: string; side: Side; line: number; body: string }
 export const MAX_BODY_CHARS = 65_536;
 
 const MAX_LISTED = 25;
+const MAX_REVIEW_ENTRIES = 50;
 const FIRST_LINE_CHARS = 300;
 const UNPLACED_HEADING = '## Findings not placed on the diff';
 const OVERALL_HEADING = '## Overall';
 const UNPLACED_NOTE = "GitHub cannot show these inline: the line is outside this pull request's diff, or the file has no diff GitHub can comment on. They do not block the merge.";
 
-type Meta = { trigger: 'automatic' | 'manual'; requestedBy: string | null };
+type FileRef = { path: string; previousPath: string | null };
+type Meta = {
+  trigger: 'automatic' | 'manual';
+  requestedBy: string | null;
+  // Builds a link to a span of a file; null when the service has no such link.
+  lineUrl: ((file: FileRef, span: Span) => string) | null;
+};
+
+const WHOLE_FILE_TEXT: Record<Exclude<FileLevelSource, 'whole_file' | 'team_file_invalid'>, string> = {
+  builtin_floor: "it changes the reviewer's own file, code owners or CI",
+  team_floor: 'a path the team marked as always needing a person',
+  hidden_characters: 'a changed line holds invisible or direction-changing characters',
+  not_scored: 'not read, or left without a score',
+  rule_rename: 'scored by rule',
+  rule_asset: 'scored by rule',
+};
 
 // Cut a string to at most `limit` UTF-16 units without splitting a surrogate pair.
 function safeSlice(text: string, limit: number): string {
@@ -27,7 +44,10 @@ function firstLine(body: string): string {
 // A path shown in a bullet stays on its line: newlines and tabs become spaces first.
 function codeSpan(raw: string): string {
   const text = raw.replace(/[\r\n\t]/g, ' ');
-  return text.includes('`') ? `\`\` ${text} \`\`` : `\`${text}\``;
+  if (!text.includes('`')) return `\`${text}\``;
+  const longest = Math.max(...(text.match(/`+/g) ?? []).map((run) => run.length));
+  const fence = '`'.repeat(longest + 1);
+  return `${fence} ${text} ${fence}`;
 }
 
 // An HTML comment opener could hide the rest of the text: show it instead.
@@ -56,6 +76,61 @@ function commentBody(f: Finding): string {
   return `**[${f.severity}]** ${moved}${noComment(f.body)}`;
 }
 
+// The part after the score: the category in a code span, then the dash and the reason when there is one.
+function scoreTail(entry: ScoreEntry): string {
+  const reason = firstLine(entry.reason);
+  return `${codeSpan(entry.category)}${reason === '' ? '' : ` \u2014 ${reason}`}`;
+}
+
+function wholeFileLine(file: FileScore, level: NonNullable<FileScore['fileLevel']>, teamFileInvalid: string | null): string {
+  const head = `- whole file, ${level.score}%`;
+  if (level.source === 'team_file_invalid') {
+    return `${head} \u2014 the repository's .visto-ai.yml cannot be used (${teamFileInvalid ?? 'unknown'}), so every file needs a person`;
+  }
+  if (level.source !== 'whole_file') return `${head} \u2014 ${WHOLE_FILE_TEXT[level.source]}`;
+  return file.wholeFile === null ? head : `${head} ${scoreTail(file.wholeFile)}`;
+}
+
+function blockLine(file: FileScore, block: BlockScore, entry: ScoreEntry, lineUrl: Meta['lineUrl']): string {
+  const { span } = block;
+  const range = span.first === span.last ? `line ${span.first}` : `lines ${span.first}-${span.last}`;
+  const label = `${span.side === 'LEFT' ? 'old ' : ''}${range}`;
+  const shown = lineUrl === null ? label : `[${label}](${lineUrl(file, span)})`;
+  return `- ${shown}, ${entry.score}% ${scoreTail(entry)}`;
+}
+
+// The lines a person should read, grouped by file; a file's heading is not an entry.
+function humanReviewSection(result: ReviewResult, lineUrl: Meta['lineUrl']): string {
+  const { threshold, highest } = result.verdict;
+  const groups: { file: FileScore; lines: string[] }[] = [];
+  const files = result.scores
+    .map((file, index) => ({ file, index }))
+    .sort((a, b) => b.file.finalScore - a.file.finalScore || (a.file.path < b.file.path ? -1 : a.file.path > b.file.path ? 1 : a.index - b.index))
+    .map((x) => x.file);
+  for (const file of files) {
+    const lines: string[] = [];
+    if (file.fileLevel !== null && file.fileLevel.score >= threshold) lines.push(wholeFileLine(file, file.fileLevel, result.teamFileInvalid));
+    const flagged = file.blocks
+      .map((block, index) => ({ block, index, entry: block.entry }))
+      .filter((x): x is { block: BlockScore; index: number; entry: ScoreEntry } => x.entry !== null && x.entry.score >= threshold)
+      .sort((a, b) => b.entry.score - a.entry.score || a.index - b.index);
+    for (const x of flagged) lines.push(blockLine(file, x.block, x.entry, lineUrl));
+    if (lines.length > 0) groups.push({ file, lines });
+  }
+  if (groups.length === 0) return `## Human review\n\nNothing here is at or above ${threshold}%. The highest score is ${highest}%.`;
+  const total = groups.reduce((n, g) => n + g.lines.length, 0);
+  let room = MAX_REVIEW_ENTRIES;
+  const out: string[] = [`## Human review\n\nA person should read these parts. Each is at or above ${threshold}%.`];
+  for (const { file, lines } of groups) {
+    if (room === 0) break;
+    const written = lines.slice(0, room);
+    room -= written.length;
+    out.push([`**${codeSpan(file.path)}**`, ...written].join('\n'));
+  }
+  if (total > MAX_REVIEW_ENTRIES) out[out.length - 1] += `\n- \u2026and ${total - MAX_REVIEW_ENTRIES} more.`;
+  return out.join('\n\n');
+}
+
 function overallLine(result: ReviewResult): string {
   const placed = result.findings;
   const count = (s: Finding['severity']) => placed.filter((f) => f.severity === s).length;
@@ -68,6 +143,8 @@ function overallLine(result: ReviewResult): string {
     if (u > 0) parts.push(`${u} could not be placed on the diff.`);
   }
   if (k > 0) parts.push(`${k} files were not reviewed.`);
+  const { needsHuman, highest } = result.verdict;
+  parts.push(`Human review: ${needsHuman ? 'needed' : 'not needed'} (highest score ${highest}%).`);
   return parts.join(' ');
 }
 
@@ -78,13 +155,14 @@ export function renderReview(result: ReviewResult, meta: Meta): { body: string; 
   }
   if (result.status === 'failed') {
     const failure = result.failure === null ? 'unknown' : `${result.failure.stage}: ${result.failure.code}`;
-    return { body: [...prefix, `${OVERALL_HEADING}\n\nThe review could not be completed (${failure}).`].join('\n\n'), comments: [] };
+    return { body: [...prefix, `${OVERALL_HEADING}\n\nThe review could not be completed (${failure}).\n\nHuman review: needed, because the review did not finish.`].join('\n\n'), comments: [] };
   }
   // The tail is kept whole when the body is cut: from the unplaced section on, or the Overall section alone.
   const head: string[] = [...prefix];
   const tail: string[] = [];
   const overview = result.overview.trim();
   if (overview !== '') head.push(`## Summary\n\n${noHeading(overview)}`);
+  head.push(humanReviewSection(result, meta.lineUrl));
   if (result.findings.length > 0) head.push(['## Findings', '', ...bullets(result.findings.map(located))].join('\n'));
   const rest = result.unplaced.length > 0 ? tail : head;
   if (result.unplaced.length > 0) {

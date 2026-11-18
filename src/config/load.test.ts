@@ -82,3 +82,50 @@ test('model.baseUrl must be an http or https URL', () => {
     assert.throws(() => parseConfig(at(bad), { MODEL_KEY: 'k' }), (e: ConfigError) => e.issues.some((i) => i.startsWith('model.baseUrl')) && !e.message.includes(bad), bad);
   }
 });
+
+const score = (body: string) => minimal + `repositories:\n  defaults: { score: ${body} }\n`;
+const threshold = (name: string) => repoConfigFor(parseConfig(minimal, { MODEL_KEY: 'k' }), name).scoreThreshold;
+
+test('the threshold defaults to 70', () => assert.equal(threshold('acme/shop'), 70));
+
+test('a repository can lower it', () => {
+  const c = parseConfig(
+    minimal + 'repositories:\n  defaults: { score: { threshold: 80 } }\n  overrides:\n    acme/shop: { score: { threshold: 40 } }\n',
+    { MODEL_KEY: 'k' },
+  );
+  assert.equal(repoConfigFor(c, 'acme/shop').scoreThreshold, 40);
+  assert.equal(repoConfigFor(c, 'acme/other').scoreThreshold, 80);
+});
+
+test('an override that sets only primaryBranches keeps the default threshold', () => {
+  const c = parseConfig(minimal + 'repositories:\n  overrides:\n    acme/shop: { primaryBranches: [trunk] }\n', { MODEL_KEY: 'k' });
+  assert.deepEqual(repoConfigFor(c, 'acme/shop'), { primaryBranches: ['trunk'], scoreThreshold: 70 });
+});
+
+test('0, 101, 69.5 and an unknown key in score are errors', () => {
+  for (const body of ['{ threshold: 0 }', '{ threshold: 101 }', '{ threshold: 69.5 }', '{ threshold: 70, auto: true }']) {
+    assert.throws(
+      () => parseConfig(score(body), { MODEL_KEY: 'k' }),
+      (e: ConfigError) => e instanceof ConfigError && e.issues.some((i) => i.startsWith('repositories.defaults.score')),
+      body,
+    );
+  }
+  assert.throws(
+    () => parseConfig(minimal + 'repositories:\n  overrides:\n    acme/shop: { score: { threshold: 101 } }\n', { MODEL_KEY: 'k' }),
+    (e: ConfigError) => e.issues.some((i) => i.startsWith('repositories.overrides.acme/shop.score')),
+  );
+});
+
+test('a repository override applies whatever the letter case of the name', () => {
+  const c = parseConfig(minimal + 'repositories:\n  overrides:\n    Acme/Shop: { score: { threshold: 40 } }\n', { MODEL_KEY: 'k' });
+  assert.equal(repoConfigFor(c, 'acme/shop').scoreThreshold, 40);
+  assert.equal(repoConfigFor(c, 'ACME/SHOP').scoreThreshold, 40);
+  assert.equal(repoConfigFor(c, 'acme/other').scoreThreshold, 70);
+});
+
+test('two override keys that differ only by letter case are refused', () => {
+  assert.throws(
+    () => parseConfig(minimal + 'repositories:\n  overrides:\n    acme/shop: { score: { threshold: 40 } }\n    Acme/Shop: { score: { threshold: 90 } }\n', { MODEL_KEY: 'k' }),
+    (e: ConfigError) => e instanceof ConfigError && e.issues.some((i) => i.startsWith('repositories.overrides')),
+  );
+});

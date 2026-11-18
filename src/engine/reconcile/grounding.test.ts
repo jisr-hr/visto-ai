@@ -12,8 +12,8 @@ const PR_FILES = [
 
 const finding = (path: string, body = 'This looks wrong.') =>
   ({ path, side: 'RIGHT', line: 3, severity: 'minor', body, quote: '', beyond_diff: false }) as const;
-const overviewOnly = (overview: string): SubmitReviewArgs => ({ overview, findings: [] });
-const answerOn = (path: string): SubmitReviewArgs => ({ overview: 'A short summary.', findings: [finding(path)] });
+const overviewOnly = (overview: string): SubmitReviewArgs => ({ overview, findings: [], files: [] });
+const answerOn = (path: string): SubmitReviewArgs => ({ overview: 'A short summary.', findings: [finding(path)], files: [] });
 
 const ARTICLE = `Gardening in a small city apartment
 
@@ -30,11 +30,11 @@ test('a finding path is compared after normalisation', () => {
 });
 
 test('an essay about something else is not grounded', () => {
-  assert.equal(isGrounded({ overview: 'A long article about city gardens and soil.', findings: [] }, ['src/a.ts']), false);
+  assert.equal(isGrounded({ overview: 'A long article about city gardens and soil.', findings: [], files: [] }, ['src/a.ts']), false);
 });
 
 test('an empty file list skips grounding', () => {
-  assert.equal(isGrounded({ overview: 'x', findings: [] }, []), true);
+  assert.equal(isGrounded({ overview: 'x', findings: [], files: [] }, []), true);
 });
 
 test('a full path in the overview grounds the answer', () => {
@@ -43,7 +43,7 @@ test('a full path in the overview grounds the answer', () => {
 });
 
 test('the text checked is the overview followed by the finding bodies', () => {
-  const answer: SubmitReviewArgs = { overview: 'Looks reasonable.', findings: [finding('other/file.ts', 'The guard in account.ts is inverted.')] };
+  const answer: SubmitReviewArgs = { overview: 'Looks reasonable.', findings: [finding('other/file.ts', 'The guard in account.ts is inverted.')], files: [] };
   assert.equal(isGrounded(answer, PR_FILES), true);
 });
 
