@@ -51,9 +51,10 @@ repositories:
   defaults:
     # Branches that count as primary; a pull request targeting one gets elevated effort.
     primaryBranches: [main, master]
-    score:
-      # A changed block scored at or above this (1 to 100) is listed for a human reviewer.
-      threshold: 70
+    # A changed block scored at or above this (1 to 100) is listed for a human reviewer.
+    # It is 70 when not written, and must be written when a scorer is named.
+    # score:
+    #   threshold: 70
   # Per-repository changes, keyed by "owner/name"; each replaces only the keys it sets.
   overrides:
     acme/shop: { primaryBranches: [trunk], score: { threshold: 60 } }

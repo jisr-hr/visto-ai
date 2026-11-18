@@ -52,6 +52,37 @@ test('the example file parses', () => {
   assert.equal(c.model.apiKey, 'k');
 });
 
+// Removes the "# " after the indent of `first` from that line and from the commented lines that follow it at that indent.
+function uncomment(text: string, first: string): string {
+  const lines = text.split('\n');
+  const start = lines.indexOf(first);
+  assert.notEqual(start, -1, first);
+  const indent = first.slice(0, first.indexOf('#'));
+  for (let i = start; i < lines.length && lines[i]!.startsWith(`${indent}#`); i += 1) {
+    lines[i] = indent + lines[i]!.slice(indent.length).replace(/^# ?/, '');
+  }
+  return lines.join('\n');
+}
+const example = (): string => readFileSync(new URL('../../config.example.yml', import.meta.url), 'utf8');
+const exampleEnv = { OPENROUTER_API_KEY: 'k', SCORER_API_KEY: 'scorer-key' };
+
+test('the example file as shipped names no scorer and has a threshold of 70', () => {
+  const c = parseConfig(example(), exampleEnv);
+  assert.equal(c.scorer, null);
+  assert.equal(c.repositories.defaults.scoreThreshold, 70);
+});
+
+test('the example with its scorer block switched on is refused until its threshold is written', () => {
+  const withScorer = uncomment(example(), '# scorer:');
+  assert.throws(
+    () => parseConfig(withScorer, exampleEnv),
+    (e: ConfigError) => e.issues.includes('repositories.defaults.score.threshold: must be written when scorer is set'),
+  );
+  const c = parseConfig(uncomment(withScorer, '    # score:'), exampleEnv);
+  assert.notEqual(c.scorer, null);
+  assert.equal(c.repositories.defaults.scoreThreshold, 70);
+});
+
 test('a YAML syntax error never echoes file text', () => {
   const text = 'model:\n  apiKey: sk-SECRET123\n  model: [m\n';
   assert.throws(
