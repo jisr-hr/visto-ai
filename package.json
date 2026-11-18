@@ -15,7 +15,8 @@
     "eval:compare": "node src/eval/cli.ts compare",
     "eval:import-history": "node src/eval/cli.ts import-history",
     "eval:backtest": "node src/eval/cli.ts backtest",
-    "eval:score-noise": "node src/eval/cli.ts score-noise"
+    "eval:score-noise": "node src/eval/cli.ts score-noise",
+    "start": "node src/main.ts"
   },
   "dependencies": {
     "diff": "^9.0.0",
