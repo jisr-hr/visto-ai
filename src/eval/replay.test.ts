@@ -17,6 +17,7 @@ const config: DeploymentConfig = {
     effort: { default: {}, elevated: {} }, extraBody: {}, extraHeaders: {}, prices: null, timeoutSeconds: 45,
   },
   scorer: null,
+  app: null, database: null, server: { port: 8080 },
   limits: { inputTokensPerCall: 200_000, batchesPerReview: 6 },
   repositories: { defaults: { primaryBranches: ['main'], scoreThreshold: 70 }, overrides: {} },
 };

@@ -15,9 +15,14 @@ export interface ScorerConfig { baseUrl: string; apiKey: string; model: string; 
 export interface DeploymentConfig {
   model: ModelConfig;
   scorer: ScorerConfig | null;
+  app: { webhookSecret: string } | null;
+  database: { url: string } | null;
+  server: { port: number };
   limits: { inputTokensPerCall: number; batchesPerReview: number };
   repositories: { defaults: RepoConfig; overrides: Record<string, Partial<RepoConfig>> };
 }
+
+export type ServiceConfig = DeploymentConfig & { app: { webhookSecret: string }; database: { url: string } };
 
 export class ConfigError extends Error {
   issues: string[];
@@ -79,6 +84,26 @@ export function parseConfig(yamlText: string, env: Record<string, string | undef
     }
     scorer = { ...raw.scorer, apiKey: scorerKey };
   }
+  let app: { webhookSecret: string } | null = null;
+  if (raw.app !== undefined) {
+    const hookVar = raw.app.webhookSecret.env;
+    const webhookSecret = env[hookVar];
+    if (webhookSecret === undefined || webhookSecret === '') {
+      throw new ConfigError([`app.webhookSecret: environment variable ${hookVar} is not set`]);
+    }
+    app = { webhookSecret };
+  }
+  let database: { url: string } | null = null;
+  if (raw.database !== undefined) {
+    const urlVar = raw.database.url.env;
+    const url = env[urlVar];
+    if (url === undefined || url === '') {
+      throw new ConfigError([`database.url: environment variable ${urlVar} is not set`]);
+    }
+    // The URL holds a password, so the message never quotes it.
+    if (!/^postgres(ql)?:\/\//.test(url) || !URL.canParse(url)) throw new ConfigError(['database.url: must be a postgres URL']);
+    database = { url };
+  }
   const { defaults, overrides } = raw.repositories;
   // Repository names are case-insensitive on the git service, so two such keys name one repository.
   const seen = new Map<string, string>();
@@ -90,6 +115,9 @@ export function parseConfig(yamlText: string, env: Record<string, string | undef
   return {
     model: { ...raw.model, apiKey },
     scorer,
+    app,
+    database,
+    server: raw.server,
     limits: raw.limits,
     repositories: {
       defaults: { primaryBranches: defaults.primaryBranches, scoreThreshold: defaults.score.threshold },
@@ -108,6 +136,13 @@ export function parseConfig(yamlText: string, env: Record<string, string | undef
 
 export function loadConfig(path: string, env: Record<string, string | undefined>): DeploymentConfig {
   return parseConfig(readFileSync(path, 'utf8'), env);
+}
+
+/** The config a running service needs. Throws a ConfigError naming each missing block. */
+export function serviceConfig(config: DeploymentConfig): ServiceConfig {
+  const missing = [config.app === null ? 'app' : null, config.database === null ? 'database' : null].filter((n) => n !== null);
+  if (missing.length > 0) throw new ConfigError(missing.map((n) => `${n}: required to run the service`));
+  return config as ServiceConfig;
 }
 
 /** The file in `contract/` the review model gets. With a second scorer it is the one that asks for no block scores. */

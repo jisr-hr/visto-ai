@@ -45,6 +45,12 @@ const scorer = z
   })
   .strict();
 
+const app = z.object({ webhookSecret: secretRef }).strict();
+
+const database = z.object({ url: secretRef }).strict();
+
+const server = z.object({ port: z.number().int().min(1).max(65535).default(8080) }).strict();
+
 const limits = z
   .object({
     inputTokensPerCall: z.number().int().min(10000).default(200000),
@@ -79,6 +85,9 @@ export const configSchema = z
   .object({
     model,
     scorer: scorer.optional(),
+    app: app.optional(),
+    database: database.optional(),
+    server: server.prefault({}),
     limits: limits.prefault({}),
     repositories: repositories.prefault({}),
   })
