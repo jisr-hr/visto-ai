@@ -22,9 +22,9 @@ export function createListener(
   const handling = new Set<Promise<void>>();
   let webhooks = 0;
 
-  function answer(res: ResponseLike, a: HttpAnswer): void {
+  function answer(res: ResponseLike, a: HttpAnswer, close = false): void {
     try {
-      res.writeHead(a.status, { ...HEADERS });
+      res.writeHead(a.status, close ? { ...HEADERS, connection: 'close' } : { ...HEADERS });
       res.end(a.body);
     } catch {
       // the caller is gone: nothing is owed
@@ -44,8 +44,13 @@ export function createListener(
     const chunks: Buffer[] = [];
     let total = 0;
     try {
-      for await (const chunk of req) {
-        const piece = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      // Driven by hand: leaving a for-await loop early would call return(), which destroys a real
+      // request's socket before the 413 can be written.
+      const it = req[Symbol.asyncIterator]();
+      for (;;) {
+        const next = await it.next();
+        if (next.done) break;
+        const piece = Buffer.isBuffer(next.value) ? next.value : Buffer.from(next.value);
         total += piece.length;
         if (total > maxBody) return { tooLarge: true };
         chunks.push(piece);
@@ -62,7 +67,7 @@ export function createListener(
     try {
       const read = await readBody(req);
       if ('failed' in read) return;
-      if ('tooLarge' in read) return answer(res, { status: 413, body: 'payload_too_large' });
+      if ('tooLarge' in read) return answer(res, { status: 413, body: 'payload_too_large' }, true);
       let result: HttpAnswer;
       try {
         result = await routes.webhook(firstValues(req.headers), read.body);

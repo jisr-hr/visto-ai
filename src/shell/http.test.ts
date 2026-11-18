@@ -211,3 +211,46 @@ test('idle resolves at once with nothing in flight, and only after the answer ot
   assert.equal(out.written?.status, 202);
   void listener;
 });
+
+const TEXT = { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' };
+const CLOSE = { ...TEXT, connection: 'close' };
+
+test('a body over the limit is answered 413 with connection close, and the iterator is not returned', async () => {
+  let returned = 0;
+  const parts = [Buffer.from('abcde'), Buffer.from('fghi'), Buffer.from('jk')];
+  let i = 0;
+  const req: RequestLike = {
+    method: 'POST', url: '/webhooks/github', headers: {},
+    [Symbol.asyncIterator]: () => ({
+      next: async () => (i < parts.length ? { done: false as const, value: parts[i++] as Buffer } : { done: true as const, value: undefined }),
+      return: async () => { returned += 1; return { done: true as const, value: undefined }; },
+    }),
+  };
+  let called = 0;
+  const out = await send(req, { webhook: async () => { called += 1; return ok; } }, { maxBodyBytes: 8 });
+  assert.deepEqual(out.written, { status: 413, body: 'payload_too_large', headers: CLOSE });
+  assert.equal(called, 0);
+  assert.equal(returned, 0);
+});
+
+test('a content-length over the limit is answered 413 with connection close', async () => {
+  const out = await send(
+    request('POST', '/webhooks/github', [Buffer.from('a')], { 'content-length': '9' }), routes, { maxBodyBytes: 8 });
+  assert.deepEqual(out.written, { status: 413, body: 'payload_too_large', headers: CLOSE });
+});
+
+test('other answers carry no connection header', async () => {
+  for (const req of [request('POST', '/webhooks/github'), request('GET', '/nope'), request('GET', '/healthz')]) {
+    assert.deepEqual((await send(req)).written?.headers, TEXT);
+  }
+});
+
+test('a 413 stops counting as in flight', async () => {
+  const { listener, idle } = createListener(routes, { maxBodyBytes: 1, maxInFlight: 1 });
+  listener(request('POST', '/webhooks/github'), response().res);
+  await idle();
+  const next = response();
+  listener(request('POST', '/webhooks/github', [Buffer.from('a')]), next.res);
+  await idle();
+  assert.equal(next.out.written?.status, 202);
+});
