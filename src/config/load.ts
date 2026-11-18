@@ -14,6 +14,7 @@ export interface ModelConfig {
 export interface ScorerConfig { baseUrl: string; apiKey: string; model: string; timeoutSeconds: number }
 export interface DeploymentConfig {
   model: ModelConfig;
+  scorer: ScorerConfig | null;
   limits: { inputTokensPerCall: number; batchesPerReview: number };
   repositories: { defaults: RepoConfig; overrides: Record<string, Partial<RepoConfig>> };
 }
@@ -25,6 +26,15 @@ export class ConfigError extends Error {
     this.name = 'ConfigError';
     this.issues = issues;
   }
+}
+
+function writesDefaultThreshold(doc: unknown): boolean {
+  let node = doc;
+  for (const key of ['repositories', 'defaults', 'score', 'threshold']) {
+    if (typeof node !== 'object' || node === null || !(key in node)) return false;
+    node = (node as Record<string, unknown>)[key];
+  }
+  return true;
 }
 
 export function parseConfig(yamlText: string, env: Record<string, string | undefined>): DeploymentConfig {
@@ -56,6 +66,19 @@ export function parseConfig(yamlText: string, env: Record<string, string | undef
   if (apiKey === undefined || apiKey === '') {
     throw new ConfigError([`model.apiKey: environment variable ${varName} is not set`]);
   }
+  let scorer: ScorerConfig | null = null;
+  if (raw.scorer !== undefined) {
+    const scorerVar = raw.scorer.apiKey.env;
+    const scorerKey = env[scorerVar];
+    if (scorerKey === undefined || scorerKey === '') {
+      throw new ConfigError([`scorer.apiKey: environment variable ${scorerVar} is not set`]);
+    }
+    // The schema gives the threshold a default, so only the parsed document tells whether it was written.
+    if (!writesDefaultThreshold(doc)) {
+      throw new ConfigError(['repositories.defaults.score.threshold: must be written when scorer is set']);
+    }
+    scorer = { ...raw.scorer, apiKey: scorerKey };
+  }
   const { defaults, overrides } = raw.repositories;
   // Repository names are case-insensitive on the git service, so two such keys name one repository.
   const seen = new Map<string, string>();
@@ -66,6 +89,7 @@ export function parseConfig(yamlText: string, env: Record<string, string | undef
   }
   return {
     model: { ...raw.model, apiKey },
+    scorer,
     limits: raw.limits,
     repositories: {
       defaults: { primaryBranches: defaults.primaryBranches, scoreThreshold: defaults.score.threshold },

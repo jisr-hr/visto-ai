@@ -16,6 +16,7 @@ const config: DeploymentConfig = {
     baseUrl: 'https://models.example.test/v1', apiKey: 'k', model: 'm', fallbacks: [],
     effort: { default: {}, elevated: {} }, extraBody: {}, extraHeaders: {}, prices: null, timeoutSeconds: 45,
   },
+  scorer: null,
   limits: { inputTokensPerCall: 200_000, batchesPerReview: 6 },
   repositories: { defaults: { primaryBranches: ['main'], scoreThreshold: 70 }, overrides: {} },
 };

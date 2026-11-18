@@ -129,3 +129,65 @@ test('two override keys that differ only by letter case are refused', () => {
     (e: ConfigError) => e instanceof ConfigError && e.issues.some((i) => i.startsWith('repositories.overrides')),
   );
 });
+
+const withScorer = minimal + 'scorer:\n  apiKey: { env: SCORER_KEY }\n  model: vendor/decider\n';
+const writtenThreshold = 'repositories:\n  defaults:\n    score:\n      threshold: 80\n';
+const scorerEnv = { MODEL_KEY: 'k', SCORER_KEY: 'scorer-secret-value' };
+
+test('without a scorer block the scorer is null', () => {
+  assert.equal(parseConfig(minimal, { MODEL_KEY: 'k' }).scorer, null);
+});
+
+test('a scorer block with the threshold written gets its defaults and its resolved key', () => {
+  const c = parseConfig(withScorer + writtenThreshold, scorerEnv);
+  assert.deepEqual(c.scorer, {
+    baseUrl: 'https://openrouter.ai/api/alpha',
+    apiKey: 'scorer-secret-value',
+    model: 'vendor/decider',
+    timeoutSeconds: 60,
+  });
+});
+
+test('a scorer key that is not set names its variable and prints no value', () => {
+  for (const env of [{ MODEL_KEY: 'k' }, { MODEL_KEY: 'k', SCORER_KEY: '' }]) {
+    assert.throws(
+      () => parseConfig(withScorer + writtenThreshold, env),
+      (e: ConfigError) => e.issues.includes('scorer.apiKey: environment variable SCORER_KEY is not set'),
+    );
+  }
+});
+
+test('an unknown key inside scorer is an error that names it', () => {
+  assert.throws(
+    () => parseConfig(withScorer + '  temperature: 0\n' + writtenThreshold, scorerEnv),
+    (e: ConfigError) => e.issues.some((i) => i.startsWith('scorer') && i.includes('temperature')),
+  );
+});
+
+test('scorer.baseUrl must be an http or https URL', () => {
+  assert.throws(
+    () => parseConfig(withScorer + '  baseUrl: ftp://x\n' + writtenThreshold, scorerEnv),
+    (e: ConfigError) => e.issues.some((i) => i.startsWith('scorer.baseUrl') && !i.includes('ftp')),
+  );
+});
+
+test('a scorer without a written threshold is refused and the message echoes no value', () => {
+  assert.throws(
+    () => parseConfig(withScorer, scorerEnv),
+    (e: ConfigError) =>
+      e.issues.includes('repositories.defaults.score.threshold: must be written when scorer is set') &&
+      !e.message.includes('scorer-secret-value'),
+  );
+});
+
+test('a threshold written only in an override does not satisfy the scorer rule', () => {
+  const override = 'repositories:\n  overrides:\n    acme/shop:\n      score:\n        threshold: 80\n';
+  assert.throws(
+    () => parseConfig(withScorer + override, scorerEnv),
+    (e: ConfigError) => e.issues.includes('repositories.defaults.score.threshold: must be written when scorer is set'),
+  );
+});
+
+test('the threshold is not required while no scorer is named', () => {
+  assert.equal(parseConfig(minimal, { MODEL_KEY: 'k' }).repositories.defaults.scoreThreshold, 70);
+});

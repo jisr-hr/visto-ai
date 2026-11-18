@@ -33,6 +33,19 @@ limits:
   # Batches of files allowed in one review.
   batchesPerReview: 6
 
+# Optional second scorer: a decision model that scores the changed blocks in place of the review model.
+# Naming one sends the reviewed code to that provider too, and then
+# repositories.defaults.score.threshold must be written below.
+# scorer:
+#   # Base URL of the scorer's API.
+#   baseUrl: https://openrouter.ai/api/alpha
+#   # The environment variable that holds the scorer's key.
+#   apiKey: { env: SCORER_API_KEY }
+#   # The decision model to call.
+#   model: vendor/decision-model
+#   # Seconds to wait for one scorer call (at most 300).
+#   timeoutSeconds: 60
+
 repositories:
   # Settings for every repository.
   defaults:

@@ -36,6 +36,15 @@ const model = z
   })
   .strict();
 
+const scorer = z
+  .object({
+    baseUrl: z.string().refine(isHttpUrl, { message: 'must be an http or https URL' }).default('https://openrouter.ai/api/alpha'),
+    apiKey: secretRef,
+    model: z.string().min(1),
+    timeoutSeconds: z.number().positive().max(300).default(60),
+  })
+  .strict();
+
 const limits = z
   .object({
     inputTokensPerCall: z.number().int().min(10000).default(200000),
@@ -69,6 +78,7 @@ const repositories = z
 export const configSchema = z
   .object({
     model,
+    scorer: scorer.optional(),
     limits: limits.prefault({}),
     repositories: repositories.prefault({}),
   })
