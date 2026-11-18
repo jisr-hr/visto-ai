@@ -88,7 +88,7 @@ Tests never reach the network. The test setup blocks sockets and `fetch`, and cl
 
 ## Run the service
 
-The service stores each signed webhook it receives and records what people do on pull requests in its own Postgres. It reviews nothing yet.
+The service records each signed delivery's id, and what the delivery says about people and the pull request, in its own Postgres. The payload itself is not kept. It reviews nothing yet.
 
 ```bash
 cp env.example .env                       # then write your own passwords and secret
@@ -105,7 +105,16 @@ npm run dev:send-webhook -- --url http://localhost:8080/webhooks/github --secret
 
 The kinds are `pull_request`, `review` and `comment`. Stop it with `docker compose down`.
 
-The service holds a request's body in memory before it can check the signature. It holds at most 25 MB for each of at most 20 requests at once, so a caller with no secret can make it hold about 500 MB. TLS, and any limit on connections or body size per caller, belong to the proxy placed in front of it.
+Setup notes:
+
+- A database password that contains any of `@ : / # ?` must be percent-encoded in the database URL.
+- If you change `server.port` in the config, change the port mapping and the health check in the Compose file too.
+
+What to know before you expose it:
+
+- The service holds a request's body in memory before it can check the signature: at most 25 MB for each of at most 20 requests at once. That is about 500 MB while bodies arrive, and about twice that at the moment a body is joined into one piece.
+- A caller that sends slowly can hold one of the 20 places for up to about a minute. Twenty such callers, none of whom needs the secret, take every place, and real deliveries are answered `503 busy` meanwhile.
+- The Compose file publishes port 8080 on every interface of the host. TLS, and any limit on connections or body size per caller, belong to the proxy in front. Firewall the port, or publish it only where the proxy can reach it.
 
 ## Configuration
 
@@ -191,10 +200,13 @@ A file that cannot be used (invalid YAML, an unknown key, a refused pattern, con
 | `src/engine` | The review engine: context, model call, checks on the answer, rendering |
 | `src/engine/scorer` | The optional decision-model scorer and its client |
 | `src/engine/score` | Blocks, the rules that score without the model, and the floors from `.visto-ai.yml` |
-| `src/forge` | The boundary to git services. `forge/github` holds the read-only GitHub sources |
+| `src/forge` | The boundary to git services. `forge/github` holds the read-only GitHub sources and the webhook reader |
 | `src/eval` | The `replay` and `compare` commands |
 | `src/eval/history` | The `import-history` command and the history file it writes |
 | `src/eval/backtest` | The `backtest` and `score-noise` commands: labels, the three numbers and the noise between runs |
+| `src/db` | The Postgres client, migrations and queries |
+| `src/shell` | Receiving a webhook and deciding what it stores |
+| `src/service.ts`, `src/main.ts` | Starting and stopping the service |
 | `src/config` | Loading and validating configuration |
 | `contract` | The rules the model is given |
 | `docs/superpowers` | The design and the implementation plans |
