@@ -89,6 +89,19 @@ Tests never reach the network. The test setup blocks sockets and `fetch`, and cl
 
 [config.example.yml](config.example.yml) documents every key. Copy it to `config.local.yml`, which git ignores. A secret is never written in the file; the file names the environment variable that holds it.
 
+### A second scorer (optional)
+
+By default the review model also scores the changed blocks. You can name a separate decision model to score them instead. It is off unless you write the `scorer` block. [config.example.yml](config.example.yml) shows the keys, with a placeholder model name.
+
+The adapter speaks the decisions endpoint of OpenRouter and was built against the Jev decision model.
+
+- The reviewed code is then also sent to that provider.
+- The endpoint is marked alpha by its provider.
+- The score threshold must be written, and you should choose it from a backtest.
+- A file the scorer fails on goes to a person.
+
+`backtest` records which scorer was used, and `score-noise` refuses to compare two runs made with different scorers.
+
 ## Replay
 
 The replay runs past pull requests through the engine and scores its findings against what human reviewers said on those pull requests. It reads from GitHub and calls the model. It posts nothing.
@@ -152,6 +165,7 @@ A file that cannot be used (invalid YAML, an unknown key, a refused pattern, con
 | Path | What |
 |---|---|
 | `src/engine` | The review engine: context, model call, checks on the answer, rendering |
+| `src/engine/scorer` | The optional decision-model scorer and its client |
 | `src/engine/score` | Blocks, the rules that score without the model, and the floors from `.visto-ai.yml` |
 | `src/forge` | The boundary to git services. `forge/github` holds the read-only GitHub sources |
 | `src/eval` | The `replay` and `compare` commands |

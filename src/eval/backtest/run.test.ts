@@ -97,8 +97,17 @@ test('two cases produce the four files, and the numbers have one row per thresho
   assert.deepEqual([a.status, a.verdict.highest, a.verdict.needsHuman, a.blocks, a.blocks_unscored, a.files_flagged_whole], ['ok', 80, true, 1, 0, 0]);
   const md = readFileSync(join(args.outDir, 'summary.md'), 'utf8');
   assert.match(md, /^\| threshold \| safety_blocks \| safety_blocks_n /);
-  assert.equal(md.trim().split('\n').length, 9);
-  assert.match(md, /\n\nComments by a person left out because a bot started their thread: 0\. Labelled blocks and files with no final patch: 0\.\n$/);
+  assert.equal(md.trim().split('\n').length, 10);
+  assert.match(md, /\n\nComments by a person left out because a bot started their thread: 0\. Labelled blocks and files with no final patch: 0\.\nScorer: the review model\n$/);
+});
+
+test('the summary names the configured scorer, or null, and summary.md has the line', async () => {
+  const without = await runBacktest(baseArgs());
+  assert.equal(without.scorer, null);
+  const args = baseArgs({ config: { ...config, scorer: { baseUrl: 'https://scorer.example.test/api', apiKey: 'k', model: 'vendor/decision-model', timeoutSeconds: 60 } } });
+  const s = await runBacktest(args);
+  assert.equal(s.scorer, 'vendor/decision-model');
+  assert.match(readFileSync(join(args.outDir, 'summary.md'), 'utf8'), /\nScorer: vendor\/decision-model\n$/);
 });
 
 test('the numbers follow the scores: at 70 one of two pull requests is clear, and a commented block left out counts against safety', async () => {

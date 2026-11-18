@@ -23,6 +23,7 @@ export interface BacktestSummary {
   reviewed_by_person: number; total_cost: number;
   models: string[];        // the models that answered, distinct, in first-seen order
   contract_sha256: string; // sha256 of the contract text the run used
+  scorer: string | null;   // the decision model that scored the blocks, or null when the review model did
   comments: Labels['comments'];
   final_missing: number;
   numbers: Numbers[]; // one per THRESHOLDS entry, then 'own'
@@ -140,7 +141,8 @@ const cell = (value: number | null): string => (value === null ? EM_DASH : Strin
 
 function summaryMarkdown(summary: BacktestSummary): string {
   return `${summaryTable(summary.numbers)}\nComments by a person left out because a bot started their thread: ${summary.comments.in_bot_thread}. ` +
-    `Labelled blocks and files with no final patch: ${summary.final_missing}.\n`;
+    `Labelled blocks and files with no final patch: ${summary.final_missing}.\n` +
+    `Scorer: ${summary.scorer ?? 'the review model'}\n`;
 }
 
 function summaryTable(numbers: Numbers[]): string {
@@ -201,6 +203,7 @@ export async function runBacktest(args: {
     total_cost: Number(done.reduce((sum, o) => sum + o.total_cost, 0).toFixed(6)),
     models: [...new Set(done.flatMap((o) => o.models))],
     contract_sha256: createHash('sha256').update(args.deps.contract).digest('hex'),
+    scorer: args.config.scorer?.model ?? null,
     comments,
     final_missing: finalMissing,
     numbers: [...THRESHOLDS, 'own' as const].map((t) => measure(scored, t)),

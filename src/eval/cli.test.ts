@@ -110,7 +110,7 @@ test('backtest usage errors exit 2 with one exact line', async () => {
   }
 });
 
-function runDir(name: string, sha: string, scores: string, extra: { contract_sha256?: string; models?: string[] } = {}): string {
+function runDir(name: string, sha: string, scores: string, extra: { contract_sha256?: string; models?: string[]; scorer?: string | null } = {}): string {
   const d = join(dir, name);
   mkdirSync(d);
   writeFileSync(join(d, 'summary.json'), JSON.stringify({ label: name, history_sha256: sha, contract_sha256: 'd'.repeat(64), models: ['m'], ...extra }));
@@ -145,6 +145,18 @@ test('score-noise on two runs made with different contracts refuses', async () =
   const [code, lines] = await run(['score-noise', runDir('k1', 'c'.repeat(64), ''), runDir('k2', 'c'.repeat(64), '', { contract_sha256: 'e'.repeat(64) })]);
   assert.notEqual(code, 0);
   assert.deepEqual(lines, ['different_contracts']);
+});
+
+test('score-noise on two runs scored by different scorers refuses', async () => {
+  const [code, lines] = await run(['score-noise', runDir('s1', 'c'.repeat(64), '', { scorer: null }), runDir('s2', 'c'.repeat(64), '', { scorer: 'vendor/decision-model' })]);
+  assert.notEqual(code, 0);
+  assert.deepEqual(lines, ['different_scorers']);
+});
+
+test('score-noise counts a summary without the scorer field as null', async () => {
+  const [code, lines] = await run(['score-noise', runDir('s3', 'c'.repeat(64), ''), runDir('s4', 'c'.repeat(64), '', { scorer: null })]);
+  assert.equal(code, 0);
+  assert.equal(lines.length, 6);
 });
 
 test('score-noise warns in one line when the runs were answered by different models', async () => {
