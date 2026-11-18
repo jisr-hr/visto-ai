@@ -103,6 +103,7 @@ These would make the project a failure even if it works.
 | D22 | Inline notes on flagged blocks are off unless a repository switches them on. When on, at most 50 are posted per review. | Owner |
 | D23 | A reply counts towards a lesson, or towards closing a thread under the strict approval rule, only when its writer has access to the repository. | Design call |
 | D24 | A pull request from a fork is never approved automatically. | Design call |
+| D25 | A deployment may name a second scorer that scores the blocks in place of the review model. It is off unless the deployment config names it, and nothing else changes: floors, rules, the verdict and the gate work the same. | Owner |
 
 ## 4. System overview
 
@@ -442,6 +443,20 @@ This label is a floor. A block that needed a person but was waved through looks 
 
 Whether the numbers justify switching approval on is the team's decision. The tool shows them and does not decide.
 
+### 6.7 A second scorer (optional)
+
+By default the review model scores the blocks in the same call that looks for bugs (section 5.5). A deployment may name a second scorer in its config (section 11.1). When it does, the scores come from that scorer and the review model's own scores are not used (D25). It exists so that the two ways of scoring can be compared on a repository's own history before either is relied on.
+
+The first scorer supported is a decision model reached through its provider's decisions endpoint: a model that answers yes/no questions about a text with a probability and writes no text of its own.
+
+- **What it reads.** For each file the review model read, the pull request header and that file's section of the review prompt: the diff cut into blocks, the full file and the paired test. A file the review model did not read is not sent and needs a person, as before.
+- **What it is asked.** For each block, thirteen yes/no questions, each about one thing that can be checked on its own. Nine raise the score: a calculation of money, time or counts; a business rule; something other code calls; server-side access; the database schema; security; an irreversible change to stored data; a dependency; a weakened test or check. Four lower it: the block changes only what the user sees; it holds only declarations; it is only a rename, a move, formatting or generated output; it is test code.
+- **How the answers become a score.** Three of the raising answers are soft (calculation, business rule, something other code calls) and six are hard (the rest). The highest soft answer is multiplied by one minus the highest lowering answer. A hard answer is never lowered. The score is the higher of the two, as a whole percentage. Test code stops lowering once the block weakens a test.
+- **Category and reason.** Both are taken from the answer that set the score: a category from the list in section 6.1 and a fixed sentence with the probability. The scorer writes no text, so nothing it returns is printed.
+- **Failure.** A file the scorer cannot answer for, and a block it leaves out, count as not scored (100%). A review does not fail because the scorer failed: the findings stand.
+- **The scale.** These scores are probabilities turned into percentages. They are not placed on the bands of section 6.1, and the default threshold was not chosen for them. A config that names a scorer must therefore write its threshold, and is refused otherwise. The threshold is chosen from a backtest run with the scorer on (section 6.6).
+- **What it costs.** One more provider, and more calls per review. The reviewed code is sent to that provider as well. The review model still writes its own scores, which are dropped; taking them out of the call when a scorer is named is left for later.
+
 ## 7. Memory
 
 ### 7.1 What is captured
@@ -641,6 +656,7 @@ One file, owned by whoever runs the deployment and kept in their own git reposit
 
 - The app's identity (id, key and webhook secret, by reference).
 - The model: endpoint and key (by reference), model, the request fragment for each effort level, fallbacks, request extras (body fields and headers), and prices per token for an endpoint that reports no cost.
+- The second scorer (section 6.7), optional: endpoint and key (by reference), model and time limit.
 - Limits and cost guards (section 12).
 - Repository defaults and per-repository overrides: primary branches, ignored authors, base filter, how a new head is reviewed (D4), the gate block, and the score block (threshold, automatic approval, audit share, the thread rule for approval, and inline notes).
 - MCP servers and extension modules.
@@ -829,6 +845,8 @@ Each of these comes from documentation or third-party reports, not from a test.
 7. The association the git service reports for a commenter (owner, member, collaborator) is right for a member of an organisation whose membership is private. If it is not, D15 and D23 need a lookup of the commenter's permission on the repository instead.
 8. Which permission lets an app read a branch's protection rules, in both of GitHub's forms (rulesets and classic branch protection), and whether the answer says that stale approvals are dismissed (section 6.4).
 9. One review can carry 50 inline notes on top of its findings.
+10. The decisions endpoint the second scorer uses (section 6.7) is marked alpha by its provider: its path, request and response may change.
+11. That a decision model's answer to one question does not depend on which other questions travel in the same request. The question set was reduced after it was first tried.
 
 Items 1 to 3 and 6 to 9 need a scratch repository and the owner's go-ahead. Item 4 needs an OpenRouter key and the owner's go-ahead, because it spends money.
 
