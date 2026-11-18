@@ -268,7 +268,8 @@ export async function review(input: ReviewInput, deps: ReviewDeps): Promise<Revi
       const reviewed = new Set(outcomes.flatMap((o) => o.reviewed));
       const asked = await askScorer({
         scorer: deps.scorer,
-        contexts: built.contexts.filter((c) => reviewed.has(c.file.path) && c.plan.kind === 'model'),
+        // The copies the review model was sent, with the paired test or the full file cut where one was.
+        contexts: packed.batches.flatMap((b) => b.files).filter((c) => reviewed.has(c.file.path) && c.plan.kind === 'model'),
         pr, token: run.token, summaries: summariesOf(scoreAnswers, built.contexts), log: (entry) => safeLog(deps, entry),
       });
       usage = addUsage(usage, asked.usage);

@@ -660,3 +660,15 @@ test('with a scorer set, a review-model whole-file score for a file with a diff 
   assert.equal(a.fileLevel, null);
   assert.equal(a.finalScore, 15);
 });
+
+test('the scorer is sent the file as the review model received it, with the full file cut', async () => {
+  const scorer = scorerStub(() => ({ blocks: { B1: refunds } }));
+  const d = deps({ files: [fileA], answers: [scored('src/a.ts', 20)], scorer });
+  const content = Array.from({ length: 60 }, (_, i) => `const line${i} = ${i * 104729};`).join('\n');
+  d.source.getFileContent = async (_p, path) => (path === 'src/a.ts' ? content : null);
+  const r = await review(smallLimits, d);
+  assert.ok(r.audit.some((e) => e.action === 'full_file_cut' && e.subject === 'src/a.ts'));
+  assert.equal(scorer.requests.length, 1);
+  assert.ok(!scorer.requests[0]!.text.includes('### Full file'));
+  assert.ok(!d.model.requests[0]!.messages[2]!.content.includes('### Full file'));
+});
