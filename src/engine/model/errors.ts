@@ -47,3 +47,12 @@ export function classify(status: number, body: unknown, retryAfterHeader: string
   if (isRecord(first) && first.finish_reason === 'error') return make('provider');
   return null;
 }
+
+// Node's fetch stops waiting for headers or body after its own limit, whatever signal it is given.
+const UNDICI_TIMEOUTS = new Set(['UND_ERR_HEADERS_TIMEOUT', 'UND_ERR_BODY_TIMEOUT']);
+
+export function isTimeout(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  if (err.name === 'TimeoutError' || err.name === 'AbortError') return true;
+  return isRecord(err.cause) && typeof err.cause.code === 'string' && UNDICI_TIMEOUTS.has(err.cause.code);
+}

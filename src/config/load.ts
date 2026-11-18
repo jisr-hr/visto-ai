@@ -10,6 +10,8 @@ export interface ModelConfig {
   prices: { inputPerMillion: number; cachedInputPerMillion: number; outputPerMillion: number } | null;
   timeoutSeconds: number;
 }
+
+export interface ScorerConfig { baseUrl: string; apiKey: string; model: string; timeoutSeconds: number }
 export interface DeploymentConfig {
   model: ModelConfig;
   limits: { inputTokensPerCall: number; batchesPerReview: number };
