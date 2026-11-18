@@ -91,7 +91,7 @@ Tests never reach the network. The test setup blocks sockets and `fetch`, and cl
 
 ### A second scorer (optional)
 
-By default the review model also scores the changed blocks. You can name a separate decision model to score them instead. It is off unless you write the `scorer` block. [config.example.yml](config.example.yml) shows the keys, with a placeholder model name.
+By default the review model also scores the changed blocks. You can name a separate decision model to score them instead. It is off unless you write the `scorer` block. The scorer answers for blocks only: a file moved to another directory with no content change keeps the review model's score. [config.example.yml](config.example.yml) shows the keys, with a placeholder model name.
 
 The adapter speaks the decisions endpoint of OpenRouter and was built against the Jev decision model.
 
@@ -99,6 +99,7 @@ The adapter speaks the decisions endpoint of OpenRouter and was built against th
 - The endpoint is marked alpha by its provider.
 - The score threshold must be written, and you should choose it from a backtest.
 - A file the scorer fails on goes to a person.
+- The scorer's cost counts towards `--max-cost` only when its provider reports a cost with each answer.
 
 `backtest` records which scorer was used, and `score-noise` refuses to compare two runs made with different scorers.
 
