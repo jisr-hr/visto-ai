@@ -270,3 +270,5 @@ Left as they are, by decision:
 - An unreadable response body on a refused key is tried again as a provider error. It still ends with a person.
 - The `replay` summary does not name the scorer.
 - The pull request's title and description are part of what the scorer reads. They can move a probability and nothing else.
+- With a scorer set, nothing the review model says about a score counts for a file with blocks: not a high score, and not an unusable one that would otherwise send the file to a person. That follows from D25.
+- With a scorer set, a score the review model gives for a path outside the pull request is dropped without an audit entry.
