@@ -1,6 +1,6 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import type { WebhookReader, WebhookReading } from '../types.ts';
-import { eventOf } from './events.ts';
+import { eventOf, MAX_ID_CHARS } from './events.ts';
 import { isObject } from './http.ts';
 
 function signedBy(secret: string, header: unknown, body: Buffer): boolean {
@@ -24,7 +24,7 @@ export function createGithubWebhookReader(secret: string): WebhookReader {
         return { ok: false, reason: 'not_json' };
       }
       const delivery = headers['x-github-delivery'];
-      if (!nonEmpty(delivery)) return { ok: false, reason: 'no_delivery_id' };
+      if (!nonEmpty(delivery) || delivery.length > MAX_ID_CHARS) return { ok: false, reason: 'no_delivery_id' };
       const name = headers['x-github-event'];
       if (!nonEmpty(name)) return { ok: false, reason: 'no_event_name' };
       const action = isObject(payload) && typeof payload.action === 'string' ? payload.action : null;

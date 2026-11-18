@@ -31,9 +31,25 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps): Pr
     throw error;
   }
   let stopping: Promise<void> | null = null;
+  // A logger that throws must not change how stop ends.
+  function say(entry: Record<string, unknown>): void {
+    try {
+      deps.log(entry);
+    } catch {
+      // nothing to do
+    }
+  }
+  function why(error: unknown): { error: string; code: string | null } {
+    const o = typeof error === 'object' && error !== null ? error as { name?: unknown; code?: unknown } : {};
+    return { error: typeof o.name === 'string' ? o.name : 'unknown', code: typeof o.code === 'string' ? o.code : null };
+  }
   async function stopOnce(): Promise<void> {
     try {
-      await listening.close();
+      try {
+        await listening.close();
+      } catch (error) {
+        say({ event: 'listener_close_failed', ...why(error) });
+      }
       let timer: NodeJS.Timeout | undefined;
       const patience = new Promise<void>((done) => { timer = setTimeout(done, STOP_WAIT_MS); });
       try {
@@ -50,10 +66,9 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps): Pr
     const patience = new Promise<'timeout'>((done) => { timer = setTimeout(() => { done('timeout'); }, CLOSE_WAIT_MS); });
     try {
       const outcome = await Promise.race([db.close().then(() => 'closed' as const), patience]);
-      if (outcome === 'timeout') deps.log({ event: 'database_close_timeout' });
+      if (outcome === 'timeout') say({ event: 'database_close_timeout' });
     } catch (error) {
-      const o = typeof error === 'object' && error !== null ? error as { name?: unknown; code?: unknown } : {};
-      deps.log({ event: 'database_close_failed', error: typeof o.name === 'string' ? o.name : 'unknown', code: typeof o.code === 'string' ? o.code : null });
+      say({ event: 'database_close_failed', ...why(error) });
     } finally {
       clearTimeout(timer);
     }

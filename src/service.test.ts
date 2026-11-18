@@ -152,3 +152,31 @@ test('a database whose close rejects does not make stop reject, and its message 
   assert.deepEqual(logs, [{ event: 'database_close_failed', error: 'Error', code: 'X1' }]);
   assert.ok(!JSON.stringify(logs).includes('do-not-log-this'));
 });
+
+test('a listener whose close rejects does not make stop reject; stop goes on and closes the database', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const logs: Record<string, unknown>[] = [];
+  const log: string[] = [];
+  const db = recording(await testDb(), log);
+  const service = await startService(config, {
+    db, reader, clock: () => new Date(), log: (e) => logs.push(e),
+    listen: async () => ({ close: () => Promise.reject(Object.assign(new Error('do-not-log-this'), { code: 'L1' })) }),
+  });
+  await service.stop();
+  assert.deepEqual(log, ['db closed']);
+  assert.deepEqual(logs, [{ event: 'listener_close_failed', error: 'Error', code: 'L1' }]);
+  assert.ok(!JSON.stringify(logs).includes('do-not-log-this'));
+});
+
+test('a logger that throws changes nothing about stop', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const log: string[] = [];
+  const real = await testDb();
+  const db: Db = { ...recording(real, log), close: () => { log.push('db closed'); return Promise.reject(new Error('close failed')); } };
+  const service = await startService(config, {
+    db, reader, clock: () => new Date(), log: () => { throw new Error('logger down'); },
+    listen: async () => ({ close: () => Promise.reject(new Error('listener failed')) }),
+  });
+  await service.stop();
+  assert.deepEqual(log, ['db closed']);
+});

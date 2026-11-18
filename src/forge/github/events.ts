@@ -2,6 +2,7 @@ import type { ForgeEvent, PullRequestAction, PullRequestFacts, PullRequestRef } 
 import { isObject } from './http.ts';
 import { authorOf, generalCommentOf, inlineCommentOf, reviewOf } from './objects.ts';
 
+export const MAX_ID_CHARS = 200;
 const MAX_INT = 2147483647;
 const PR_ACTIONS = new Set<string>(['opened', 'reopened', 'ready_for_review', 'synchronize', 'closed']);
 const malformed: ForgeEvent = { kind: 'ignored', reason: 'malformed' };
@@ -19,6 +20,10 @@ function str(v: unknown): string {
   return v;
 }
 
+function short(v: string | null): void {
+  if (v !== null && v.length > MAX_ID_CHARS) throw bad();
+}
+
 function whole(v: unknown): number {
   if (typeof v !== 'number' || !Number.isInteger(v) || v < 1 || v > MAX_INT) throw bad();
   return v;
@@ -31,14 +36,20 @@ function optionalWhole(v: unknown): void {
 function iso(v: unknown): string {
   const ms = typeof v === 'string' ? Date.parse(v) : Number.NaN;
   if (Number.isNaN(ms)) throw bad();
-  return new Date(ms).toISOString();
+  const date = new Date(ms);
+  if (date.getUTCFullYear() < 1970 || date.getUTCFullYear() > 9999) throw bad();
+  return date.toISOString();
 }
 
 const isoOrNull = (v: unknown): string | null => (v === undefined || v === null ? null : iso(v));
 
 function refOf(p: Record<string, unknown>, number: unknown): PullRequestRef {
   const repository = obj(p.repository);
-  return { service: 'github', owner: str(obj(repository.owner).login), repo: str(repository.name), number: whole(number) };
+  const owner = str(obj(repository.owner).login);
+  const repo = str(repository.name);
+  short(owner);
+  short(repo);
+  return { service: 'github', owner, repo, number: whole(number) };
 }
 
 function factsOf(p: Record<string, unknown>): PullRequestFacts {
@@ -81,6 +92,7 @@ function build(name: string, p: Record<string, unknown>): ForgeEvent {
       const ref = refOf(p, prNumber(p));
       const review = reviewOf(p.review);
       if (review === null) return unknownAction;
+      short(review.id);
       return { kind: 'review', ref, review: { ...review, at: iso(review.at) } };
     }
     case 'pull_request_review_comment': {
@@ -90,6 +102,8 @@ function build(name: string, p: Record<string, unknown>): ForgeEvent {
       optionalWhole(raw.original_line);
       optionalWhole(raw.original_start_line);
       const comment = inlineCommentOf(raw);
+      short(comment.id);
+      short(comment.replyTo);
       return { kind: 'inline_comment', ref, comment: { ...comment, at: iso(comment.at) } };
     }
     case 'issue_comment': {
@@ -98,6 +112,7 @@ function build(name: string, p: Record<string, unknown>): ForgeEvent {
       const ref = refOf(p, issue.number);
       if (issue.pull_request === undefined || issue.pull_request === null) return { kind: 'ignored', reason: 'not_a_pull_request' };
       const comment = generalCommentOf(p.comment);
+      short(comment.id);
       return { kind: 'general_comment', ref, comment: { ...comment, at: iso(comment.at) } };
     }
     case 'pull_request_review_thread': {
@@ -112,8 +127,10 @@ function build(name: string, p: Record<string, unknown>): ForgeEvent {
         if (typeof id !== 'number' || !Number.isInteger(id)) throw bad();
         rootComment = String(id);
       }
+      const threadId = str(thread.node_id);
+      short(threadId);
       const sender = authorOf(p.sender);
-      return { kind: 'thread', ref, action: p.action, thread: str(thread.node_id), rootComment, actor: sender.author, actorIsBot: sender.authorIsBot };
+      return { kind: 'thread', ref, action: p.action, thread: threadId, rootComment, actor: sender.author, actorIsBot: sender.authorIsBot };
     }
     default:
       return { kind: 'ignored', reason: 'unknown_event' };

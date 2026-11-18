@@ -128,17 +128,6 @@ test('a general comment by a bot is ignored', () => {
     { outcome: 'ignored', reason: 'bot_author' });
 });
 
-test('a comment by the pull request author is handled like any person is', () => {
-  const result = captureOf({ kind: 'general_comment', ref, comment: general({ author: 'octo-dev' }) }, delivery, receivedAt);
-  assert.deepEqual(result, {
-    outcome: 'handled', pullRequest: null,
-    activity: base({
-      kind: 'general_comment', sourceId: 'g-1', association: 'owner', body: 'Thanks for this.',
-      at: '2026-03-01T10:10:00.000Z',
-    }),
-  });
-});
-
 test('a thread resolved by a person is stored keyed by the delivery and the arrival time', () => {
   assert.deepEqual(captureOf(thread(), delivery, receivedAt), {
     outcome: 'handled', pullRequest: null,

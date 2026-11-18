@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHmac } from 'node:crypto';
+import { MAX_ID_CHARS } from './events.ts';
 import { createGithubWebhookReader } from './webhook.ts';
 
 const secret = 'hook-secret-value';
@@ -71,4 +72,11 @@ test('an issue_comment gives its action and event; a numeric action gives null',
 
 test('an empty secret is refused', () => {
   assert.throws(() => createGithubWebhookReader(''), { message: 'empty_webhook_secret' });
+});
+
+test('a delivery id longer than MAX_ID_CHARS is no_delivery_id', () => {
+  const body = Buffer.from('{"zen":"x"}');
+  assert.deepEqual(reader.read(headers(body, { 'x-github-delivery': 'd'.repeat(MAX_ID_CHARS + 1) }), body), { ok: false, reason: 'no_delivery_id' });
+  const got = reader.read(headers(body, { 'x-github-delivery': 'd'.repeat(MAX_ID_CHARS) }), body);
+  assert.equal(got.ok && got.delivery, 'd'.repeat(MAX_ID_CHARS));
 });

@@ -71,3 +71,12 @@ test('another pull request of the same repository has no activity listed', async
   assert.deepEqual(await listActivity(db, { ...ref, number: 8 }), []);
   await db.close();
 });
+test('the limits the reader enforces are values the database accepts', async () => {
+  const db = await testDb();
+  const long = activity({ sourceId: 'x'.repeat(200), at: '9999-12-31T23:59:59.000Z' });
+  const early = activity({ sourceId: 'r-2', at: '1970-01-01T00:00:00.000Z', delivery: 'd-2' });
+  assert.equal(await recordActivity(db, long), true);
+  assert.equal(await recordActivity(db, early), true);
+  assert.deepEqual(await listActivity(db, ref), [early, long]);
+  await db.close();
+});

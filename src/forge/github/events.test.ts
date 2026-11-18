@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { eventOf } from './events.ts';
+import { eventOf, MAX_ID_CHARS } from './events.ts';
 
 const ref = { service: 'github', owner: 'acme', repo: 'shop', number: 7 };
 const repo = () => ({ name: 'shop', owner: { login: 'acme' } });
@@ -133,4 +133,35 @@ test('malformed payloads are ignored without throwing', () => {
     ['pull_request_review_thread', { ...threadPayload(), thread: {} }],
   ];
   for (const [name, payload] of cases) assert.deepEqual(eventOf(name, payload), malformed, `${name} ${JSON.stringify(payload)}`);
+});
+
+test('a time outside the years 1970 to 9999 is malformed', () => {
+  const malformed = { kind: 'ignored', reason: 'malformed' };
+  for (const t of ['0000-01-01T00:00:00Z', '-000001-01-01T00:00:00Z', '+010000-01-01T00:00:00Z', '1969-12-31T23:59:59Z']) {
+    assert.deepEqual(eventOf('pull_request', pr({ updated_at: t })), malformed, t);
+    assert.deepEqual(eventOf('pull_request_review', reviewPayload({ submitted_at: t })), malformed, t);
+  }
+  assert.equal(eventOf('pull_request', pr({ updated_at: '1970-01-01T00:00:00Z' })).kind, 'pull_request');
+  assert.equal(eventOf('pull_request', pr({ updated_at: '9999-12-31T23:59:59Z' })).kind, 'pull_request');
+  assert.equal(eventOf('pull_request', pr()).kind, 'pull_request');
+});
+
+test('the texts the database indexes are at most MAX_ID_CHARS long', () => {
+  assert.equal(MAX_ID_CHARS, 200);
+  const long = 'x'.repeat(MAX_ID_CHARS + 1);
+  const ok = 'x'.repeat(MAX_ID_CHARS);
+  const malformed = { kind: 'ignored', reason: 'malformed' };
+  const cases: Array<[string, (v: string) => [string, unknown]]> = [
+    ['owner', (v) => ['pull_request', { ...pr(), repository: { name: 'shop', owner: { login: v } } }]],
+    ['repository name', (v) => ['pull_request', { ...pr(), repository: { name: v, owner: { login: 'acme' } } }]],
+    ['review id', (v) => ['pull_request_review', reviewPayload({ id: v })]],
+    ['inline comment id', (v) => ['pull_request_review_comment', inlinePayload({ id: v })]],
+    ['reply-to id', (v) => ['pull_request_review_comment', inlinePayload({ in_reply_to_id: v })]],
+    ['general comment id', (v) => ['issue_comment', { ...issuePayload(), comment: { ...issuePayload().comment, id: v } }]],
+    ['thread id', (v) => ['pull_request_review_thread', { ...threadPayload(), thread: { node_id: v, comments: [{ id: 21 }] } }]],
+  ];
+  for (const [name, make] of cases) {
+    assert.deepEqual(eventOf(...make(long)), malformed, `${name}: ${String(MAX_ID_CHARS + 1)}`);
+    assert.notDeepEqual(eventOf(...make(ok)), malformed, `${name}: ${String(MAX_ID_CHARS)}`);
+  }
 });
