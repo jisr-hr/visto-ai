@@ -135,7 +135,11 @@ test('a dead key stops the files not yet started', async () => {
   assert.equal(s.requests.length, 4);
   assert.ok(s.requests.every((r) => !r.text.includes('src/e.ts') && !r.text.includes('src/f.ts')));
   assert.deepEqual(out.answers.map((a) => a.files[0]), ['src/a.ts', 'src/b.ts', 'src/c.ts', 'src/d.ts']);
-  assert.deepEqual(out.audit, [{ stage: 'scorer', action: 'file_failed', subject: 'src/a.ts', reason: 'auth' }]);
+  assert.deepEqual(out.audit, [
+    { stage: 'scorer', action: 'file_failed', subject: 'src/a.ts', reason: 'auth' },
+    { stage: 'scorer', action: 'file_not_asked', subject: 'src/e.ts', reason: 'auth' },
+    { stage: 'scorer', action: 'file_not_asked', subject: 'src/f.ts', reason: 'auth' },
+  ]);
 });
 
 test('a rejecting scorer is a failed file, not a rejection', async () => {

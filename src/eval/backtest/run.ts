@@ -24,6 +24,7 @@ export interface BacktestSummary {
   models: string[];        // the models that answered, distinct, in first-seen order
   contract_sha256: string; // sha256 of the contract text the run used
   scorer: string | null;   // the decision model that scored the blocks, or null when the review model did
+  scorer_failed_files: number; // the rows' scorer_failed_files, summed
   comments: Labels['comments'];
   final_missing: number;
   numbers: Numbers[]; // one per THRESHOLDS entry, then 'own'
@@ -33,6 +34,7 @@ interface ResultRow {
   key: string; status: 'ok' | 'failed'; failure_stage: string | null; failure_code: string | null;
   cost: number; tokens: number; duration_ms: number; calls: number; verdict: Verdict | null;
   blocks: number; blocks_unscored: number; files_flagged_whole: number;
+  scorer_failed_files: number; // files the scorer failed on or was not asked about
 }
 interface ScoresLine {
   key: string; threshold: number; status: 'ok' | 'failed'; scores: FileScore[];
@@ -89,6 +91,7 @@ async function backtestCase(c: HistoryCase, config: DeploymentConfig, deps: Revi
         key, status: result.status, failure_stage: result.failure?.stage ?? null, failure_code: result.failure?.code ?? null,
         cost: result.usage.cost, tokens: result.usage.inputTokens + result.usage.outputTokens, duration_ms: Date.now() - started,
         calls: result.usage.calls, verdict: result.verdict, ...counts(result.scores, result.verdict.threshold),
+        scorer_failed_files: failed ? 0 : result.audit.filter((e) => e.stage === 'scorer' && (e.action === 'file_failed' || e.action === 'file_not_asked')).length,
       },
       scores: { key, threshold: result.verdict.threshold, status: result.status, scores: result.scores, labels },
     };
@@ -101,7 +104,7 @@ async function backtestCase(c: HistoryCase, config: DeploymentConfig, deps: Revi
       models: [],
       row: {
         key, status: 'failed', failure_stage: 'eval', failure_code: code, cost: 0, tokens: 0, duration_ms: Date.now() - started,
-        calls: 0, verdict: null, blocks: 0, blocks_unscored: 0, files_flagged_whole: 0,
+        calls: 0, verdict: null, blocks: 0, blocks_unscored: 0, files_flagged_whole: 0, scorer_failed_files: 0,
       },
       scores: { key, threshold: config.repositories.defaults.scoreThreshold, status: 'failed', scores: [], labels: emptyLabels() },
     };
@@ -142,7 +145,8 @@ const cell = (value: number | null): string => (value === null ? EM_DASH : Strin
 function summaryMarkdown(summary: BacktestSummary): string {
   return `${summaryTable(summary.numbers)}\nComments by a person left out because a bot started their thread: ${summary.comments.in_bot_thread}. ` +
     `Labelled blocks and files with no final patch: ${summary.final_missing}.\n` +
-    `Scorer: ${summary.scorer ?? 'the review model'}\n`;
+    `Scorer: ${summary.scorer ?? 'the review model'}\n` +
+    (summary.scorer === null ? '' : `Files the scorer failed on or was not asked about: ${summary.scorer_failed_files}\n`);
 }
 
 function summaryTable(numbers: Numbers[]): string {
@@ -204,6 +208,7 @@ export async function runBacktest(args: {
     models: [...new Set(done.flatMap((o) => o.models))],
     contract_sha256: createHash('sha256').update(args.deps.contract).digest('hex'),
     scorer: args.config.scorer?.model ?? null,
+    scorer_failed_files: done.reduce((n, o) => n + o.row.scorer_failed_files, 0),
     comments,
     final_missing: finalMissing,
     numbers: [...THRESHOLDS, 'own' as const].map((t) => measure(scored, t)),

@@ -54,6 +54,7 @@ export async function askScorer(args: {
   const { contexts } = args;
   const header = pullRequestHeader(args.pr, contexts.length, args.token);
   const ctl: Control = { stopped: false, error: null, failed: false };
+  let stopCode = 'internal_error'; // the failure that stopped the files not yet started
   const settled = await inPool(contexts.length, SCORER_CONCURRENCY, ctl, async (i) => {
     const context = contexts[i]!;
     const blocks = context.blocks.map((b) => b.id);
@@ -64,7 +65,10 @@ export async function askScorer(args: {
     } catch {
       answer = { blocks: {}, usage: noUsage(), failure: 'internal_error' };
     }
-    if (answer.failure === 'auth' || answer.failure === 'no_credit') ctl.stopped = true;
+    if (answer.failure === 'auth' || answer.failure === 'no_credit') {
+      if (!ctl.stopped) stopCode = answer.failure;
+      ctl.stopped = true;
+    }
     args.log({ event: 'scorer_call', blocks: blocks.length, code: answer.failure ?? 'ok', usage: answer.usage });
     return { context, blocks, answer };
   });
@@ -72,8 +76,11 @@ export async function askScorer(args: {
   const answers: Answer[] = [];
   let usage = noUsage();
   const audit: AuditEntry[] = [];
-  for (const one of settled) {
-    if (one === undefined) continue;
+  settled.forEach((one, i) => {
+    if (one === undefined) {
+      audit.push({ stage: 'scorer', action: 'file_not_asked', subject: contexts[i]!.file.path, reason: stopCode });
+      return;
+    }
     const { context, blocks, answer } = one;
     const path = context.file.path;
     usage = {
@@ -85,6 +92,6 @@ export async function askScorer(args: {
     };
     if (answer.failure !== null) audit.push({ stage: 'scorer', action: 'file_failed', subject: path, reason: answer.failure });
     answers.push({ value: { overview: '', findings: [], files: [rawFileOf(context, blocks, answer, args.summaries.get(path) ?? '')] }, files: [path] });
-  }
+  });
   return { answers, usage, audit };
 }

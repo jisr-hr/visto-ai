@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import type { DeploymentConfig } from '../../config/load.ts';
 import { SUBMIT_REVIEW } from '../../engine/model/submit-review.ts';
-import type { ChangedFile, ModelClient, ModelResponse, ReviewDeps, Source } from '../../engine/types.ts';
+import type { ChangedFile, ModelClient, ModelResponse, ReviewDeps, ScoreAnswer, Scorer, Source } from '../../engine/types.ts';
 import type { HistoryCase } from '../history/file.ts';
 import { readCaseScores, runBacktest, toBacktestInput } from './run.ts';
 import type { BacktestSummary } from './run.ts';
@@ -107,7 +107,27 @@ test('the summary names the configured scorer, or null, and summary.md has the l
   const args = baseArgs({ config: { ...config, scorer: { baseUrl: 'https://scorer.example.test/api', apiKey: 'k', model: 'vendor/decision-model', timeoutSeconds: 60 } } });
   const s = await runBacktest(args);
   assert.equal(s.scorer, 'vendor/decision-model');
-  assert.match(readFileSync(join(args.outDir, 'summary.md'), 'utf8'), /\nScorer: vendor\/decision-model\n$/);
+  assert.match(readFileSync(join(args.outDir, 'summary.md'), 'utf8'), /\nScorer: vendor\/decision-model\nFiles the scorer failed on or was not asked about: 0\n$/);
+});
+
+test('each row and the summary count the files the scorer failed on or was not asked about', async () => {
+  const scorerConfig = { ...config, scorer: { baseUrl: 'https://scorer.example.test/api', apiKey: 'k', model: 'vendor/decision-model', timeoutSeconds: 60 } };
+  const usage = { calls: 1, inputTokens: 0, outputTokens: 0, cachedTokens: 0, cost: 0 };
+  const failed: ScoreAnswer = { blocks: {}, usage, failure: 'provider' };
+  const answered: ScoreAnswer = { blocks: { B1: { score: 20, category: 'other', reason: 'Plain change.' } }, usage, failure: null };
+  const scorer: Scorer = { score: (request) => Promise.resolve(request.text.includes('src/b.ts') ? failed : answered) };
+  const args = baseArgs({ cases: [caseA, caseB, mkCase(3, 'src/a.ts')], config: scorerConfig, deps: { ...stubDeps([3]), scorer } });
+  const s = await runBacktest(args);
+  const rows = lines(join(args.outDir, 'results.jsonl')) as { key: string; scorer_failed_files: number }[];
+  const byPr = (n: number): number => rows.find((r) => r.key.includes(`#${n}@`))!.scorer_failed_files;
+  assert.deepEqual([byPr(1), byPr(2), byPr(3)], [0, 1, 0]);
+  assert.equal(s.scorer_failed_files, 1);
+  assert.match(readFileSync(join(args.outDir, 'summary.md'), 'utf8'), /\nScorer: vendor\/decision-model\nFiles the scorer failed on or was not asked about: 1\n$/);
+
+  const without = baseArgs();
+  const none = await runBacktest(without);
+  assert.equal(none.scorer_failed_files, 0);
+  assert.doesNotMatch(readFileSync(join(without.outDir, 'summary.md'), 'utf8'), /Files the scorer/);
 });
 
 test('the numbers follow the scores: at 70 one of two pull requests is clear, and a commented block left out counts against safety', async () => {
