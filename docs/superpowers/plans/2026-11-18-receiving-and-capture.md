@@ -824,7 +824,12 @@ git commit -m "feat: receive a webhook: verify, reject duplicates, store, then a
 
 ```ts
 // src/db/postgres.ts
-export interface ClientLike { query(text: string, params?: unknown[]): Promise<{ rows: unknown[] }>; release(): void }
+export interface ClientLike {
+  query(text: string, params?: unknown[]): Promise<{ rows: unknown[] }>;
+  release(destroy?: boolean): void;                       // true after a rollback that failed: the pool then destroys the client
+  on(event: 'error', listener: (error: Error) => void): unknown;   // a client checked out for a transaction has no listener of the pool's:
+  off(event: 'error', listener: (error: Error) => void): unknown;  // the transaction attaches its own, or a dropped connection ends the process
+}
 export interface PoolLike extends Pick<ClientLike, 'query'> {
   connect(): Promise<ClientLike>; end(): Promise<void>;
   on(event: 'error', listener: (error: Error) => void): unknown;
@@ -839,7 +844,8 @@ export interface ServiceDeps {
   listen: (listener: (req: RequestLike, res: ResponseLike) => void, port: number) => Promise<Listening>;
 }
 export const STOP_WAIT_MS = 10_000;
-/** Migrates, then listens. `stop` closes the listener, waits for requests in flight (at most STOP_WAIT_MS), then closes the database. */
+export const CLOSE_WAIT_MS = 5_000;
+/** Migrates, then listens. `stop` closes the listener, waits for requests in flight (at most STOP_WAIT_MS), then closes the database (waiting at most CLOSE_WAIT_MS: a pool closes only when every statement in flight has returned). It never rejects. */
 export function startService(config: ServiceConfig, deps: ServiceDeps): Promise<{ stop(): Promise<void> }>;
 // src/main.ts
 export const REQUEST_TIMEOUT_MS = 30_000;
