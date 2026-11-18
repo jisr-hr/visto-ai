@@ -272,3 +272,15 @@ Left as they are, by decision:
 - The pull request's title and description are part of what the scorer reads. They can move a probability and nothing else.
 - With a scorer set, nothing the review model says about a score counts for a file with blocks: not a high score, and not an unusable one that would otherwise send the file to a person. That follows from D25.
 - With a scorer set, a score the review model gives for a path outside the pull request is dropped without an audit entry.
+
+## Changed after the adapter was first run
+
+The plan left the review call as it was when a scorer is named, so the review model wrote block scores that were then dropped. The owner asked for that to stop. What was built:
+
+1. **A second contract.** `contract/review-contract-scorer.md` is the review contract with three passages changed: the `files` argument asks for no `blocks`, the section on blocks says another system scores them, and a whole-file score has one case, the moved file. A test keeps the two files the same text up to the section on blocks, but for the line on the `files` argument. `contract/review-contract.md` is not changed.
+2. **Which contract a deployment gets.** `contractFile(config)` in `src/config/load.ts` names the file: the scorer's when the config names a scorer. The eval command line reads the file it names. A run's `contract_sha256` therefore differs between a run with a scorer and one without.
+3. **The engine is not changed.** It already used nothing the review model says about a block's score when a scorer is set. A test pins that a review answer with no block scores loses nothing: the scores are the scorer's and the file's sentence is kept.
+
+The file sections of the prompt are not changed either, so the scorer reads what it read before. The header line `whole-file score: allowed` is still printed for the review model; the scorer's contract says such a file gets no score from it.
+
+Not shown by a test: that the review model's findings are the same under the second contract. That takes a paid replay with a scorer named (design section 20, item 12).

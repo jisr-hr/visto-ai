@@ -96,6 +96,7 @@ By default the review model also scores the changed blocks. You can name a separ
 The adapter speaks the decisions endpoint of OpenRouter and was built against the Jev decision model.
 
 - The reviewed code is then also sent to that provider.
+- The review model is then not asked for block scores: it gets [contract/review-contract-scorer.md](contract/review-contract-scorer.md) in place of the review contract.
 - The endpoint is marked alpha by its provider.
 - The score threshold must be written, and you should choose it from a backtest.
 - A file the scorer fails on goes to a person.
