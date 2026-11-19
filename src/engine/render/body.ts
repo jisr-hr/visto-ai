@@ -17,6 +17,8 @@ type Meta = {
   requestedBy: string | null;
   // Builds a link to a span of a file; null when the service has no such link.
   lineUrl: ((file: FileRef, span: Span) => string) | null;
+  // true: each finding is an inline comment; false: its whole text is written in the body.
+  inline: boolean;
 };
 
 const WHOLE_FILE_TEXT: Record<Exclude<FileLevelSource, 'whole_file' | 'team_file_invalid'>, string> = {
@@ -50,35 +52,89 @@ function codeSpan(raw: string): string {
   return `${fence} ${text} ${fence}`;
 }
 
-// An HTML comment opener could hide the rest of the text: show it instead.
-function noComment(text: string): string {
-  return text.replaceAll('<!--', '&lt;!--');
-}
-
 // A model-written line must not become a heading of the review body.
 function noHeading(text: string): string {
   return text.replace(/^( {0,3})#/gm, '$1\\#');
 }
 
-function bullets(items: string[]): string[] {
-  const shown = items.slice(0, MAX_LISTED);
+const ZW = '\u200b';
+
+// Mentions and raw HTML in a stretch of prose. `before` is the character in front of it.
+function inertProse(text: string, before: string): string {
+  return text.replace(/<|@(?=[\p{L}\p{N}])/gu, (m, at: number) => {
+    if (m === '<') return '&lt;';
+    return /[\p{L}\p{N}_]/u.test(at > 0 ? text[at - 1]! : before) ? m : `@${ZW}`;
+  });
+}
+
+// One line: an inline span closed on the same line is code, and everything else is prose.
+function inertLine(line: string): string {
+  let out = '';
+  let from = 0; // start of the prose not yet written
+  let i = 0;
+  while (i < line.length) {
+    if (line[i] !== '`') { i += 1; continue; }
+    let j = i;
+    while (line[j] === '`') j += 1;
+    let close = -1;
+    if (i === 0 || line[i - 1] !== '\\') {
+      for (const run of line.slice(j).matchAll(/`+/g)) {
+        if (run[0].length === j - i) { close = j + run.index + run[0].length; break; }
+      }
+    }
+    if (close === -1) { i = j; continue; }
+    out += inertProse(line.slice(from, i), line[from - 1] ?? '');
+    out += line.slice(i, close);
+    from = i = close;
+  }
+  return out + inertProse(line.slice(from), line[from - 1] ?? '');
+}
+
+// Text of one line that is written after other text: no fence can open in it.
+function inertInline(text: string): string {
+  return text.split('\n').map(inertLine).join('\n');
+}
+
+/** Text the model wrote, made safe to post. Outside code: a mention gets a zero-width space after its `@`, and every `<` is written as `&lt;`. A fence left open is closed. */
+export function inert(text: string): string {
+  let open: Fence | null = null;
+  const lines: string[] = [];
+  for (const line of text.split('\n')) {
+    if (open !== null) {
+      if (fenceCloses(line, open)) open = null;
+      lines.push(line);
+      continue;
+    }
+    open = fenceOpens(line);
+    lines.push(open !== null ? line : inertLine(line));
+  }
+  return closeOpenFence(lines.join('\n'));
+}
+
+function bullets(items: string[], cap: boolean = true): string[] {
+  const shown = cap ? items.slice(0, MAX_LISTED) : items;
   return items.length > shown.length ? [...shown, `- \u2026and ${items.length - shown.length} more.`] : shown;
 }
 
 const located = (f: Finding | RawFinding): string =>
-  `- **[${f.severity}]** ${codeSpan(`${f.path}:${f.line}`)} \u2014 ${firstLine(f.body)}`;
+  `- **[${f.severity}]** ${codeSpan(`${f.path}:${f.line}`)} \u2014 ${inertInline(firstLine(f.body))}`;
 const unplacedLine = (f: UnplacedFinding): string =>
-  `- ${codeSpan(`${f.path}:${f.line}`)}${f.side === 'LEFT' ? ' (old file)' : ''} \u2014 ${firstLine(f.body)}`;
+  `- ${codeSpan(`${f.path}:${f.line}`)}${f.side === 'LEFT' ? ' (old file)' : ''} \u2014 ${inertInline(firstLine(f.body))}`;
+// A bullet with the whole text of its finding under it, as a continuation of the item.
+const locatedWhole = (f: Finding): string => {
+  const text = noHeading(inert(f.body)).split('\n').map((l) => (l === '' ? l : `  ${l}`)).join('\n');
+  return `${located(f)}\n\n${text}`;
+};
 const notReviewedLine = (n: NotReviewed): string => `- ${codeSpan(n.path)}: ${n.reason}`;
 
 function commentBody(f: Finding): string {
   const moved = f.requestedLine === null ? '' : `_(Refers to ${f.side === 'LEFT' ? 'old line' : 'line'} ${f.requestedLine}, just outside the diff.)_ `;
-  return `**[${f.severity}]** ${moved}${noComment(f.body)}`;
+  return `**[${f.severity}]** ${moved}${inert(f.body)}`;
 }
 
 // The part after the score: the category in a code span, then the dash and the reason when there is one.
 function scoreTail(entry: ScoreEntry): string {
-  const reason = firstLine(entry.reason);
+  const reason = inertInline(firstLine(entry.reason));
   return `${codeSpan(entry.category)}${reason === '' ? '' : ` \u2014 ${reason}`}`;
 }
 
@@ -161,9 +217,12 @@ export function renderReview(result: ReviewResult, meta: Meta): { body: string; 
   const head: string[] = [...prefix];
   const tail: string[] = [];
   const overview = result.overview.trim();
-  if (overview !== '') head.push(`## Summary\n\n${noHeading(overview)}`);
+  if (overview !== '') head.push(`## Summary\n\n${noHeading(inert(overview))}`);
   head.push(humanReviewSection(result, meta.lineUrl));
-  if (result.findings.length > 0) head.push(['## Findings', '', ...bullets(result.findings.map(located))].join('\n'));
+  if (result.findings.length > 0) {
+    const items = meta.inline ? bullets(result.findings.map(located)) : bullets(result.findings.map(locatedWhole), false);
+    head.push(['## Findings', '', ...items].join('\n'));
+  }
   const rest = result.unplaced.length > 0 ? tail : head;
   if (result.unplaced.length > 0) {
     tail.push([UNPLACED_HEADING, '', UNPLACED_NOTE, '', ...bullets(result.unplaced.map(unplacedLine))].join('\n'));
@@ -173,23 +232,33 @@ export function renderReview(result: ReviewResult, meta: Meta): { body: string; 
     rest.push(['## Coverage', '', 'These files were not reviewed:', '', ...bullets(result.coverage.notReviewed.map(notReviewedLine))].join('\n'));
   }
   tail.push(`${OVERALL_HEADING}\n\n${overallLine(result)}`);
-  const comments = result.findings.map((f) => ({ path: f.path, side: f.side, line: f.line, body: commentBody(f) }));
-  return { body: fitBody(noComment(head.join('\n\n')), noComment(tail.join('\n\n'))), comments };
+  const comments = !meta.inline ? [] : result.findings.map((f) => ({ path: f.path, side: f.side, line: f.line, body: commentBody(f) }));
+  return { body: fitBody(head.join('\n\n'), tail.join('\n\n')), comments };
 }
 
 const cutMarker = (removed: number): string => `_[\u2026 ${removed} characters of the review were cut to fit GitHub's limit]_`;
 
+type Fence = { indent: string; char: string; size: number };
+
+// A line indented by at most three spaces that opens with three or more backticks or tildes; for backticks the rest of the line holds none.
+function fenceOpens(line: string): Fence | null {
+  const m = /^( {0,3})(`{3,}|~{3,})(.*)$/.exec(line.replace(/\r$/, ''));
+  if (m === null || (m[2]![0] === '`' && m[3]!.includes('`'))) return null;
+  return { indent: m[1]!, char: m[2]![0]!, size: m[2]!.length };
+}
+
+// The same character at the same or a greater length, and nothing else but spaces.
+function fenceCloses(line: string, open: Fence): boolean {
+  const m = /^ {0,3}(`{3,}|~{3,}) *$/.exec(line.replace(/\r$/, ''));
+  return m !== null && m[1]![0] === open.char && m[1]!.length >= open.size;
+}
+
 // Close a code fence that a cut left open, at the opening fence's own indent.
 function closeOpenFence(text: string): string {
-  let open: { indent: string; char: string; size: number } | null = null;
+  let open: Fence | null = null;
   for (const line of text.split('\n')) {
-    if (open === null) {
-      const m = /^( *)(`{3,}|~{3,})/.exec(line);
-      if (m) open = { indent: m[1]!, char: m[2]![0]!, size: m[2]!.length };
-    } else {
-      const m = /^ *(`{3,}|~{3,}) *$/.exec(line);
-      if (m && m[1]![0] === open.char && m[1]!.length >= open.size) open = null;
-    }
+    if (open === null) open = fenceOpens(line);
+    else if (fenceCloses(line, open)) open = null;
   }
   return open === null ? text : `${text}\n${open.indent}${open.char.repeat(open.size)}`;
 }

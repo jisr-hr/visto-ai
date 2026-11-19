@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { fitBody, MAX_BODY_CHARS, renderReview } from './body.ts';
+import { fitBody, inert, MAX_BODY_CHARS, renderReview } from './body.ts';
 import type { Finding, NotReviewed, RawFinding, ReviewResult, UnplacedFinding } from '../types.ts';
 import type { BlockScore, Category, FileLevelSource, FileScore, Span } from '../score/types.ts';
 
@@ -19,7 +19,7 @@ const result = (over: Partial<ReviewResult> = {}): ReviewResult => ({
   coverage: { reviewed: [], notReviewed: [] }, usage, models: [], providers: [], dependencies: { model: 'ok' }, audit: [],
   scores: [], verdict: { threshold: 70, needsHuman: false, highest: 0 }, teamFileInvalid: null, ...over,
 });
-const auto = { trigger: 'automatic', requestedBy: null, lineUrl: null } as const;
+const auto = { trigger: 'automatic', requestedBy: null, lineUrl: null, inline: true } as const;
 const notReviewed = (n: number): NotReviewed[] =>
   (['no_diff', 'too_large', 'over_batch_limit', 'batch_failed'] as const).slice(0, n).map((reason, i) => ({ path: `f${i}.bin`, reason }));
 const full = result({
@@ -94,8 +94,8 @@ test('a path with a backtick is shown between double backticks', () => {
   assert.ok(b.includes('`` x`y:7 `` \u2014'));
 });
 test('a manual run is prefixed', () => {
-  assert.match(renderReview(result(), { trigger: 'manual', requestedBy: 'dev-one', lineUrl: null }).body, /^\*\*Full review\*\* requested by @dev-one\.\n\n## Summary/);
-  assert.match(renderReview(result(), { trigger: 'manual', requestedBy: null, lineUrl: null }).body, /^\*\*Full review\*\* requested\.\n\n## Summary/);
+  assert.match(renderReview(result(), { trigger: 'manual', requestedBy: 'dev-one', lineUrl: null, inline: true }).body, /^\*\*Full review\*\* requested by @dev-one\.\n\n## Summary/);
+  assert.match(renderReview(result(), { trigger: 'manual', requestedBy: null, lineUrl: null, inline: true }).body, /^\*\*Full review\*\* requested\.\n\n## Summary/);
   assert.doesNotMatch(renderReview(result(), auto).body, /Full review/);
 });
 test('a long list is capped at 25', () => {
@@ -211,7 +211,7 @@ test('the default limit is 65,536', () => {
 test('a failed review renders only its Overall line, after the manual prefix', () => {
   const failed = result({ status: 'failed', failure: { stage: 'model', code: 'no_credit' }, overview: 'x', findings: [finding()], unplaced: [unplaced()] });
   assert.deepEqual(renderReview(failed, auto), { body: '## Overall\n\nThe review could not be completed (model: no_credit).\n\nHuman review: needed, because the review did not finish.', comments: [] });
-  const manual = renderReview(failed, { trigger: 'manual', requestedBy: 'dev-one', lineUrl: null });
+  const manual = renderReview(failed, { trigger: 'manual', requestedBy: 'dev-one', lineUrl: null, inline: true });
   assert.equal(manual.body, '**Full review** requested by @dev-one.\n\n## Overall\n\nThe review could not be completed (model: no_credit).\n\nHuman review: needed, because the review did not finish.');
   assert.deepEqual(manual.comments, []);
 });
@@ -247,7 +247,7 @@ test('a path with a newline or a tab stays on its bullet line', () => {
 });
 
 const lineUrl = (f: { path: string }, s: Span): string => 'u:' + f.path + ':' + s.first;
-const withUrl = { trigger: 'automatic', requestedBy: null, lineUrl } as const;
+const withUrl = { trigger: 'automatic', requestedBy: null, lineUrl, inline: true } as const;
 const span = (first: number, last: number, side: Span['side'] = 'RIGHT'): Span => ({ side, first, last });
 const block = (id: string, s: Span, score: number | null, category: Category = 'calculation', reason = ''): BlockScore => ({
   id, hunk: id, hunkHash: 'h', hash: 'h', changedLines: s.last - s.first + 1, span: s,
@@ -397,4 +397,65 @@ test('a reason is written as its first line only', () => {
   assert.ok(b.includes('- line 1, 90% `fix` \u2014 Fixes it.\n'));
   assert.equal((b.match(/^## Overall$/gm) ?? []).length, 1);
   assert.equal(b.includes('forged'), false);
+});
+
+const ZW = '\u200b';
+test('a mention in prose is made inert, and one in code is left as it is', () => {
+  assert.equal(inert('ask @octo-dev or (@acme/reviewers)'), `ask @${ZW}octo-dev or (@${ZW}acme/reviewers)`);
+  assert.equal(inert('use `@Injectable()` here'), 'use `@Injectable()` here');
+  assert.equal(inert('```ts\n@Component({})\n```\nthanks @octo-dev'), `\`\`\`ts\n@Component({})\n\`\`\`\nthanks @${ZW}octo-dev`);
+});
+test('an address, a lone @ and an @ before a symbol are not mentions', () => {
+  for (const text of ['dev@example.test', 'a @ b', 'x_@y', '@-x', '@']) assert.equal(inert(text), text);
+});
+test('what only looks like code is prose', () => {
+  const cases = [
+    '\\`@victim\\`',
+    '`a\n\n@victim b`',
+    'see `@victim',
+    '    ```\n    @victim\n    ```',
+    '``` a`b\n@victim\n```',
+  ];
+  for (const text of cases) assert.equal(inert(text).includes(`@${ZW}victim`), true, text);
+});
+test('raw HTML in prose is shown and not rendered, and a fence left open is closed', () => {
+  assert.equal(inert('<details><summary>x</summary>'), '&lt;details>&lt;summary>x&lt;/summary>');
+  assert.equal(inert('a <!-- b'), 'a &lt;!-- b');
+  assert.equal(inert('use `Array<string>` here'), 'use `Array<string>` here');
+  assert.equal(inert('```ts\nconst a: Array<string> = [];'), '```ts\nconst a: Array<string> = [];\n```');
+});
+test('a review writes no live mention from the model, and keeps the one the service writes', () => {
+  const r = result({ overview: 'a.ts: see @octo-dev', findings: [finding({ path: 'a.ts', line: 3, body: 'ping @octo-dev' })] });
+  const out = renderReview(r, { trigger: 'manual', requestedBy: 'octo-lead', lineUrl: null, inline: true });
+  assert.equal(out.body.includes('@octo-dev'), false);
+  assert.equal(out.comments[0]!.body.includes('@octo-dev'), false);
+  assert.equal(out.body.includes('requested by @octo-lead'), true);
+});
+test('a first line cut out of a span is prose', () => {
+  const r = result({ findings: [finding({ path: 'a.ts', line: 3, body: '`@victim\nrest`' })] });
+  const out = renderReview(r, { trigger: 'automatic', requestedBy: null, lineUrl: null, inline: true });
+  assert.equal(out.body.includes('@victim'), false);
+  assert.equal(out.body.includes(`@${ZW}victim`), true);
+});
+test('without inline comments, every finding carries its whole text in the body and cannot forge a heading', () => {
+  const many = Array.from({ length: 30 }, (_, i) => finding({ path: 'a.ts', line: i + 1, body: `Finding ${i + 1}.\n\n## Overall\n\nDetail ${i + 1}.` }));
+  const r = result({ findings: many });
+  const inline = renderReview(r, { trigger: 'automatic', requestedBy: null, lineUrl: null, inline: true });
+  const bodyOnly = renderReview(r, { trigger: 'automatic', requestedBy: null, lineUrl: null, inline: false });
+  assert.deepEqual([inline.comments.length, bodyOnly.comments.length], [30, 0]);
+  assert.equal(inline.body.includes('Detail 1.'), false);
+  assert.equal(bodyOnly.body.includes('Detail 1.') && bodyOnly.body.includes('Detail 30.'), true);
+  assert.equal(bodyOnly.body.match(/^## Overall$/gm)?.length, 1);
+});
+test('a fence opened by the first line of a finding does not swallow the next bullet', () => {
+  const b = renderReview(result({ findings: [finding({ body: '```ts' }), finding({ line: 11, body: 'Next @octo-dev' })] }), auto).body;
+  assert.equal(b.includes('```'), true);
+  assert.equal(b.includes('@octo-dev'), false);
+  assert.equal(/^```/m.test(b), false);
+});
+test('a score reason and the whole-file reason are made inert too', () => {
+  const r = scored([file('a.ts', { blocks: [block('B1', span(1, 1), 90, 'fix', 'ask @octo-dev <b>')] })]);
+  const b = renderReview(r, auto).body;
+  assert.equal(b.includes('@octo-dev'), false);
+  assert.ok(b.includes(`ask @${ZW}octo-dev &lt;b>`));
 });

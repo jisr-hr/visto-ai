@@ -159,7 +159,7 @@ export async function runReviewJob(job: Job, deps: ReviewJobDeps): Promise<void>
     if (result !== null) {
       const info = live!.info;
       try {
-        ({ body, comments } = renderReview(result, { trigger: 'automatic', requestedBy: null, lineUrl: (file, span) => deps.lineUrl(info, file, span) }));
+        ({ body, comments } = renderReview(result, { trigger: 'automatic', requestedBy: null, lineUrl: (file, span) => deps.lineUrl(info, file, span), inline: true }));
       } catch {
         log({ event: 'render_failed', job: job.id, repo, number: job.ref.number });
       }
