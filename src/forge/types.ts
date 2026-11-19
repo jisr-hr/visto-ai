@@ -23,6 +23,17 @@ export interface Source {
   getDefaultBranchFile(pr: PullRequestInfo, path: string): Promise<string | null>;
 }
 
+export interface LivePullRequest {
+  info: PullRequestInfo;                 // for an open pull request, baseSha is the merge base of its base and its head
+  state: 'open' | 'closed' | 'merged';
+}
+export interface ForgeAccess {
+  /** The pull request as the git service has it now. null when it is not there. Rejects with a short code. */
+  readPullRequest(ref: PullRequestRef, installation: string): Promise<LivePullRequest | null>;
+  /** A read-only source for one review, with that installation's token. Rejects with a short code. */
+  sourceFor(installation: string): Promise<Source>;
+}
+
 export type Association = 'owner' | 'member' | 'collaborator' | 'none';
 export interface RepoRef { owner: string; repo: string }
 export interface MergedPullRequest {
