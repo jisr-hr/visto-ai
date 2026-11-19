@@ -90,6 +90,14 @@ interface Options {
   markFailures?: number;
   /** lineUrl throws, and the review's body needs a link. */
   renderThrows?: boolean;
+  /** The job is a manual one, from a /review comment. */
+  manual?: boolean;
+  /** The association of a manual job's requester; 'member' when not given. */
+  association?: string | null;
+  /** react and comment reject. */
+  writeFails?: boolean;
+  /** The first n statements that finish the job reject. */
+  finishFailures?: number;
 }
 
 async function harness(options: Options = {}) {
@@ -105,6 +113,13 @@ async function harness(options: Options = {}) {
   if (options.reuseJob !== undefined) {
     const again = (await getJob(db, options.reuseJob))!;
     job = (await claimJob(db, again.id, again.runAt))!;
+  } else if (options.manual === true) {
+    await enqueueJob(db, {
+      ref, reason: 'command', headSha: '', runAt: at(0), now: at(0), delivery: 'd1', replace: true, trigger: 'manual', requestedBy: 'octo-lead', commentId: '31',
+      association: 'association' in options ? options.association ?? null : 'member', installation: '99',
+    });
+    const jobs = await unfinishedJobs(db);
+    job = (await claimJob(db, jobs.find((j) => j.status === 'pending' && j.ref.number === ref.number)!.id, at(0)))!;
   } else {
     await enqueueJob(db, { ref, reason: 'opened', headSha: head, runAt: at(0), now: at(0), delivery: 'd1', replace: true, ...AUTOMATIC });
     const jobs = await unfinishedJobs(db);
@@ -145,8 +160,20 @@ async function harness(options: Options = {}) {
       if (posted instanceof Error) throw posted;
       return posted;
     },
-    react: async () => { writes.push(['react']); },
-    comment: async () => { writes.push(['comment']); },
+    react: async (_ref, _installation, commentId, reaction) => {
+      writes.push(['react', commentId, reaction]);
+      if (options.writeFails === true) throw new Error('github_502');
+    },
+    comment: async (_ref, _installation, body) => {
+      writes.push(['comment', body]);
+      if (options.writeFails === true) throw new Error('github_502');
+    },
+  };
+  let finishFailuresLeft = options.finishFailures ?? 0;
+  /** Whether this statement is one that finishes the job, and is to reject. */
+  const finishFails = (text: string): boolean => {
+    if (finishFailuresLeft > 0 && text.includes('set status = $2, outcome = $3')) { finishFailuresLeft -= 1; return true; }
+    return false;
   };
   let markFailuresLeft = options.markFailures ?? 0;
   let failuresLeft = options.recordFailures ?? 0;
@@ -155,6 +182,7 @@ async function harness(options: Options = {}) {
   const wrapped: Db = {
     query: (text, params) => {
       if (queryFails && text.includes(options.failQuery!)) { queryFails = false; return Promise.reject(new Error('Something private broke')); }
+      if (finishFails(text)) return Promise.reject(new Error('db_down'));
       return db.query(text, params);
     },
     script: (sql) => db.script(sql),
@@ -164,6 +192,7 @@ async function harness(options: Options = {}) {
       const done = await db.transaction((tx) => work({
         query: (text, params) => {
           if (markFailuresLeft > 0 && text.includes('set published = true')) { markFailuresLeft -= 1; return Promise.reject(new Error('db_down')); }
+          if (finishFails(text)) return Promise.reject(new Error('db_down'));
           return tx.query(text, params);
         },
         script: (sql) => tx.script(sql),
@@ -201,9 +230,11 @@ async function harness(options: Options = {}) {
     health: { reviewed: (code, when) => { healthCalls.push(code); healthTimes.push(when.toISOString()); } },
     spend: { noteRun: (usage) => { spendCalls.push(usage); } },
   };
-  return { job, deps, inputs, healthCalls, healthTimes, spendCalls, slept, logged, writes };
+  return { job, deps, inputs, healthCalls, healthTimes, spendCalls, slept, logged, writes, get reads() { return reads; } };
 }
 const live = (options: Options = {}) => harness({ dryRun: false, ...options });
+/** A job a /review comment stored: by octo-lead, comment 31, through installation 99; out of dry run unless given. */
+const manualJob = (options: Options = {}) => harness({ dryRun: false, ...options, manual: true });
 
 /** Real engine dependencies around one changed file and a model that answers the forced call with no findings. */
 function engineDepsWithStubs(): ReviewDeps {
@@ -594,4 +625,86 @@ test('a review that failed, or whose text could not be rendered, is recorded and
   const next = await live({ pullRequest: 8 });
   await runReviewJob(next.job, next.deps);
   assert.deepEqual([next.inputs.length, (await getJob(db, next.job.id))?.outcome], [1, 'published']);
+});
+test('a /review from a member is accepted, reviewed as requested, and published', async () => {
+  const h = await manualJob();
+  await runReviewJob(h.job, h.deps);
+  assert.deepEqual(h.writes.map((w) => w[0]), ['listOwnReviews', 'react', 'listOwnReviews', 'publishReview', 'listReviewComments']);
+  assert.deepEqual(h.writes[1], ['react', '31', 'eyes']);
+  assert.deepEqual([h.inputs[0]!.trigger, (await listRuns(db, REF))[0]!.trigger, (await getJob(db, h.job.id))?.outcome], ['manual', 'manual', 'published']);
+  assert.equal((await listRuns(db, REF))[0]!.body.includes('requested by @octo-lead'), true);
+});
+test('a /review from someone without access is refused before anything is read, and the head still gets its job', async () => {
+  for (const [association, number] of [['none', 7], [null, 8], ['contributor', 9]] as const) {
+    const h = await manualJob({ association, pullRequest: number });
+    await runReviewJob(h.job, h.deps);
+    assert.deepEqual(h.writes, [['react', '31', 'confused'], ['comment', '@octo-lead The review was not started (`not_allowed`).']]);
+    assert.deepEqual([h.reads, h.inputs.length, (await getJob(db, h.job.id))?.outcome], [0, 0, 'refused']);
+    const left = (await unfinishedJobs(db)).filter((j) => j.ref.number === number);
+    assert.deepEqual(left.map((j) => [j.trigger, j.reason, j.headSha, j.status]), [['automatic', 'opened', 'h1', 'pending']]);
+  }
+});
+test('a /review on a closed pull request, or on one that has its review, is refused with no eyes first', async () => {
+  const closed = await manualJob({ live: { ...LIVE, state: 'closed' } });
+  await runReviewJob(closed.job, closed.deps);
+  assert.deepEqual(closed.writes, [['react', '31', 'confused'], ['comment', '@octo-lead The review was not started (`closed`).']]);
+  const first = await live({ pullRequest: 8 });
+  await runReviewJob(first.job, first.deps);
+  const second = await manualJob({ pullRequest: 8 });
+  await runReviewJob(second.job, second.deps);
+  assert.deepEqual([second.writes, second.inputs.length],
+    [[['react', '31', 'confused'], ['comment', '@octo-lead The review was not started (`already_reviewed`).']], 0]);
+});
+test('a /review on a pull request whose review only the git service knows of is refused before anything is paid', async () => {
+  const h = await manualJob({ own: [[{ id: '470', commit: 'h0' }]] });
+  await runReviewJob(h.job, h.deps);
+  assert.deepEqual(h.writes, [['listOwnReviews'], ['react', '31', 'confused'], ['comment', '@octo-lead The review was not started (`already_reviewed`).']]);
+  assert.deepEqual([h.inputs.length, (await getJob(db, h.job.id))?.outcome], [0, 'refused']);
+});
+test('a draft, an ignored author and a filtered base branch do not stop a /review, and the live head is the one reviewed', async () => {
+  const h = await manualJob({ live: { ...LIVE, info: { ...LIVE.info, draft: true, author: 'dependabot[bot]', headSha: 'h9' } }, settings: { ...SETTINGS, baseBranches: ['release'] } });
+  await runReviewJob(h.job, h.deps);
+  assert.deepEqual([(await getJob(db, h.job.id))?.outcome, (await listRuns(db, REF))[0]!.headSha], ['published', 'h9']);
+});
+test('a head that moves under a /review starts it over once, as a new job', async () => {
+  const moved = { ...LIVE, info: { ...LIVE.info, headSha: 'h2' } };
+  const first = await manualJob({ liveAfter: moved });
+  await runReviewJob(first.job, first.deps);
+  assert.deepEqual([(await getJob(db, first.job.id))?.outcome, first.writes.some((w) => w[0] === 'comment')], ['head_moved', false]);
+  const [retry] = await unfinishedJobs(db);
+  assert.deepEqual([retry!.trigger, retry!.reason, retry!.requestedBy, retry!.commentId, retry!.association, retry!.runAt], ['manual', 'command_retry', 'octo-lead', '31', 'member', at(0)]);
+  const second = await manualJob({ reuseJob: retry!.id, live: moved, liveAfter: { ...LIVE, info: { ...LIVE.info, headSha: 'h3' } } });
+  await runReviewJob(second.job, second.deps);
+  assert.deepEqual([(await getJob(db, second.job.id))?.outcome, second.writes.at(-1)], ['head_moved', ['comment', '@octo-lead The review did not finish (`head_moved`).']]);
+  assert.deepEqual((await unfinishedJobs(db)).map((j) => [j.trigger, j.headSha, j.runAt]), [['automatic', 'h3', at(180)]]);
+});
+test('a /review whose review fails, or whose publication is refused, says so', async () => {
+  const failedRun = await manualJob({ result: failed('model', 'timeout', { dependencies: { model: 'error' } }) });
+  await runReviewJob(failedRun.job, failedRun.deps);
+  assert.deepEqual(failedRun.writes.slice(-2), [['react', '31', 'confused'], ['comment', '@octo-lead The review did not finish (`review_failed`).']]);
+  const refused = await manualJob({ pullRequest: 8, posts: [new Error('review_rejected'), new Error('review_rejected')] });
+  await runReviewJob(refused.job, refused.deps);
+  assert.deepEqual(refused.writes.at(-1), ['comment', '@octo-lead The review did not finish (`publish_rejected`).']);
+});
+test('in dry run a /review writes nothing, whether it is honoured, refused or fails', async () => {
+  const ok = await manualJob({ dryRun: true });
+  await runReviewJob(ok.job, ok.deps);
+  const stranger = await manualJob({ dryRun: true, association: 'none', pullRequest: 8 });
+  await runReviewJob(stranger.job, stranger.deps);
+  const closed = await manualJob({ dryRun: true, pullRequest: 9, live: { ...LIVE, state: 'closed' } });
+  await runReviewJob(closed.job, closed.deps);
+  const failing = await manualJob({ dryRun: true, pullRequest: 10, result: failed('model', 'timeout', { dependencies: { model: 'error' } }) });
+  await runReviewJob(failing.job, failing.deps);
+  assert.deepEqual([ok.writes, stranger.writes, closed.writes, failing.writes], [[], [], [], []]);
+  assert.deepEqual(
+    [(await getJob(db, ok.job.id))?.outcome, (await getJob(db, stranger.job.id))?.outcome, (await getJob(db, closed.job.id))?.outcome, (await getJob(db, failing.job.id))?.outcome, stranger.inputs.length],
+    ['reviewed', 'refused', 'refused', 'failed', 0]);
+});
+test('a refusal is recorded before it is answered, and an answer that cannot be written changes nothing', async () => {
+  const h = await manualJob({ association: 'none', writeFails: true });
+  await runReviewJob(h.job, h.deps);
+  assert.deepEqual([(await getJob(db, h.job.id))?.outcome, h.logged.filter((e) => e.event === 'answer_failed').length], ['refused', 2]);
+  const unrecorded = await manualJob({ association: 'none', pullRequest: 8, finishFailures: 3 });
+  await runReviewJob(unrecorded.job, unrecorded.deps);
+  assert.deepEqual([unrecorded.writes, (await getJob(db, unrecorded.job.id))?.status], [[], 'running']);
 });
