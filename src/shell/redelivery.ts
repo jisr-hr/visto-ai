@@ -1,12 +1,9 @@
 import type { HookDelivery, HookDeliveries } from '../forge/types.ts';
+import { codeOf } from './codes.ts';
 
 export const MAX_REDELIVERIES = 200;
 export const PACE_MS = 200;
 export const RATE_LIMIT_WAIT_MS = 60_000;
-
-const SHORT_CODE = /^[a-z][a-z0-9_]*$/;
-const codeOf = (err: unknown): string =>
-  err instanceof Error && err.message.length <= 40 && SHORT_CODE.test(err.message) ? err.message : 'internal_error';
 
 /** Ids to send again: for each guid none of whose attempts was ok, its latest attempt; oldest first; at most `cap`. */
 export function pickRedeliveries(deliveries: HookDelivery[], cap: number = MAX_REDELIVERIES): string[] {

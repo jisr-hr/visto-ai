@@ -86,7 +86,7 @@ export type ForgeEvent =
   | { kind: 'pull_request'; action: PullRequestAction; facts: PullRequestFacts }
   | { kind: 'review'; ref: PullRequestRef; review: HumanReview }
   | { kind: 'inline_comment'; ref: PullRequestRef; comment: HumanInlineComment }
-  | { kind: 'general_comment'; ref: PullRequestRef; comment: GeneralComment }
+  | { kind: 'general_comment'; ref: PullRequestRef; installation: string | null; comment: GeneralComment }
   | { kind: 'thread'; ref: PullRequestRef; action: 'resolved' | 'unresolved'; thread: string; rootComment: string | null; actor: string; actorIsBot: boolean }
   | { kind: 'ignored'; reason: 'unknown_event' | 'unknown_action' | 'not_a_pull_request' | 'malformed' };
 export type WebhookReading =
@@ -95,4 +95,34 @@ export type WebhookReading =
 export interface WebhookReader {
   /** `headers`: the request's headers, names in lower case. `body`: the bytes as received. */
   read(headers: Record<string, string | undefined>, body: Buffer): WebhookReading;
+}
+
+export interface AppInfo {
+  botLogin: string;                          // the app's own account: "<slug>[bot]"
+  permissions: Record<string, string>;       // as the git service names them: { pull_requests: 'write', contents: 'read', ... }
+  events: string[];                          // the events the app is subscribed to
+}
+export interface FeatureOff { feature: 'reviews' | 'publishing' | 'commands' | 'capture'; missing: string }
+export interface AppIdentity {
+  read(): Promise<AppInfo>;
+  /** What the app lacks: one entry for each permission or event a feature needs and the app has not got. */
+  lacks(dryRun: boolean): Promise<FeatureOff[]>;
+}
+export interface ReviewDraft {
+  commit: string;                            // the commit the review was computed for
+  body: string;
+  comments: Array<{ path: string; side: Side; line: number; body: string }>;
+}
+export interface PostedComment { id: string; path: string; side: Side; line: number | null; body: string }
+export interface ForgeWriter {
+  /** Posts one review as a comment, pinned to `draft.commit`. Rejects `review_rejected` when the git service refuses what it holds; any other failure rejects with a short code and says nothing about whether the review was created. */
+  publishReview(ref: PullRequestRef, installation: string, draft: ReviewDraft): Promise<{ id: string }>;
+  /** The app's own reviews of the pull request that have a body, newest first, each with the commit it is pinned to. */
+  listOwnReviews(ref: PullRequestRef, installation: string): Promise<Array<{ id: string; commit: string }>>;
+  /** The inline comments of one review, read from the pull request's own comment list. null when that list was cut short. */
+  listReviewComments(ref: PullRequestRef, installation: string, reviewId: string): Promise<PostedComment[] | null>;
+  /** Puts a reaction on a general comment of a pull request. */
+  react(ref: PullRequestRef, installation: string, commentId: string, reaction: 'eyes' | 'confused'): Promise<void>;
+  /** Writes a general comment on the pull request. */
+  comment(ref: PullRequestRef, installation: string, body: string): Promise<void>;
 }

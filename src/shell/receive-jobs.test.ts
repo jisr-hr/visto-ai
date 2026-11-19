@@ -7,6 +7,7 @@ import { unfinishedJobs } from '../db/jobs.ts';
 import { getPullRequest } from '../db/pull-requests.ts';
 import type { Db } from '../db/types.ts';
 import type { RepoSettings } from '../config/load.ts';
+import { listActivity } from '../db/human-activity.ts';
 import type { ForgeEvent, PullRequestAction, PullRequestFacts } from '../forge/types.ts';
 
 const REF = { service: 'github', owner: 'acme', repo: 'shop', number: 7 } as const;
@@ -36,8 +37,15 @@ beforeEach(async () => {
 
 afterEach(async () => { await db.close(); });
 
-function deliver(event: PullRequestEvent, delivery: string, database: Db = db): Promise<HttpAnswer> {
-  const reader = { read: () => ({ ok: true as const, delivery, name: 'pull_request', action: event.action, event }) };
+const said = (body: string, over = {}): ForgeEvent => ({
+  kind: 'general_comment', ref: REF, installation: '99',
+  comment: { id: '31', author: 'octo-lead', authorIsBot: false, association: 'member', at: at(0), body, ...over },
+});
+
+function deliver(event: ForgeEvent, delivery: string, database: Db = db): Promise<HttpAnswer> {
+  const name = event.kind === 'pull_request' ? 'pull_request' : 'issue_comment';
+  const action = event.kind === 'pull_request' ? event.action : 'created';
+  const reader = { read: () => ({ ok: true as const, delivery, name, action, event }) };
   return receive({
     db: database, reader, clock: () => new Date(now), log: (entry) => { logged.push(entry); },
     settingsFor: () => SETTINGS, onQueued: () => onQueued(),
@@ -101,3 +109,42 @@ test('an onQueued that throws changes nothing about the answer', async () => {
   onQueued = () => { throw new Error('boom'); };
   assert.deepEqual(await deliver(pr('opened'), 'd1'), { status: 202, body: 'accepted' });
 });
+
+test('a /review comment stores a manual job due now, and the comment itself', async () => {
+  assert.deepEqual(await deliver(said('/review'), 'c1'), { status: 202, body: 'accepted' });
+  const [job] = await unfinishedJobs(db);
+  assert.deepEqual(
+    [job!.trigger, job!.reason, job!.headSha, job!.requestedBy, job!.commentId, job!.association, job!.installation, job!.runAt],
+    ['manual', 'command', '', 'octo-lead', '31', 'member', '99', at(0)]);
+  assert.equal((await listActivity(db, REF)).length, 1);
+  assert.deepEqual([logged.at(-1)!.job, logged.at(-1)!.command, queued], ['queued', 'review', 1]);
+});
+test('a /review replaces the pending job of a push, and a later push does not replace it', async () => {
+  await deliver(pr('synchronize'), 'd1');
+  await deliver(said('/review'), 'c1');
+  await deliver(pr('synchronize', { headSha: 'h2', updatedAt: at(9) }), 'd2');
+  assert.deepEqual((await unfinishedJobs(db)).map((j) => [j.trigger, j.reason, j.runAt]), [['manual', 'command', at(0)]]);
+});
+test('a comment that is not a command, and a command from a bot, queue nothing', async () => {
+  await deliver(said('looks good'), 'c1');
+  await deliver(said('/review', { author: 'helper[bot]', authorIsBot: true }), 'c2');
+  assert.deepEqual([await unfinishedJobs(db), queued], [[], 0]);
+});
+test("a stranger's command is stored when nothing is pending, for the job to refuse", async () => {
+  await deliver(said('/review', { association: 'none' }), 'c1');
+  assert.deepEqual((await unfinishedJobs(db)).map((j) => [j.trigger, j.association]), [['manual', 'none']]);
+});
+test("a stranger's command never pushes a pending job out", async () => {
+  await deliver(pr('synchronize'), 'd1');
+  assert.deepEqual(await deliver(said('/review', { association: 'none' }), 'c1'), { status: 202, body: 'accepted' });
+  assert.deepEqual((await unfinishedJobs(db)).map((j) => [j.trigger, j.reason, j.runAt]), [['automatic', 'synchronize', at(180)]]);
+  assert.deepEqual([logged.at(-1)!.command, logged.at(-1)!.job, queued], ['review', null, 1]);
+});
+for (const [association, replaces] of [['owner', true], ['collaborator', true], ['none', false], ['contributor', false]] as const) {
+  test(`a /review from ${association} ${replaces ? 'replaces' : 'does not replace'} a pending automatic job`, async () => {
+    await deliver(pr('synchronize'), 'd1');
+    await deliver(said('/review', { association }), 'c1');
+    const want = replaces ? [['manual', 'command']] : [['automatic', 'synchronize']];
+    assert.deepEqual((await unfinishedJobs(db)).map((j) => [j.trigger, j.reason]), want);
+  });
+}

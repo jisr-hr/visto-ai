@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createGithubWebhookReader } from './webhook.ts';
-import { isLocalUrl, sampleWebhook } from './send-sample.ts';
+import { isLocalUrl, run, sampleWebhook } from './send-sample.ts';
 import type { SampleKind } from './send-sample.ts';
 
 const KINDS: Array<[SampleKind, string]> = [['pull_request', 'pull_request'], ['review', 'review'], ['comment', 'general_comment']];
@@ -41,4 +41,23 @@ test('a pull request sample can carry another action and another head', () => {
   const { body } = sampleWebhook('pull_request', 's', 'd1', { action: 'synchronize', head: 'def456' });
   const payload = JSON.parse(body) as { action: string; pull_request: { head: { sha: string } } };
   assert.deepEqual([payload.action, payload.pull_request.head.sha], ['synchronize', 'def456']);
+});
+
+test('a comment sample can carry another body, and names an installation', () => {
+  const { headers, body } = sampleWebhook('comment', 's', 'd1', { body: '/review' });
+  const payload = JSON.parse(body) as { comment: { body: string }; installation: { id: number } };
+  assert.deepEqual([payload.comment.body, payload.installation.id], ['/review', 99]);
+  const reading = createGithubWebhookReader('s').read(headers, Buffer.from(body));
+  assert.ok(reading.ok && reading.event.kind === 'general_comment' && reading.event.comment.body === '/review' && reading.event.installation === '99');
+});
+
+test('--body is refused with a kind other than comment, and the usage names it', async (t) => {
+  const lines: string[] = [];
+  t.mock.method(console, 'log', (line: string) => { lines.push(line); });
+  const base = ['--url', 'http://localhost:1/x', '--secret-env', 'SAMPLE_SECRET'];
+  for (const kind of ['pull_request', 'review']) {
+    assert.equal(await run([...base, '--kind', kind, '--body', '/review'], { SAMPLE_SECRET: 's' }), 2);
+  }
+  assert.equal(lines.length, 2);
+  assert.ok(lines.every((l) => l.startsWith('usage: ') && l.includes('[--body <text>]')));
 });

@@ -4,7 +4,7 @@
 
 An open-source, self-hosted AI reviewer for pull requests. It looks for defects it can demonstrate, and it scores which parts of a change still need a human reviewer.
 
-> **Status: early development.** The review engine and an offline evaluation tool are built. The service receives GitHub's webhooks, reads each pull request and runs the review in dry run: it records what it would have posted and posts nothing, so Visto AI cannot yet review a live pull request. See [Status](#status).
+> **Status: early development.** The review engine and an offline evaluation tool are built. The service receives GitHub's webhooks, reads each pull request and runs the review. In dry run it records what it would have posted and posts nothing; out of dry run it posts the first review of a pull request. None of this has been tried against a real GitHub App. See [Status](#status).
 
 ## Why
 
@@ -54,14 +54,15 @@ The full design, with every decision and its reason, is in [docs/superpowers/spe
 | Engine: the score | Built. Measured only where its owner has run the backtest |
 | Service: receiving webhooks and recording what people do on pull requests | Built |
 | Service: a queue of review jobs, run in dry run and recorded | Built |
-| Service: publishing a review to GitHub, and commands | Planned |
+| Service: publishing the first review of a pull request, and `/review` | Built. Not tried against a real GitHub App |
+| Service: following up a review's comments, and reviewing later pushes | Planned |
 | Merge gate | Planned |
 | Extensions and MCP tools | Planned |
 | Memory | Planned |
 | Automatic approval | Planned |
 | UI | Planned |
 
-What exists today is a library, a command-line tool, and a service that you can run with Docker. The service receives, queues, reviews in dry run and records, and posts nothing.
+What exists today is a library, a command-line tool, and a service that you can run with Docker. The service receives, queues, reviews and records. In dry run it posts nothing; out of dry run it posts the first review of each pull request.
 
 ## How the engine works
 
@@ -89,15 +90,15 @@ Tests never reach the network. The test setup blocks sockets and `fetch`, and cl
 
 ## Run the service
 
-The service receives GitHub's signed webhooks and records each delivery's id and what it says about people and the pull request (the payload itself is not kept). When a pull request is opened, reopened, made ready for review, pushed to or given a new base branch, it queues a review. A push is reviewed after 180 quiet seconds, so several pushes in a row give one review. The review runs the engine on the pull request as GitHub has it then, in dry run: it is recorded in the database and **nothing is posted to GitHub**. Publishing, commands and the merge gate are not built, so the service starts only with `dryRun: true` in the config.
+The service receives GitHub's signed webhooks and records each delivery's id and what it says about people and the pull request (the payload itself is not kept). When a pull request is opened, reopened, made ready for review, pushed to or given a new base branch, it queues a review. A push is reviewed after 180 quiet seconds, so several pushes in a row give one review, but only while the pull request has no review of the app's (see [Leaving dry run](#leaving-dry-run)). The review runs the engine on the pull request as GitHub has it then. In dry run (`dryRun: true` in the config) it is recorded in the database and **nothing is posted to GitHub**. Out of dry run (`dryRun: false`) it is also posted, as described below. The merge gate is not built.
 
 To run it you need a GitHub App (its id, its private key and its webhook secret), a model key and a Postgres.
 
-What the app needs for a dry run, from what the service calls: read access to pull requests and to contents (and to metadata, which GitHub always asks for), and the events `pull_request`, `issue_comment`, `pull_request_review`, `pull_request_review_comment` and `pull_request_review_thread`. It reads pull requests and the files of the repository; it writes nothing. This has not yet been tried against a real app. With too little access every read is refused, and every job ends `attempts_exhausted` (or `not_found`, if GitHub answers the pull request itself with 404).
+What the app needs for a dry run, from what the service calls: read access to pull requests and to contents (and to metadata, which GitHub always asks for), and the events `pull_request`, `issue_comment`, `pull_request_review`, `pull_request_review_comment` and `pull_request_review_thread`. In dry run it reads pull requests and the files of the repository and writes nothing. With too little access every read is refused, and every job ends `attempts_exhausted` (or `not_found`, if GitHub answers the pull request itself with 404).
 
 ```bash
 cp env.example .env                       # then write your own passwords, secret and keys
-cp config.example.yml config.local.yml    # then switch on the app and database blocks and write dryRun: true
+cp config.example.yml config.local.yml    # then switch on the app and database blocks (dryRun is true in the example)
 docker compose up -d --build --wait
 ```
 
@@ -108,7 +109,21 @@ set -a && . ./.env && set +a
 npm run dev:send-webhook -- --url http://localhost:8080/webhooks/github --secret-env WEBHOOK_SECRET --kind review
 ```
 
-The kinds are `pull_request`, `review` and `comment`. For the `pull_request` kind, `--action opened|synchronize` (default `opened`) and `--head <sha>` (default `abc123`) choose the action and the head commit, so two pushes can be sent with two heads. The other kinds refuse these options. Stop it with `docker compose down`.
+The kinds are `pull_request`, `review` and `comment`. For the `comment` kind, `--body <text>` sets the comment's text, so `--body /review` sends a command; the other kinds refuse it. For the `pull_request` kind, `--action opened|synchronize` (default `opened`) and `--head <sha>` (default `abc123`) choose the action and the head commit, so two pushes can be sent with two heads. The other kinds refuse these options. Stop it with `docker compose down`.
+
+### Leaving dry run
+
+Set `dryRun: false` in the config. A config that does not write `dryRun` runs in dry run: the service posts only when the key says `false`. Nothing else changes: from then on the service writes to GitHub, so check the app's permissions first.
+
+Nothing is posted at the switch itself. A review recorded in dry run is never posted; each open pull request gets its review at its next event (a push, a reopening, a `/review`). Jobs that were waiting run as before and now post, and after a stop the deliveries GitHub could not make (at most 200) are asked for again, so the pull requests they name are reviewed and posted.
+
+- **The first review.** The first review of a pull request is posted once, as a comment review pinned to the commit it was computed for, with its inline comments. When GitHub refuses the inline comments, the review is posted with their text in its body instead.
+- **Asked first.** Before a review is computed, the service asks GitHub whether the app already has a review on the pull request, so a review it once posted is not paid for again.
+- **One review for each pull request.** A later push is not reviewed yet: the comments of the first review would have to be followed up first, and that is not built. The review is of the head the pull request had when its job ran.
+- **`/review`.** A comment asks for a review when the first line of it that is not empty is `/review`, in any letter case, alone on the line or followed by a space and more text. Only an owner, a member or a collaborator of the repository is listened to. A command from anyone else is refused. When no run is recorded yet for the pull request's head (a review, or a failed try at one), the refusal gives that head its automatic job: the command may have stood in the way of a push's job. So such a comment can be what starts the review the head would have got at its next event. An accepted command gets an eyes reaction. A command the service refuses or whose review fails gets a confused reaction and one sentence with a short code: `not_allowed`, `closed` or `already_reviewed` when it is refused, `head_moved`, `review_failed`, `publish_rejected`, `render_failed` or `superseded` (another job for the pull request was waiting when this one was put back) when it failed. These ends are not answered: a command from someone without access that arrives while the pull request has a job waiting (it is not stored); a command that is replaced, while it waits, by a later `/review` from someone with access; one whose job was dropped because the pull request is gone (`not_found`) or no installation is known for it (`no_installation`); one whose job the service gave up on (it ran out of starts or grew too old); one whose job was cut by a restart, or met a database error before its review, while another job for the pull request was waiting; one whose pull request was closed while the review ran; and one the service could not record. An answer is written once: when GitHub refuses it, the log says `answer_failed` and it is not tried again. It is honoured only while the pull request has no review of the app's. A draft, an ignored author and the base-branch filter do not stop it. A bot's command is ignored. In dry run a command from someone with access is reviewed and recorded like any other job, and nothing is written on the pull request.
+- **What the app needs.** Beyond what dry run needs, the app needs `pull_requests` write and `issues` write. At start the service logs `feature_off` once for each thing a feature lacks and raises an alert of that name, and keeps running.
+- **Mentions and HTML.** In text the model wrote, outside fenced code blocks, a zero-width space is put after the `@` of a mention, after a `<` that could start HTML (one before a letter, `/`, `!` or `?`), and after the `&` of a character reference, so none of them takes effect. This also holds inside inline code: copying such inline code copies the invisible character. Links are left as written, with these exceptions. In an address (text with `://` before it and no space between), an `@` that could start a mention is written `%40`; most sites read that as the same address. (An `@` right after a letter or digit, as in `user@example.test`, never starts a mention and is left alone; an address whose user part ends in another character stops working.) A link in angle brackets stays a link only when it starts with `http://` or `https://`, in lower case. A character reference inside an address still gets the invisible character, and so does an `@` in a link with no `://`, such as a relative path; such a link may stop working.
+- **Not tried.** None of this has been tried against a real GitHub App.
 
 ### Reading what a review would have posted
 
@@ -118,7 +133,7 @@ Every attempt at a review, finished or failed, is a row of `visto_ai.review_runs
 docker compose exec db psql -U postgres -d visto -c "select id, owner, repo, number, outcome, cost, body from visto_ai.review_runs order by id desc limit 5"
 ```
 
-`body` is the text that would have been posted, `outcome` how the run ended and `cost` what the model calls cost, as recorded (see the daily limit below).
+`body` is the text that would have been posted (or was posted, out of dry run), `outcome` how the run ended and `cost` what the model calls cost, as recorded (see the daily limit below).
 
 ### Running it
 
@@ -129,9 +144,10 @@ docker compose exec db psql -U postgres -d visto -c "select id, owner, repo, num
 - Every review costs money. The cost of a run is what the model endpoint reports with each answer; OpenRouter, the default, reports it in US dollars. For an endpoint that reports no cost, it is computed from `model.prices`, in whatever currency those prices are written in. With neither, the cost is recorded as 0.
 - The daily limit, `limits.spendPerDay` (50 when not written), is a number in the unit of those recorded costs. The service adds up the cost of the runs recorded since the start of the UTC day, so it can only see what is recorded: with an endpoint that reports no cost and no `prices`, it never stops anything, and it raises the alert `cost_unknown`. At 80% of the limit it raises `spend_80`, and at the limit `spend_limit`. Reviews then stop starting until the next UTC day; the ones already running finish. These three alerts are raised once per run of the service, so a restart can raise them again; `spend_80` and `spend_limit` are also raised once per UTC day. At most `limits.queueConcurrency` reviews run at once (2 when not written).
 - When the model's key is refused or its account is out of credit, reviews pause for 5 minutes at a time and the service raises one alert, `model_error`, and `model_ok` when the key works again. The jobs wait, but not for ever: a job that has waited 24 hours is dropped as `too_old`. A review refused after it had already made model calls uses up one of the job's three starts. Alerts go to the log always, and to `alerts.webhook` when you wrote it.
-- A job ends without a review when its three starts are used up (`attempts_exhausted`), when it is a day old (`too_old`), or when the pull request has changed by the time it runs: closed, turned into a draft, gone, given a new head (the new head gets a job of its own), or already reviewed at that head and base.
+- A job ends without a review when its three starts are used up (`attempts_exhausted`), when it is a day old (`too_old`), when no installation is known for the pull request (`no_installation`), when another job for the pull request was already waiting as it was put back (`superseded`), or when the pull request is, by the time the job runs, not one to review: gone (`not_found`), closed, a draft, by an ignored author (`ignored_author`), against a base branch outside the filter (`base_filtered`), given a new head (`stale_head`; the new head gets a job of its own), or already reviewed at that head and base (`already_reviewed`). A review that fails is recorded and its job ends `failed`; nothing is posted for it. Out of dry run there are more. Before anything is paid: `later_head`, when the pull request already has its review on an earlier head, and `already_reviewed` or `later_head` when GitHub lists a review of the app's own that the database does not know of. After the review was computed and recorded: `head_moved` when the head or the base changed meanwhile (the new head gets a job), `closed` when the pull request was closed meanwhile, `already_reviewed` when a review of the app's own appeared on another commit of it meanwhile, `publish_rejected` when GitHub refused the review even without its inline comments, and `render_failed` when its text could not be written.
 - When GitHub cannot be reached, or refuses a read, before any model call, the run is recorded as failed and the job is tried again a minute later, and then 15 minutes after that: three starts in all.
-- A restart of the database, like any restart of the service in the middle of a review, cuts the reviews that are running. They run again afterwards while they have starts left, and their model calls are paid for again.
+- Out of dry run, a review that could not be posted for any other reason (GitHub could not be reached, or answered with an error) stays recorded and its job is tried again the same way. The later start posts the recorded review without computing it again, while it is less than a day old.
+- A restart of the database, like any restart of the service in the middle of a review, cuts the reviews that are running. They run again afterwards while they have starts left, and their model calls are paid for again. Out of dry run, a review already recorded when the restart came is posted afterwards without being computed again, provided its job has a start left and is less than a day old.
 
 Setup notes:
 
@@ -228,12 +244,12 @@ A file that cannot be used (invalid YAML, an unknown key, a refused pattern, con
 | `src/engine` | The review engine: context, model call, checks on the answer, rendering |
 | `src/engine/scorer` | The optional decision-model scorer and its client |
 | `src/engine/score` | Blocks, the rules that score without the model, and the floors from `.visto-ai.yml` |
-| `src/forge` | The boundary to git services. `forge/github` holds the read-only GitHub sources and the webhook reader |
+| `src/forge` | The boundary to git services. `forge/github` holds the GitHub sources, the webhook reader and the writer that posts |
 | `src/eval` | The `replay` and `compare` commands |
 | `src/eval/history` | The `import-history` command and the history file it writes |
 | `src/eval/backtest` | The `backtest` and `score-noise` commands: labels, the three numbers and the noise between runs |
 | `src/db` | The Postgres client, migrations, the queue's statements and the recorded runs |
-| `src/shell` | Receiving a webhook, the queue of review jobs, running a review, the daily limit and the model's health |
+| `src/shell` | Receiving a webhook, the queue of review jobs, running a review, publishing it, the daily limit and the model's health |
 | `src/service.ts`, `src/main.ts` | Starting and stopping the service |
 | `src/config` | Loading and validating configuration |
 | `contract` | The rules the model is given |

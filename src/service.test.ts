@@ -9,7 +9,7 @@ import { recordRun } from './db/review-runs.ts';
 import type { RunRecord } from './db/review-runs.ts';
 import { beat, readHeartbeat } from './db/heartbeat.ts';
 import { serviceConfig, parseConfig } from './config/load.ts';
-import type { ForgeEvent, HookDelivery, LivePullRequest, PullRequestAction, PullRequestFacts, Source } from './forge/types.ts';
+import type { AppIdentity, FeatureOff, ForgeEvent, HookDelivery, LivePullRequest, PullRequestAction, PullRequestFacts, Source } from './forge/types.ts';
 import type { ReviewDeps, ReviewInput, ReviewResult } from './engine/types.ts';
 import { BEAT_MS, CLOSE_WAIT_MS, DRAIN_WAIT_MS, startService, STOP_WAIT_MS, TICK_MS, UPKEEP_MS } from './service.ts';
 import type { Listening } from './service.ts';
@@ -18,7 +18,8 @@ import type { RequestLike, ResponseLike } from './shell/http.ts';
 const REF = { service: 'github', owner: 'acme', repo: 'shop', number: 7 } as const;
 const at = (seconds: number): string => new Date(Date.parse('2026-03-01T10:00:00.000Z') + seconds * 1000).toISOString();
 
-const job = (over = {}) => ({ ref: REF, reason: 'opened', headSha: 'h1', runAt: at(0), now: at(0), delivery: 'd1', replace: true, ...over });
+const job = (over = {}) => ({ ref: REF, reason: 'opened', headSha: 'h1', runAt: at(0), now: at(0), delivery: 'd1', replace: true,
+  trigger: 'automatic' as const, requestedBy: null, commentId: null, association: null, installation: null, ...over });
 const run = (over: Partial<RunRecord> = {}): RunRecord => ({
   ref: REF, job: null, trigger: 'automatic', mode: 'full', dryRun: true, headSha: 'h1', baseSha: 'b1',
   outcome: 'ok', failureStage: null, failureCode: null, needsHuman: false, highestScore: 35,
@@ -58,6 +59,12 @@ interface Options {
   migrationError?: Error; closeNever?: boolean; closeError?: Error; listenerCloseError?: Error; logThrows?: boolean;
   /** The status the model endpoint's key route answers with; 200 when not given. */
   keyStatus?: number;
+  /** What the app lacks; an Error makes the check reject. Nothing when not given. */
+  lacks?: FeatureOff[] | Error;
+  /** false to leave dry run; true when not given. */
+  dryRun?: boolean;
+  /** The key route's answer waits for this when given. */
+  keyGate?: Promise<void>;
 }
 interface Timer { ms: number; work: () => Promise<void>; cancelled: boolean }
 
@@ -77,6 +84,7 @@ async function harness(options: Options = {}) {
   const fetched: string[] = [];
   const listedSince: string[] = [];
   const logged: Array<Record<string, unknown>> = [];
+  const writes: unknown[][] = [];
   const listings = [...(options.listings ?? [])];
   let listener: ((req: RequestLike, res: ResponseLike) => void) | null = null;
   let current: ForgeEvent = PING;
@@ -85,6 +93,14 @@ async function harness(options: Options = {}) {
   const reviewHeld = new Promise<void>((done) => { releaseReview = done; });
   let reviewCalled!: () => void;
   const reviewed = new Promise<void>((done) => { reviewCalled = done; });
+  let publishCalled!: () => void;
+  const published = new Promise<void>((done) => { publishCalled = done; });
+  const order: string[] = [];
+  const lacksCalls: boolean[] = [];
+  const appInfo: AppIdentity = {
+    read: () => Promise.reject(new Error('not_used')),
+    lacks: (dryRun) => (order.push('lacks'), lacksCalls.push(dryRun), options.lacks instanceof Error ? Promise.reject(options.lacks) : Promise.resolve(options.lacks ?? [])),
+  };
 
   const db: Db = {
     query: (text, params) => real.query(text, params),
@@ -103,7 +119,7 @@ async function harness(options: Options = {}) {
   const lock: InstanceLock = { release: async () => { events.push('release'); } };
 
   const h = {
-    db, events, timers, inputs, fetched, listedSince, logged,
+    db, events, order, lacksCalls, timers, inputs, fetched, listedSince, logged, writes,
     port: 0,
     /** What the clock reads; a test may move it. */
     now: options.now ?? at(0),
@@ -112,9 +128,10 @@ async function harness(options: Options = {}) {
     beforeTransaction: undefined as (() => Promise<void>) | undefined,
     releaseReview: () => { releaseReview(); },
     reviewed: () => reviewed,
+    published: () => published,
     start: async () => {
-      const service = await startService(config, {
-      db,
+      const service = await startService(options.dryRun === false ? { ...config, dryRun: false } : config, {
+      db, appInfo,
       reader: { read: () => ({ ok: true as const, delivery: delivered, name: current.kind, action: current.kind === 'pull_request' ? current.action : null, event: current }) },
       clock: () => new Date(h.now),
       log: (e) => { logged.push(e); if (options.logThrows === true) throw new Error('logger down'); },
@@ -140,6 +157,7 @@ async function harness(options: Options = {}) {
       hooks: {
         listSince: async (since) => {
           listedSince.push(since);
+          order.push('listing');
           if (h.beforeListing !== undefined) await h.beforeListing();
           const next = listings.shift() ?? { deliveries: [], complete: true };
           if (next instanceof Error) throw next;
@@ -147,8 +165,19 @@ async function harness(options: Options = {}) {
         },
         redeliver: () => Promise.resolve(),
       },
+      writer: {
+        publishReview: async (_ref, _installation, draft) => { writes.push(['publishReview', draft.commit]); publishCalled(); return { id: '501' }; },
+        listOwnReviews: async () => { writes.push(['listOwnReviews']); return []; },
+        listReviewComments: async () => { writes.push(['listReviewComments']); return []; },
+        react: async () => { writes.push(['react']); },
+        comment: async () => { writes.push(['comment']); },
+      },
       fetch: (async (url: string | URL | Request) => {
         fetched.push(String(url));
+        if (String(url).endsWith('/key')) {
+          order.push('key');
+          if (options.keyGate !== undefined) await options.keyGate;
+        }
         return new Response('{}', { status: String(url).endsWith('/key') ? options.keyStatus ?? 200 : 200 });
       }) as typeof fetch,
       sleep: () => Promise.resolve(),
@@ -188,7 +217,7 @@ async function harness(options: Options = {}) {
 }
 
 /** The log entries of a stop, without those every start writes. */
-const ofStop = (logged: Array<Record<string, unknown>>) => logged.filter((e) => e.event !== 'recovery' && e.event !== 'model_check');
+const ofStop = (logged: Array<Record<string, unknown>>) => logged.filter((e) => e.event !== 'recovery' && e.event !== 'model_check' && e.event !== 'app_check');
 
 test('start takes the lock, then migrates and recovers, then listens', async () => {
   const h = await harness();
@@ -346,6 +375,69 @@ test('a stop that comes while failed deliveries are being asked for starts no be
   await stopping;
   await service.settled;
   assert.deepEqual([await readHeartbeat(h.db), h.timers.some((t) => t.ms === BEAT_MS)], [at(0), false]);
+});
+
+test('out of dry run, a review is posted through the writer the service was given; in dry run that writer is never reached', async () => {
+  const out = await harness({ dryRun: false });
+  const service = await out.start();
+  await service.settled;
+  await out.webhook(pr('opened'), 'd1');
+  const gave = await Promise.race([out.published().then(() => 'posted'), new Promise<string>((done) => { setTimeout(() => { done('no post within 5 seconds'); }, 5_000).unref(); })]);
+  assert.equal(gave, 'posted');
+  assert.equal(out.writes.some((w) => w[0] === 'publishReview'), true);
+  const dry = await harness();
+  await (await dry.start()).settled;
+  await dry.webhook(pr('opened'), 'd1');
+  await dry.reviewed();
+  await dry.flush();
+  assert.deepEqual(dry.writes, []);
+});
+test('at start the service says what the app lacks, once for each thing, and keeps running', async () => {
+  const h = await harness({ dryRun: false, lacks: [{ feature: 'publishing', missing: 'pull_requests:write' }, { feature: 'commands', missing: 'issues:write' }] });
+  const service = await h.start();
+  await service.settled;
+  assert.deepEqual(h.logged.filter((e) => e.event === 'feature_off'), [
+    { event: 'feature_off', feature: 'publishing', missing: 'pull_requests:write' },
+    { event: 'feature_off', feature: 'commands', missing: 'issues:write' },
+  ]);
+  assert.deepEqual(h.logged.filter((e) => e.event === 'alert' && e.code === 'feature_off'), [
+    { event: 'alert', code: 'feature_off', feature: 'publishing', missing: 'pull_requests:write' },
+    { event: 'alert', code: 'feature_off', feature: 'commands', missing: 'issues:write' },
+  ]);
+  assert.deepEqual(h.lacksCalls, [false]);
+  assert.deepEqual(await h.webhook(pr('opened'), 'd1'), { status: 202, body: 'accepted' });
+});
+test('the app check comes after the key check and before the redelivery', async () => {
+  const h = await harness({ now: at(600) });
+  await migrate(h.db, loadMigrations(MIGRATIONS_DIR));
+  await beat(h.db, at(0));
+  await (await h.start()).settled;
+  assert.deepEqual(h.order, ['key', 'lacks', 'listing']);
+});
+test('in dry run the service asks what the app lacks for dry run', async () => {
+  const h = await harness();
+  await (await h.start()).settled;
+  assert.deepEqual(h.lacksCalls, [true]);
+});
+test('a stop that comes while the key check is pending ends the start: the app is not asked and nothing is raised', async () => {
+  let release!: () => void;
+  const gate = new Promise<void>((done) => { release = done; });
+  const h = await harness({ keyGate: gate, lacks: [{ feature: 'publishing', missing: 'pull_requests:write' }] });
+  const service = await h.start();
+  await h.flush();
+  const stopping = service.stop();
+  release();
+  await stopping;
+  await service.settled;
+  assert.deepEqual([h.lacksCalls, h.logged.filter((e) => e.event === 'app_check' || e.event === 'feature_off')], [[], []]);
+});
+test('an app that lacks nothing is logged as such, and a check that cannot be made does not stop the start', async () => {
+  const ok = await harness();
+  await (await ok.start()).settled;
+  assert.deepEqual(ok.logged.filter((e) => e.event === 'app_check'), [{ event: 'app_check', missing: 0 }]);
+  const down = await harness({ lacks: new Error('github_network') });
+  await (await down.start()).settled;
+  assert.equal(down.logged.some((e) => e.event === 'start_step_failed' && e.step === 'app_check' && e.reason === 'github_network'), true);
 });
 
 // Plan 3's tests of the start and the stop, on the new harness.

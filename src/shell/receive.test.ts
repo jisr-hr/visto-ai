@@ -179,7 +179,7 @@ test('a comment is stored and its text reaches no log', async () => {
       at: '2026-03-01T10:10:00.000Z', body: 'secret-looking-text',
     };
     const logs: Record<string, unknown>[] = [];
-    const answer = await run(db, read('d-1', { kind: 'general_comment', ref, comment }, 'issue_comment', 'created'), logs);
+    const answer = await run(db, read('d-1', { kind: 'general_comment', ref, installation: null, comment }, 'issue_comment', 'created'), logs);
     assert.deepEqual(answer, { status: 202, body: 'accepted' });
     assert.equal((await listActivity(db, ref))[0]?.body, 'secret-looking-text');
     assert.ok(!JSON.stringify(logs).includes('secret-looking-text'));

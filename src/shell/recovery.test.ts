@@ -8,7 +8,8 @@ import { recoverJobs } from './recovery.ts';
 const REF = { service: 'github', owner: 'acme', repo: 'shop', number: 7 } as const;
 const at = (seconds: number): string => new Date(Date.parse('2026-03-01T10:00:00.000Z') + seconds * 1000).toISOString();
 
-const job = (over = {}) => ({ ref: REF, reason: 'opened', headSha: 'h1', runAt: at(0), now: at(0), delivery: 'd1', replace: true, ...over });
+const job = (over = {}) => ({ ref: REF, reason: 'opened', headSha: 'h1', runAt: at(0), now: at(0), delivery: 'd1', replace: true,
+  trigger: 'automatic' as const, requestedBy: null, commentId: null, association: null, installation: null, ...over });
 
 let db: Db;
 beforeEach(async () => { db = await testDb(); });

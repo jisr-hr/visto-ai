@@ -114,7 +114,7 @@ test('an inline comment by a bot is ignored', () => {
 });
 
 test('a general comment by a person is stored with its body, association and time', () => {
-  assert.deepEqual(captureOf({ kind: 'general_comment', ref, comment: general() }, delivery, receivedAt), {
+  assert.deepEqual(captureOf({ kind: 'general_comment', ref, installation: null, comment: general() }, delivery, receivedAt), {
     outcome: 'handled', pullRequest: null,
     activity: base({
       kind: 'general_comment', sourceId: 'g-1', association: 'owner', body: 'Thanks for this.',
@@ -124,7 +124,7 @@ test('a general comment by a person is stored with its body, association and tim
 });
 
 test('a general comment by a bot is ignored', () => {
-  assert.deepEqual(captureOf({ kind: 'general_comment', ref, comment: general({ authorIsBot: true }) }, delivery, receivedAt),
+  assert.deepEqual(captureOf({ kind: 'general_comment', ref, installation: null, comment: general({ authorIsBot: true }) }, delivery, receivedAt),
     { outcome: 'ignored', reason: 'bot_author' });
 });
 

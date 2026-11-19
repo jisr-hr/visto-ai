@@ -317,6 +317,7 @@ test('serviceConfig names each missing block and returns a complete config', () 
 
 test('the example file has no service blocks as shipped, and loads with them switched on', () => {
   const shipped = parseConfig(example(), exampleEnv);
+  assert.equal(shipped.dryRun, true);
   assert.equal(shipped.app, null);
   assert.equal(shipped.database, null);
   assert.deepEqual(shipped.server, { port: 8080 });
@@ -357,7 +358,7 @@ test('an app block without an id or a key is refused', () => {
 });
 test('what this plan adds has these defaults', () => {
   const c = parseConfig('model: { apiKey: { env: MODEL_KEY }, model: m }', ENV);
-  assert.equal(c.dryRun, false);
+  assert.equal(c.dryRun, true);
   assert.equal(c.alerts, null);
   assert.deepEqual(c.limits, { inputTokensPerCall: 200000, batchesPerReview: 6, spendPerDay: 50, queueConcurrency: 2 });
   assert.deepEqual(c.repositories.defaults.ignoredAuthors, ['dependabot[bot]']);
@@ -374,11 +375,19 @@ test('the queue concurrency is a whole number from 1 to 20, and the daily limit 
     assert.throws(() => parseConfig(`${SERVICE_YAML}limits: ${limits}\n`, ENV), ConfigError);
   }
 });
-test('serviceConfig refuses a config that is not in dry run', () => {
-  const live = parseConfig(SERVICE_YAML.replace('dryRun: true', 'dryRun: false'), ENV);
-  assert.throws(() => serviceConfig(live), (e: unknown) =>
-    e instanceof ConfigError && e.issues.length === 1 && e.issues[0] === 'dryRun: must be true: this version cannot publish');
+test('a config with no dryRun key is in dry run, and only dryRun: false leaves it', () => {
+  const none = SERVICE_YAML.replace('dryRun: true\n', '');
+  assert.equal(serviceConfig(parseConfig(none, ENV)).dryRun, true);
+  assert.equal(serviceConfig(parseConfig(none + 'dryRun: false\n', ENV)).dryRun, false);
+  assert.throws(() => parseConfig(none + 'dryRun: no\n', ENV), ConfigError);
+});
+test('serviceConfig accepts a config in dry run and one out of it, and still names a missing block', () => {
   assert.equal(serviceConfig(parseConfig(SERVICE_YAML, ENV)).dryRun, true);
+  assert.equal(serviceConfig(parseConfig(SERVICE_YAML.replace('dryRun: true', 'dryRun: false'), ENV)).dryRun, false);
+  assert.throws(
+    () => serviceConfig(parseConfig('model: { apiKey: { env: MODEL_KEY }, model: m }\ndryRun: false\n', ENV)),
+    (e: unknown) => e instanceof ConfigError && JSON.stringify(e.issues) === JSON.stringify(['app: required to run the service', 'database: required to run the service']),
+  );
 });
 test('repoSettingsFor applies an override key by key, and repoConfigFor still returns the two keys the engine reads', () => {
   const c = parseConfig(`${SERVICE_YAML}repositories:\n  overrides:\n    Acme/Shop: { baseBranches: [main], ignoredAuthors: [] }\n`, ENV);

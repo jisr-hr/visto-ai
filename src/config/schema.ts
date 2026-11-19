@@ -96,7 +96,7 @@ export const configSchema = z
     app: app.optional(),
     database: database.optional(),
     server: server.prefault({}),
-    dryRun: z.boolean().default(false),
+    dryRun: z.boolean().default(true),
     alerts: alerts.optional(),
     limits: limits.prefault({}),
     repositories: repositories.prefault({}),

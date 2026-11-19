@@ -63,6 +63,7 @@ test('testDb resolves with the ledger in place', async () => {
   const names = (await db.query<{ name: string }>('select name from visto_ai.schema_migrations')).map((r) => r.name);
   assert.ok(names.includes('0001_receiving'));
   assert.ok(names.includes('0002_jobs'));
+  assert.ok(names.includes('0003_publishing'));
   await db.close();
 });
 test('a migration switches the statement timeout off for itself', async () => {

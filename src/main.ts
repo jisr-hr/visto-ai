@@ -10,9 +10,11 @@ import { review } from './engine/review.ts';
 import { createJevScorer } from './engine/scorer/jev.ts';
 import { createGithubAccess } from './forge/github/access.ts';
 import { createAppAuth } from './forge/github/app-auth.ts';
+import { createAppInfo } from './forge/github/app-info.ts';
 import { createGithubHookDeliveries } from './forge/github/hook-deliveries.ts';
 import { githubLineUrl } from './forge/github/links.ts';
 import { createGithubWebhookReader } from './forge/github/webhook.ts';
+import { createGithubWriter } from './forge/github/writer.ts';
 import { startService } from './service.ts';
 import type { Listening } from './service.ts';
 import type { RequestLike, ResponseLike } from './shell/http.ts';
@@ -117,6 +119,7 @@ export async function main(argv: string[], env: Record<string, string | undefine
       const sleep = (ms: number): Promise<void> => new Promise((done) => { setTimeout(done, ms); });
       // A key that cannot be read throws here and fails the start.
       const auth = createAppAuth({ appId: config.app.id, privateKey: config.app.privateKey, fetch, clock });
+      const info = createAppInfo({ auth, fetch });
       const engine = {
         model: createModelClient(config.model, { fetch, sleep }),
         contract: readFileSync(join(import.meta.dirname, '..', 'contract', contractFile(config)), 'utf8'),
@@ -136,6 +139,8 @@ export async function main(argv: string[], env: Record<string, string | undefine
         }),
         forge: createGithubAccess({ auth, fetch }),
         hooks: createGithubHookDeliveries({ auth, fetch }),
+        appInfo: info,
+        writer: createGithubWriter({ auth, info, fetch }),
         fetch,
         sleep,
         every: (ms, work) => {

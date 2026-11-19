@@ -8,7 +8,7 @@ const T = '2026-03-01T10:00:00Z';
 const repository = { name: 'shop', owner: { login: 'acme' } };
 const user = { login: 'octo-dev', type: 'User' };
 
-function payloadOf(kind: SampleKind, action: string, head: string): { event: string; payload: unknown } {
+function payloadOf(kind: SampleKind, action: string, head: string, body: string): { event: string; payload: unknown } {
   switch (kind) {
     case 'pull_request':
       return {
@@ -33,8 +33,8 @@ function payloadOf(kind: SampleKind, action: string, head: string): { event: str
       return {
         event: 'issue_comment',
         payload: {
-          action: 'created', repository, issue: { number: 7, pull_request: {} },
-          comment: { id: 31, user, author_association: 'OWNER', created_at: T, body: 'Thanks for the change.' },
+          action: 'created', repository, installation: { id: 99 }, issue: { number: 7, pull_request: {} },
+          comment: { id: 31, user, author_association: 'OWNER', created_at: T, body },
         },
       };
   }
@@ -42,9 +42,9 @@ function payloadOf(kind: SampleKind, action: string, head: string): { event: str
 
 /** An invented, signed webhook: the headers to send and the body. */
 export function sampleWebhook(
-  kind: SampleKind, secret: string, delivery: string, options: { action?: 'opened' | 'synchronize'; head?: string } = {},
+  kind: SampleKind, secret: string, delivery: string, options: { action?: 'opened' | 'synchronize'; head?: string; body?: string } = {},
 ): { headers: Record<string, string>; body: string } {
-  const { event, payload } = payloadOf(kind, options.action ?? 'opened', options.head ?? 'abc123');
+  const { event, payload } = payloadOf(kind, options.action ?? 'opened', options.head ?? 'abc123', options.body ?? 'Thanks for the change.');
   const body = JSON.stringify(payload);
   return {
     headers: {
@@ -68,13 +68,13 @@ export function isLocalUrl(url: string): boolean {
   return u.protocol === 'http:' && u.username === '' && u.password === '' && ['localhost', '127.0.0.1', '[::1]'].includes(u.hostname);
 }
 
-async function run(argv: string[], env: Record<string, string | undefined>): Promise<number> {
-  const usage = 'usage: send-sample --url <local url> --secret-env <variable> [--kind pull_request|review|comment] [--delivery <id>] [--action opened|synchronize] [--head <sha>]';
+export async function run(argv: string[], env: Record<string, string | undefined>): Promise<number> {
+  const usage = 'usage: send-sample --url <local url> --secret-env <variable> [--kind pull_request|review|comment] [--delivery <id>] [--action opened|synchronize] [--head <sha>] [--body <text>]';
   let values;
   try {
     values = parseArgs({
       args: argv,
-      options: { url: { type: 'string' }, 'secret-env': { type: 'string' }, kind: { type: 'string' }, delivery: { type: 'string' }, action: { type: 'string' }, head: { type: 'string' } },
+      options: { url: { type: 'string' }, 'secret-env': { type: 'string' }, kind: { type: 'string' }, delivery: { type: 'string' }, action: { type: 'string' }, head: { type: 'string' }, body: { type: 'string' } },
       strict: true,
     }).values;
   } catch {
@@ -83,7 +83,7 @@ async function run(argv: string[], env: Record<string, string | undefined>): Pro
   }
   const kind = values.kind ?? 'pull_request';
   const action = values.action ?? 'opened';
-  if (!['opened', 'synchronize'].includes(action) || (kind !== 'pull_request' && (values.action !== undefined || values.head !== undefined))) {
+  if (!['opened', 'synchronize'].includes(action) || (kind !== 'pull_request' && (values.action !== undefined || values.head !== undefined)) || (kind !== 'comment' && values.body !== undefined)) {
     console.log(usage);
     return 2;
   }
@@ -102,7 +102,7 @@ async function run(argv: string[], env: Record<string, string | undefined>): Pro
     return 2;
   }
   const delivery = values.delivery ?? `sample-${Date.now()}`;
-  const { headers, body } = sampleWebhook(kind as SampleKind, secret, delivery, { action: action as 'opened' | 'synchronize', ...(values.head === undefined ? {} : { head: values.head }) });
+  const { headers, body } = sampleWebhook(kind as SampleKind, secret, delivery, { action: action as 'opened' | 'synchronize', ...(values.head === undefined ? {} : { head: values.head }), ...(values.body === undefined ? {} : { body: values.body }) });
   try {
     const res = await fetch(values.url, { method: 'POST', headers, body, redirect: 'manual' });
     console.log(`${res.status} ${await res.text()}`);

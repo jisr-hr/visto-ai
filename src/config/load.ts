@@ -28,7 +28,7 @@ export interface DeploymentConfig {
 export interface RepoSettings extends RepoConfig { ignoredAuthors: string[]; baseBranches: string[] }
 
 export type ServiceConfig = DeploymentConfig & {
-  app: { id: string; privateKey: string; webhookSecret: string }; database: { url: string }; dryRun: true;
+  app: { id: string; privateKey: string; webhookSecret: string }; database: { url: string };
 };
 
 export class ConfigError extends Error {
@@ -184,11 +184,10 @@ export function loadConfig(path: string, env: Record<string, string | undefined>
   return parseConfig(readFileSync(path, 'utf8'), env);
 }
 
-/** The config a running service needs. Throws a ConfigError naming each missing block, and one when dryRun is not true. */
+/** The config a running service needs. Throws a ConfigError naming each missing block. */
 export function serviceConfig(config: DeploymentConfig): ServiceConfig {
   const missing = [config.app === null ? 'app' : null, config.database === null ? 'database' : null].filter((n) => n !== null);
   const issues = missing.map((n) => `${n}: required to run the service`);
-  if (!config.dryRun) issues.push('dryRun: must be true: this version cannot publish');
   if (issues.length > 0) throw new ConfigError(issues);
   return config as ServiceConfig;
 }

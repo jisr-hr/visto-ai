@@ -17,6 +17,8 @@ type Meta = {
   requestedBy: string | null;
   // Builds a link to a span of a file; null when the service has no such link.
   lineUrl: ((file: FileRef, span: Span) => string) | null;
+  // true: each finding is an inline comment; false: its whole text is written in the body.
+  inline: boolean;
 };
 
 const WHOLE_FILE_TEXT: Record<Exclude<FileLevelSource, 'whole_file' | 'team_file_invalid'>, string> = {
@@ -37,7 +39,7 @@ function safeSlice(text: string, limit: number): string {
 }
 
 function firstLine(body: string): string {
-  const line = body.split(/\r?\n/).map((l) => l.trim()).find((l) => l !== '') ?? '';
+  const line = body.split(/\r\n|\r|\n/).map((l) => l.trim()).find((l) => l !== '') ?? '';
   return line.length > FIRST_LINE_CHARS ? `${safeSlice(line, FIRST_LINE_CHARS - 1)}\u2026` : line;
 }
 
@@ -50,35 +52,142 @@ function codeSpan(raw: string): string {
   return `${fence} ${text} ${fence}`;
 }
 
-// An HTML comment opener could hide the rest of the text: show it instead.
-function noComment(text: string): string {
-  return text.replaceAll('<!--', '&lt;!--');
-}
+// What may stand before a heading's # on its line: at most three spaces, then any mix of quote marks, bullets and ordered marks, with spaces and tabs between.
+const BEFORE_HASH = /^ {0,3}(?:(?:>|[-*+][ \t]|[0-9]{1,9}[.)][ \t])[ \t]*)*#/;
+// A setext underline, at the first column or after quote marks.
+const UNDERLINE = /^ {0,3}(?:>[ \t]*)*(=+|-+)[ \t]*$/;
 
-// A model-written line must not become a heading of the review body.
+// A model-written line must not become a heading of the review body: not with a #, and not as a setext underline, at the top level, in a quote or in a list item. A fence is left as it is.
 function noHeading(text: string): string {
-  return text.replace(/^( {0,3})#/gm, '$1\\#');
+  let open: Fence | null = null;
+  let before = ''; // the line above, or '' when it is blank or closed a fence
+  return text.split('\n').map((line) => {
+    const prev = before;
+    before = line;
+    if (open !== null) {
+      if (fenceCloses(line, open)) {
+        open = null;
+        before = '';
+      }
+      return line;
+    }
+    open = fenceOpens(line);
+    if (open !== null) return line;
+    if (BEFORE_HASH.test(line)) return line.replace(BEFORE_HASH, (m) => `${m.slice(0, -1)}\\#`);
+    if (!BLANK.test(prev) && UNDERLINE.test(line)) return line.replace(/[=-]/, '\\$&');
+    return line;
+  }).join('\n');
 }
 
-function bullets(items: string[]): string[] {
-  const shown = items.slice(0, MAX_LISTED);
+const ZW = '\u200b';
+
+const STARTS = new RegExp('@(?=[A-Za-z0-9])|<(?=[A-Za-z/!?])|&(?=(?:[A-Za-z][A-Za-z0-9]{0,31}|#[0-9]{1,7}|#[xX][0-9A-Fa-f]{1,6});)', 'g');
+
+// A zero-width space after what starts a mention, raw HTML or a character reference. Nothing is rewritten, so the text reads the same inside an inline span as outside one.
+// Decided once for each run without white space: in an address, after its ://, an @ is written %40; a < before http:// or https:// is left, as it cannot start raw HTML.
+function inertProse(line: string): string {
+  return line.replace(/\S+/g, (run) => {
+    const scheme = run.indexOf('://');
+    return run.replace(STARTS, (m, at: number) => {
+      if (m === '@') {
+        if (/[A-Za-z0-9]/.test(run[at - 1] ?? '')) return m;
+        return scheme >= 0 && at > scheme ? '%40' : `${m}${ZW}`;
+      }
+      if (m === '<' && (run.startsWith('http://', at + 1) || run.startsWith('https://', at + 1))) return m;
+      return `${m}${ZW}`;
+    });
+  });
+}
+
+type Fence = { indent: string; char: string; size: number };
+
+// A line that opens with three or more backticks or tildes, indented by at most three spaces; for backticks the rest of the line holds none.
+// The rest of the line is any character: U+2028 and U+2029 do not end a line.
+function fenceOpens(line: string): Fence | null {
+  const m = /^( *)(`{3,}|~{3,})([^]*)$/.exec(line);
+  if (m === null || m[1]!.length > 3 || (m[2]![0] === '`' && m[3]!.includes('`'))) return null;
+  return { indent: m[1]!, char: m[2]![0]!, size: m[2]!.length };
+}
+
+// The same character at the same or a greater length, then nothing but spaces and tabs.
+function fenceCloses(line: string, open: Fence): boolean {
+  const m = /^ {0,3}(`{3,}|~{3,})[ \t]*$/.exec(line);
+  return m !== null && m[1]![0] === open.char && m[1]!.length >= open.size;
+}
+
+const fenceLine = (open: Fence): string => `${open.indent}${open.char.repeat(open.size)}`;
+
+// A line is blank when it holds nothing but spaces and tabs.
+const BLANK = /^[ \t]*$/;
+
+// Leading tabs become spaces, each tab reaching the next multiple of four columns: under a bullet a tab would reach another column.
+function untab(line: string): string {
+  const lead = /^[ \t]*/.exec(line)![0];
+  let col = 0;
+  for (const c of lead) col = c === '\t' ? col + 4 - (col % 4) : col + 1;
+  return ' '.repeat(col) + line.slice(lead.length);
+}
+
+// Model-written text made inert line by line; `fences` says whether a fence can open in it.
+function inertText(text: string, fences: boolean): string {
+  let open: Fence | null = null;
+  const lines: string[] = [];
+  for (const raw of text.replace(/\r\n?/g, '\n').split('\n')) {
+    // Inside a fence only a line that could close it is touched.
+    const line: string = open === null || new RegExp(`^[ \\t]*\\${open.char}{${open.size},}[ \\t]*$`).test(raw) ? untab(raw) : raw;
+    if (open !== null) {
+      const closes = fenceCloses(line, open);
+      if (closes) open = null;
+      lines.push(closes ? line.trimStart() : line);
+      continue;
+    }
+    open = fences ? fenceOpens(line) : null;
+    if (open === null) lines.push(inertProse(line));
+    else {
+      open = { ...open, indent: '' };
+      lines.push(line.trimStart());
+    }
+  }
+  return open === null ? lines.join('\n') : `${lines.join('\n')}\n${fenceLine(open)}`;
+}
+
+// Text that follows the service's own words on one line: no fence can open in it, and nothing is appended.
+const inertInline = (text: string): string => inertText(text, false);
+
+/** Text the model wrote, made safe to post. Outside a fence a zero-width space follows every `@` that starts a mention, every `<` that starts raw HTML and every `&` that starts a character reference. Fence lines are moved to the first column, and a fence left open is closed. */
+export function inert(text: string): string {
+  return inertText(text, true);
+}
+
+function bullets(items: string[], cap: boolean = true): string[] {
+  const shown = cap ? items.slice(0, MAX_LISTED) : items;
   return items.length > shown.length ? [...shown, `- \u2026and ${items.length - shown.length} more.`] : shown;
 }
 
 const located = (f: Finding | RawFinding): string =>
-  `- **[${f.severity}]** ${codeSpan(`${f.path}:${f.line}`)} \u2014 ${firstLine(f.body)}`;
+  `- **\\[${f.severity}]** ${codeSpan(`${f.path}:${f.line}`)} \u2014 ${inertInline(firstLine(f.body))}`;
 const unplacedLine = (f: UnplacedFinding): string =>
-  `- ${codeSpan(`${f.path}:${f.line}`)}${f.side === 'LEFT' ? ' (old file)' : ''} \u2014 ${firstLine(f.body)}`;
+  `- ${codeSpan(`${f.path}:${f.line}`)}${f.side === 'LEFT' ? ' (old file)' : ''} \u2014 ${inertInline(firstLine(f.body))}`;
+// A bullet with the whole text of its finding under it, as a continuation of the item.
+const locatedWhole = (f: Finding): string => {
+  const note = movedNote(f);
+  const text = [note, noHeading(inert(f.body))].filter((t) => t !== '').join('\n\n').split('\n').map((l) => (l === '' ? l : `  ${l}`)).join('\n');
+  return `${located(f)}\n\n${text}`;
+};
 const notReviewedLine = (n: NotReviewed): string => `- ${codeSpan(n.path)}: ${n.reason}`;
 
+const movedNote = (f: Finding): string =>
+  f.requestedLine === null ? '' : `_(Refers to ${f.side === 'LEFT' ? 'old line' : 'line'} ${f.requestedLine}, just outside the diff.)_`;
+
+// The service's own first line, an empty line, then the model's text.
 function commentBody(f: Finding): string {
-  const moved = f.requestedLine === null ? '' : `_(Refers to ${f.side === 'LEFT' ? 'old line' : 'line'} ${f.requestedLine}, just outside the diff.)_ `;
-  return `**[${f.severity}]** ${moved}${noComment(f.body)}`;
+  const note = movedNote(f);
+  return `**\\[${f.severity}]**${note === '' ? '' : ` ${note}`}\n\n${inert(f.body)}`;
 }
 
 // The part after the score: the category in a code span, then the dash and the reason when there is one.
 function scoreTail(entry: ScoreEntry): string {
-  const reason = firstLine(entry.reason);
+  const reason = inertInline(firstLine(entry.reason));
   return `${codeSpan(entry.category)}${reason === '' ? '' : ` \u2014 ${reason}`}`;
 }
 
@@ -148,7 +257,18 @@ function overallLine(result: ReviewResult): string {
   return parts.join(' ');
 }
 
+const NUL = String.fromCharCode(0);
+
+// Text that storing leaves as it is: every NUL becomes U+FFFD, as CommonMark reads it, and a lone surrogate becomes U+FFFD too. Lengths do not change.
+const asRead = (text: string): string => text.replaceAll(NUL, '\ufffd').toWellFormed();
+
+/** The review's body and inline comments, as they are posted and as they are stored: storing them changes nothing. */
 export function renderReview(result: ReviewResult, meta: Meta): { body: string; comments: InlineComment[] } {
+  const { body, comments } = rendered(result, meta);
+  return { body: asRead(body), comments: comments.map((c) => ({ ...c, body: asRead(c.body) })) };
+}
+
+function rendered(result: ReviewResult, meta: Meta): { body: string; comments: InlineComment[] } {
   const prefix: string[] = [];
   if (meta.trigger === 'manual') {
     prefix.push(meta.requestedBy === null ? '**Full review** requested.' : `**Full review** requested by @${meta.requestedBy}.`);
@@ -161,9 +281,12 @@ export function renderReview(result: ReviewResult, meta: Meta): { body: string; 
   const head: string[] = [...prefix];
   const tail: string[] = [];
   const overview = result.overview.trim();
-  if (overview !== '') head.push(`## Summary\n\n${noHeading(overview)}`);
+  if (overview !== '') head.push(`## Summary\n\n${noHeading(inert(overview))}`);
   head.push(humanReviewSection(result, meta.lineUrl));
-  if (result.findings.length > 0) head.push(['## Findings', '', ...bullets(result.findings.map(located))].join('\n'));
+  if (result.findings.length > 0) {
+    const items = meta.inline ? bullets(result.findings.map(located)) : bullets(result.findings.map(locatedWhole), false);
+    head.push(['## Findings', '', ...items].join('\n'));
+  }
   const rest = result.unplaced.length > 0 ? tail : head;
   if (result.unplaced.length > 0) {
     tail.push([UNPLACED_HEADING, '', UNPLACED_NOTE, '', ...bullets(result.unplaced.map(unplacedLine))].join('\n'));
@@ -173,25 +296,20 @@ export function renderReview(result: ReviewResult, meta: Meta): { body: string; 
     rest.push(['## Coverage', '', 'These files were not reviewed:', '', ...bullets(result.coverage.notReviewed.map(notReviewedLine))].join('\n'));
   }
   tail.push(`${OVERALL_HEADING}\n\n${overallLine(result)}`);
-  const comments = result.findings.map((f) => ({ path: f.path, side: f.side, line: f.line, body: commentBody(f) }));
-  return { body: fitBody(noComment(head.join('\n\n')), noComment(tail.join('\n\n'))), comments };
+  const comments = !meta.inline ? [] : result.findings.map((f) => ({ path: f.path, side: f.side, line: f.line, body: commentBody(f) }));
+  return { body: fitBody(head.join('\n\n'), tail.join('\n\n')), comments };
 }
 
-const cutMarker = (removed: number): string => `_[\u2026 ${removed} characters of the review were cut to fit GitHub's limit]_`;
+const cutMarker = (removed: number): string => `_\\[\u2026 ${removed} characters of the review were cut to fit GitHub's limit]_`;
 
 // Close a code fence that a cut left open, at the opening fence's own indent.
 function closeOpenFence(text: string): string {
-  let open: { indent: string; char: string; size: number } | null = null;
+  let open: Fence | null = null;
   for (const line of text.split('\n')) {
-    if (open === null) {
-      const m = /^( *)(`{3,}|~{3,})/.exec(line);
-      if (m) open = { indent: m[1]!, char: m[2]![0]!, size: m[2]!.length };
-    } else {
-      const m = /^ *(`{3,}|~{3,}) *$/.exec(line);
-      if (m && m[1]![0] === open.char && m[1]!.length >= open.size) open = null;
-    }
+    if (open === null) open = fenceOpens(line);
+    else if (fenceCloses(line, open)) open = null;
   }
-  return open === null ? text : `${text}\n${open.indent}${open.char.repeat(open.size)}`;
+  return open === null ? text : `${text}\n${fenceLine(open)}`;
 }
 
 // The longest prefix that fits and ends at a line break, or a plain cut when no line break fits.

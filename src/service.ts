@@ -5,8 +5,10 @@ import type { Db, InstanceLock } from './db/types.ts';
 import { repoSettingsFor } from './config/load.ts';
 import type { ServiceConfig } from './config/load.ts';
 import type { ReviewDeps, ReviewInput, ReviewResult } from './engine/types.ts';
-import type { ForgeAccess, HookDeliveries, Source, WebhookReader } from './forge/types.ts';
+import type { AppIdentity, ForgeAccess, ForgeWriter, HookDeliveries, Source, WebhookReader } from './forge/types.ts';
 import { ALERT_TIMEOUT_MS, createAlerts } from './shell/alerts.ts';
+import { isShortCode } from './shell/codes.ts';
+import { dryWriter } from './shell/dry-writer.ts';
 import { createListener } from './shell/http.ts';
 import type { RequestLike, ResponseLike } from './shell/http.ts';
 import { checkModelKey, createModelHealth } from './shell/model-health.ts';
@@ -26,6 +28,10 @@ export interface ServiceDeps {
   /** null when another instance holds the lock. */
   takeLock: () => Promise<InstanceLock | null>;
   forge: ForgeAccess; hooks: HookDeliveries;
+  /** What writes to the git service. In dry run the review job is given a writer that refuses every call instead. */
+  writer: ForgeWriter;
+  /** What the app is allowed to do; asked once at start. */
+  appInfo: AppIdentity;
   fetch: typeof fetch;
   sleep: (ms: number) => Promise<void>;
   /** A repeating timer. Returns its cancel. `work` never rejects; what it returns is there for a test to wait on. */
@@ -49,6 +55,12 @@ function why(error: unknown): { error: string; code: string | null } {
   return { error: typeof o.name === 'string' ? o.name : 'unknown', code: typeof o.code === 'string' ? o.code : null };
 }
 
+/** The error's message when it is a short code, else null. */
+function reasonOf(error: unknown): string | null {
+  const message = typeof error === 'object' && error !== null ? (error as { message?: unknown }).message : undefined;
+  return typeof message === 'string' && isShortCode(message) ? message : null;
+}
+
 /** 'done' when `work` settles first, 'timeout' when `ms` pass first. Rejects when `work` does. */
 async function within(ms: number, work: Promise<unknown>): Promise<'done' | 'timeout'> {
   let timer: NodeJS.Timeout | undefined;
@@ -62,7 +74,7 @@ async function within(ms: number, work: Promise<unknown>): Promise<'done' | 'tim
 
 /**
  * Takes the lock, migrates, recovers, then listens; the work that follows listening is not waited for.
- * `settled` resolves when the work that follows listening has had its first try: the key check, the redelivery attempt and, when that worked, the first beat.
+ * `settled` resolves when the work that follows listening has had its first try: the key check, the app check, the redelivery attempt and, when that worked, the first beat.
  * `stop` drains the runner (at most DRAIN_WAIT_MS), closes the listener and waits for requests in flight (at most STOP_WAIT_MS),
  * beats once more, waits for alerts, closes the database and releases the lock. It never rejects.
  */
@@ -86,7 +98,7 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps): Pr
       inputTokensPerCall: config.limits.inputTokensPerCall, batchesPerReview: config.limits.batchesPerReview,
       modelTimeoutSeconds: config.model.timeoutSeconds,
     },
-    dryRun: config.dryRun, engineDeps: deps.engineDeps, review: deps.review, lineUrl: deps.lineUrl, health, spend,
+    dryRun: config.dryRun, writer: config.dryRun ? dryWriter() : deps.writer, engineDeps: deps.engineDeps, review: deps.review, lineUrl: deps.lineUrl, health, spend,
   };
   const runner = createRunner({
     db, concurrency: config.limits.queueConcurrency, clock, log: say,
@@ -143,7 +155,7 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps): Pr
     try {
       await work();
     } catch (error) {
-      say({ event, step, ...why(error) });
+      say({ event, step, ...why(error), ...(event === 'start_step_failed' ? { reason: reasonOf(error) } : {}) });
     }
   }
 
@@ -155,6 +167,17 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps): Pr
     health.checked(result, clock());
     if (result !== lastCheck) say({ event: 'model_check', result });
     lastCheck = result;
+  }
+
+  async function appCheck(): Promise<void> {
+    if (ending) return;
+    const lacking = await deps.appInfo.lacks(config.dryRun);
+    if (ending) return;
+    if (lacking.length === 0) say({ event: 'app_check', missing: 0 });
+    for (const { feature, missing } of lacking) {
+      say({ event: 'feature_off', feature, missing });
+      alert('feature_off', { feature, missing });
+    }
   }
 
   let since: string | null | undefined;    // undefined until the heartbeat has been read; null on a first start
@@ -212,6 +235,7 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps): Pr
   void runner.tick();
   const settled = (async () => {
     await guarded('start_step_failed', 'key_check', keyCheck);
+    await guarded('start_step_failed', 'app_check', appCheck);
     await redeliveryThenBeat('start_step_failed');
   })();
 

@@ -15,7 +15,10 @@ export interface RunRecord {
   usage: RunUsage;
   startedAt: string; finishedAt: string;
 }
-export interface StoredRun extends RunRecord { id: number }
+export interface StoredRun extends RunRecord {
+  id: number;
+  published: boolean; reviewId: string | null; publishedAt: string | null; inlineDropped: boolean;
+}
 
 /** A finite number at or above 0, else 0: what the provider reported must not break the row or the day's sum. */
 const amount = (n: number): number => (Number.isFinite(n) && n >= 0 ? n : 0);
@@ -49,29 +52,79 @@ interface Row {
   body: string; comments: unknown; result: unknown;
   calls: number; input_tokens: number; output_tokens: number; cached_tokens: number; cost: number;
   started_at: Date; finished_at: Date;
+  published: boolean; review_id: string | null; published_at: Date | null; inline_dropped: boolean;
 }
 
-/** A pull request's runs, lowest id first. */
-export async function listRuns(db: Db, ref: PullRequestRef): Promise<StoredRun[]> {
-  const owner = storable(ref.owner).toLowerCase();
-  const repo = storable(ref.repo).toLowerCase();
-  const rows = await db.query<Row>(
-    `select id, job, trigger, mode, dry_run, head_sha, base_sha, outcome, failure_stage, failure_code,
+const COLUMNS = `id, job, trigger, mode, dry_run, head_sha, base_sha, outcome, failure_stage, failure_code,
             needs_human, highest_score, body, comments, result,
-            calls, input_tokens, output_tokens, cached_tokens, cost::float8 as cost, started_at, finished_at
-     from visto_ai.review_runs
-     where service = $1 and owner = $2 and repo = $3 and number = $4
-     order by id`,
-    [ref.service, owner, repo, ref.number]);
-  return rows.map((r) => ({
-    id: r.id, ref: { service: ref.service, owner, repo, number: ref.number }, job: r.job,
+            calls, input_tokens, output_tokens, cached_tokens, cost::float8 as cost, started_at, finished_at,
+            published, review_id, published_at, inline_dropped`;
+
+function toRun(r: Row, ref: PullRequestRef): StoredRun {
+  return {
+    id: r.id, ref, job: r.job,
     trigger: r.trigger, mode: r.mode, dryRun: r.dry_run, headSha: r.head_sha, baseSha: r.base_sha,
     outcome: r.outcome, failureStage: r.failure_stage, failureCode: r.failure_code,
     needsHuman: r.needs_human, highestScore: r.highest_score,
     body: r.body, comments: r.comments, result: r.result,
     usage: { calls: r.calls, inputTokens: r.input_tokens, outputTokens: r.output_tokens, cachedTokens: r.cached_tokens, cost: r.cost },
     startedAt: r.started_at.toISOString(), finishedAt: r.finished_at.toISOString(),
-  }));
+    published: r.published, reviewId: r.review_id, publishedAt: r.published_at?.toISOString() ?? null, inlineDropped: r.inline_dropped,
+  };
+}
+
+const lowered = (ref: PullRequestRef): PullRequestRef => ({
+  service: ref.service, owner: storable(ref.owner).toLowerCase(), repo: storable(ref.repo).toLowerCase(), number: ref.number,
+});
+
+/** A pull request's runs, lowest id first. */
+export async function listRuns(db: Db, ref: PullRequestRef): Promise<StoredRun[]> {
+  const r = lowered(ref);
+  const rows = await db.query<Row>(
+    `select ${COLUMNS}
+     from visto_ai.review_runs
+     where service = $1 and owner = $2 and repo = $3 and number = $4
+     order by id`,
+    [r.service, r.owner, r.repo, r.number]);
+  return rows.map((row) => toRun(row, r));
+}
+
+/** Fills in a run's publication, once. false when the run was already marked. */
+export async function markPublished(db: Db, runId: number, p: { reviewId: string; publishedAt: string; body: string; inlineDropped: boolean }): Promise<boolean> {
+  const rows = await db.query(
+    `update visto_ai.review_runs set published = true, review_id = $2, published_at = $3::timestamptz, body = $4, inline_dropped = $5
+     where id = $1 and published = false
+     returning id`,
+    [runId, storable(p.reviewId), p.publishedAt, storable(p.body), p.inlineDropped]);
+  return rows.length === 1;
+}
+
+/** The newest run of the pull request that is not a dry run, ended ok, has a body that is not empty, is not published, has this head and base, and started at or after `since`. */
+export async function unpublishedRun(db: Db, ref: PullRequestRef, headSha: string, baseSha: string, since: string): Promise<StoredRun | null> {
+  const r = lowered(ref);
+  const rows = await db.query<Row>(
+    `select ${COLUMNS}
+     from visto_ai.review_runs
+     where service = $1 and owner = $2 and repo = $3 and number = $4
+       and dry_run = false and outcome = 'ok' and body <> '' and published = false
+       and head_sha = $5 and base_sha = $6 and started_at >= $7::timestamptz
+     order by id desc
+     limit 1`,
+    [r.service, r.owner, r.repo, r.number, storable(headSha), storable(baseSha), since]);
+  return rows[0] === undefined ? null : toRun(rows[0], r);
+}
+
+/** The newest published run of the pull request. */
+export async function lastPublishedRun(db: Db, ref: PullRequestRef): Promise<StoredRun | null> {
+  const r = lowered(ref);
+  const rows = await db.query<Row>(
+    `select ${COLUMNS}
+     from visto_ai.review_runs
+     where service = $1 and owner = $2 and repo = $3 and number = $4 and published
+     order by id desc
+     limit 1`,
+    [r.service, r.owner, r.repo, r.number]);
+  return rows[0] === undefined ? null : toRun(rows[0], r);
 }
 
 /** The summed cost of the runs started at or after `since`. 0 when there are none. */
@@ -80,6 +133,18 @@ export async function spentSince(db: Db, since: string): Promise<number> {
     'select coalesce(sum(cost), 0)::float8 as spent from visto_ai.review_runs where started_at >= $1::timestamptz',
     [since]);
   return rows[0]!.spent;
+}
+
+/** Whether the pull request has a run at this head, of the same kind (dry or live), whatever its outcome; a run whose job ended dropped as superseded does not count. */
+export async function hasRun(db: Db, ref: PullRequestRef, headSha: string, dryRun: boolean): Promise<boolean> {
+  const rows = await db.query(
+    `select 1 from visto_ai.review_runs r
+     where r.service = $1 and r.owner = $2 and r.repo = $3 and r.number = $4
+       and r.head_sha = $5 and r.dry_run = $6
+       and not exists (select 1 from visto_ai.jobs j where j.id = r.job and j.status = 'dropped' and j.outcome = 'superseded')
+     limit 1`,
+    [ref.service, storable(ref.owner).toLowerCase(), storable(ref.repo).toLowerCase(), ref.number, storable(headSha), dryRun]);
+  return rows.length === 1;
 }
 
 /** Whether the pull request has a run with outcome `ok` at this head and this base, of the same kind (dry or live). */
