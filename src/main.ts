@@ -139,6 +139,7 @@ export async function main(argv: string[], env: Record<string, string | undefine
         }),
         forge: createGithubAccess({ auth, fetch }),
         hooks: createGithubHookDeliveries({ auth, fetch }),
+        appInfo: info,
         writer: createGithubWriter({ auth, info, fetch }),
         fetch,
         sleep,

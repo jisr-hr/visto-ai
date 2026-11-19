@@ -38,9 +38,10 @@ limits:
   # How many review jobs may run at once (1 to 20).
   queueConcurrency: 2
 
-# The service starts only with dryRun: true; this version cannot publish a review.
+# true: reviews are run and recorded in the database, and nothing is posted to the git service.
+# false: the first review of each pull request is posted, and /review comments are answered.
 # It is false when not written.
-dryRun: false
+dryRun: true
 
 # Optional second scorer: a decision model that scores the changed blocks in place of the review model.
 # Naming one sends the reviewed code to that provider too, and then

@@ -42,3 +42,11 @@ test('a pull request sample can carry another action and another head', () => {
   const payload = JSON.parse(body) as { action: string; pull_request: { head: { sha: string } } };
   assert.deepEqual([payload.action, payload.pull_request.head.sha], ['synchronize', 'def456']);
 });
+
+test('a comment sample can carry another body, and names an installation', () => {
+  const { headers, body } = sampleWebhook('comment', 's', 'd1', { body: '/review' });
+  const payload = JSON.parse(body) as { comment: { body: string }; installation: { id: number } };
+  assert.deepEqual([payload.comment.body, payload.installation.id], ['/review', 99]);
+  const reading = createGithubWebhookReader('s').read(headers, Buffer.from(body));
+  assert.ok(reading.ok && reading.event.kind === 'general_comment' && reading.event.comment.body ==='/review' && reading.event.installation === '99');
+});

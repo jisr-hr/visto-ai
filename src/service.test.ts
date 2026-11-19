@@ -9,7 +9,7 @@ import { recordRun } from './db/review-runs.ts';
 import type { RunRecord } from './db/review-runs.ts';
 import { beat, readHeartbeat } from './db/heartbeat.ts';
 import { serviceConfig, parseConfig } from './config/load.ts';
-import type { ForgeEvent, HookDelivery, LivePullRequest, PullRequestAction, PullRequestFacts, Source } from './forge/types.ts';
+import type { AppIdentity, FeatureOff, ForgeEvent, HookDelivery, LivePullRequest, PullRequestAction, PullRequestFacts, Source } from './forge/types.ts';
 import type { ReviewDeps, ReviewInput, ReviewResult } from './engine/types.ts';
 import { BEAT_MS, CLOSE_WAIT_MS, DRAIN_WAIT_MS, startService, STOP_WAIT_MS, TICK_MS, UPKEEP_MS } from './service.ts';
 import type { Listening } from './service.ts';
@@ -59,6 +59,10 @@ interface Options {
   migrationError?: Error; closeNever?: boolean; closeError?: Error; listenerCloseError?: Error; logThrows?: boolean;
   /** The status the model endpoint's key route answers with; 200 when not given. */
   keyStatus?: number;
+  /** What the app lacks; an Error makes the check reject. Nothing when not given. */
+  lacks?: FeatureOff[] | Error;
+  /** false to leave dry run; true when not given. */
+  dryRun?: boolean;
 }
 interface Timer { ms: number; work: () => Promise<void>; cancelled: boolean }
 
@@ -87,6 +91,12 @@ async function harness(options: Options = {}) {
   const reviewHeld = new Promise<void>((done) => { releaseReview = done; });
   let reviewCalled!: () => void;
   const reviewed = new Promise<void>((done) => { reviewCalled = done; });
+  let publishCalled!: () => void;
+  const published = new Promise<void>((done) => { publishCalled = done; });
+  const appInfo: AppIdentity = {
+    read: () => Promise.reject(new Error('not_used')),
+    lacks: () => (options.lacks instanceof Error ? Promise.reject(options.lacks) : Promise.resolve(options.lacks ?? [])),
+  };
 
   const db: Db = {
     query: (text, params) => real.query(text, params),
@@ -114,9 +124,10 @@ async function harness(options: Options = {}) {
     beforeTransaction: undefined as (() => Promise<void>) | undefined,
     releaseReview: () => { releaseReview(); },
     reviewed: () => reviewed,
+    published: () => published,
     start: async () => {
-      const service = await startService(config, {
-      db,
+      const service = await startService(options.dryRun === false ? { ...config, dryRun: false } : config, {
+      db, appInfo,
       reader: { read: () => ({ ok: true as const, delivery: delivered, name: current.kind, action: current.kind === 'pull_request' ? current.action : null, event: current }) },
       clock: () => new Date(h.now),
       log: (e) => { logged.push(e); if (options.logThrows === true) throw new Error('logger down'); },
@@ -150,7 +161,7 @@ async function harness(options: Options = {}) {
         redeliver: () => Promise.resolve(),
       },
       writer: {
-        publishReview: async (_ref, _installation, draft) => { writes.push(['publishReview', draft.commit]); return { id: '501' }; },
+        publishReview: async (_ref, _installation, draft) => { writes.push(['publishReview', draft.commit]); publishCalled(); return { id: '501' }; },
         listOwnReviews: async () => { writes.push(['listOwnReviews']); return []; },
         listReviewComments: async () => { writes.push(['listReviewComments']); return []; },
         react: async () => { writes.push(['react']); },
@@ -197,7 +208,7 @@ async function harness(options: Options = {}) {
 }
 
 /** The log entries of a stop, without those every start writes. */
-const ofStop = (logged: Array<Record<string, unknown>>) => logged.filter((e) => e.event !== 'recovery' && e.event !== 'model_check');
+const ofStop = (logged: Array<Record<string, unknown>>) => logged.filter((e) => e.event !== 'recovery' && e.event !== 'model_check' && e.event !== 'app_check');
 
 test('start takes the lock, then migrates and recovers, then listens', async () => {
   const h = await harness();
@@ -355,6 +366,40 @@ test('a stop that comes while failed deliveries are being asked for starts no be
   await stopping;
   await service.settled;
   assert.deepEqual([await readHeartbeat(h.db), h.timers.some((t) => t.ms === BEAT_MS)], [at(0), false]);
+});
+
+test('out of dry run, a review is posted through the writer the service was given; in dry run that writer is never reached', async () => {
+  const out = await harness({ dryRun: false });
+  const service = await out.start();
+  await service.settled;
+  await out.webhook(pr('opened'), 'd1');
+  await out.published();
+  assert.equal(out.writes.some((w) => w[0] === 'publishReview'), true);
+  const dry = await harness();
+  await (await dry.start()).settled;
+  await dry.webhook(pr('opened'), 'd1');
+  await dry.reviewed();
+  await dry.flush();
+  assert.deepEqual(dry.writes, []);
+});
+test('at start the service says what the app lacks, once for each thing, and keeps running', async () => {
+  const h = await harness({ dryRun: false, lacks: [{ feature: 'publishing', missing: 'pull_requests:write' }, { feature: 'commands', missing: 'issues:write' }] });
+  const service = await h.start();
+  await service.settled;
+  assert.deepEqual(h.logged.filter((e) => e.event === 'feature_off'), [
+    { event: 'feature_off', feature: 'publishing', missing: 'pull_requests:write' },
+    { event: 'feature_off', feature: 'commands', missing: 'issues:write' },
+  ]);
+  assert.equal(h.logged.filter((e) => e.event === 'alert' && e.code === 'feature_off').length, 2);
+  assert.deepEqual(await h.webhook(pr('opened'), 'd1'), { status: 202, body: 'accepted' });
+});
+test('an app that lacks nothing is logged as such, and a check that cannot be made does not stop the start', async () => {
+  const ok = await harness();
+  await (await ok.start()).settled;
+  assert.deepEqual(ok.logged.filter((e) => e.event === 'app_check'), [{ event: 'app_check', missing: 0 }]);
+  const down = await harness({ lacks: new Error('github_network') });
+  await (await down.start()).settled;
+  assert.equal(down.logged.some((e) => e.event === 'start_step_failed' && e.step === 'app_check' && e.reason === 'github_network'), true);
 });
 
 // Plan 3's tests of the start and the stop, on the new harness.
