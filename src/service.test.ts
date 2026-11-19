@@ -63,6 +63,8 @@ interface Options {
   lacks?: FeatureOff[] | Error;
   /** false to leave dry run; true when not given. */
   dryRun?: boolean;
+  /** The key route's answer waits for this when given. */
+  keyGate?: Promise<void>;
 }
 interface Timer { ms: number; work: () => Promise<void>; cancelled: boolean }
 
@@ -93,9 +95,11 @@ async function harness(options: Options = {}) {
   const reviewed = new Promise<void>((done) => { reviewCalled = done; });
   let publishCalled!: () => void;
   const published = new Promise<void>((done) => { publishCalled = done; });
+  const order: string[] = [];
+  const lacksCalls: boolean[] = [];
   const appInfo: AppIdentity = {
     read: () => Promise.reject(new Error('not_used')),
-    lacks: () => (options.lacks instanceof Error ? Promise.reject(options.lacks) : Promise.resolve(options.lacks ?? [])),
+    lacks: (dryRun) => (order.push('lacks'), lacksCalls.push(dryRun), options.lacks instanceof Error ? Promise.reject(options.lacks) : Promise.resolve(options.lacks ?? [])),
   };
 
   const db: Db = {
@@ -115,7 +119,7 @@ async function harness(options: Options = {}) {
   const lock: InstanceLock = { release: async () => { events.push('release'); } };
 
   const h = {
-    db, events, timers, inputs, fetched, listedSince, logged, writes,
+    db, events, order, lacksCalls, timers, inputs, fetched, listedSince, logged, writes,
     port: 0,
     /** What the clock reads; a test may move it. */
     now: options.now ?? at(0),
@@ -153,6 +157,7 @@ async function harness(options: Options = {}) {
       hooks: {
         listSince: async (since) => {
           listedSince.push(since);
+          order.push('listing');
           if (h.beforeListing !== undefined) await h.beforeListing();
           const next = listings.shift() ?? { deliveries: [], complete: true };
           if (next instanceof Error) throw next;
@@ -169,6 +174,10 @@ async function harness(options: Options = {}) {
       },
       fetch: (async (url: string | URL | Request) => {
         fetched.push(String(url));
+        if (String(url).endsWith('/key')) {
+          order.push('key');
+          if (options.keyGate !== undefined) await options.keyGate;
+        }
         return new Response('{}', { status: String(url).endsWith('/key') ? options.keyStatus ?? 200 : 200 });
       }) as typeof fetch,
       sleep: () => Promise.resolve(),
@@ -373,7 +382,8 @@ test('out of dry run, a review is posted through the writer the service was give
   const service = await out.start();
   await service.settled;
   await out.webhook(pr('opened'), 'd1');
-  await out.published();
+  const gave = await Promise.race([out.published().then(() => 'posted'), new Promise<string>((done) => { setTimeout(() => { done('no post within 5 seconds'); }, 5_000).unref(); })]);
+  assert.equal(gave, 'posted');
   assert.equal(out.writes.some((w) => w[0] === 'publishReview'), true);
   const dry = await harness();
   await (await dry.start()).settled;
@@ -390,8 +400,36 @@ test('at start the service says what the app lacks, once for each thing, and kee
     { event: 'feature_off', feature: 'publishing', missing: 'pull_requests:write' },
     { event: 'feature_off', feature: 'commands', missing: 'issues:write' },
   ]);
-  assert.equal(h.logged.filter((e) => e.event === 'alert' && e.code === 'feature_off').length, 2);
+  assert.deepEqual(h.logged.filter((e) => e.event === 'alert' && e.code === 'feature_off'), [
+    { event: 'alert', code: 'feature_off', feature: 'publishing', missing: 'pull_requests:write' },
+    { event: 'alert', code: 'feature_off', feature: 'commands', missing: 'issues:write' },
+  ]);
+  assert.deepEqual(h.lacksCalls, [false]);
   assert.deepEqual(await h.webhook(pr('opened'), 'd1'), { status: 202, body: 'accepted' });
+});
+test('the app check comes after the key check and before the redelivery', async () => {
+  const h = await harness({ now: at(600) });
+  await migrate(h.db, loadMigrations(MIGRATIONS_DIR));
+  await beat(h.db, at(0));
+  await (await h.start()).settled;
+  assert.deepEqual(h.order, ['key', 'lacks', 'listing']);
+});
+test('in dry run the service asks what the app lacks for dry run', async () => {
+  const h = await harness();
+  await (await h.start()).settled;
+  assert.deepEqual(h.lacksCalls, [true]);
+});
+test('a stop that comes while the key check is pending ends the start: the app is not asked and nothing is raised', async () => {
+  let release!: () => void;
+  const gate = new Promise<void>((done) => { release = done; });
+  const h = await harness({ keyGate: gate, lacks: [{ feature: 'publishing', missing: 'pull_requests:write' }] });
+  const service = await h.start();
+  await h.flush();
+  const stopping = service.stop();
+  release();
+  await stopping;
+  await service.settled;
+  assert.deepEqual([h.lacksCalls, h.logged.filter((e) => e.event === 'app_check' || e.event === 'feature_off')], [[], []]);
 });
 test('an app that lacks nothing is logged as such, and a check that cannot be made does not stop the start', async () => {
   const ok = await harness();

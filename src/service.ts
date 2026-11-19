@@ -169,7 +169,9 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps): Pr
   }
 
   async function appCheck(): Promise<void> {
+    if (ending) return;
     const lacking = await deps.appInfo.lacks(config.dryRun);
+    if (ending) return;
     if (lacking.length === 0) say({ event: 'app_check', missing: 0 });
     for (const { feature, missing } of lacking) {
       say({ event: 'feature_off', feature, missing });

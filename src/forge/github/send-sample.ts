@@ -68,7 +68,7 @@ export function isLocalUrl(url: string): boolean {
   return u.protocol === 'http:' && u.username === '' && u.password === '' && ['localhost', '127.0.0.1', '[::1]'].includes(u.hostname);
 }
 
-async function run(argv: string[], env: Record<string, string | undefined>): Promise<number> {
+export async function run(argv: string[], env: Record<string, string | undefined>): Promise<number> {
   const usage = 'usage: send-sample --url <local url> --secret-env <variable> [--kind pull_request|review|comment] [--delivery <id>] [--action opened|synchronize] [--head <sha>] [--body <text>]';
   let values;
   try {

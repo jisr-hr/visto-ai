@@ -358,7 +358,7 @@ test('an app block without an id or a key is refused', () => {
 });
 test('what this plan adds has these defaults', () => {
   const c = parseConfig('model: { apiKey: { env: MODEL_KEY }, model: m }', ENV);
-  assert.equal(c.dryRun, false);
+  assert.equal(c.dryRun, true);
   assert.equal(c.alerts, null);
   assert.deepEqual(c.limits, { inputTokensPerCall: 200000, batchesPerReview: 6, spendPerDay: 50, queueConcurrency: 2 });
   assert.deepEqual(c.repositories.defaults.ignoredAuthors, ['dependabot[bot]']);
@@ -374,6 +374,12 @@ test('the queue concurrency is a whole number from 1 to 20, and the daily limit 
   for (const limits of ['{ queueConcurrency: 0 }', '{ queueConcurrency: 21 }', '{ queueConcurrency: 1.5 }', '{ spendPerDay: 0 }']) {
     assert.throws(() => parseConfig(`${SERVICE_YAML}limits: ${limits}\n`, ENV), ConfigError);
   }
+});
+test('a config with no dryRun key is in dry run, and only dryRun: false leaves it', () => {
+  const none = SERVICE_YAML.replace('dryRun: true\n', '');
+  assert.equal(serviceConfig(parseConfig(none, ENV)).dryRun, true);
+  assert.equal(serviceConfig(parseConfig(none + 'dryRun: false\n', ENV)).dryRun, false);
+  assert.throws(() => parseConfig(none + 'dryRun: no\n', ENV), ConfigError);
 });
 test('serviceConfig accepts a config in dry run and one out of it, and still names a missing block', () => {
   assert.equal(serviceConfig(parseConfig(SERVICE_YAML, ENV)).dryRun, true);
