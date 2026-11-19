@@ -71,7 +71,7 @@ dryRun: false
 #   # The port the service listens on (1 to 65535). It is 8080 when not written.
 #   port: 8080
 # alerts:
-#   # The environment variable that holds the URL (http or https) that gets one message when reviews must wait.
+#   # The environment variable that holds the URL (http or https) that gets the alerts: model_error, model_ok, spend_80, spend_limit, cost_unknown and redelivery_failed.
 #   webhook: { env: ALERT_WEBHOOK_URL }
 
 repositories:

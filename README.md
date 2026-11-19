@@ -93,6 +93,8 @@ The service receives GitHub's signed webhooks and records each delivery's id and
 
 To run it you need a GitHub App (its id, its private key and its webhook secret), a model key and a Postgres.
 
+What the app needs for a dry run, from what the service calls: read access to pull requests and to contents (and to metadata, which GitHub always asks for), and the events `pull_request`, `issue_comment`, `pull_request_review`, `pull_request_review_comment` and `pull_request_review_thread`. It reads pull requests and the files of the repository; it writes nothing. This has not yet been tried against a real app. With too little access every read is refused, and every job ends `attempts_exhausted` (or `not_found`, if GitHub answers the pull request itself with 404).
+
 ```bash
 cp env.example .env                       # then write your own passwords, secret and keys
 cp config.example.yml config.local.yml    # then switch on the app and database blocks and write dryRun: true
@@ -125,8 +127,11 @@ docker compose exec db psql -U postgres -d visto -c "select id, owner, repo, num
 - Connect to Postgres directly. The lock and the statement timeout do not work through a pooler in transaction mode.
 - Stopping the service (`docker compose stop`) waits up to 10 minutes for the reviews that are running. The Compose file allows 660 seconds for it. A second signal ends it at once.
 - Every review costs money. The cost of a run is what the model endpoint reports with each answer; OpenRouter, the default, reports it in US dollars. For an endpoint that reports no cost, it is computed from `model.prices`, in whatever currency those prices are written in. With neither, the cost is recorded as 0.
-- The daily limit, `limits.spendPerDay` (50 when not written), is a number in the unit of those recorded costs. The service adds up the cost of the runs recorded since the start of the UTC day, so it can only see what is recorded: with an endpoint that reports no cost and no `prices`, it never stops anything, and it raises the alert `cost_unknown`, once. At 80% of the limit it raises `spend_80`, and at the limit `spend_limit`, each once per UTC day. Reviews then stop starting until the next UTC day; the ones already running finish. At most `limits.queueConcurrency` reviews run at once (2 when not written).
-- When the model's key is refused or its account is out of credit, reviews pause for 5 minutes at a time and the service raises one alert. No job is lost meanwhile. Alerts go to the log always, and to `alerts.webhook` when you wrote it.
+- The daily limit, `limits.spendPerDay` (50 when not written), is a number in the unit of those recorded costs. The service adds up the cost of the runs recorded since the start of the UTC day, so it can only see what is recorded: with an endpoint that reports no cost and no `prices`, it never stops anything, and it raises the alert `cost_unknown`. At 80% of the limit it raises `spend_80`, and at the limit `spend_limit`. Reviews then stop starting until the next UTC day; the ones already running finish. These three alerts are raised once per run of the service, so a restart can raise them again; `spend_80` and `spend_limit` are also raised once per UTC day. At most `limits.queueConcurrency` reviews run at once (2 when not written).
+- When the model's key is refused or its account is out of credit, reviews pause for 5 minutes at a time and the service raises one alert, `model_error`, and `model_ok` when the key works again. The jobs wait, but not for ever: a job that has waited 24 hours is dropped as `too_old`. A review refused after it had already made model calls uses up one of the job's three starts. Alerts go to the log always, and to `alerts.webhook` when you wrote it.
+- A job ends without a review when its three starts are used up (`attempts_exhausted`), when it is a day old (`too_old`), or when the pull request has changed by the time it runs: closed, turned into a draft, gone, given a new head (the new head gets a job of its own), or already reviewed at that head and base.
+- When GitHub cannot be reached, or refuses a read, before any model call, the run is recorded as failed and the job is tried again a minute later, and then 15 minutes after that: three starts in all.
+- A restart of the database, like any restart of the service in the middle of a review, cuts the reviews that are running. They run again afterwards, and their model calls are paid for again.
 
 Setup notes:
 
