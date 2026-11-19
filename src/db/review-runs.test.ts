@@ -100,6 +100,14 @@ test('unpublishedRun finds the newest finished live review of that head and base
   assert.equal(await unpublishedRun(db, REF, 'h1', 'b1', at(-100)), null);
   await db.close();
 });
+test('unpublishedRun does not find a run on another base, and finds one that started exactly at the time given', async () => {
+  const db = await testDb();
+  await recordRun(db, run({ dryRun: false, baseSha: 'b2' }));
+  assert.equal(await unpublishedRun(db, REF, 'h1', 'b1', at(-100)), null);
+  const edge = await recordRun(db, run({ dryRun: false, startedAt: at(-100) }));
+  assert.equal((await unpublishedRun(db, REF, 'h1', 'b1', at(-100)))?.id, edge);
+  await db.close();
+});
 test('lastPublishedRun is the newest published run of the pull request', async () => {
   const db = await testDb();
   assert.equal(await lastPublishedRun(db, REF), null);

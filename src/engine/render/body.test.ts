@@ -452,6 +452,10 @@ test('a score reason and the whole-file reason are made inert too', () => {
   const b = renderReview(r, auto).body;
   assert.equal(b.includes('@octo-dev'), false);
   assert.ok(b.includes(`ask @${ZW}octo-dev <${ZW}b>`));
+  const whole = scored([file('a.ts', { fileLevel: level(90, 'whole_file'), wholeFile: { score: 90, category: 'permission', reason: 'ask @octo-dev <b>' } })]);
+  const w = renderReview(whole, auto).body;
+  assert.equal(w.includes('@octo-dev'), false);
+  assert.ok(w.includes(`- whole file, 90% \`permission\` \u2014 ask @${ZW}octo-dev <${ZW}b>`));
 });
 
 test('a fence is honoured only where it is certainly one', () => {

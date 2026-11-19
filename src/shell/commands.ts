@@ -1,5 +1,11 @@
-const SHORT_CODE = /^[a-z][a-z0-9_]*$/;
+import { isShortCode } from './codes.ts';
+
 const LOGIN = /^[A-Za-z0-9-]{1,39}$/;
+
+/** Whether a commenter with this association with the repository may command the service: an owner, a member or a collaborator. */
+export function mayCommand(association: string | null): boolean {
+  return association === 'owner' || association === 'member' || association === 'collaborator';
+}
 
 /** The command a comment gives, read from its first line that is not empty. */
 export function commandOf(body: string): 'review' | null {
@@ -9,7 +15,7 @@ export function commandOf(body: string): 'review' | null {
 
 function sentence(login: string | null, text: string, code: string): string {
   const who = login !== null && LOGIN.test(login) ? `@${login} ` : '';
-  const shown = code.length <= 40 && SHORT_CODE.test(code) ? code : 'internal_error';
+  const shown = isShortCode(code) ? code : 'internal_error';
   return `${who}${text} (\`${shown}\`).`;
 }
 

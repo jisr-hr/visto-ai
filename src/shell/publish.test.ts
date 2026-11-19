@@ -119,6 +119,13 @@ test('when the inline comments are refused, the review is posted with their text
   assert.deepEqual([out.reviewId, out.inlineDropped, out.adopted, out.body !== run.body], ['502', true, false, true]);
   assert.deepEqual(h.calls.slice(1), [['publishReview', 'h1', run.body, 1], ['publishReview', 'h1', out.body, 0]]);
 });
+test("the fallback's body is the review rendered without inline comments", async () => {
+  const h = harness({ posts: [new Error('review_rejected'), { id: '502' }] });
+  const out = await publishRun(h.deps, h.args);
+  assert.equal(out.kind, 'published');
+  if (out.kind !== 'published') return;
+  assert.equal(out.body, renderReview(okResult(), { trigger: 'automatic', requestedBy: null, lineUrl, inline: false }).body);
+});
 test('a review the git service refuses twice, or refuses with no inline comment, is rejected', async () => {
   const twice = harness({ posts: [new Error('review_rejected'), new Error('review_rejected')] });
   assert.deepEqual(await publishRun(twice.deps, twice.args), { kind: 'rejected' });

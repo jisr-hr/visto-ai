@@ -3,6 +3,7 @@ import { renderReview } from '../engine/render/body.ts';
 import type { Span } from '../engine/score/types.ts';
 import type { ReviewResult } from '../engine/types.ts';
 import type { ForgeAccess, ForgeWriter, LivePullRequest, PullRequestInfo, PullRequestRef } from '../forge/types.ts';
+import { codeOf } from './codes.ts';
 
 export type PublishOutcome =
   | { kind: 'published'; reviewId: string; body: string; inlineDropped: boolean; adopted: boolean }
@@ -15,14 +16,6 @@ export type PublishOutcome =
 export interface PublishDeps {
   forge: ForgeAccess; writer: ForgeWriter;
   lineUrl: (pr: PullRequestInfo, file: { path: string; previousPath: string | null }, span: Span) => string;
-}
-
-const SHORT_CODE = /^[a-z][a-z0-9_]*$/;
-
-/** The error's message when it is a short code, else internal_error. */
-function codeOf(error: unknown): string {
-  const message = error instanceof Error ? error.message : '';
-  return message.length <= 40 && SHORT_CODE.test(message) ? message : 'internal_error';
 }
 
 /** Publishes one recorded review, or says why not. Writes nothing to the database. Never rejects. */

@@ -14,7 +14,8 @@ import type { Limits, ReviewDeps, ReviewInput, ReviewResult, Usage } from '../en
 import type { ForgeAccess, ForgeWriter, LivePullRequest, PullRequestInfo, Source } from '../forge/types.ts';
 import { PAUSE_MS } from './model-health.ts';
 import type { ModelHealth } from './model-health.ts';
-import { failureText, refusalText } from './commands.ts';
+import { codeOf } from './codes.ts';
+import { failureText, mayCommand, refusalText } from './commands.ts';
 import { publishRun } from './publish.ts';
 import type { PublishOutcome } from './publish.ts';
 import { QUIET_SECONDS, skipReason } from './triggers.ts';
@@ -44,16 +45,7 @@ export interface ReviewJobDeps {
   spend: { noteRun(usage: Usage): void };
 }
 
-const SHORT_CODE = /^[a-z][a-z0-9_]*$/;
-/** The associations with the repository whose /review is honoured. */
-const HAS_ACCESS = new Set<string>(['owner', 'member', 'collaborator']);
 const NO_USAGE: Usage = { calls: 0, inputTokens: 0, outputTokens: 0, cachedTokens: 0, cost: 0 };
-
-/** The error's message when it is a short code, else internal_error. */
-function codeOf(error: unknown): string {
-  const message = error instanceof Error ? error.message : '';
-  return message.length <= 40 && SHORT_CODE.test(message) ? message : 'internal_error';
-}
 
 /** The number of findings of an engine result, or of a stored one; 0 when it has none that can be counted. */
 function findingsOf(result: unknown): number {
@@ -183,7 +175,7 @@ export async function runReviewJob(job: Job, deps: ReviewJobDeps): Promise<void>
     if (installation === null) return await drop('no_installation');
 
     // 1b. Who asked. A refused command may have stood in the way of a push's job: the stored head gets one, unless it has a run in this mode.
-    if (manual && !HAS_ACCESS.has(job.association ?? '')) {
+    if (manual && !mayCommand(job.association)) {
       await refuse(installation, 'not_allowed', async (tx) => {
         const stored = await getPullRequest(tx, job.ref);
         if (stored === null || stored.state !== 'open') return;

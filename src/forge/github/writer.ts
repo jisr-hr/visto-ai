@@ -23,11 +23,12 @@ export function createGithubWriter(opts: { auth: AppAuth; info: { read(): Promis
   }
 
   // The only place the writer sends anything. Once: a post is never repeated,
-  // whatever came back, because it may have taken effect.
+  // whatever came back, because it may have taken effect. A redirect is not followed: it is an answer like any other.
   async function post(token: string, url: string, body: unknown): Promise<Response> {
     try {
       return await opts.fetch(url, {
         method: 'POST',
+        redirect: 'manual',
         headers: {
           Authorization: `Bearer ${token}`,
           'X-GitHub-Api-Version': '2022-11-28',

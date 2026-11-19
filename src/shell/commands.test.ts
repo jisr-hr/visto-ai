@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { commandOf, failureText, refusalText } from './commands.ts';
+import { commandOf, failureText, mayCommand, refusalText } from './commands.ts';
 
 test('/review is a command on the first line that is not empty, in any case, alone or followed by text', () => {
   for (const body of ['/review', '  /Review  ', '\n\n/REVIEW\nthanks', '/review please', '/review\tnow']) assert.equal(commandOf(body), 'review');
@@ -33,4 +33,8 @@ test('a code of 40 characters is written, one of 41 gives internal_error', () =>
   const c40 = 'a'.repeat(40);
   assert.equal(refusalText(null, c40), `The review was not started (\`${c40}\`).`);
   assert.equal(refusalText(null, 'a'.repeat(41)), 'The review was not started (`internal_error`).');
+});
+test('an owner, a member or a collaborator may command the service, and nobody else', () => {
+  for (const association of ['owner', 'member', 'collaborator']) assert.equal(mayCommand(association), true);
+  for (const association of [null, '', 'none', 'contributor', 'first_time_contributor', 'Owner', ' member']) assert.equal(mayCommand(association), false, String(association));
 });

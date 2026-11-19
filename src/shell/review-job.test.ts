@@ -716,6 +716,18 @@ test('a /review put back while another job waits is superseded and says so', asy
   assert.equal((await getJob(db, late.job.id))?.outcome, 'superseded');
   assert.deepEqual(late.writes.slice(-2), [['react', '31', 'confused'], ['comment', '@octo-lead The review did not finish (`superseded`).']]);
 });
+test('a /review whose text could not be rendered says so', async () => {
+  const h = await manualJob({ renderThrows: true });
+  await runReviewJob(h.job, h.deps);
+  assert.equal((await getJob(db, h.job.id))?.outcome, 'render_failed');
+  assert.deepEqual(h.writes.slice(-2), [['react', '31', 'confused'], ['comment', '@octo-lead The review did not finish (`render_failed`).']]);
+});
+test('a /review whose publication finds a review of its own on another commit is refused', async () => {
+  const h = await manualJob({ own: [[], [{ id: '470', commit: 'h0' }]] });
+  await runReviewJob(h.job, h.deps);
+  assert.deepEqual([(await getJob(db, h.job.id))?.outcome, h.inputs.length, h.writes.filter((w) => w[0] === 'publishReview').length], ['refused', 1, 0]);
+  assert.deepEqual(h.writes.slice(-2), [['react', '31', 'confused'], ['comment', '@octo-lead The review was not started (`already_reviewed`).']]);
+});
 test('in dry run a /review writes nothing, whether it is honoured, refused or fails', async () => {
   const ok = await manualJob({ dryRun: true });
   await runReviewJob(ok.job, ok.deps);

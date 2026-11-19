@@ -119,3 +119,32 @@ test('an id that is not digits is refused before any request', async () => {
   await assert.rejects(writer.publishReview(REF, '9/9', DRAFT), /^Error: github_bad_path$/);
   assert.equal(seen.length, 0);
 });
+test('a redirect is not followed: a post answered 301 rejects github_301 after one request', async () => {
+  const seen: Array<RequestRedirect | undefined> = [];
+  const stub = async (_url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+    seen.push(init?.redirect);
+    return new Response(null, { status: 301, headers: { location: 'https://api.github.com/repositories/1/pulls/7/reviews' } });
+  };
+  const writer = createGithubWriter({ auth, info, fetch: stub as typeof fetch });
+  await assert.rejects(writer.publishReview(REF, '99', DRAFT), /^Error: github_301$/);
+  assert.deepEqual(seen, ['manual']);
+});
+test('an error the writer throws holds nothing of the token: each message is a short code', async () => {
+  const secret = 'tok-secret-0123456789';
+  const leaky: AppAuth = { appToken: () => 'jwt', installationToken: async () => secret };
+  const answers = [() => json({ message: secret }, 500), () => json({ message: secret }, 422), () => json({ id: secret }), () => { throw new Error(secret); }];
+  for (const answer of answers) {
+    const writer = createGithubWriter({ auth: leaky, info, fetch: (async () => answer()) as typeof fetch });
+    const calls = [
+      writer.publishReview(REF, '99', DRAFT), writer.listOwnReviews(REF, '99'), writer.listReviewComments(REF, '99', '501'),
+      writer.react(REF, '99', '31', 'eyes'), writer.comment(REF, '99', 'text'),
+    ];
+    for (const call of calls) {
+      const error = await call.then(() => null, (e: unknown) => e);
+      if (error === null) continue;
+      assert.ok(error instanceof Error);
+      assert.match(error.message, /^[a-z][a-z0-9_]{0,39}$/);
+      assert.equal(error.message.includes(secret), false);
+    }
+  }
+});

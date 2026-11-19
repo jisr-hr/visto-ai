@@ -164,6 +164,14 @@ test('a push does not replace a pending manual job', async () => {
   assert.deepEqual([j?.trigger, j?.reason, j?.runAt], ['manual', 'command', at(0)]);
   await db.close();
 });
+test('an automatic job that may not replace meets a pending manual job: nothing is stored and the manual job is left whole', async () => {
+  const db = await testDb();
+  const first = (await enqueueJob(db, manual()))!;
+  const before = await getJob(db, first);
+  assert.equal(await enqueueJob(db, job({ reason: 'synchronize', headSha: 'h2', runAt: at(240), now: at(60), delivery: 'd2', replace: false })), null);
+  assert.deepEqual(await unfinishedJobs(db), [before]);
+  await db.close();
+});
 test('a manual job that may not replace is stored only when nothing is pending', async () => {
   const db = await testDb();
   const first = (await enqueueJob(db, job({ runAt: at(180) })))!;

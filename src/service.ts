@@ -7,6 +7,7 @@ import type { ServiceConfig } from './config/load.ts';
 import type { ReviewDeps, ReviewInput, ReviewResult } from './engine/types.ts';
 import type { AppIdentity, ForgeAccess, ForgeWriter, HookDeliveries, Source, WebhookReader } from './forge/types.ts';
 import { ALERT_TIMEOUT_MS, createAlerts } from './shell/alerts.ts';
+import { isShortCode } from './shell/codes.ts';
 import { dryWriter } from './shell/dry-writer.ts';
 import { createListener } from './shell/http.ts';
 import type { RequestLike, ResponseLike } from './shell/http.ts';
@@ -57,7 +58,7 @@ function why(error: unknown): { error: string; code: string | null } {
 /** The error's message when it is a short code, else null. */
 function reasonOf(error: unknown): string | null {
   const message = typeof error === 'object' && error !== null ? (error as { message?: unknown }).message : undefined;
-  return typeof message === 'string' && message.length <= 40 && /^[a-z][a-z0-9_]*$/.test(message) ? message : null;
+  return typeof message === 'string' && isShortCode(message) ? message : null;
 }
 
 /** 'done' when `work` settles first, 'timeout' when `ms` pass first. Rejects when `work` does. */
