@@ -189,20 +189,34 @@ export function inert(text: string): string;
 type Meta = { trigger: 'automatic' | 'manual'; requestedBy: string | null; lineUrl: ...; inline: boolean };
 ```
 
-**What counts as code.** Only what is certainly code is left as it is; everything else is prose (calls 1 and 17). A rule that is generous here leaves a live mention, so when in doubt it is prose.
+**What counts as code.** Only what is certainly code under CommonMark's own rules is left as it is; everything else is prose (calls 1 and 17). A rule that is generous here leaves a live mention, so when in doubt it is prose. `inert` first turns every `\r\n` and every lone `\r` into `\n`.
 
-- **An inline span:** a run of backticks that is not preceded by a backslash, up to the next run of exactly the same length **on the same line**. A run with no such closing run on its line is prose, backticks included.
-- **A fence:** a line indented by at most three spaces that opens with three or more backticks, or three or more tildes. For a backtick fence the rest of that line holds no backtick. It ends at a line indented by at most three spaces that holds only the same character, at the same or a greater length, and spaces; or at the end of the text.
+- **A fence.** It opens at a line that starts **at its first column** with three or more backticks, or three or more tildes; for a backtick fence the rest of that line holds no backtick. An opener that is indented at all is not honoured: indented, it may be the inside of a list item, which only a full parser could tell. It ends at a line indented by at most three spaces that holds the same character, at the same or a greater length, followed by nothing but spaces and tabs; or at the end of the text. Nothing inside a fence is changed.
+- **An inline span.** Spans are found paragraph by paragraph (a paragraph is a run of lines with no empty line between them, outside fences), line by line, left to right:
+  - A run of backticks opens a span unless it is escaped. An odd number of backslashes right before the run makes its first backtick a plain character; what is left of the run, if anything, is the run.
+  - It is closed by the next run of exactly the same length **on the same line**. A backslash before a closing run changes nothing.
+  - When no such run is on that line, the rest of the line and **the rest of the paragraph** is prose: under CommonMark the opener may pair with a run on a later line, and what lies between would be code there and prose here, or the reverse.
+  - A span whose content holds a `|` is prose: in a table row the bar ends the cell, and the span with it.
 
-**What is done to prose.**
+**What is done to prose,** in this order:
 
-- **Mentions.** An `@` starts a mention when the character after it is a letter or a digit and the character before it, if any, is not a letter, a digit or an underscore. It gets a zero-width space after it. So `@octo-dev` and `(@acme/reviewers)` are changed, and `dev@example.test` is not.
-- **Raw HTML.** Every `<` is written as `&lt;`. It is shown as it was typed and nothing of it is rendered: no comment that hides text, no block that folds the sections after it. This replaces the present `noComment`.
-- **An open fence** is closed with the file's `closeOpenFence`, so one piece cannot swallow the next.
+- **Character references.** Every `&` is written as `&amp;`, so `&#64;name` is shown as typed and never becomes an `@`.
+- **Raw HTML.** Every `<` is written as `&lt;`. This replaces the present `noComment`.
+- **Mentions.** An `@` starts a mention when the character after it is an ASCII letter or digit and the character before it, if any, is not an ASCII letter, an ASCII digit or an underscore. It gets a zero-width space after it. A letter that is not ASCII before the `@` does not protect it.
 
-**Where.** `inert` is applied to each piece of model-written text **as it is finally written**: the summary; a finding's whole text in an inline comment; a finding's first line in a bullet, after `firstLine` has cut it (a span the cut left open is then prose); an unplaced or beyond-the-diff finding; a score's category and reason. It is not applied to what the service writes itself: its headings, its paths in code spans, and the line "requested by @name".
+**An open fence** is closed by one more line, at the first column, with the fence's own characters, so one piece cannot swallow the next.
 
-**The inline switch.** With `inline: true` nothing else changes. With `inline: false`: the result's `comments` is empty; the `## Findings` section lists every finding, not the first 25; and each bullet is followed by the whole inert text its inline comment would have carried, indented by two spaces as a continuation of the bullet, with any line that would be a heading escaped as `noHeading` does. The other sections are as they are.
+**Where.** `inert` is applied to each piece of model-written text **as it is finally written**, and each piece is placed so that its first line starts a line of the document, which is what the rules above assume:
+
+- The summary: under its heading, as now.
+- An inline comment: the service's own first line (`**[severity]**`, and the note about a moved line when there is one), then an empty line, then the finding's whole inert text. The model's text never shares a line with the service's.
+- The body-only form: under the bullet, indented by two spaces as a continuation of the list item: first the note about a moved line when there is one, then the whole inert text. Any line that would be a heading is escaped as `noHeading` does.
+- Text that follows the service's own words on one line (a finding's first line in a bullet, after `firstLine` has cut it; a score's reason) cannot open a fence there. It is made inert by the same rules without the fence rule, and nothing is appended to it. `firstLine` also treats a lone `\r` as a line break.
+- A score's `category` is always written inside a code span by the service and needs nothing.
+
+It is not applied to what the service writes itself: its headings, its paths in code spans, and the line "requested by @name".
+
+**The inline switch.** With `inline: true` nothing else changes. With `inline: false`: the result's `comments` is empty; the `## Findings` section lists every finding, not the first 25; and each bullet is followed, indented by two spaces as a continuation of the bullet, by what its inline comment would have carried after the severity: the note about a moved line when there is one, then the finding's whole inert text, with any line that would be a heading escaped as `noHeading` does. The other sections are as they are.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -257,6 +271,53 @@ test('without inline comments, every finding carries its whole text in the body 
   assert.equal(bodyOnly.body.match(/^## Overall$/gm)?.length, 1);
 });
 ```
+
+**Tests added after the first build of this task was reviewed.** Each input was found to slip past the first build; `ZW` is the zero-width space written as its escape:
+
+```ts
+test('a fence is honoured only where it is certainly one', () => {
+  // inside a list item: not at the first column, so prose, and nothing is appended that could open a fence
+  const listed = inert('- ```\n  x\n  ```\n\n@victim');
+  assert.equal(listed.includes(`@${ZW}victim`), true);
+  assert.equal(listed.endsWith('```'), false);
+  // a closing fence may be followed by a tab
+  assert.equal(inert('```\nx\n```\t\n@victim'), `\`\`\`\nx\n\`\`\`\t\n@${ZW}victim`);
+  // a closing fence may be indented by up to three spaces
+  assert.equal(inert('```\nx\n   ```\n@victim'), `\`\`\`\nx\n   \`\`\`\n@${ZW}victim`);
+});
+test('a span is honoured only where it is certainly one', () => {
+  const live = (text: string): boolean => /(^|[^A-Za-z0-9_])@[A-Za-z0-9]/.test(inert(text));
+  for (const text of [
+    '\\`` x `@victim`',              // the backslash takes one backtick of the run
+    'x `a\n` @victim `y`',           // a run left open on an earlier line of the paragraph
+    '| `a | @victim` |',             // a bar inside the span: a table cell ends there
+    '`a\r\r@victim\r\r`',            // a lone carriage return is a line break
+    '\u00e9@victim',                 // a letter that is not ASCII before the @
+  ]) assert.equal(live(text), false, JSON.stringify(text));
+  assert.equal(inert('use `@Injectable()` and `x` here'), 'use `@Injectable()` and `x` here');
+  assert.equal(inert('a\n\nuse `@Injectable()` here'), 'a\n\nuse `@Injectable()` here');
+});
+test('a character reference cannot become a mention', () => {
+  assert.equal(inert('ping &#64;octo-dev and &commat;octo-lead'), 'ping &amp;#64;octo-dev and &amp;commat;octo-lead');
+  assert.equal(inert('a && b < c'), 'a &amp;&amp; b &lt; c');
+  assert.equal(inert('use `a && b` here'), 'use `a && b` here');
+});
+test("an inline comment keeps the model's text off the service's own line", () => {
+  const r = resultWith({ findings: [findingAt('a.ts', 3, '~~~\n@victim\n~~~')] });
+  const out = renderReview(r, { trigger: 'automatic', requestedBy: null, lineUrl: null, inline: true });
+  assert.equal(out.comments[0]!.body, '**[minor]**\n\n~~~\n@victim\n~~~');
+  const uneven = resultWith({ findings: [findingAt('a.ts', 3, '```\n@victim\n````\nafter @victim')] });
+  const body = renderReview(uneven, { trigger: 'automatic', requestedBy: null, lineUrl: null, inline: true }).comments[0]!.body;
+  assert.equal(body, '**[minor]**\n\n```\n@victim\n````\nafter @' + ZW + 'victim');
+});
+test('the body-only form carries the note about a moved line', () => {
+  const r = resultWith({ findings: [{ ...findingAt('a.ts', 3, 'Detail.'), requestedLine: 5 }] });
+  const out = renderReview(r, { trigger: 'automatic', requestedBy: null, lineUrl: null, inline: false });
+  assert.equal(out.body.includes('Refers to line 5, just outside the diff.'), true);
+});
+```
+
+In the last-but-one test the finding's severity is whatever `findingAt` gives (the expected text writes it as `minor`; use the helper's). In the uneven case a fence opened with three backticks is closed by the run of four, so `after @victim` is prose. The non-ASCII letter in the second test is written as its escape.
 
 Existing tests whose expected text holds a `<` the model wrote outside code change to `&lt;`; list them in the report.
 
