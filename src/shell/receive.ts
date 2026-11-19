@@ -54,7 +54,8 @@ export async function receive(
         : { status: 400, body: reading.reason };
     }
     who = { delivery: reading.delivery, name: reading.name, action: reading.action };
-    const capture = captureOf(reading.event, reading.delivery, deps.clock());
+    const receivedAt = deps.clock();
+    const capture = captureOf(reading.event, reading.delivery, receivedAt);
     let stored: Queued | null;
     try {
       stored = await deps.db.transaction(async (tx): Promise<Queued | null> => {
@@ -74,7 +75,7 @@ export async function receive(
               const trigger = triggerOf(reading.event.action, current, deps.settingsFor(`${ref.owner}/${ref.repo}`));
               if (trigger.kind === 'skip') queued.skip = trigger.reason;
               if (trigger.kind === 'queue') {
-                const now = deps.clock();
+                const now = receivedAt;
                 const id = await enqueueJob(tx, {
                   ref, reason: trigger.reason, headSha: trigger.headSha,
                   runAt: new Date(now.getTime() + trigger.delaySeconds * 1000).toISOString(),
@@ -88,7 +89,7 @@ export async function receive(
           if (capture.activity) await recordActivity(tx, capture.activity);
           if (reading.event.kind === 'general_comment' && commandOf(reading.event.comment.body) === 'review') {
             const { ref, installation, comment } = reading.event;
-            const now = deps.clock().toISOString();
+            const now = receivedAt.toISOString();
             const id = await enqueueJob(tx, {
               ref, reason: 'command', headSha: '', runAt: now, now, delivery: reading.delivery,
               replace: HAS_ACCESS.has(comment.association),
@@ -112,26 +113,15 @@ export async function receive(
       note(who, 'ignored', capture.reason);
       return { status: 202, body: 'ignored' };
     }
-    if (reading.event.kind === 'pull_request') {
-      note(who, 'accepted', null, { job: stored.job, skip: stored.skip });
-      if (stored.job !== null) {
-        try {
-          deps.onQueued();
-        } catch {
-          // a wake-up that fails changes nothing
-        }
+    if (reading.event.kind === 'pull_request') note(who, 'accepted', null, { job: stored.job, skip: stored.skip });
+    else if (stored.command !== null) note(who, 'accepted', null, { command: stored.command, job: stored.job });
+    else note(who, 'accepted', null);
+    if (stored.job !== null) {
+      try {
+        deps.onQueued();
+      } catch {
+        // a wake-up that fails changes nothing
       }
-    } else if (stored.command !== null) {
-      note(who, 'accepted', null, { command: stored.command, job: stored.job });
-      if (stored.job !== null) {
-        try {
-          deps.onQueued();
-        } catch {
-          // a wake-up that fails changes nothing
-        }
-      }
-    } else {
-      note(who, 'accepted', null);
     }
     return { status: 202, body: 'accepted' };
   } catch (err) {

@@ -140,3 +140,11 @@ test("a stranger's command never pushes a pending job out", async () => {
   assert.deepEqual((await unfinishedJobs(db)).map((j) => [j.trigger, j.reason, j.runAt]), [['automatic', 'synchronize', at(180)]]);
   assert.deepEqual([logged.at(-1)!.command, logged.at(-1)!.job, queued], ['review', null, 1]);
 });
+for (const [association, replaces] of [['owner', true], ['collaborator', true], ['none', false], ['contributor', false]] as const) {
+  test(`a /review from ${association} ${replaces ? 'replaces' : 'does not replace'} a pending automatic job`, async () => {
+    await deliver(pr('synchronize'), 'd1');
+    await deliver(said('/review', { association }), 'c1');
+    const want = replaces ? [['manual', 'command']] : [['automatic', 'synchronize']];
+    assert.deepEqual((await unfinishedJobs(db)).map((j) => [j.trigger, j.reason]), want);
+  });
+}

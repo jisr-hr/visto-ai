@@ -15,3 +15,22 @@ test('the answers are one fixed sentence with a short code', () => {
   assert.equal(refusalText('not a login', 'closed'), 'The review was not started (`closed`).');
   assert.equal(failureText('octo-dev', 'Something long went wrong'), '@octo-dev The review did not finish (`internal_error`).');
 });
+
+test('a body with CRLF line ends or a leading byte-order mark is read the same way', () => {
+  assert.equal(commandOf('\r\n\r\n/review\r\nthanks'), 'review');
+  assert.equal(commandOf('\ufeff/review'), 'review');
+});
+test('/review followed by a no-break space is not a command', () => {
+  assert.equal(commandOf('/review\u00a0now'), null);
+});
+test('a login of 39 characters is written, one of 40 or with a trailing newline is not', () => {
+  const l39 = 'a'.repeat(39);
+  assert.equal(refusalText(l39, 'closed'), `@${l39} The review was not started (\`closed\`).`);
+  assert.equal(refusalText('a'.repeat(40), 'closed'), 'The review was not started (`closed`).');
+  assert.equal(refusalText('octo-dev\n', 'closed'), 'The review was not started (`closed`).');
+});
+test('a code of 40 characters is written, one of 41 gives internal_error', () => {
+  const c40 = 'a'.repeat(40);
+  assert.equal(refusalText(null, c40), `The review was not started (\`${c40}\`).`);
+  assert.equal(refusalText(null, 'a'.repeat(41)), 'The review was not started (`internal_error`).');
+});
