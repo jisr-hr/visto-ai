@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { testDb } from './testing.ts';
-import { hasOkRun, lastPublishedRun, listRuns, markPublished, recordRun, spentSince, unpublishedRun } from './review-runs.ts';
+import { hasOkRun, hasRun, lastPublishedRun, listRuns, markPublished, recordRun, spentSince, unpublishedRun } from './review-runs.ts';
 import type { RunRecord } from './review-runs.ts';
 
 const REF = { service: 'github', owner: 'acme', repo: 'shop', number: 7 } as const;
@@ -46,6 +46,16 @@ test('hasOkRun finds a finished review of the same head, base and kind, and noth
     hasOkRun(db, REF, 'h1', 'b1', true), hasOkRun(db, REF, 'h1', 'b2', true), hasOkRun(db, REF, 'h1', 'b1', false),
     hasOkRun(db, REF, 'h9', 'b1', true), hasOkRun(db, { ...REF, number: 8 }, 'h1', 'b1', true),
   ]), [true, false, false, false, false]);
+  await db.close();
+});
+test('hasRun finds a run of that head and kind, whatever its outcome, and nothing else', async () => {
+  const db = await testDb();
+  await recordRun(db, run({ dryRun: false, outcome: 'failed', failureStage: 'model', failureCode: 'timeout', baseSha: null }));
+  assert.deepEqual(await Promise.all([
+    hasRun(db, REF, 'h1', false), hasRun(db, REF, 'h2', false), hasRun(db, REF, 'h1', true), hasRun(db, { ...REF, number: 8 }, 'h1', false),
+  ]), [true, false, false, false]);
+  await recordRun(db, run({ dryRun: true }));
+  assert.equal(await hasRun(db, REF, 'h1', true), true);
   await db.close();
 });
 test('spentSince adds the cost of runs started at or after the time given', async () => {

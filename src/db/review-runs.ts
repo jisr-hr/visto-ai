@@ -135,6 +135,17 @@ export async function spentSince(db: Db, since: string): Promise<number> {
   return rows[0]!.spent;
 }
 
+/** Whether the pull request has a run at this head, of the same kind (dry or live), whatever its outcome. */
+export async function hasRun(db: Db, ref: PullRequestRef, headSha: string, dryRun: boolean): Promise<boolean> {
+  const rows = await db.query(
+    `select 1 from visto_ai.review_runs
+     where service = $1 and owner = $2 and repo = $3 and number = $4
+       and head_sha = $5 and dry_run = $6
+     limit 1`,
+    [ref.service, storable(ref.owner).toLowerCase(), storable(ref.repo).toLowerCase(), ref.number, storable(headSha), dryRun]);
+  return rows.length === 1;
+}
+
 /** Whether the pull request has a run with outcome `ok` at this head and this base, of the same kind (dry or live). */
 export async function hasOkRun(db: Db, ref: PullRequestRef, headSha: string, baseSha: string, dryRun: boolean): Promise<boolean> {
   const rows = await db.query(

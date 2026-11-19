@@ -4,7 +4,7 @@ import type { Job } from '../db/jobs.ts';
 import { getPullRequest } from '../db/pull-requests.ts';
 import { recordComments } from '../db/review-comments.ts';
 import type { StoredComment } from '../db/review-comments.ts';
-import { hasOkRun, lastPublishedRun, markPublished, recordRun, unpublishedRun } from '../db/review-runs.ts';
+import { hasOkRun, hasRun, lastPublishedRun, markPublished, recordRun, unpublishedRun } from '../db/review-runs.ts';
 import type { RunRecord, StoredRun } from '../db/review-runs.ts';
 import type { Db } from '../db/types.ts';
 import { renderReview } from '../engine/render/body.ts';
@@ -182,11 +182,12 @@ export async function runReviewJob(job: Job, deps: ReviewJobDeps): Promise<void>
     const installation = job.installation ?? (await getPullRequest(db, job.ref))?.installation ?? null;
     if (installation === null) return await drop('no_installation');
 
-    // 1b. Who asked. A refused command may have stood in the way of a push's job: the stored head gets one.
+    // 1b. Who asked. A refused command may have stood in the way of a push's job: the stored head gets one, unless it has a run in this mode.
     if (manual && !HAS_ACCESS.has(job.association ?? '')) {
       await refuse(installation, 'not_allowed', async (tx) => {
         const stored = await getPullRequest(tx, job.ref);
         if (stored === null || stored.state !== 'open') return;
+        if (await hasRun(tx, job.ref, stored.headSha, deps.dryRun)) return;
         await enqueueJob(tx, { ref: job.ref, reason: 'opened', headSha: stored.headSha, runAt: nowIso, now: nowIso, delivery: null, replace: false,
           trigger: 'automatic', requestedBy: null, commentId: null, association: null, installation: null });
       });
@@ -343,6 +344,8 @@ export async function runReviewJob(job: Job, deps: ReviewJobDeps): Promise<void>
       written = await tried(async () => { await recordRun(db, run); });
       if (written) {
         written = await tried(async () => { requeued = (await requeueJob(db, job.id, putBack.runAt, nowIso, putBack.giveBackStart)) === 'requeued'; });
+        // Another job was waiting: this one was dropped as superseded.
+        if (written && !requeued) await fail(installation, 'superseded');
       }
     } else if (deps.dryRun || run.outcome !== 'ok') {
       const ended = run.outcome === 'ok' ? 'reviewed' : 'failed';
@@ -408,6 +411,7 @@ export async function runReviewJob(job: Job, deps: ReviewJobDeps): Promise<void>
         if (written) await fail(installation, 'publish_rejected');
       } else {
         written = await tried(async () => { requeued = (await requeueJob(db, job.id, later(retryWait), nowIso, false)) === 'requeued'; });
+        if (written && !requeued) await fail(installation, 'superseded');
       }
     }
 

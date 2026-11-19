@@ -644,6 +644,17 @@ test('a /review from someone without access is refused before anything is read, 
     assert.deepEqual(left.map((j) => [j.trigger, j.reason, j.headSha, j.status]), [['automatic', 'opened', 'h1', 'pending']]);
   }
 });
+test('a /review from someone without access on a head whose paid review failed stores no job, in dry run and out of it', async () => {
+  for (const [dryRun, number] of [[true, 7], [false, 8]] as const) {
+    const first = await harness({ dryRun, pullRequest: number, result: failed('model', 'timeout', { dependencies: { model: 'error' } }) });
+    await runReviewJob(first.job, first.deps);
+    assert.equal((await getJob(db, first.job.id))?.outcome, 'failed');
+    const h = await manualJob({ dryRun, association: 'none', pullRequest: number });
+    await runReviewJob(h.job, h.deps);
+    assert.deepEqual([(await getJob(db, h.job.id))?.outcome, h.inputs.length], ['refused', 0]);
+    assert.deepEqual((await unfinishedJobs(db)).filter((j) => j.ref.number === number), []);
+  }
+});
 test('a /review on a closed pull request, or on one that has its review, is refused with no eyes first', async () => {
   const closed = await manualJob({ live: { ...LIVE, state: 'closed' } });
   await runReviewJob(closed.job, closed.deps);
@@ -685,6 +696,25 @@ test('a /review whose review fails, or whose publication is refused, says so', a
   const refused = await manualJob({ pullRequest: 8, posts: [new Error('review_rejected'), new Error('review_rejected')] });
   await runReviewJob(refused.job, refused.deps);
   assert.deepEqual(refused.writes.at(-1), ['comment', '@octo-lead The review did not finish (`publish_rejected`).']);
+});
+test('a /review put back while another job waits is superseded and says so', async () => {
+  const early = await manualJob({ live: new Error('github_502') });
+  const waiting = await enqueueJob(db, { ref: REF, reason: 'synchronize', headSha: 'h2', runAt: at(100), now: at(1), delivery: 'd9', replace: false, ...AUTOMATIC });
+  await runReviewJob(early.job, early.deps);
+  assert.deepEqual([(await getJob(db, early.job.id))?.outcome, (await getJob(db, waiting!))?.status], ['superseded', 'pending']);
+  assert.deepEqual(early.writes, [['react', '31', 'confused'], ['comment', '@octo-lead The review did not finish (`superseded`).']]);
+  const late = await manualJob({ pullRequest: 8, posts: [new Error('github_502')] });
+  const post = late.deps.writer.publishReview;
+  late.deps.writer = {
+    ...late.deps.writer,
+    publishReview: async (ref, installation, draft) => {
+      await enqueueJob(db, { ref: { ...REF, number: 8 }, reason: 'synchronize', headSha: 'h2', runAt: at(100), now: at(1), delivery: 'd10', replace: false, ...AUTOMATIC });
+      return post(ref, installation, draft);
+    },
+  };
+  await runReviewJob(late.job, late.deps);
+  assert.equal((await getJob(db, late.job.id))?.outcome, 'superseded');
+  assert.deepEqual(late.writes.slice(-2), [['react', '31', 'confused'], ['comment', '@octo-lead The review did not finish (`superseded`).']]);
 });
 test('in dry run a /review writes nothing, whether it is honoured, refused or fails', async () => {
   const ok = await manualJob({ dryRun: true });
