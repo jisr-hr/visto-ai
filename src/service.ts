@@ -1,5 +1,6 @@
 import { loadMigrations, MIGRATIONS_DIR, migrate } from './db/migrate.ts';
 import type { Db } from './db/types.ts';
+import { repoSettingsFor } from './config/load.ts';
 import type { ServiceConfig } from './config/load.ts';
 import type { WebhookReader } from './forge/types.ts';
 import { createListener } from './shell/http.ts';
@@ -18,7 +19,9 @@ export const CLOSE_WAIT_MS = 5_000;
 export async function startService(config: ServiceConfig, deps: ServiceDeps): Promise<{ stop(): Promise<void> }> {
   const { db } = deps;
   let listening: Listening;
-  const { listener, idle } = createListener({ webhook: (headers, body) => receive(deps, headers, body) });
+  const { listener, idle } = createListener({ webhook: (headers, body) => receive({
+      ...deps, settingsFor: (name) => repoSettingsFor(config, name), onQueued: () => {},   // until the runner exists
+    }, headers, body) });
   try {
     await migrate(db, loadMigrations(MIGRATIONS_DIR));
     listening = await deps.listen(listener, config.server.port);
