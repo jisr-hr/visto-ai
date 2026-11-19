@@ -131,7 +131,7 @@ docker compose exec db psql -U postgres -d visto -c "select id, owner, repo, num
 - When the model's key is refused or its account is out of credit, reviews pause for 5 minutes at a time and the service raises one alert, `model_error`, and `model_ok` when the key works again. The jobs wait, but not for ever: a job that has waited 24 hours is dropped as `too_old`. A review refused after it had already made model calls uses up one of the job's three starts. Alerts go to the log always, and to `alerts.webhook` when you wrote it.
 - A job ends without a review when its three starts are used up (`attempts_exhausted`), when it is a day old (`too_old`), or when the pull request has changed by the time it runs: closed, turned into a draft, gone, given a new head (the new head gets a job of its own), or already reviewed at that head and base.
 - When GitHub cannot be reached, or refuses a read, before any model call, the run is recorded as failed and the job is tried again a minute later, and then 15 minutes after that: three starts in all.
-- A restart of the database, like any restart of the service in the middle of a review, cuts the reviews that are running. They run again afterwards, and their model calls are paid for again.
+- A restart of the database, like any restart of the service in the middle of a review, cuts the reviews that are running. They run again afterwards while they have starts left, and their model calls are paid for again.
 
 Setup notes:
 
