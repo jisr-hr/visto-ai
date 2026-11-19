@@ -55,7 +55,7 @@ None of these is in the design. Each is the planner's call, listed so the owner 
 15. **The comments are read back after the publication is recorded.** A read-back that fails is logged and not tried again; those comments' ids are then unknown to plan 6.
 16. **A command from any bot is ignored,** not only from the app itself (PM-command). 8.1 excludes only comments the app wrote. A bot that may command a review can make two bots answer each other.
 17. **Raw HTML the model wrote is shown as text.** Outside a fenced block a `<` that could start a tag, a comment or a declaration gets a zero-width space after it, so nothing of the model's is rendered as HTML: no comment that hides text, no block that folds what follows. Cost if wrong: a table or a details block the model wrote on purpose is shown as its source.
-18. **A command from someone without access never pushes a job out.** It is stored only when the pull request has no pending job; and when it is refused, an automatic job for the stored head is stored in its place, in case a push's job was kept out meanwhile.
+18. **A command from someone without access never pushes a job out.** It is stored only when the pull request has no pending job; and when it is refused, an automatic job for the stored head is stored in its place, in case a push's job was kept out meanwhile. (Narrowed by the review of the whole branch: only when that head has no recorded run. See the notes.)
 
 ## Global Constraints
 
@@ -1483,3 +1483,20 @@ None of this can be shown by a test or by the run in Task 9. Each needs a GitHub
 6. The association GitHub reports for a commenter, also for a member whose membership is private (design 20, item 7).
 7. That a zero-width space after `@` stops a mention, that one after `<` stops a tag and one after `&` stops a character reference, and that all three read well in a review, also inside an inline span. Also that a fence line at the first column, right after a list item whose own fence is still open, opens a new fence on GitHub as it does under CommonMark: the service leaves a mention inside such a fence as it is.
 8. One whole first review of a real pull request, and one `/review`.
+9. What GitHub does with an invisible character in a body before it looks for mentions: whether a zero-width space, a soft hyphen, a word joiner or a byte-order mark is removed, which would join an `@` to its name again. (A NUL never reaches GitHub: the service writes U+FFFD in its place.)
+10. Whether `#12@name`, or a commit id followed by `@name`, is a mention once GitHub has turned the first part into a link. The rule leaves an `@` after a letter or digit alone.
+11. That a line of the model's that defines a link named like one of the service's tags leaves the escaped tags as text, and that `%40` in an address reaches the page that `@` did.
+12. The status GitHub answers to a write on a renamed repository, which the writer now reports as a failure instead of following.
+
+---
+
+## After the review of the whole branch
+
+The branch was reviewed as a whole after its nine tasks, and one wave of fixes followed. The notes file beside this plan (`2026-11-19-publishing-the-first-review-notes.md`, decisions 19 to 27) says what changed and why. Where a task above says otherwise, the notes say what was built:
+
+- Task 1: `renderReview` returns text that storing does not change (a NUL becomes U+FFFD); the service writes its own brackets escaped; a heading after quote or list marks is escaped; inside an address an `@` is written `%40`, and a `<` before `http://` or `https://` is left alone.
+- Task 2: `hasRun`.
+- Task 4: the writer follows no redirect.
+- Tasks 5 to 9: one definition of a short code (`src/shell/codes.ts`) and of who may give a command (`mayCommand`).
+- Task 8: the refusal's automatic job is stored only for a head that has no recorded run; a `/review` that is superseded is answered; one whose review could not be recorded is not.
+- Task 9: `dryRun` is true when it is not written.
