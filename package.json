@@ -15,15 +15,20 @@
     "eval:compare": "node src/eval/cli.ts compare",
     "eval:import-history": "node src/eval/cli.ts import-history",
     "eval:backtest": "node src/eval/cli.ts backtest",
-    "eval:score-noise": "node src/eval/cli.ts score-noise"
+    "eval:score-noise": "node src/eval/cli.ts score-noise",
+    "start": "node src/main.ts",
+    "dev:send-webhook": "node src/forge/github/send-sample.ts"
   },
   "dependencies": {
     "diff": "^9.0.0",
+    "pg": "^8.23.1",
     "yaml": "^2.9.1",
     "zod": "^4.6.7"
   },
   "devDependencies": {
+    "@electric-sql/pglite": "^0.5.16",
     "@types/node": "^26.6.6",
+    "@types/pg": "^8.23.1",
     "eslint": "^10.15.0",
     "typescript": "^6.0.3",
     "typescript-eslint": "^8.72.2"

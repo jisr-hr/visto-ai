@@ -46,6 +46,17 @@ limits:
 #   # Seconds to wait for one scorer call (at most 300).
 #   timeoutSeconds: 60
 
+# Needed only to run the service (not for the eval commands).
+# app:
+#   # The environment variable that holds the secret set on the app's webhook.
+#   webhookSecret: { env: WEBHOOK_SECRET }
+# database:
+#   # The environment variable that holds the Postgres URL (postgres:// or postgresql://); it contains a password.
+#   url: { env: DATABASE_URL }
+# server:
+#   # The port the service listens on (1 to 65535). It is 8080 when not written.
+#   port: 8080
+
 repositories:
   # Settings for every repository.
   defaults:

@@ -30,6 +30,21 @@ test('only the eval command line may import the GitHub adapter outside forge', a
   assert.ok((await lint("import '../forge/github/read-source.ts';\n", 'src/eval/score.ts')).includes('no-restricted-imports'));
   assert.deepEqual(await lint("import '../forge/github/read-source.ts';\n", 'src/eval/cli.ts'), []);
 });
+test('only the db part may import a Postgres client', async () => {
+  for (const name of ['pg', '@electric-sql/pglite']) {
+    assert.ok((await lint(`import '${name}';\n`, 'src/shell/x.ts')).includes('no-restricted-imports'), name);
+    assert.ok((await lint(`import '${name}';\n`, 'src/forge/github/x.ts')).includes('no-restricted-imports'), name);
+    assert.deepEqual(await lint(`import '${name}';\n`, 'src/db/x.ts'), [], name);
+  }
+});
+test('the engine may not import the db or the shell', async () => {
+  assert.ok((await lint("import '../db/types.ts';\n", 'src/engine/x.ts')).includes('no-restricted-imports'));
+  assert.ok((await lint("import '../shell/receive.ts';\n", 'src/engine/x.ts')).includes('no-restricted-imports'));
+});
+test('the shell may not import the GitHub adapter, and the service entry may', async () => {
+  assert.ok((await lint("import '../forge/github/webhook.ts';\n", 'src/shell/x.ts')).includes('no-restricted-imports'));
+  assert.deepEqual(await lint("import './forge/github/webhook.ts';\n", 'src/main.ts'), []);
+});
 test('the --import flag reaches test processes: fetch is blocked without importing setup', async () => {
   await assert.rejects(fetch('https://example.com'), (error: Error) => error.name === 'NetworkBlockedError');
 });

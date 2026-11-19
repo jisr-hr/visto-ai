@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
-import { ConfigError, contractFile, parseConfig, repoConfigFor } from './load.ts';
+import { ConfigError, contractFile, parseConfig, repoConfigFor, serviceConfig } from './load.ts';
 
 const minimal = 'model:\n  apiKey: { env: MODEL_KEY }\n  model: vendor/model-a\n';
 
@@ -229,4 +229,98 @@ test('a threshold written only in an override does not satisfy the scorer rule',
 
 test('the threshold is not required while no scorer is named', () => {
   assert.equal(parseConfig(minimal, { MODEL_KEY: 'k' }).repositories.defaults.scoreThreshold, 70);
+});
+
+const service = minimal + 'app:\n  webhookSecret: { env: HOOK }\ndatabase:\n  url: { env: DB_URL }\n';
+const serviceEnv = { MODEL_KEY: 'k', HOOK: 'hook-secret-value', DB_URL: 'postgres://u:db-password-value@db:5432/visto' };
+
+test('without the service blocks app and database are null and the port is 8080', () => {
+  const c = parseConfig(minimal, { MODEL_KEY: 'k' });
+  assert.equal(c.app, null);
+  assert.equal(c.database, null);
+  assert.deepEqual(c.server, { port: 8080 });
+});
+
+test('the service blocks resolve their secrets', () => {
+  const c = parseConfig(service, serviceEnv);
+  assert.deepEqual(c.app, { webhookSecret: 'hook-secret-value' });
+  assert.equal(c.database?.url, serviceEnv.DB_URL);
+});
+
+test('server.port is read and must be a port number', () => {
+  assert.equal(parseConfig(minimal + 'server:\n  port: 9000\n', { MODEL_KEY: 'k' }).server.port, 9000);
+  for (const body of ['port: 0', 'port: 65536', 'port: 80.5', 'port: 80\n  host: x']) {
+    assert.throws(
+      () => parseConfig(minimal + `server:\n  ${body}\n`, { MODEL_KEY: 'k' }),
+      (e: ConfigError) => e instanceof ConfigError && e.issues.some((i) => i.startsWith('server')),
+      body,
+    );
+  }
+});
+
+test('an unset service variable names itself', () => {
+  assert.throws(
+    () => parseConfig(service, { MODEL_KEY: 'k', DB_URL: serviceEnv.DB_URL }),
+    (e: ConfigError) => e.issues.includes('app.webhookSecret: environment variable HOOK is not set'),
+  );
+  assert.throws(
+    () => parseConfig(service, { MODEL_KEY: 'k', HOOK: 'hook-secret-value' }),
+    (e: ConfigError) => e.issues.includes('database.url: environment variable DB_URL is not set'),
+  );
+});
+
+test('the database URL must be a postgres URL and is never printed', () => {
+  assert.throws(
+    () => parseConfig(service, { ...serviceEnv, DB_URL: 'mysql://u:db-password-value@db/x' }),
+    (e: ConfigError) => e.issues.includes('database.url: must be a postgres URL') && !e.message.includes('db-password-value'),
+  );
+  for (const url of ['postgres://u:p@db/x', 'postgresql://u:p@db/x']) {
+    assert.equal(parseConfig(service, { ...serviceEnv, DB_URL: url }).database?.url, url);
+  }
+});
+
+test('a webhook secret written inline is rejected and never printed', () => {
+  assert.throws(
+    () => parseConfig(minimal + 'app:\n  webhookSecret: hook-secret-value\n', serviceEnv),
+    (e: ConfigError) => e instanceof ConfigError && !e.message.includes('hook-secret-value'),
+  );
+});
+
+test('an unknown key inside app or database names the key', () => {
+  assert.throws(
+    () => parseConfig(service + 'app2: {}\n', serviceEnv),
+    (e: ConfigError) => e.issues.some((i) => i.includes('app2')),
+  );
+  assert.throws(
+    () => parseConfig(minimal + 'app:\n  webhookSecret: { env: HOOK }\n  appId: 1\n', serviceEnv),
+    (e: ConfigError) => e.issues.some((i) => i.startsWith('app') && i.includes('appId')),
+  );
+  assert.throws(
+    () => parseConfig(minimal + 'database:\n  url: { env: DB_URL }\n  pool: 5\n', serviceEnv),
+    (e: ConfigError) => e.issues.some((i) => i.startsWith('database') && i.includes('pool')),
+  );
+});
+
+test('serviceConfig names each missing block and returns a complete config', () => {
+  assert.throws(
+    () => serviceConfig(parseConfig(minimal, { MODEL_KEY: 'k' })),
+    (e: ConfigError) =>
+      e instanceof ConfigError &&
+      JSON.stringify(e.issues) === JSON.stringify(['app: required to run the service', 'database: required to run the service']),
+  );
+  const c = parseConfig(service, serviceEnv);
+  assert.equal(serviceConfig(c), c);
+});
+
+test('the example file has no service blocks as shipped, and loads with them switched on', () => {
+  const shipped = parseConfig(example(), exampleEnv);
+  assert.equal(shipped.app, null);
+  assert.equal(shipped.database, null);
+  assert.deepEqual(shipped.server, { port: 8080 });
+  const text = uncomment(example(), '# app:');
+  const env = { ...exampleEnv, WEBHOOK_SECRET: 'hook-secret-value', DATABASE_URL: 'postgres://u:p@db:5432/visto' };
+  const c = parseConfig(text, env);
+  assert.equal(serviceConfig(c).app.webhookSecret, 'hook-secret-value');
+  assert.equal(c.database?.url, env.DATABASE_URL);
+  assert.equal(c.server.port, 8080);
 });
