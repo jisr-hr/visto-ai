@@ -54,7 +54,7 @@ None of these is in the design. Each is the planner's call, listed so the owner 
 14. **When the inline comments are refused, the whole text of each is put in the body,** under the finding it belongs to, so nothing the review found is lost.
 15. **The comments are read back after the publication is recorded.** A read-back that fails is logged and not tried again; those comments' ids are then unknown to plan 6.
 16. **A command from any bot is ignored,** not only from the app itself (PM-command). 8.1 excludes only comments the app wrote. A bot that may command a review can make two bots answer each other.
-17. **Raw HTML the model wrote is shown as text.** Outside code every `<` is written as `&lt;`, so nothing of the model's is rendered as HTML: no comment that hides text, no block that folds what follows. Cost if wrong: a table or a details block the model wrote on purpose is shown as its source.
+17. **Raw HTML the model wrote is shown as text.** Outside a fenced block a `<` that could start a tag, a comment or a declaration gets a zero-width space after it, so nothing of the model's is rendered as HTML: no comment that hides text, no block that folds what follows. Cost if wrong: a table or a details block the model wrote on purpose is shown as its source.
 18. **A command from someone without access never pushes a job out.** It is stored only when the pull request has no pending job; and when it is refused, an automatic job for the stored head is stored in its place, in case a push's job was kept out meanwhile.
 
 ## Global Constraints
@@ -183,39 +183,35 @@ Each file declares `type Log = (entry: Record<string, unknown>) => void` locally
 
 ```ts
 // src/engine/render/body.ts
-/** Text the model wrote, made safe to post. Outside code: a mention gets a zero-width space after its `@`, and every `<` is written as `&lt;`. A fence left open is closed. */
+/** Text the model wrote, made safe to post. Outside a fence a zero-width space is put after the `@` of a mention, after a `<` that could start HTML and after the `&` of a character reference. A fence left open is closed. */
 export function inert(text: string): string;
 // renderReview's second argument gains one required field:
 type Meta = { trigger: 'automatic' | 'manual'; requestedBy: string | null; lineUrl: ...; inline: boolean };
 ```
 
-**What counts as code.** Only what is certainly code under CommonMark's own rules is left as it is; everything else is prose (calls 1 and 17). A rule that is generous here leaves a live mention, so when in doubt it is prose. `inert` first turns every `\r\n` and every lone `\r` into `\n`.
+**What counts as code.** Only a fence. Outside a fence nothing is treated as code, and inline spans are not looked for (calls 1 and 17). Whether GitHub reads a run of backticks as a span depends on what stands before it: a link's destination or title, a reference label, an address GitHub links by itself, a table cell. Three builds of this task showed that this cannot be told without a full parser, and each wrong guess left a mention live. What is done to prose is therefore chosen to read the same inside an inline span as outside one: nothing is rewritten, and a character that cannot be seen is added. `inert` first turns every `\r\n` and every lone `\r` into `\n`.
 
-- **A fence.** It opens at a line that starts, after at most three spaces, with three or more backticks, or three or more tildes; for a backtick fence the rest of that line holds no backtick. **The opening line is written without those spaces, at its first column.** There it is a fence to GitHub whatever came before it: a line at the first column cannot belong to a list item or to a quote, and a fence may interrupt a paragraph. Left indented, the same line may be an opening fence of the top level, which runs to the end of the review when nothing closes it, or the closing fence of a list item; only a full parser could tell which. A line indented by four spaces or more, or by a tab, opens no fence here and is prose. The fence ends at a line indented by at most three spaces that holds the same character, at the same or a greater length, followed by nothing but spaces and tabs; or at the end of the text. Nothing else inside a fence is changed.
-- **An inline span.** Spans are found paragraph by paragraph (a paragraph is a run of lines with no blank line between them, outside fences; a line is blank only when it holds nothing but spaces and tabs, so a no-break space, a form feed or any other white space does not end a paragraph), line by line, left to right:
-  - A run of backticks opens a span unless it is escaped. An odd number of backslashes right before the run makes its first backtick a plain character; what is left of the run, if anything, is the run.
-  - It is closed by the next run of exactly the same length **on the same line**. A backslash before a closing run changes nothing.
-  - When no such run is on that line, the rest of the line and **the rest of the paragraph** is prose: under CommonMark the opener may pair with a run on a later line, and what lies between would be code there and prose here, or the reverse.
-  - A span whose content holds a `|` is prose: in a table row the bar ends the cell, and the span with it.
+- **Tabs.** Outside a fence, the tabs in a line's leading white space are replaced by spaces, each tab reaching the next multiple of four columns counted from the start of the line. Inside a fence this is done only to a line that holds nothing but white space and a run of the fence's own character at least as long as the opening run. Under a bullet every line is written two columns in, and there a tab reaches a different column than at the top level; written with spaces, a line means the same in both places. Tabs after a line's first character, and in the other lines of a fence, are kept.
+- **A fence.** It opens at a line that starts, after at most three spaces, with three or more backticks, or three or more tildes; for a backtick fence the rest of that line holds no backtick. It ends at a line that holds, after at most three spaces, the same character at the same or a greater length, followed by nothing but spaces and tabs; or at the end of the text. **Both lines are written without their leading spaces, at the first column.** There a fence line is a fence to GitHub whatever came before it: a line at the first column cannot belong to a list item or to a quote, and a fence may interrupt a paragraph. Left indented, the same line may be an opening fence of the top level, which runs to the end of the review when nothing closes it, or the closing fence of a list item; only a full parser could tell which. A line indented by four spaces or more opens and closes nothing. Nothing else inside a fence is changed.
 
-**What is done to prose,** in this order:
+**What is done to prose,** that is to every line outside a fence. A zero-width space is put:
 
-- **Character references.** Every `&` is written as `&amp;`, so `&#64;name` is shown as typed and never becomes an `@`.
-- **Raw HTML.** Every `<` is written as `&lt;`. This replaces the present `noComment`.
-- **Mentions.** An `@` starts a mention when the character after it is an ASCII letter or digit and the character before it, if any, is not an ASCII letter, an ASCII digit or an underscore. It gets a zero-width space after it. A letter that is not ASCII before the `@` does not protect it.
+- **after an `@`** that is followed by an ASCII letter or digit and is not preceded by an ASCII letter or digit. An underscore before the `@`, or a letter that is not ASCII, does not protect it: `_x_@name` loses its underscores to emphasis, which leaves `@name` at the start of its own piece of text.
+- **after a `<`** that is followed by an ASCII letter, `/`, `!` or `?`, which is every way raw HTML can start. `a < b` and `x <= y` are left as they are. This replaces the present `noComment`.
+- **after an `&`** that starts a character reference: `&`, then a name that starts with an ASCII letter and holds 1 to 32 ASCII letters and digits, or `#` and 1 to 7 digits, or `#x` or `#X` and 1 to 6 hexadecimal digits, and then `;`. So `&#64;name` is shown as typed and never becomes an `@`. `a && b` and `&mut x` are left as they are.
 
 **An open fence** is closed by one more line, at the first column, with the fence's own characters, so one piece cannot swallow the next.
 
-**Headings.** `noHeading`, which the summary and the body-only form go through, works on prose only: the lines of a fence are left as they are. Outside a fence it escapes a line that starts a heading with `#`, as now, and also a line made only of `=` or only of `-` (after any spaces, and before any spaces or tabs) that comes right after a line that is not blank: such a line turns the line above it into a heading. It gets a backslash before its first `=` or `-`. A line of `-` after a blank line is a rule and is left.
+**Headings.** `noHeading`, which the summary and the body-only form go through after `inert`, works on prose only: the lines of a fence are left as they are. Outside a fence it escapes a line that starts a heading with `#`, as now, and also a line made only of `=` or only of `-` (after at most three spaces, and before any spaces or tabs) that comes right after a line of text: such a line turns the line above it into a heading. It gets a backslash before its first `=` or `-`. A line of text is one that is not blank and is not a fence's closing line; a line is blank only when it holds nothing but spaces and tabs, so a no-break space or a form feed does not make one. A line of `-` after a blank line or after a fence is a rule and is left.
 
-**The cut.** `closeOpenFence` keeps its rule: an opening line indented by at most three spaces, closed at that line's own indent. After `inert`, every such line of the body outside a fence is a fence the service honoured: at the first column in the summary, and two spaces in under a bullet of the body-only form.
+**The cut.** `closeOpenFence` keeps its rule: an opening line indented by at most three spaces, closed at that line's own indent. After `inert`, every fence line of the body that the service honoured stands at the first column of its piece: at the first column in the summary, and two spaces in under a bullet of the body-only form.
 
 **Where.** `inert` is applied to each piece of model-written text **as it is finally written**, and each piece is placed so that its first line starts a line of the document, which is what the rules above assume:
 
 - The summary: under its heading, as now.
 - An inline comment: the service's own first line (`**[severity]**`, and the note about a moved line when there is one), then an empty line, then the finding's whole inert text. The model's text never shares a line with the service's.
 - The body-only form: under the bullet, indented by two spaces as a continuation of the list item: first the note about a moved line when there is one, then the whole inert text. Any line that would be a heading is escaped as `noHeading` does.
-- Text that follows the service's own words on one line (a finding's first line in a bullet, after `firstLine` has cut it; a score's reason) cannot open a fence there. It is made inert by the same rules without the fence rule, and nothing is appended to it. `firstLine` also treats a lone `\r` as a line break.
+- Text that follows the service's own words on one line (a finding's first line in a bullet, after `firstLine` has cut it; a score's reason) cannot open a fence there. It is made inert by the prose rule alone, and nothing is appended to it. `firstLine` also treats a lone `\r` as a line break.
 - A score's `category` is always written inside a code span by the service and needs nothing.
 
 It is not applied to what the service writes itself: its headings, its paths in code spans, and the line "requested by @name".
@@ -358,7 +354,67 @@ test('a cut inside a fence that came from an indented line closes it before the 
 
 The first of these replaces the three `listed` assertions of the test "a fence is honoured only where it is certainly one", which expected the opposite for the same input and are removed. In the third test the first list holds white space that is not a space or a tab: the paragraph goes on, so the run left open on its first line still makes the rest prose. In the last test the summary's third line becomes an opening fence at the first column, everything after it is inside that fence, and the cut lands there.
 
-Existing tests whose expected text holds a `<` the model wrote outside code change to `&lt;`; list them in the report.
+**The rule after the third build of this task was reviewed.** Inline spans are no longer looked for and nothing is rewritten (see "What counts as code" above), so where a test block above expects `&lt;`, `&amp;` or an inline span left as it was, this section wins; the tests as they stand are in `src/engine/render/body.test.ts`.
+
+Tests that exist and change (`ZW` is the test file's constant; declare it at the top of the file, since tests above its present place now use it):
+
+- "an HTML comment opener written by the model is neutralised": each expected `&lt;!--` becomes `<${ZW}!--` (five places; the assertion that the body holds no `<!--` stays).
+- "a mention in prose is made inert, and one in code is left as it is": its second assertion now expects ``use `@${ZW}Injectable()` here``; rename it "a mention outside a fence is made inert, and one in a fence is left as it is".
+- "an address, a lone @ and an @ before a symbol are not mentions": `'x_@y'` leaves the list (the first new test covers the list that stays).
+- "what only looks like code is prose": unchanged, and still passes.
+- "raw HTML in prose is shown and not rendered, and a fence left open is closed": replaced by the second new test.
+- "a score reason and the whole-file reason are made inert too": the expected text becomes ``ask @${ZW}octo-dev <${ZW}b>``.
+- "a fence is honoured only where it is certainly one": the second expected text becomes `` `\`\`\`\nx\n\`\`\`\n@${ZW}victim` `` (the closing fence at the first column).
+- "a span is honoured only where it is certainly one" and "a character reference cannot become a mention": removed; the first two new tests take their place.
+- "an indented fence is moved to the first column, ...": its second expected text becomes `` `~~~ts\ncode\n~~~\nafter @${ZW}victim` ``.
+- "only spaces and tabs make a line blank": replaced by the test of that name below (the paragraphs it tested are gone; what a blank line is now matters to `noHeading` only).
+- Every other test of the file stays as it is and must still pass, among them "a first line cut out of a span is prose", "an inline comment keeps the model's text off the service's own line", "a fence the summary leaves open cannot swallow the sections after it", "a line of = or - under a line of text makes no heading, and a fence is left as it is" and "a cut inside a fence that came from an indented line closes it before the cut marker".
+
+Tests added:
+
+```ts
+test('outside a fence nothing is treated as code', () => {
+  const live = (text: string): boolean => /(^|[^A-Za-z0-9])@[A-Za-z0-9]/.test(inert(text)) || /<[A-Za-z\/!?]/.test(inert(text));
+  for (const text of [
+    '`@victim`', '\\`` x `@victim`', 'x `a\n` @victim `y`', '| `a | @victim` |', '`a\r\r@victim\r\r`', '\u00e9@victim',
+    '[a](`) @victim `', '[a](/u "`") @victim <b> `', '[`]: /u\n\n[a][`] @victim `',   // a backtick in a link's destination, title or label opens no span
+    'see https://x.co/` @victim `', 'www.x.co/` @victim <img src=x> `',                // nor does one inside an address GitHub links by itself
+    '_x_@victim', 'x_@victim', '**a**@victim', '\\@victim',                            // emphasis takes the characters before the @ away
+  ]) assert.equal(live(text), false, JSON.stringify(text));
+  assert.equal(inert('use `@Injectable()` here'), `use \`@${ZW}Injectable()\` here`);
+  for (const text of ['dev@example.test', 'a1@b', 'a @ b', '@-x', '@']) assert.equal(inert(text), text);
+});
+test('raw HTML and character references are shown as typed, by a character that cannot be seen', () => {
+  assert.equal(inert('<details><summary>x</summary>'), `<${ZW}details><${ZW}summary>x<${ZW}/summary>`);
+  assert.equal(inert('a <!-- b, <?php and <!DOCTYPE'), `a <${ZW}!-- b, <${ZW}?php and <${ZW}!DOCTYPE`);
+  assert.equal(inert('use `Array<string>` here: a < b, x <= y, 1 <2, <-'), `use \`Array<${ZW}string>\` here: a < b, x <= y, 1 <2, <-`);
+  assert.equal(inert('ping &#64;octo-dev, &#x40;octo-dev and &commat;octo-lead'), `ping &${ZW}#64;octo-dev, &${ZW}#x40;octo-dev and &${ZW}commat;octo-lead`);
+  assert.equal(inert('a && b, R&D, &mut x, &#12345678; and a&b;c'), `a && b, R&D, &mut x, &#12345678; and a&${ZW}b;c`);
+  assert.equal(inert('```ts\nconst a: Array<string> = []; // &amp; @x'), '```ts\nconst a: Array<string> = []; // &amp; @x\n```');
+});
+test('a tab before a fence line means the same under a bullet as at the top level', () => {
+  // inside a fence, a line that would close it if it were indented less is written with spaces and stays inside
+  assert.equal(inert('```\n\t```\n@victim\n```'), '```\n    ```\n@victim\n```');
+  assert.equal(inert('~~~\n \t~~~~\nx'), '~~~\n    ~~~~\nx\n~~~');
+  // the other lines of a fence keep their tabs
+  assert.equal(inert('```make\nall:\n\tcc x.c\n```'), '```make\nall:\n\tcc x.c\n```');
+  // outside a fence a leading tab becomes spaces up to the next multiple of four, so no fence opens there
+  assert.equal(inert('\t```\n```\n@victim <img src=x>\n\t```'), '    ```\n```\n@victim <img src=x>\n    ```\n```');
+  assert.equal(inert('a\n\tb\n  \tc\td'), 'a\n    b\n    c\td');
+  const bodyOnly = renderReview(result({ findings: [finding({ body: 'Overall\n\t---\n\n\t## Overall' })] }), { ...auto, inline: false }).body;
+  assert.equal(bodyOnly.includes('  Overall\n      ---\n\n      ## Overall'), true);
+});
+test('a closing fence is written at the first column too', () => {
+  assert.equal(inert('```\nx\n  ```  \nafter @victim'), `\`\`\`\nx\n\`\`\`  \nafter @${ZW}victim`);
+});
+test('only spaces and tabs make a line blank', () => {
+  const body = (text: string): string => renderReview(result({ overview: text }), auto).body;
+  for (const gap of ['\u00a0', '\u3000', '\ufeff', '\u2003', '\v', '\f']) assert.equal(body(`Title\n${gap}\n---`).includes(`${gap}\n\\---`), true, JSON.stringify(gap));
+  for (const gap of ['', ' ', '\t', ' \t ']) assert.equal(body(`Title\n${gap}\n---\n\nend`).includes('\n---\n\nend'), true, JSON.stringify(gap));
+  // a rule right after a fence is not under a line of text
+  assert.equal(body('a\n\n```\nx\n```\n---\nb').includes('```\nx\n```\n---\nb'), true);
+});
+```
 
 - [ ] **Step 2: Run them to see them fail**
 
@@ -1417,5 +1473,5 @@ None of this can be shown by a test or by the run in Task 9. Each needs a GitHub
 4. That the pull request's comment list names each comment's review, and returns each comment's text as it was sent, so the read-back matches them.
 5. That a reaction and a general comment need the `issues` permission and not less.
 6. The association GitHub reports for a commenter, also for a member whose membership is private (design 20, item 7).
-7. That a zero-width space after `@` stops a mention, that `&lt;` shows as `<`, and that both read well in a review. Also that a fence line at the first column, right after a list item whose own fence is still open, opens a new fence on GitHub as it does under CommonMark: the service leaves a mention inside such a fence as it is.
+7. That a zero-width space after `@` stops a mention, that one after `<` stops a tag and one after `&` stops a character reference, and that all three read well in a review, also inside an inline span. Also that a fence line at the first column, right after a list item whose own fence is still open, opens a new fence on GitHub as it does under CommonMark: the service leaves a mention inside such a fence as it is.
 8. One whole first review of a real pull request, and one `/review`.
