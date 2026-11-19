@@ -32,14 +32,57 @@ function configPath(argv: string[]): string {
   throw new UsageError('usage: main --config <path>');
 }
 
-/** The error's name and, when it is a string, its code. Never its message. */
-function describe(error: unknown): { error: string; code: string | null } {
-  const o = typeof error === 'object' && error !== null ? error as { name?: unknown; code?: unknown } : {};
-  return { error: typeof o.name === 'string' ? o.name : 'unknown', code: typeof o.code === 'string' ? o.code : null };
+/** The error's name, its string code, and the short code its message starts with (up to a colon), or null. Never its message. */
+export function describeFailure(error: unknown): { error: string; code: string | null; reason: string | null } {
+  const o = typeof error === 'object' && error !== null ? error as { name?: unknown; code?: unknown; message?: unknown } : {};
+  const reason = typeof o.message === 'string' ? /^([a-z][a-z0-9_]{0,39})(:|$)/.exec(o.message)?.[1] ?? null : null;
+  return { error: typeof o.name === 'string' ? o.name : 'unknown', code: typeof o.code === 'string' ? o.code : null, reason };
 }
 
 function log(entry: Record<string, unknown>): void {
   process.stdout.write(JSON.stringify(entry) + '\n');
+}
+
+/**
+ * Runs `start` and stops what it started on the first signal, also one that arrives before `start` has resolved.
+ * A second signal calls exit(1). A start that rejects logs { event: 'start_failed', ...describeFailure } and resolves 1.
+ * Resolves 0 after a stop.
+ */
+// PM-drain: the first signal stops the service cleanly, a second one ends the process at once.
+export function runUntilSignal(
+  start: () => Promise<{ stop(): Promise<void> }>,
+  signals: { on(listener: () => void): void; off(listener: () => void): void },
+  exit: (code: number) => void,
+  log: (entry: Record<string, unknown>) => void,
+): Promise<number> {
+  return new Promise<number>((resolve) => {
+    let count = 0;
+    let service: { stop(): Promise<void> } | null = null;
+    const finish = (code: number): void => { signals.off(onSignal); resolve(code); };
+    const stop = (running: { stop(): Promise<void> }): void => {
+      running.stop().then(
+        () => 0,
+        (error: unknown) => { log({ event: 'stop_failed', ...describeFailure(error) }); return 1; },
+      ).then(finish);
+    };
+    function onSignal(): void {
+      count += 1;
+      if (count > 1) { exit(1); return; }
+      log({ event: 'stopping' });
+      if (service !== null) stop(service);
+    }
+    signals.on(onSignal);
+    start().then(
+      (started) => {
+        service = started;
+        if (count > 0) stop(started);
+      },
+      (error: unknown) => {
+        log({ event: 'start_failed', ...describeFailure(error) });
+        finish(1);
+      },
+    );
+  });
 }
 
 export async function main(argv: string[], env: Record<string, string | undefined>, out: (line: string) => void): Promise<number> {
@@ -58,90 +101,74 @@ export async function main(argv: string[], env: Record<string, string | undefine
     // Issues name keys and variables, never values.
     if (error instanceof ConfigError) { for (const issue of error.issues) out(`config: ${issue}`); return 2; }
     out('start_failed');
-    log({ event: 'start_failed', ...describe(error) });
+    log({ event: 'start_failed', ...describeFailure(error) });
     return 1;
   }
 
   let server: Server | null = null;
-  let service: Awaited<ReturnType<typeof startService>>;
-  try {
-    const { fetch } = globalThis;
-    const clock = (): Date => new Date();
-    const sleep = (ms: number): Promise<void> => new Promise((done) => { setTimeout(done, ms); });
-    // A key that cannot be read throws here and fails the start.
-    const auth = createAppAuth({ appId: config.app.id, privateKey: config.app.privateKey, fetch, clock });
-    const engine = {
-      model: createModelClient(config.model, { fetch, sleep }),
-      contract: readFileSync(join(import.meta.dirname, '..', 'contract', contractFile(config)), 'utf8'),
-      clock,
-      token: () => randomBytes(8).toString('hex'),
-      log,
-      ...(config.scorer === null ? {} : { scorer: createJevScorer(config.scorer, { fetch, sleep }) }),
-    };
-    service = await startService(config, {
-      db: postgresDb(config.database.url, log),
-      reader: createGithubWebhookReader(config.app.webhookSecret),
-      clock,
-      log,
-      takeLock: () => takeInstanceLock(config.database.url, () => {
-        log({ event: 'instance_lock_lost' });
-        process.exit(1);
-      }),
-      forge: createGithubAccess({ auth, fetch }),
-      hooks: createGithubHookDeliveries({ auth, fetch }),
-      fetch,
-      sleep,
-      every: (ms, work) => {
-        const timer = setInterval(() => { void work(); }, ms);
-        timer.unref();
-        return () => { clearInterval(timer); };
-      },
-      engineDeps: (source) => ({ source, ...engine }),
-      review,
-      lineUrl: githubLineUrl,
-      listen: (listener, port) => new Promise<Listening>((resolve, reject) => {
-        const listening = createServer(listener);
-        server = listening;
-        listening.once('error', reject);
-        listening.listen(port, () => {
-          listening.off('error', reject);
-          listening.on('error', (error) => { log({ event: 'server_error', ...describe(error) }); });
-          log({ event: 'listening', port });
-          resolve({
-            close: () => { listening.close(); listening.closeIdleConnections(); return Promise.resolve(); },
+  const signals = {
+    on: (listener: () => void): void => { process.on('SIGTERM', listener); process.on('SIGINT', listener); },
+    off: (listener: () => void): void => { process.off('SIGTERM', listener); process.off('SIGINT', listener); },
+  };
+  const code = await runUntilSignal(async () => {
+    try {
+      const { fetch } = globalThis;
+      const clock = (): Date => new Date();
+      const sleep = (ms: number): Promise<void> => new Promise((done) => { setTimeout(done, ms); });
+      // A key that cannot be read throws here and fails the start.
+      const auth = createAppAuth({ appId: config.app.id, privateKey: config.app.privateKey, fetch, clock });
+      const engine = {
+        model: createModelClient(config.model, { fetch, sleep }),
+        contract: readFileSync(join(import.meta.dirname, '..', 'contract', contractFile(config)), 'utf8'),
+        clock,
+        token: () => randomBytes(8).toString('hex'),
+        log,
+        ...(config.scorer === null ? {} : { scorer: createJevScorer(config.scorer, { fetch, sleep }) }),
+      };
+      return await startService(config, {
+        db: postgresDb(config.database.url, log),
+        reader: createGithubWebhookReader(config.app.webhookSecret),
+        clock,
+        log,
+        takeLock: () => takeInstanceLock(config.database.url, () => {
+          log({ event: 'instance_lock_lost' });
+          process.exit(1);
+        }),
+        forge: createGithubAccess({ auth, fetch }),
+        hooks: createGithubHookDeliveries({ auth, fetch }),
+        fetch,
+        sleep,
+        every: (ms, work) => {
+          const timer = setInterval(() => { void work(); }, ms);
+          timer.unref();
+          return () => { clearInterval(timer); };
+        },
+        engineDeps: (source) => ({ source, ...engine }),
+        review,
+        lineUrl: githubLineUrl,
+        listen: (listener, port) => new Promise<Listening>((resolve, reject) => {
+          const listening = createServer(listener);
+          server = listening;
+          listening.once('error', reject);
+          listening.listen(port, () => {
+            listening.off('error', reject);
+            listening.on('error', (error) => { log({ event: 'server_error', ...describeFailure(error) }); });
+            log({ event: 'listening', port });
+            resolve({
+              close: () => { listening.close(); listening.closeIdleConnections(); return Promise.resolve(); },
+            });
           });
-        });
-      }),
-    });
-  } catch (error) {
-    (server as Server | null)?.closeAllConnections();
-    out('start_failed');
-    log({ event: 'start_failed', ...describe(error) });
-    return 1;
-  }
-
-  // PM-drain: the first signal stops the service cleanly, a second one ends the process at once.
-  return new Promise<number>((resolve) => {
-    let signals = 0;
-    const onSignal = (): void => {
-      signals += 1;
-      if (signals > 1) process.exit(1);
-      log({ event: 'stopping' });
-      service.stop().then(
-        () => 0,
-        (error: unknown) => { log({ event: 'stop_failed', ...describe(error) }); return 1; },
-      ).then((code) => {
-        (server as Server | null)?.closeAllConnections();
-        process.off('SIGTERM', onSignal);
-        process.off('SIGINT', onSignal);
-        resolve(code);
+        }),
       });
-    };
-    process.on('SIGTERM', onSignal);
-    process.on('SIGINT', onSignal);
-  });
+    } catch (error) {
+      out('start_failed');
+      throw error;
+    }
+  }, signals, (exitCode) => process.exit(exitCode), log);
+  (server as Server | null)?.closeAllConnections();
+  return code;
 }
 
 if (import.meta.main) {
-  process.exitCode = await main(process.argv.slice(2), process.env, (line) => { process.stdout.write(line + '\n'); });
+  process.exit(await main(process.argv.slice(2), process.env, (line) => { process.stdout.write(line + '\n'); }));
 }

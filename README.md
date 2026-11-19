@@ -4,7 +4,7 @@
 
 An open-source, self-hosted AI reviewer for pull requests. It looks for defects it can demonstrate, and it scores which parts of a change still need a human reviewer.
 
-> **Status: early development.** The review engine and an offline evaluation tool are built. The service receives GitHub's webhooks and records what people do on pull requests, but it reviews nothing yet, so Visto AI cannot review a live pull request. See [Status](#status).
+> **Status: early development.** The review engine and an offline evaluation tool are built. The service receives GitHub's webhooks, reads each pull request and runs the review in dry run: it records what it would have posted and posts nothing, so Visto AI cannot yet review a live pull request. See [Status](#status).
 
 ## Why
 
@@ -53,14 +53,15 @@ The full design, with every decision and its reason, is in [docs/superpowers/spe
 | Offline replay of past pull requests | Built and run |
 | Engine: the score | Built. Measured only where its owner has run the backtest |
 | Service: receiving webhooks and recording what people do on pull requests | Built |
-| Service: queue and publishing a review to GitHub | Planned |
+| Service: a queue of review jobs, run in dry run and recorded | Built |
+| Service: publishing a review to GitHub, and commands | Planned |
 | Merge gate | Planned |
 | Extensions and MCP tools | Planned |
 | Memory | Planned |
 | Automatic approval | Planned |
 | UI | Planned |
 
-What exists today is a library, a command-line tool, and a service that you can run with Docker. The service receives and records, and still reviews nothing.
+What exists today is a library, a command-line tool, and a service that you can run with Docker. The service receives, queues, reviews in dry run and records, and posts nothing.
 
 ## How the engine works
 
@@ -88,11 +89,13 @@ Tests never reach the network. The test setup blocks sockets and `fetch`, and cl
 
 ## Run the service
 
-The service records each signed delivery's id, and what the delivery says about people and the pull request, in its own Postgres. The payload itself is not kept. It reviews nothing yet.
+The service receives GitHub's signed webhooks and records each delivery's id and what it says about people and the pull request (the payload itself is not kept). When a pull request is opened, reopened, made ready for review or pushed to, it queues a review. A push is reviewed after 180 quiet seconds, so several pushes in a row give one review. The review runs the engine on the pull request as GitHub has it then, in dry run: it is recorded in the database and **nothing is posted to GitHub**. Publishing, commands and the merge gate are not built, so the service starts only with `dryRun: true` in the config.
+
+To run it you need a GitHub App (its id, its private key and its webhook secret), a model key and a Postgres.
 
 ```bash
-cp env.example .env                       # then write your own passwords and secret
-cp config.example.yml config.local.yml    # then switch on the app, database and server blocks
+cp env.example .env                       # then write your own passwords, secret and keys
+cp config.example.yml config.local.yml    # then switch on the app and database blocks and write dryRun: true
 docker compose up -d --build --wait
 ```
 
@@ -103,7 +106,25 @@ set -a && . ./.env && set +a
 npm run dev:send-webhook -- --url http://localhost:8080/webhooks/github --secret-env WEBHOOK_SECRET --kind review
 ```
 
-The kinds are `pull_request`, `review` and `comment`. Stop it with `docker compose down`.
+The kinds are `pull_request`, `review` and `comment`. For the `pull_request` kind, `--action opened|synchronize` (default `opened`) and `--head <sha>` (default `abc123`) choose the action and the head commit, so two pushes can be sent with two heads. The other kinds refuse these options. Stop it with `docker compose down`.
+
+### Reading what a review would have posted
+
+Every attempt at a review, finished or failed, is a row of `visto_ai.review_runs`:
+
+```bash
+docker compose exec db psql -U postgres -d visto -c "select id, owner, repo, number, outcome, cost, body from visto_ai.review_runs order by id desc limit 5"
+```
+
+`body` is the text that would have been posted, `outcome` how the run ended and `cost` what the model calls cost, in the currency of your prices.
+
+### Running it
+
+- Run one instance per database. A second one stops at once with `another_instance_running`, and the first keeps running.
+- If the database restarts, the service notices that it has lost its lock, exits, and Compose starts it again.
+- Connect to Postgres directly. The lock and the statement timeout do not work through a pooler in transaction mode.
+- Stopping the service (`docker compose stop`) waits up to 10 minutes for the reviews that are running. The Compose file allows 660 seconds for it. A second signal ends it at once.
+- Every review costs money. The service stops starting reviews for the day when spending reaches `limits.spendPerDay` (50 US dollars when not written), and runs at most `limits.queueConcurrency` reviews at once (2 when not written). When the model's key is refused or its account is out of credit, reviews pause for 5 minutes at a time and the service sends one message to `alerts.webhook` if you wrote it. No job is lost meanwhile.
 
 Setup notes:
 
@@ -204,8 +225,8 @@ A file that cannot be used (invalid YAML, an unknown key, a refused pattern, con
 | `src/eval` | The `replay` and `compare` commands |
 | `src/eval/history` | The `import-history` command and the history file it writes |
 | `src/eval/backtest` | The `backtest` and `score-noise` commands: labels, the three numbers and the noise between runs |
-| `src/db` | The Postgres client, migrations and queries |
-| `src/shell` | Receiving a webhook and deciding what it stores |
+| `src/db` | The Postgres client, migrations, the queue's statements and the recorded runs |
+| `src/shell` | Receiving a webhook, the queue of review jobs, running a review, the daily limit and the model's health |
 | `src/service.ts`, `src/main.ts` | Starting and stopping the service |
 | `src/config` | Loading and validating configuration |
 | `contract` | The rules the model is given |
