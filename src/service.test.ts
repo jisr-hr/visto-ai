@@ -56,11 +56,15 @@ interface Options {
   lock?: null; listenError?: Error; now?: string; holdReview?: boolean;
   listings?: Array<{ deliveries: HookDelivery[]; complete: boolean } | Error>;
   migrationError?: Error; closeNever?: boolean; closeError?: Error; listenerCloseError?: Error; logThrows?: boolean;
+  /** The status the model endpoint's key route answers with; 200 when not given. */
+  keyStatus?: number;
 }
 interface Timer { ms: number; work: () => Promise<void>; cancelled: boolean }
 
 const opened: Db[] = [];
+const started: Array<{ stop(): Promise<void> }> = [];
 afterEach(async () => {
+  for (const service of started.splice(0)) await service.stop();
   for (const db of opened.splice(0)) await db.close();
 });
 
@@ -101,15 +105,18 @@ async function harness(options: Options = {}) {
   const h = {
     db, events, timers, inputs, fetched, listedSince, logged,
     port: 0,
+    /** What the clock reads; a test may move it. */
+    now: options.now ?? at(0),
     onListen: undefined as (() => Promise<void>) | undefined,
     beforeListing: undefined as (() => Promise<void>) | undefined,
     beforeTransaction: undefined as (() => Promise<void>) | undefined,
     releaseReview: () => { releaseReview(); },
     reviewed: () => reviewed,
-    start: () => startService(config, {
+    start: async () => {
+      const service = await startService(config, {
       db,
       reader: { read: () => ({ ok: true as const, delivery: delivered, name: current.kind, action: current.kind === 'pull_request' ? current.action : null, event: current }) },
-      clock: () => new Date(options.now ?? at(0)),
+      clock: () => new Date(h.now),
       log: (e) => { logged.push(e); if (options.logThrows === true) throw new Error('logger down'); },
       listen: async (l, p) => {
         events.push('listen');
@@ -142,7 +149,7 @@ async function harness(options: Options = {}) {
       },
       fetch: (async (url: string | URL | Request) => {
         fetched.push(String(url));
-        return new Response('{}', { status: 200 });
+        return new Response('{}', { status: String(url).endsWith('/key') ? options.keyStatus ?? 200 : 200 });
       }) as typeof fetch,
       sleep: () => Promise.resolve(),
       every: (ms, work) => {
@@ -158,7 +165,10 @@ async function harness(options: Options = {}) {
         return okResult();
       },
       lineUrl: () => 'https://git.example.test/x',
-    }),
+      });
+      started.push(service);
+      return service;
+    },
     runTimer: (ms: number) => timers.find((t) => t.ms === ms)!.work(),
     webhook: (event: ForgeEvent, delivery: string) => new Promise<{ status: number | null; body: string | null }>((resolve) => {
       current = event;
@@ -289,6 +299,38 @@ test('stop goes on once DRAIN_WAIT_MS has passed, and says how many reviews were
   await stopping;
   assert.deepEqual(h.logged.find((e) => e.event === 'drain_timeout'), { event: 'drain_timeout', running: 1 });
   assert.equal((await h.db.query<{ status: string }>('select status from visto_ai.jobs'))[0]!.status, 'running');
+});
+test('a redelivery attempt that is still under way when the upkeep runs is not started twice, and one beat is registered', async () => {
+  let release!: () => void;
+  const held = new Promise<void>((done) => { release = done; });
+  const h = await harness({ now: at(600) });
+  h.beforeListing = () => held;
+  await migrate(h.db, loadMigrations(MIGRATIONS_DIR));
+  await beat(h.db, at(0));
+  const service = await h.start();
+  await h.flush();
+  const upkept = h.runTimer(UPKEEP_MS);
+  await h.flush();
+  assert.equal(h.listedSince.length, 1);
+  release();
+  await service.settled;
+  await upkept;
+  assert.deepEqual([h.listedSince.length, h.timers.filter((t) => t.ms === BEAT_MS).length], [1, 1]);
+  await service.stop();
+});
+test('a refused key stops the service from reviewing until the pause is over', async () => {
+  const h = await harness({ keyStatus: 401 });
+  const service = await h.start();
+  await service.settled;
+  await h.webhook(pr('opened'), 'd1');
+  await h.runTimer(TICK_MS);
+  await h.runTimer(TICK_MS);
+  assert.deepEqual([h.inputs.length, (await unfinishedJobs(h.db))[0]!.status], [0, 'pending']);
+  h.now = at(300);
+  await h.runTimer(TICK_MS);
+  await h.reviewed();
+  assert.equal(h.inputs.length, 1);
+  await service.stop();
 });
 test('a stop that comes while failed deliveries are being asked for starts no beat', async () => {
   let release!: () => void;

@@ -21,7 +21,13 @@ export function createGithubReadSource(opts: { token: string; fetch: typeof fetc
     const res = await send('GET', `${repoUrl(pr)}/contents/${encodePath(path)}${query}`, 'application/vnd.github.raw+json');
     if (res.status === 404) return null;
     if (!res.ok) throw new Error(`github_${res.status}`);
-    const bytes = new Uint8Array(await res.arrayBuffer());
+    let body: ArrayBuffer;
+    try {
+      body = await res.arrayBuffer();
+    } catch {
+      throw new Error('github_network');                // the body broke while it was read
+    }
+    const bytes = new Uint8Array(body);
     if (!asText && bytes.subarray(0, BINARY_SCAN_BYTES).includes(0)) return null;
     const text = new TextDecoder().decode(bytes);
     if (text.length <= MAX_CONTENT_CHARS) return text;

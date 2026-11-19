@@ -15,7 +15,8 @@ import type { ModelHealth } from './model-health.ts';
 import { QUIET_SECONDS, skipReason } from './triggers.ts';
 
 export const RECORD_WAITS_MS = [1_000, 5_000];
-export const RETRY_WAIT_MS = 60_000;
+/** The wait before a job the git service failed is tried again: after its first start, then after its second or third. */
+export const RETRY_WAITS_MS = [60_000, 900_000];
 
 type Log = (entry: Record<string, unknown>) => void;
 
@@ -57,6 +58,17 @@ export async function runReviewJob(job: Job, deps: ReviewJobDeps): Promise<void>
   const now = deps.clock();
   const nowIso = now.toISOString();
   const at = (ms: number): string => new Date(now.getTime() + ms).toISOString();
+  /** `ms` after the clock as it reads now; after the job's start when the clock fails. */
+  const later = (ms: number): string => {
+    let t = now;
+    try {
+      t = deps.clock();
+    } catch {
+      // a clock that fails leaves the start's time
+    }
+    return new Date(t.getTime() + ms).toISOString();
+  };
+  const retryWait = RETRY_WAITS_MS[job.starts <= 1 ? 0 : 1]!;
 
   /** Runs one write, up to three times, with the waits between. false when the third try failed too. */
   const tried = async (write: () => Promise<void>): Promise<boolean> => {
@@ -83,6 +95,7 @@ export async function runReviewJob(job: Job, deps: ReviewJobDeps): Promise<void>
   const drop = (reason: string): Promise<void> =>
     dropped(reason, async () => { await finishJob(db, job.id, 'dropped', reason, nowIso); });
 
+  let result: ReviewResult | null = null;
   try {
     // 1. The installation.
     const stored = await getPullRequest(db, job.ref);
@@ -114,7 +127,6 @@ export async function runReviewJob(job: Job, deps: ReviewJobDeps): Promise<void>
     }
 
     // 4. The review.
-    let result: ReviewResult | null = null;
     let failure: { stage: string; code: string } | null = null;
     if (prepareError !== null) {
       failure = { stage: 'prepare', code: codeOf(prepareError) };
@@ -159,8 +171,8 @@ export async function runReviewJob(job: Job, deps: ReviewJobDeps): Promise<void>
       const code = result.failure?.code;
       if (code === 'auth' || code === 'no_credit') refused = code;
       try {
-        if (refused !== null) deps.health.reviewed(refused, now);
-        else if (result.usage.calls >= 1 && result.dependencies.model === 'ok') deps.health.reviewed(null, now);
+        if (refused !== null) deps.health.reviewed(refused, deps.clock());
+        else if (result.usage.calls >= 1 && result.dependencies.model === 'ok') deps.health.reviewed(null, deps.clock());
       } catch {
         // a guard that fails changes nothing
       }
@@ -185,8 +197,8 @@ export async function runReviewJob(job: Job, deps: ReviewJobDeps): Promise<void>
     const gitFailed = failure?.stage === 'prepare'
       || (result?.failure?.stage === 'context' && result.failure.code.startsWith('github_') && result.usage.calls === 0);
     const putBack = refused !== null
-      ? { runAt: at(PAUSE_MS), giveBackStart: usage.cost === 0 }
-      : gitFailed ? { runAt: at(RETRY_WAIT_MS), giveBackStart: false } : null;
+      ? { runAt: later(PAUSE_MS), giveBackStart: usage.calls === 0 }
+      : gitFailed ? { runAt: later(retryWait), giveBackStart: false } : null;
 
     let written: boolean;
     let requeued = false;
@@ -210,9 +222,20 @@ export async function runReviewJob(job: Job, deps: ReviewJobDeps): Promise<void>
       calls: usage.calls, cost: usage.cost, duration_ms: deps.clock().getTime() - now.getTime(), requeued,
     });
   } catch (error) {
+    if (result !== null) {
+      // The review was paid for: putting the job back would pay for it again. It is left running, as after three failed tries to record.
+      let cost = 0;
+      try {
+        if (typeof result.usage.cost === 'number') cost = result.usage.cost;
+      } catch {
+        // a cost that cannot be read is logged as 0
+      }
+      log({ event: 'review', job: job.id, repo, number: job.ref.number, head: job.headSha, trigger: 'automatic', mode: 'full', dry_run: deps.dryRun, outcome: 'record_failed', cost, requeued: false });
+      return;
+    }
     // Nothing has been spent on this path: put the job back, its start counted, as for a git service failure.
     let requeued = false;
-    await tried(async () => { requeued = (await requeueJob(db, job.id, at(RETRY_WAIT_MS), nowIso, false)) === 'requeued'; });
+    await tried(async () => { requeued = (await requeueJob(db, job.id, later(retryWait), nowIso, false)) === 'requeued'; });
     log({ event: 'job', job: job.id, repo, number: job.ref.number, outcome: 'error', reason: codeOf(error), requeued });
   }
 }

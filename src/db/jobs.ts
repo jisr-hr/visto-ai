@@ -80,6 +80,16 @@ export async function finishJob(db: Db, id: number, status: 'done' | 'dropped', 
   return rows.length === 1;
 }
 
+/** pending -> dropped, with its outcome, only when the job still has the starts and creation time it was listed with. false when it was replaced, taken or finished meanwhile. */
+export async function dropJobIfUnchanged(db: Db, job: Pick<Job, 'id' | 'starts' | 'createdAt'>, outcome: string, now: string): Promise<boolean> {
+  const rows = await db.query(
+    `update visto_ai.jobs set status = 'dropped', outcome = $4, finished_at = $5::timestamptz
+     where id = $1 and status = 'pending' and starts = $2 and created_at = $3::timestamptz
+     returning id`,
+    [job.id, job.starts, job.createdAt, storable(outcome), now]);
+  return rows.length === 1;
+}
+
 /**
  * running -> pending, due at `runAt`; with `giveBackStart` its count of starts goes down by one. When the pull request
  * already has a pending job, this one is dropped with outcome `superseded` instead, finished at `now`.

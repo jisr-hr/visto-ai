@@ -24,7 +24,7 @@ export function pickRedeliveries(deliveries: HookDelivery[], cap: number = MAX_R
     .map((d) => d.id);
 }
 
-/** Lists, picks and asks. Never rejects. */
+/** Lists, picks and asks. A delivery left out by the cap counts as failed. Never rejects. */
 export async function runRedelivery(
   deps: { hooks: HookDeliveries; sleep: (ms: number) => Promise<void>; log: (entry: Record<string, unknown>) => void },
   since: string,
@@ -39,8 +39,11 @@ export async function runRedelivery(
     const listing = await deps.hooks.listSince(since);
     listed = listing.deliveries.length;
     complete = listing.complete;
-    const ids = pickRedeliveries(listing.deliveries);
+    const needed = pickRedeliveries(listing.deliveries, Number.POSITIVE_INFINITY);
+    const ids = needed.slice(0, MAX_REDELIVERIES);
+    const leftOut = needed.length - ids.length;       // past the cap: not asked for, so counted as failed
     picked = ids.length;
+    failed = leftOut;
     for (const [index, id] of ids.entries()) {
       if (index > 0) await deps.sleep(PACE_MS);
       try {
@@ -55,7 +58,7 @@ export async function runRedelivery(
       } catch (err) {
         if (codeOf(err) === 'github_rate_limited') {
           code = 'github_rate_limited';
-          failed = picked - requested;
+          failed = leftOut + picked - requested;
           break;
         }
         failed += 1;

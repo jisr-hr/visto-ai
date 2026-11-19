@@ -56,3 +56,12 @@ test('spentSince adds the cost of runs started at or after the time given', asyn
   assert.equal(await spentSince(db, at(0)), 0.75);
   await db.close();
 });
+test('token counts are stored as whole numbers, and a count or a cost that is not a number at or above 0 as 0', async () => {
+  const db = await testDb();
+  await recordRun(db, run({ usage: { calls: 2, inputTokens: 12.5, outputTokens: Number.NaN, cachedTokens: 50, cost: Number.NaN } }));
+  await recordRun(db, run({ usage: { ...run().usage, cost: -1 } }));
+  const [odd, negative] = await listRuns(db, REF);
+  assert.deepEqual([odd!.usage.inputTokens, odd!.usage.outputTokens, odd!.usage.cost, negative!.usage.cost], [13, 0, 0, 0]);
+  assert.equal(await spentSince(db, at(0)), 0);
+  await db.close();
+});

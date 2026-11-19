@@ -17,7 +17,11 @@ export interface RunRecord {
 }
 export interface StoredRun extends RunRecord { id: number }
 
-/** Appends one row. Returns its id. */
+/** A finite number at or above 0, else 0: what the provider reported must not break the row or the day's sum. */
+const amount = (n: number): number => (Number.isFinite(n) && n >= 0 ? n : 0);
+const count = (n: number): number => Math.round(amount(n));
+
+/** Appends one row. Returns its id. Each count is rounded; a count or a cost that is not a finite number at or above 0 is stored as 0. */
 export async function recordRun(db: Db, run: RunRecord): Promise<number> {
   const rows = await db.query<{ id: number }>(
     `insert into visto_ai.review_runs
@@ -32,7 +36,7 @@ export async function recordRun(db: Db, run: RunRecord): Promise<number> {
       run.job, run.trigger, run.mode, run.dryRun, storable(run.headSha), storableOrNull(run.baseSha), run.outcome,
       storableOrNull(run.failureStage), storableOrNull(run.failureCode), run.needsHuman, run.highestScore,
       storable(run.body), storableJson(run.comments), storableJson(run.result),
-      run.usage.calls, run.usage.inputTokens, run.usage.outputTokens, run.usage.cachedTokens, run.usage.cost,
+      count(run.usage.calls), count(run.usage.inputTokens), count(run.usage.outputTokens), count(run.usage.cachedTokens), amount(run.usage.cost),
       run.startedAt, run.finishedAt,
     ]);
   return rows[0]!.id;

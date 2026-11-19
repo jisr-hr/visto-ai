@@ -168,6 +168,12 @@ test('content over 2,000,000 characters is null; exactly 2,000,000 is returned',
   assert.equal((await source().getFileContent(pr, 'ok.txt', 'head111'))!.length, 2_000_000);
 });
 
+test('a body that breaks while it is read is a network failure', async () => {
+  const broken = new ReadableStream({ start(controller) { controller.error(new TypeError('terminated')); } });
+  queue(new Response(broken, { status: 200 }));
+  await assert.rejects(source().getFileContent(pr, 'a.ts', 'head111'), (e: Error) => e.message === 'github_network');
+});
+
 test('a failure names the status and hides the body', async () => {
   queue(new Response('secret detail', { status: 500 }), new Response('secret detail', { status: 500 }));
   await assert.rejects(source().listFiles(pr), (e: Error) => e.message === 'github_500');

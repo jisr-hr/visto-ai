@@ -2,7 +2,7 @@ import test, { afterEach, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { testDb } from '../db/testing.ts';
 import type { Db } from '../db/types.ts';
-import { enqueueJob, getJob } from '../db/jobs.ts';
+import { enqueueJob, finishJob, getJob } from '../db/jobs.ts';
 import type { Job } from '../db/jobs.ts';
 import { createRunner } from './runner.ts';
 import type { RunnerDeps } from './runner.ts';
@@ -85,6 +85,25 @@ test('a job that is out of starts is dropped and not run, and the next one runs'
   const j = await getJob(db, id);
   assert.deepEqual([numbers(h.started), j?.status, j?.outcome], [[8], 'dropped', 'attempts_exhausted']);
 });
+test('a job replaced between the listing and the drop is not dropped, and runs once it is due', async () => {
+  const id = (await enqueueJob(db, job()))!;
+  await db.query('update visto_ai.jobs set starts = 3 where id = $1', [id]);
+  let replaced = false;
+  const racing: Db = { ...db, query: async (text, params) => {
+    if (!replaced && text.includes('set status') && text.includes('outcome =')) {
+      replaced = true;
+      await enqueueJob(db, job({ reason: 'synchronize', headSha: 'h2', runAt: at(700), now: at(600) }));
+    }
+    return db.query(text, params);
+  } };
+  const h = harness({ db: racing });
+  await h.runner.tick();
+  const j = await getJob(db, id);
+  assert.deepEqual([replaced, j?.status, j?.headSha, j?.starts, h.started.length, h.logged], [true, 'pending', 'h2', 0, 0, []]);
+  h.state.now = at(700);
+  await h.runner.tick();
+  assert.deepEqual(h.started.map((s) => `${s.id} ${s.headSha}`), [`${id} h2`]);
+});
 test('a job more than a day old is dropped and not run', async () => {
   const id = (await enqueueJob(db, job({ now: at(-90_000), runAt: at(-90_000) })))!;
   const h = harness();
@@ -102,7 +121,17 @@ test('a run that rejects ends the job as failed and the runner goes on', async (
   await h.next();
   const j = await getJob(db, id);
   assert.deepEqual([ran, j?.status, j?.outcome], [[7, 8], 'done', 'failed']);
+  assert.deepEqual(h.logged.filter((e) => e.event === 'job'), [{ event: 'job', job: id, repo: 'acme/shop', number: 7, outcome: 'failed', reason: 'internal_error', error: 'TypeError' }]);
   assert.equal(JSON.stringify(h.logged).includes('private detail'), false);
+});
+test('a failed finish after a run rejects is logged with the job, and no failed outcome is logged', async () => {
+  const id = (await enqueueJob(db, job()))!;
+  const failing: Db = { ...db, query: (text, params) => (text.includes("status = $2") ? Promise.reject(Object.assign(new Error('gone'), { code: '57P01' })) : db.query(text, params)) };
+  const h = harness({ db: failing, run: async () => { throw new TypeError('private detail'); } });
+  await h.runner.tick();
+  await h.next();
+  assert.deepEqual(h.logged, [{ event: 'runner_failed', job: id, error: 'Error', code: '57P01' }]);
+  assert.equal(h.runner.running(), 0);
 });
 test('ticks that overlap never start more than the concurrency', async () => {
   for (const n of [7, 8, 9, 10, 11]) await enqueueJob(db, job({ ref: { ...REF, number: n } }));
@@ -133,4 +162,11 @@ test('a database failure in a pass is logged and the next pass works', async () 
   fail = false;
   await h.runner.tick();
   assert.deepEqual(numbers(h.started), [7]);
+});test('a run that rejects after its job was finished logs no failed outcome', async () => {
+  const id = (await enqueueJob(db, job()))!;
+  const h = harness({ run: async (j) => { await finishJob(db, j.id, 'done', 'reviewed', at(600)); throw new TypeError('late'); } });
+  await h.runner.tick();
+  await h.next();
+  const j = await getJob(db, id);
+  assert.deepEqual([j?.outcome, h.logged], ['reviewed', []]);
 });

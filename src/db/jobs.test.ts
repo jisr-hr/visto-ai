@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { testDb } from './testing.ts';
 import type { Db } from './types.ts';
-import { claimJob, deleteFinishedJobs, dueJobs, enqueueJob, finishJob, getJob, requeueJob, unfinishedJobs } from './jobs.ts';
+import { claimJob, deleteFinishedJobs, dropJobIfUnchanged, dueJobs, enqueueJob, finishJob, getJob, requeueJob, unfinishedJobs } from './jobs.ts';
 
 const REF = { service: 'github', owner: 'acme', repo: 'shop', number: 7 } as const;
 const at = (seconds: number): string => new Date(Date.parse('2026-03-01T10:00:00.000Z') + seconds * 1000).toISOString();
@@ -76,6 +76,26 @@ test('finishJob ends a job once and keeps its outcome', async () => {
   assert.equal(await finishJob(db, id, 'done', 'reviewed', at(4)), false);
   const j = await getJob(db, id);
   assert.deepEqual([j?.status, j?.outcome], ['dropped', 'stale_head']);
+  await db.close();
+});
+test('dropJobIfUnchanged drops a pending job that is as it was listed', async () => {
+  const db = await testDb();
+  const id = (await enqueueJob(db, job()))!;
+  const [listed] = await dueJobs(db, at(0), 5);
+  assert.equal(await dropJobIfUnchanged(db, listed!, 'too_old', at(3)), true);
+  const j = await getJob(db, id);
+  assert.deepEqual([j?.status, j?.outcome], ['dropped', 'too_old']);
+  await db.close();
+});
+test('dropJobIfUnchanged leaves a job that was replaced after it was listed', async () => {
+  const db = await testDb();
+  const id = (await enqueueJob(db, job()))!;
+  await db.query('update visto_ai.jobs set starts = 3 where id = $1', [id]);
+  const [listed] = await dueJobs(db, at(0), 5);
+  await enqueueJob(db, job({ reason: 'synchronize', headSha: 'h2', runAt: at(5), now: at(1) }));
+  assert.equal(await dropJobIfUnchanged(db, listed!, 'attempts_exhausted', at(3)), false);
+  const j = await getJob(db, id);
+  assert.deepEqual([j?.status, j?.headSha, j?.starts, j?.outcome], ['pending', 'h2', 0, null]);
   await db.close();
 });
 test('requeueJob puts a running job back, and gives its start back when asked', async () => {

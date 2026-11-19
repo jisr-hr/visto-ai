@@ -1,4 +1,4 @@
-import { claimJob, dueJobs, finishJob } from '../db/jobs.ts';
+import { claimJob, dropJobIfUnchanged, dueJobs, finishJob } from '../db/jobs.ts';
 import type { Job } from '../db/jobs.ts';
 import type { Db } from '../db/types.ts';
 
@@ -50,9 +50,11 @@ export function createRunner(deps: RunnerDeps): Runner {
 
   const free = (): boolean => keys.size < deps.concurrency;
 
-  const dropped = async (job: Job, reason: string, now: Date): Promise<void> => {
-    await finishJob(db, job.id, 'dropped', reason, now.toISOString());
+  /** Drops the job as it was listed. false when it was replaced or taken meanwhile: a later pass sees it again. */
+  const dropped = async (job: Job, reason: string, now: Date): Promise<boolean> => {
+    if (!(await dropJobIfUnchanged(db, job, reason, now.toISOString()))) return false;
     log({ event: 'job', job: job.id, repo: `${job.ref.owner}/${job.ref.repo}`, number: job.ref.number, outcome: 'dropped', reason });
+    return true;
   };
 
   const start = (job: Job): void => {
@@ -62,12 +64,12 @@ export function createRunner(deps: RunnerDeps): Runner {
       try {
         await deps.run(job);
       } catch (err) {
-        keys.delete(key);
         try {
-          await finishJob(db, job.id, 'done', 'failed', deps.clock().toISOString());
-          log({ event: 'job', job: job.id, repo: `${job.ref.owner}/${job.ref.repo}`, number: job.ref.number, outcome: 'failed', reason: 'internal_error', error: describe(err).error });
+          if (await finishJob(db, job.id, 'done', 'failed', deps.clock().toISOString())) {
+            log({ event: 'job', job: job.id, repo: `${job.ref.owner}/${job.ref.repo}`, number: job.ref.number, outcome: 'failed', reason: 'internal_error', error: describe(err).error });
+          }
         } catch (finishErr) {
-          log({ event: 'runner_failed', ...describe(finishErr) });
+          log({ event: 'runner_failed', job: job.id, ...describe(finishErr) });
         }
       } finally {
         keys.delete(key);
@@ -94,13 +96,11 @@ export function createRunner(deps: RunnerDeps): Runner {
       if (draining || !free()) break;
       if (keys.has(keyOf(due))) continue;
       if (Date.parse(due.createdAt) < now.getTime() - MAX_AGE_MS) {
-        await dropped(due, 'too_old', now);
-        progressed = true;
+        if (await dropped(due, 'too_old', now)) progressed = true;
         continue;
       }
       if (due.starts >= MAX_STARTS) {
-        await dropped(due, 'attempts_exhausted', now);
-        progressed = true;
+        if (await dropped(due, 'attempts_exhausted', now)) progressed = true;
         continue;
       }
       const claimed = await claimJob(db, due.id, now.toISOString());

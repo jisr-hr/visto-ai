@@ -60,3 +60,9 @@ test('a listing that fails is logged with its code and nothing is asked for', as
   assert.deepEqual(await runRedelivery(h.deps, at(0)), { picked: 0, requested: 0, failed: 0, complete: false, code: 'github_401' });
   assert.deepEqual(h.asked, []);
 });
+test('deliveries the cap leaves out are counted as failed', async () => {
+  const deliveries = Array.from({ length: 201 }, (_, i) => d(String(i + 1), `g${i + 1}`, i, false));
+  const h = harness({ deliveries, complete: true });
+  assert.deepEqual(await runRedelivery(h.deps, at(0)), { picked: 200, requested: 200, failed: 1, complete: true, code: null });
+  assert.equal(h.asked.includes('201'), false);
+});

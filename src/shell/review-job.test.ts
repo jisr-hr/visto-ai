@@ -2,7 +2,7 @@ import test, { afterEach, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { testDb } from '../db/testing.ts';
 import type { Db } from '../db/types.ts';
-import { enqueueJob, claimJob, finishJob, getJob, unfinishedJobs } from '../db/jobs.ts';
+import { enqueueJob, claimJob, finishJob, getJob, requeueJob, unfinishedJobs } from '../db/jobs.ts';
 import type { Job } from '../db/jobs.ts';
 import { savePullRequest } from '../db/pull-requests.ts';
 import { listRuns } from '../db/review-runs.ts';
@@ -46,6 +46,10 @@ const failed = (stage: 'context' | 'model', code: string, over: Partial<ReviewRe
 interface Options {
   live?: LivePullRequest | Error | null; result?: ReviewResult; settings?: RepoSettings; stored?: boolean;
   recordFailures?: number; lostAnswer?: boolean; failQuery?: string;
+  /** The job is on its second start: claimed, put back and claimed again. */
+  secondStart?: boolean;
+  /** The time the clock reads once the review has been called; at(0) before. */
+  afterReview?: string;
 }
 
 async function harness(options: Options = {}) {
@@ -57,9 +61,15 @@ async function harness(options: Options = {}) {
   }
   await enqueueJob(db, { ref: REF, reason: 'opened', headSha: 'h1', runAt: at(0), now: at(0), delivery: 'd1', replace: true });
   const jobs = await unfinishedJobs(db);
-  const job = (await claimJob(db, jobs.find((j) => j.status === 'pending')!.id, at(0)))!;
+  let job = (await claimJob(db, jobs.find((j) => j.status === 'pending')!.id, at(0)))!;
+  if (options.secondStart === true) {
+    await requeueJob(db, job.id, at(0), at(0), false);
+    job = (await claimJob(db, job.id, at(0)))!;
+  }
   const inputs: ReviewInput[] = [];
   const healthCalls: Array<'auth' | 'no_credit' | null> = [];
+  const healthTimes: string[] = [];
+  let reviewCalled = false;
   const spendCalls: unknown[] = [];
   const slept: number[] = [];
   const logged: Array<Record<string, unknown>> = [];
@@ -87,19 +97,19 @@ async function harness(options: Options = {}) {
       readPullRequest: () => (live instanceof Error ? Promise.reject(live) : Promise.resolve(live)),
       sourceFor: () => Promise.resolve({} as Source),
     },
-    clock: () => new Date(at(0)),
+    clock: () => new Date(reviewCalled && options.afterReview !== undefined ? options.afterReview : at(0)),
     log: (e) => { logged.push(e); },
     sleep: (ms) => { slept.push(ms); return Promise.resolve(); },
     settingsFor: () => options.settings ?? SETTINGS,
     limits: LIMITS,
     dryRun: true,
     engineDeps: () => ({}) as ReviewDeps,
-    review: (input) => { inputs.push(input); return Promise.resolve(options.result ?? okResult()); },
+    review: (input) => { inputs.push(input); reviewCalled = true; return Promise.resolve(options.result ?? okResult()); },
     lineUrl: () => 'https://git.example.test/x',
-    health: { reviewed: (code) => { healthCalls.push(code); } },
+    health: { reviewed: (code, when) => { healthCalls.push(code); healthTimes.push(when.toISOString()); } },
     spend: { noteRun: (usage) => { spendCalls.push(usage); } },
   };
-  return { job: job as Job, deps, inputs, healthCalls, spendCalls, slept, logged };
+  return { job: job as Job, deps, inputs, healthCalls, healthTimes, spendCalls, slept, logged };
 }
 
 /** Real engine dependencies around one changed file and a model that answers the forced call with no findings. */
@@ -200,6 +210,12 @@ test('a pull request that cannot be read is recorded as a failed run, and the jo
   assert.deepEqual([j?.status, j?.runAt, j?.starts, h.inputs.length], ['pending', at(60), 1, 0]);
   assert.equal(h.logged.find((e) => e.event === 'review')!.requeued, true);
 });
+test('a job that cannot be read on its second start is tried again 15 minutes later', async () => {
+  const h = await harness({ live: new Error('github_502'), secondStart: true });
+  await runReviewJob(h.job, h.deps);
+  const j = await getJob(db, h.job.id);
+  assert.deepEqual([j?.status, j?.runAt, j?.starts], ['pending', at(900), 2]);
+});
 test('an error that is not a short code is recorded as internal_error and its message is logged nowhere', async () => {
   const h = await harness({ live: new Error('Something private went wrong') });
   await runReviewJob(h.job, h.deps);
@@ -224,16 +240,38 @@ test('a failed review is recorded with its stage and code and is not run again',
   const j = await getJob(db, h.job.id);
   assert.deepEqual([stored!.outcome, stored!.failureStage, stored!.failureCode, j?.status, j?.outcome, h.healthCalls], ['failed', 'model', 'timeout', 'done', 'failed', []]);
 });
-test('a refused key records the run and puts the job back for when the pause is over; the start is given back only when the run cost nothing', async () => {
-  const free = await harness({ result: failed('model', 'auth', { dependencies: { model: 'error' }, usage: { ...USAGE, cost: 0 } }) });
+test('a refused key records the run and puts the job back for when the pause is over; the start is given back only when no model call was made', async () => {
+  const free = await harness({ result: failed('model', 'auth', { dependencies: { model: 'error' }, usage: NO_CALLS }) });
   await runReviewJob(free.job, free.deps);
   let j = await getJob(db, free.job.id);
   assert.deepEqual([free.healthCalls, j?.status, j?.runAt, j?.starts, (await listRuns(db, REF)).at(-1)!.failureCode], [['auth'], 'pending', at(300), 0, 'auth']);
   await finishJob(db, free.job.id, 'dropped', 'test_over', at(1));
+  const unpriced = await harness({ result: failed('model', 'auth', { dependencies: { model: 'error' }, usage: { ...USAGE, cost: 0 } }) });
+  await runReviewJob(unpriced.job, unpriced.deps);
+  j = await getJob(db, unpriced.job.id);
+  assert.deepEqual([j?.status, j?.runAt, j?.starts], ['pending', at(300), 1]);
+  await finishJob(db, unpriced.job.id, 'dropped', 'test_over', at(1));
   const paid = await harness({ result: failed('model', 'no_credit', { dependencies: { model: 'error' } }) });
   await runReviewJob(paid.job, paid.deps);
   j = await getJob(db, paid.job.id);
   assert.deepEqual([paid.healthCalls, j?.status, j?.runAt, j?.starts], [['no_credit'], 'pending', at(300), 1]);
+});
+test('a refusal is dated when it is seen, and the pause is counted from then', async () => {
+  const h = await harness({ result: failed('model', 'auth', { dependencies: { model: 'error' } }), afterReview: at(400) });
+  await runReviewJob(h.job, h.deps);
+  const j = await getJob(db, h.job.id);
+  assert.deepEqual([h.healthTimes, j?.status, j?.runAt], [[at(400)], 'pending', at(700)]);
+});
+test('a failure after the review returned never puts the job back: it is left running and the cost is in the log', async () => {
+  const broken = { ...okResult() } as Partial<ReviewResult>;
+  delete broken.verdict;
+  const h = await harness({ result: broken as ReviewResult });
+  await runReviewJob(h.job, h.deps);
+  const j = await getJob(db, h.job.id);
+  assert.deepEqual([j?.status, j?.starts, (await listRuns(db, REF)).length], ['running', 1, 0]);
+  const entry = h.logged.find((e) => e.event === 'review')!;
+  assert.deepEqual([entry.outcome, entry.cost, entry.requeued], ['record_failed', 0.5, false]);
+  assert.equal(h.logged.some((e) => e.event === 'job'), false);
 });
 test('a review the model answered tells the health so, and one that made no model call says nothing', async () => {
   const answered = await harness();

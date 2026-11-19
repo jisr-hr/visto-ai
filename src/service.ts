@@ -161,6 +161,7 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps): Pr
   let through = false;                     // an attempt of the redelivery got through
   let alerted = false;
   let beating = false;
+  let redelivering = false;                // an attempt of the redelivery is under way
   /** True when the attempt got through the deliveries. */
   async function redeliver(): Promise<boolean> {
     if (since === undefined) {
@@ -180,10 +181,16 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps): Pr
   async function beatOnce(event: string): Promise<void> {
     await guarded(event, 'heartbeat', () => beat(db, clock().toISOString()));
   }
+  /** A call that comes while an attempt is under way does nothing. */
   async function redeliveryThenBeat(event: string): Promise<void> {
-    if (ending || through) return;
+    if (ending || through || redelivering) return;
     let ok = false;
-    await guarded(event, 'redelivery', async () => { ok = await redeliver(); });
+    redelivering = true;
+    try {
+      await guarded(event, 'redelivery', async () => { ok = await redeliver(); });
+    } finally {
+      redelivering = false;
+    }
     if (!ok || ending) return;
     through = true;
     beating = true;
