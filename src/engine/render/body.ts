@@ -55,12 +55,15 @@ function codeSpan(raw: string): string {
 // A model-written line must not become a heading of the review body: not with a #, and not as a setext underline. A fence is left as it is.
 function noHeading(text: string): string {
   let open: Fence | null = null;
-  let before = '';
+  let before = ''; // the line above, or '' when it is blank or closed a fence
   return text.split('\n').map((line) => {
     const prev = before;
     before = line;
     if (open !== null) {
-      if (fenceCloses(line, open)) open = null;
+      if (fenceCloses(line, open)) {
+        open = null;
+        before = '';
+      }
       return line;
     }
     open = fenceOpens(line, 3);
@@ -73,40 +76,10 @@ function noHeading(text: string): string {
 
 const ZW = '\u200b';
 
-// Character references, raw HTML and mentions in a stretch of prose. `before` is the character in front of it.
-function inertProse(text: string, before: string): string {
-  return text.replace(/&|<|@(?=[A-Za-z0-9])/g, (m, at: number) => {
-    if (m === '&') return '&amp;';
-    if (m === '<') return '&lt;';
-    return /[A-Za-z0-9_]/.test(at > 0 ? text[at - 1]! : before) ? m : `@${ZW}`;
-  });
-}
-
-// One line. An inline span closed on the same line is code; a run left open, or a span that holds a bar, makes the rest of the paragraph prose.
-function inertLine(line: string, dead: boolean): { text: string; dead: boolean } {
-  let out = '';
-  let from = 0; // start of the prose not yet written
-  let i = 0;
-  while (!dead && i < line.length) {
-    if (line[i] !== '`') { i += 1; continue; }
-    let start = i;
-    let end = i;
-    while (line[end] === '`') end += 1;
-    let slashes = 0;
-    while (start - 1 - slashes >= 0 && line[start - 1 - slashes] === '\\') slashes += 1;
-    if (slashes % 2 === 1) start += 1; // the backslash takes the first backtick of the run
-    if (start === end) { i = end; continue; }
-    let close = -1;
-    for (const run of line.slice(end).matchAll(/`+/g)) {
-      if (run[0].length === end - start) { close = end + run.index; break; }
-    }
-    if (close === -1 || line.slice(end, close).includes('|')) { dead = true; break; }
-    out += inertProse(line.slice(from, start), line[from - 1] ?? '');
-    const stop = close + (end - start);
-    out += line.slice(start, stop);
-    from = i = stop;
-  }
-  return { text: out + inertProse(line.slice(from), line[from - 1] ?? ''), dead };
+// A zero-width space after what starts a mention, raw HTML or a character reference. Nothing is rewritten, so the text reads the same inside an inline span as outside one.
+function inertProse(line: string): string {
+  const reference = '(?=(?:[A-Za-z][A-Za-z0-9]{0,31}|#[0-9]{1,7}|#[xX][0-9A-Fa-f]{1,6});)';
+  return line.replace(new RegExp(`@(?=[A-Za-z0-9])|<(?=[A-Za-z/!?])|&${reference}`, 'g'), (m, at: number) => (m === '@' && /[A-Za-z0-9]/.test(line[at - 1] ?? '') ? m : `${m}${ZW}`));
 }
 
 type Fence = { indent: string; char: string; size: number };
@@ -129,30 +102,32 @@ const fenceLine = (open: Fence): string => `${open.indent}${open.char.repeat(ope
 // A line is blank when it holds nothing but spaces and tabs.
 const BLANK = /^[ \t]*$/;
 
+// Leading tabs become spaces, each tab reaching the next multiple of four columns: under a bullet a tab would reach another column.
+function untab(line: string): string {
+  const lead = /^[ \t]*/.exec(line)![0];
+  let col = 0;
+  for (const c of lead) col = c === '\t' ? col + 4 - (col % 4) : col + 1;
+  return ' '.repeat(col) + line.slice(lead.length);
+}
+
 // Model-written text made inert line by line; `fences` says whether a fence can open in it.
 function inertText(text: string, fences: boolean): string {
   let open: Fence | null = null;
-  let dead = false;
   const lines: string[] = [];
-  for (const line of text.replace(/\r\n?/g, '\n').split('\n')) {
+  for (const raw of text.replace(/\r\n?/g, '\n').split('\n')) {
+    // Inside a fence only a line that could close it is touched.
+    const line: string = open === null || new RegExp(`^[ \\t]*\\${open.char}{${open.size},}[ \\t]*$`).test(raw) ? untab(raw) : raw;
     if (open !== null) {
-      if (fenceCloses(line, open)) open = null;
-      lines.push(line);
+      const closes = fenceCloses(line, open);
+      if (closes) open = null;
+      lines.push(closes ? line.trimStart() : line);
       continue;
     }
     open = fences ? fenceOpens(line, 3) : null;
-    if (open !== null) {
-      // Written at the first column: there it is a fence to GitHub whatever came before it.
+    if (open === null) lines.push(inertProse(line));
+    else {
       open = { ...open, indent: '' };
-      dead = false;
       lines.push(line.trimStart());
-    } else if (BLANK.test(line)) {
-      dead = false;
-      lines.push(line);
-    } else {
-      const done = inertLine(line, dead);
-      dead = done.dead;
-      lines.push(done.text);
     }
   }
   return open === null ? lines.join('\n') : `${lines.join('\n')}\n${fenceLine(open)}`;
