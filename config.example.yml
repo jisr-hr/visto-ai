@@ -32,6 +32,14 @@ limits:
   inputTokensPerCall: 200000
   # Batches of files allowed in one review.
   batchesPerReview: 6
+  # The most the service may spend on model calls in one day, in US dollars.
+  spendPerDay: 50
+  # How many review jobs may run at once (1 to 20).
+  queueConcurrency: 2
+
+# The service starts only with dryRun: true; this version cannot publish a review.
+# It is false when not written.
+dryRun: false
 
 # Optional second scorer: a decision model that scores the changed blocks in place of the review model.
 # Naming one sends the reviewed code to that provider too, and then
@@ -48,6 +56,11 @@ limits:
 
 # Needed only to run the service (not for the eval commands).
 # app:
+#   # The app's id, a whole number from 1 up.
+#   id: 12345
+#   # The environment variable that holds the app's RSA private key in PEM form.
+#   # A key written on one line with backslash-n for each line break is accepted.
+#   privateKey: { env: APP_PRIVATE_KEY }
 #   # The environment variable that holds the secret set on the app's webhook.
 #   webhookSecret: { env: WEBHOOK_SECRET }
 # database:
@@ -56,16 +69,23 @@ limits:
 # server:
 #   # The port the service listens on (1 to 65535). It is 8080 when not written.
 #   port: 8080
+# alerts:
+#   # The environment variable that holds the URL (http or https) that gets one message when reviews must wait.
+#   webhook: { env: ALERT_WEBHOOK_URL }
 
 repositories:
   # Settings for every repository.
   defaults:
     # Branches that count as primary; a pull request targeting one gets elevated effort.
     primaryBranches: [main, master]
+    # Pull requests by these logins are not reviewed. It is [dependabot[bot]] when not written.
+    ignoredAuthors: ['dependabot[bot]']
+    # Only pull requests that target one of these branches are reviewed; empty means every branch.
+    baseBranches: []
     # A changed block scored at or above this (1 to 100) is listed for a human reviewer.
     # It is 70 when not written, and must be written when a scorer is named.
     # score:
     #   threshold: 70
   # Per-repository changes, keyed by "owner/name"; each replaces only the keys it sets.
   overrides:
-    acme/shop: { primaryBranches: [trunk], score: { threshold: 60 } }
+    acme/shop: { primaryBranches: [trunk], baseBranches: [trunk], score: { threshold: 60 } }

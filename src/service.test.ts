@@ -4,13 +4,16 @@ import { pgliteDb } from './db/pglite.ts';
 import { testDb } from './db/testing.ts';
 import type { Db } from './db/types.ts';
 import type { ForgeEvent, WebhookReader } from './forge/types.ts';
+import { generateKeyPairSync } from 'node:crypto';
 import { serviceConfig, parseConfig } from './config/load.ts';
 import { CLOSE_WAIT_MS, startService, STOP_WAIT_MS } from './service.ts';
 import type { Listening } from './service.ts';
 import type { RequestLike, ResponseLike } from './shell/http.ts';
 
+const appKey = generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey.export({ type: 'pkcs8', format: 'pem' }) as string;
 const config = serviceConfig(parseConfig(
-  'model:\n  apiKey: { env: K }\n  model: vendor/model-a\napp:\n  webhookSecret: { env: S }\ndatabase:\n  url: { env: U }\nserver:\n  port: 9191\n', { K: 'k', S: 's', U: 'postgres://u:p@h/d' }));
+  'model:\n  apiKey: { env: K }\n  model: vendor/model-a\napp:\n  id: 12345\n  privateKey: { env: A }\n  webhookSecret: { env: S }\ndatabase:\n  url: { env: U }\nserver:\n  port: 9191\ndryRun: true\n',
+  { K: 'k', A: appKey, S: 's', U: 'postgres://u:p@h/d' }));
 
 const reader: WebhookReader = {
   read: () => ({ ok: true, delivery: 'd-1', name: 'ping', action: null, event: { kind: 'ping' } as ForgeEvent }),

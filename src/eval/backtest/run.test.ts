@@ -17,9 +17,9 @@ const config: DeploymentConfig = {
     effort: { default: {}, elevated: {} }, extraBody: {}, extraHeaders: {}, prices: null, timeoutSeconds: 45,
   },
   scorer: null,
-  app: null, database: null, server: { port: 8080 },
-  limits: { inputTokensPerCall: 200_000, batchesPerReview: 6 },
-  repositories: { defaults: { primaryBranches: ['main'], scoreThreshold: 70 }, overrides: {} },
+  app: null, database: null, server: { port: 8080 }, dryRun: false, alerts: null,
+  limits: { inputTokensPerCall: 200_000, batchesPerReview: 6, spendPerDay: 50, queueConcurrency: 2 },
+  repositories: { defaults: { primaryBranches: ['main'], scoreThreshold: 70, ignoredAuthors: [], baseBranches: [] }, overrides: {} },
 };
 
 const bulk = Array.from({ length: 30 }, (_, i) => `+const value${i} = ${i * 7919};`).join('\n');

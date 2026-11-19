@@ -58,7 +58,10 @@ export function toBacktestInput(c: HistoryCase, config: DeploymentConfig): Revie
     },
     trigger: 'automatic',
     repoConfig: repoConfigFor(config, c.repo),
-    limits: { ...config.limits, modelTimeoutSeconds: config.model.timeoutSeconds },
+    limits: {
+      inputTokensPerCall: config.limits.inputTokensPerCall, batchesPerReview: config.limits.batchesPerReview,
+      modelTimeoutSeconds: config.model.timeoutSeconds,
+    },
     asOf: new Date(c.review_at),
     earlier: null,
   };
