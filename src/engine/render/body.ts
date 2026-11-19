@@ -39,7 +39,7 @@ function safeSlice(text: string, limit: number): string {
 }
 
 function firstLine(body: string): string {
-  const line = body.split(/\r?\n/).map((l) => l.trim()).find((l) => l !== '') ?? '';
+  const line = body.split(/\r\n|\r|\n/).map((l) => l.trim()).find((l) => l !== '') ?? '';
   return line.length > FIRST_LINE_CHARS ? `${safeSlice(line, FIRST_LINE_CHARS - 1)}\u2026` : line;
 }
 
@@ -59,56 +59,92 @@ function noHeading(text: string): string {
 
 const ZW = '\u200b';
 
-// Mentions and raw HTML in a stretch of prose. `before` is the character in front of it.
+// Character references, raw HTML and mentions in a stretch of prose. `before` is the character in front of it.
 function inertProse(text: string, before: string): string {
-  return text.replace(/<|@(?=[\p{L}\p{N}])/gu, (m, at: number) => {
+  return text.replace(/&|<|@(?=[A-Za-z0-9])/g, (m, at: number) => {
+    if (m === '&') return '&amp;';
     if (m === '<') return '&lt;';
-    return /[\p{L}\p{N}_]/u.test(at > 0 ? text[at - 1]! : before) ? m : `@${ZW}`;
+    return /[A-Za-z0-9_]/.test(at > 0 ? text[at - 1]! : before) ? m : `@${ZW}`;
   });
 }
 
-// One line: an inline span closed on the same line is code, and everything else is prose.
-function inertLine(line: string): string {
+// One line. An inline span closed on the same line is code; a run left open, or a span that holds a bar, makes the rest of the paragraph prose.
+function inertLine(line: string, dead: boolean): { text: string; dead: boolean } {
   let out = '';
   let from = 0; // start of the prose not yet written
   let i = 0;
-  while (i < line.length) {
+  while (!dead && i < line.length) {
     if (line[i] !== '`') { i += 1; continue; }
-    let j = i;
-    while (line[j] === '`') j += 1;
+    let start = i;
+    let end = i;
+    while (line[end] === '`') end += 1;
+    let slashes = 0;
+    while (start - 1 - slashes >= 0 && line[start - 1 - slashes] === '\\') slashes += 1;
+    if (slashes % 2 === 1) start += 1; // the backslash takes the first backtick of the run
+    if (start === end) { i = end; continue; }
     let close = -1;
-    if (i === 0 || line[i - 1] !== '\\') {
-      for (const run of line.slice(j).matchAll(/`+/g)) {
-        if (run[0].length === j - i) { close = j + run.index + run[0].length; break; }
-      }
+    for (const run of line.slice(end).matchAll(/`+/g)) {
+      if (run[0].length === end - start) { close = end + run.index; break; }
     }
-    if (close === -1) { i = j; continue; }
-    out += inertProse(line.slice(from, i), line[from - 1] ?? '');
-    out += line.slice(i, close);
-    from = i = close;
+    if (close === -1 || line.slice(end, close).includes('|')) { dead = true; break; }
+    out += inertProse(line.slice(from, start), line[from - 1] ?? '');
+    const stop = close + (end - start);
+    out += line.slice(start, stop);
+    from = i = stop;
   }
-  return out + inertProse(line.slice(from), line[from - 1] ?? '');
+  return { text: out + inertProse(line.slice(from), line[from - 1] ?? ''), dead };
 }
 
-// Text of one line that is written after other text: no fence can open in it.
-function inertInline(text: string): string {
-  return text.split('\n').map(inertLine).join('\n');
+type Fence = { indent: string; char: string; size: number };
+
+// A line that opens with three or more backticks or tildes, indented by at most `room` spaces; for backticks the rest of the line holds none.
+function fenceOpens(line: string, room: number): Fence | null {
+  const m = /^( *)(`{3,}|~{3,})(.*)$/.exec(line);
+  if (m === null || m[1]!.length > room || (m[2]![0] === '`' && m[3]!.includes('`'))) return null;
+  return { indent: m[1]!, char: m[2]![0]!, size: m[2]!.length };
 }
 
-/** Text the model wrote, made safe to post. Outside code: a mention gets a zero-width space after its `@`, and every `<` is written as `&lt;`. A fence left open is closed. */
-export function inert(text: string): string {
+// The same character at the same or a greater length, then nothing but spaces and tabs.
+function fenceCloses(line: string, open: Fence): boolean {
+  const m = /^ {0,3}(`{3,}|~{3,})[ \t]*$/.exec(line);
+  return m !== null && m[1]![0] === open.char && m[1]!.length >= open.size;
+}
+
+const fenceLine = (open: Fence): string => `${open.indent}${open.char.repeat(open.size)}`;
+
+// Model-written text made inert line by line; `fences` says whether a fence can open in it.
+function inertText(text: string, fences: boolean): string {
   let open: Fence | null = null;
+  let dead = false;
   const lines: string[] = [];
-  for (const line of text.split('\n')) {
+  for (const line of text.replace(/\r\n?/g, '\n').split('\n')) {
     if (open !== null) {
       if (fenceCloses(line, open)) open = null;
       lines.push(line);
       continue;
     }
-    open = fenceOpens(line);
-    lines.push(open !== null ? line : inertLine(line));
+    open = fences ? fenceOpens(line, 0) : null;
+    if (open !== null) {
+      dead = false;
+      lines.push(line);
+    } else if (line.trim() === '') {
+      dead = false;
+      lines.push(line);
+    } else {
+      const done = inertLine(line, dead);
+      dead = done.dead;
+      lines.push(done.text);
+    }
   }
-  return closeOpenFence(lines.join('\n'));
+  return open === null ? lines.join('\n') : `${lines.join('\n')}\n${fenceLine(open)}`;
+}
+
+// Text that follows the service's own words on one line: no fence can open in it, and nothing is appended.
+const inertInline = (text: string): string => inertText(text, false);
+
+/** Text the model wrote, made safe to post. Outside code: `&` is written as `&amp;`, every `<` as `&lt;`, and a mention gets a zero-width space after its `@`. A fence left open is closed. */
+export function inert(text: string): string {
+  return inertText(text, true);
 }
 
 function bullets(items: string[], cap: boolean = true): string[] {
@@ -122,14 +158,19 @@ const unplacedLine = (f: UnplacedFinding): string =>
   `- ${codeSpan(`${f.path}:${f.line}`)}${f.side === 'LEFT' ? ' (old file)' : ''} \u2014 ${inertInline(firstLine(f.body))}`;
 // A bullet with the whole text of its finding under it, as a continuation of the item.
 const locatedWhole = (f: Finding): string => {
-  const text = noHeading(inert(f.body)).split('\n').map((l) => (l === '' ? l : `  ${l}`)).join('\n');
+  const note = movedNote(f);
+  const text = [note, noHeading(inert(f.body))].filter((t) => t !== '').join('\n\n').split('\n').map((l) => (l === '' ? l : `  ${l}`)).join('\n');
   return `${located(f)}\n\n${text}`;
 };
 const notReviewedLine = (n: NotReviewed): string => `- ${codeSpan(n.path)}: ${n.reason}`;
 
+const movedNote = (f: Finding): string =>
+  f.requestedLine === null ? '' : `_(Refers to ${f.side === 'LEFT' ? 'old line' : 'line'} ${f.requestedLine}, just outside the diff.)_`;
+
+// The service's own first line, an empty line, then the model's text.
 function commentBody(f: Finding): string {
-  const moved = f.requestedLine === null ? '' : `_(Refers to ${f.side === 'LEFT' ? 'old line' : 'line'} ${f.requestedLine}, just outside the diff.)_ `;
-  return `**[${f.severity}]** ${moved}${inert(f.body)}`;
+  const note = movedNote(f);
+  return `**[${f.severity}]**${note === '' ? '' : ` ${note}`}\n\n${inert(f.body)}`;
 }
 
 // The part after the score: the category in a code span, then the dash and the reason when there is one.
@@ -238,29 +279,14 @@ export function renderReview(result: ReviewResult, meta: Meta): { body: string; 
 
 const cutMarker = (removed: number): string => `_[\u2026 ${removed} characters of the review were cut to fit GitHub's limit]_`;
 
-type Fence = { indent: string; char: string; size: number };
-
-// A line indented by at most three spaces that opens with three or more backticks or tildes; for backticks the rest of the line holds none.
-function fenceOpens(line: string): Fence | null {
-  const m = /^( {0,3})(`{3,}|~{3,})(.*)$/.exec(line.replace(/\r$/, ''));
-  if (m === null || (m[2]![0] === '`' && m[3]!.includes('`'))) return null;
-  return { indent: m[1]!, char: m[2]![0]!, size: m[2]!.length };
-}
-
-// The same character at the same or a greater length, and nothing else but spaces.
-function fenceCloses(line: string, open: Fence): boolean {
-  const m = /^ {0,3}(`{3,}|~{3,}) *$/.exec(line.replace(/\r$/, ''));
-  return m !== null && m[1]![0] === open.char && m[1]!.length >= open.size;
-}
-
 // Close a code fence that a cut left open, at the opening fence's own indent.
 function closeOpenFence(text: string): string {
   let open: Fence | null = null;
   for (const line of text.split('\n')) {
-    if (open === null) open = fenceOpens(line);
+    if (open === null) open = fenceOpens(line, 3);
     else if (fenceCloses(line, open)) open = null;
   }
-  return open === null ? text : `${text}\n${open.indent}${open.char.repeat(open.size)}`;
+  return open === null ? text : `${text}\n${fenceLine(open)}`;
 }
 
 // The longest prefix that fits and ends at a line break, or a plain cut when no line break fits.

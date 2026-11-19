@@ -38,14 +38,14 @@ test('an empty overview leaves the summary out', () => {
 });
 test('an inline comment carries its tag, and a moved one its note', () => {
   const { comments } = renderReview(result({ findings: [finding({ line: 12, requestedLine: 15 })] }), auto);
-  assert.deepEqual(comments, [{ path: 'src/a.ts', side: 'RIGHT', line: 12, body: '**[major]** _(Refers to line 15, just outside the diff.)_ Breaks on empty input.' }]);
+  assert.deepEqual(comments, [{ path: 'src/a.ts', side: 'RIGHT', line: 12, body: '**[major]** _(Refers to line 15, just outside the diff.)_\n\nBreaks on empty input.' }]);
 });
 test('an unmoved comment has no note', () => {
-  assert.equal(renderReview(result({ findings: [finding({ severity: 'minor' })] }), auto).comments[0]!.body, '**[minor]** Breaks on empty input.');
+  assert.equal(renderReview(result({ findings: [finding({ severity: 'minor' })] }), auto).comments[0]!.body, '**[minor]**\n\nBreaks on empty input.');
 });
 test('the left side says old line', () => {
   const { comments } = renderReview(result({ findings: [finding({ side: 'LEFT', line: 8, requestedLine: 9 })] }), auto);
-  assert.equal(comments[0]!.body, '**[major]** _(Refers to old line 9, just outside the diff.)_ Breaks on empty input.');
+  assert.equal(comments[0]!.body, '**[major]** _(Refers to old line 9, just outside the diff.)_\n\nBreaks on empty input.');
   assert.equal(comments[0]!.side, 'LEFT');
 });
 test('sections appear in order and only when they have content', () => {
@@ -232,7 +232,7 @@ test('an HTML comment opener written by the model is neutralised', () => {
   assert.ok(r.body.includes('See &lt;!-- hidden -->.'));
   assert.ok(r.body.includes('Bad &lt;!-- x'));
   assert.ok(r.body.includes('Also &lt;!-- y'));
-  assert.equal(r.comments[0]!.body, '**[major]** Bad &lt;!-- x');
+  assert.equal(r.comments[0]!.body, '**[major]**\n\nBad &lt;!-- x');
 });
 test('a heading line in the overview is escaped', () => {
   const b = renderReview(result({ overview: 'Text.\n## Overall\n   # Title\n    # code\nnot # a heading' }), auto).body;
@@ -458,4 +458,40 @@ test('a score reason and the whole-file reason are made inert too', () => {
   const b = renderReview(r, auto).body;
   assert.equal(b.includes('@octo-dev'), false);
   assert.ok(b.includes(`ask @${ZW}octo-dev &lt;b>`));
+});
+
+test('a fence is honoured only where it is certainly one', () => {
+  const listed = inert('- ```\n  x\n  ```\n\n@victim');
+  assert.equal(listed.includes(`@${ZW}victim`), true);
+  assert.equal(listed.endsWith('```'), false);
+  assert.equal(inert('```\nx\n```\t\n@victim'), `\`\`\`\nx\n\`\`\`\t\n@${ZW}victim`);
+  assert.equal(inert('```\nx\n   ```\n@victim'), `\`\`\`\nx\n   \`\`\`\n@${ZW}victim`);
+});
+test('a span is honoured only where it is certainly one', () => {
+  const live = (text: string): boolean => /(^|[^A-Za-z0-9_])@[A-Za-z0-9]/.test(inert(text));
+  for (const text of [
+    '\\`` x `@victim`',
+    'x `a\n` @victim `y`',
+    '| `a | @victim` |',
+    '`a\r\r@victim\r\r`',
+    '\u00e9@victim',
+  ]) assert.equal(live(text), false, JSON.stringify(text));
+  assert.equal(inert('use `@Injectable()` and `x` here'), 'use `@Injectable()` and `x` here');
+  assert.equal(inert('a\n\nuse `@Injectable()` here'), 'a\n\nuse `@Injectable()` here');
+});
+test('a character reference cannot become a mention', () => {
+  assert.equal(inert('ping &#64;octo-dev and &commat;octo-lead'), 'ping &amp;#64;octo-dev and &amp;commat;octo-lead');
+  assert.equal(inert('a && b < c'), 'a &amp;&amp; b &lt; c');
+  assert.equal(inert('use `a && b` here'), 'use `a && b` here');
+});
+test("an inline comment keeps the model's text off the service's own line", () => {
+  const out = renderReview(result({ findings: [finding({ path: 'a.ts', line: 3, severity: 'minor', body: '~~~\n@victim\n~~~' })] }), auto);
+  assert.equal(out.comments[0]!.body, '**[minor]**\n\n~~~\n@victim\n~~~');
+  const uneven = result({ findings: [finding({ path: 'a.ts', line: 3, severity: 'minor', body: '```\n@victim\n````\nafter @victim' })] });
+  assert.equal(renderReview(uneven, auto).comments[0]!.body, '**[minor]**\n\n```\n@victim\n````\nafter @' + ZW + 'victim');
+});
+test('the body-only form carries the note about a moved line', () => {
+  const r = result({ findings: [finding({ path: 'a.ts', line: 3, body: 'Detail.', requestedLine: 5 })] });
+  const out = renderReview(r, { trigger: 'automatic', requestedBy: null, lineUrl: null, inline: false });
+  assert.equal(out.body.includes('Refers to line 5, just outside the diff.'), true);
 });
