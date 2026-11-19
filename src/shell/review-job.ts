@@ -52,6 +52,12 @@ function codeOf(error: unknown): string {
   return message.length <= 40 && SHORT_CODE.test(message) ? message : 'internal_error';
 }
 
+/** The number of findings of an engine result, or of a stored one; 0 when it has none that can be counted. */
+function findingsOf(result: unknown): number {
+  const findings = (result as { findings?: unknown } | null | undefined)?.findings;
+  return Array.isArray(findings) ? findings.length : 0;
+}
+
 /** Takes one claimed job to its end: drops it, puts it back, or reviews and records; not in dry run, then publishes. Never rejects. */
 export async function runReviewJob(job: Job, deps: ReviewJobDeps): Promise<void> {
   const { db } = deps;
@@ -167,6 +173,19 @@ export async function runReviewJob(job: Job, deps: ReviewJobDeps): Promise<void>
         if (last !== null) return await drop(last.headSha === live.info.headSha && last.baseSha === live.info.baseSha ? 'already_reviewed' : 'later_head');
         // A stored review? This start then publishes it: no engine, no render, no guard.
         resumed = await unpublishedRun(db, job.ref, live.info.headSha, live.info.baseSha, new Date(now.getTime() - STORED_REVIEW_MS).toISOString());
+        // What the database may not know: a review of the app's own already on the pull request. Asked before anything is paid.
+        if (resumed === null) {
+          let own: Array<{ id: string; commit: string }> | null = null;
+          try {
+            own = await deps.writer.listOwnReviews(job.ref, installation);
+          } catch (error) {
+            prepareError = error;
+          }
+          if (own !== null && own.length > 0) {
+            const head = live.info.headSha;
+            return await drop(own.some((r) => r.commit === head) ? 'already_reviewed' : 'later_head');
+          }
+        }
       }
     }
 
@@ -308,7 +327,7 @@ export async function runReviewJob(job: Job, deps: ReviewJobDeps): Promise<void>
     log({
       event: 'review', job: job.id, repo, number: job.ref.number, head: run.headSha, trigger: 'automatic', mode: 'full', dry_run: deps.dryRun,
       outcome: written ? run.outcome : 'record_failed', failure_stage: run.failureStage, failure_code: run.failureCode,
-      needs_human: run.needsHuman, highest: run.highestScore, findings: result === null ? 0 : result.findings.length,
+      needs_human: run.needsHuman, highest: run.highestScore, findings: findingsOf(result ?? resumed?.result),
       calls: usage.calls, cost: usage.cost, duration_ms: deps.clock().getTime() - now.getTime(), requeued,
       published: publish?.kind === 'published', review: publish?.kind === 'published' ? publish.reviewId : null,
       publish: publish?.kind ?? null, publish_code: publish?.kind === 'failed' ? publish.code : null,
