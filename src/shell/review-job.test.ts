@@ -655,6 +655,35 @@ test('a /review from someone without access on a head whose paid review failed s
     assert.deepEqual((await unfinishedJobs(db)).filter((j) => j.ref.number === number), []);
   }
 });
+test('a stranger\'s command that superseded the head\'s job gives the head its job back, and its start posts the recorded review', async () => {
+  const STRANGER = { ref: REF, reason: 'command', headSha: '', runAt: at(1), now: at(1), delivery: 'd8', replace: false,
+    trigger: 'manual' as const, requestedBy: 'octo-dev', commentId: '32', association: 'none', installation: '99' };
+  const first = await live({ posts: [new Error('github_502')] });
+  const post = first.deps.writer.publishReview;
+  let command: number | null = null;
+  first.deps.writer = { ...first.deps.writer, publishReview: async (ref, installation, draft) => { command = await enqueueJob(db, STRANGER); return post(ref, installation, draft); } };
+  await runReviewJob(first.job, first.deps);
+  assert.equal((await getJob(db, first.job.id))?.outcome, 'superseded');
+  const refused = await manualJob({ reuseJob: command!, association: 'none' });
+  await runReviewJob(refused.job, refused.deps);
+  assert.equal((await getJob(db, command!))?.outcome, 'refused');
+  const waiting = await unfinishedJobs(db);
+  assert.deepEqual(waiting.map((j) => [j.trigger, j.headSha, j.status]), [['automatic', 'h1', 'pending']]);
+  const again = await live({ reuseJob: waiting[0]!.id });
+  await runReviewJob(again.job, again.deps);
+  const [stored] = await listRuns(db, REF);
+  assert.deepEqual([again.inputs.length, (await getJob(db, again.job.id))?.outcome, stored!.published, (await listRuns(db, REF)).length], [0, 'published', true, 1]);
+  assert.deepEqual(again.writes.filter((w) => w[0] === 'publishReview'), [['publishReview', 'h1', stored!.body, 1]]);
+
+  // in dry run: a read that fails, a put-back superseded by a stranger's waiting command, and the refusal stores the head's job again
+  const dry = await harness({ pullRequest: 8, live: new Error('github_502') });
+  const waits = (await enqueueJob(db, { ...STRANGER, ref: { ...REF, number: 8 } }))!;
+  await runReviewJob(dry.job, dry.deps);
+  assert.equal((await getJob(db, dry.job.id))?.outcome, 'superseded');
+  const no = await manualJob({ dryRun: true, pullRequest: 8, reuseJob: waits, association: 'none' });
+  await runReviewJob(no.job, no.deps);
+  assert.deepEqual((await unfinishedJobs(db)).filter((j) => j.ref.number === 8).map((j) => [j.trigger, j.headSha, j.status]), [['automatic', 'h1', 'pending']]);
+});
 test('a /review on a closed pull request, or on one that has its review, is refused with no eyes first', async () => {
   const closed = await manualJob({ live: { ...LIVE, state: 'closed' } });
   await runReviewJob(closed.job, closed.deps);

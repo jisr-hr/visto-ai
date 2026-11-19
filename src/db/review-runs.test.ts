@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { testDb } from './testing.ts';
 import { hasOkRun, hasRun, lastPublishedRun, listRuns, markPublished, recordRun, spentSince, unpublishedRun } from './review-runs.ts';
 import type { RunRecord } from './review-runs.ts';
+import { enqueueJob, finishJob } from './jobs.ts';
 
 const REF = { service: 'github', owner: 'acme', repo: 'shop', number: 7 } as const;
 const at = (seconds: number): string => new Date(Date.parse('2026-03-01T10:00:00.000Z') + seconds * 1000).toISOString();
@@ -56,6 +57,23 @@ test('hasRun finds a run of that head and kind, whatever its outcome, and nothin
   ]), [true, false, false, false]);
   await recordRun(db, run({ dryRun: true }));
   assert.equal(await hasRun(db, REF, 'h1', true), true);
+  await db.close();
+});
+test('hasRun does not count a run whose job ended dropped as superseded; any other end, or a job that is gone, counts', async () => {
+  const db = await testDb();
+  const jobFor = async (number: number, status: 'done' | 'dropped' | null, outcome: string): Promise<number> => {
+    const id = (await enqueueJob(db, { ref: { ...REF, number }, reason: 'opened', headSha: 'h1', runAt: at(0), now: at(0), delivery: null, replace: false,
+      trigger: 'automatic', requestedBy: null, commentId: null, association: null, installation: null }))!;
+    if (status !== null) await finishJob(db, id, status, outcome, at(1));
+    return id;
+  };
+  await recordRun(db, run({ ref: { ...REF, number: 7 }, dryRun: false, job: await jobFor(7, 'dropped', 'superseded') }));
+  await recordRun(db, run({ ref: { ...REF, number: 8 }, dryRun: false, job: await jobFor(8, 'done', 'failed') }));
+  await recordRun(db, run({ ref: { ...REF, number: 9 }, dryRun: false, job: await jobFor(9, 'dropped', 'stale_head') }));
+  const gone = await jobFor(10, 'done', 'superseded');
+  await db.query('delete from visto_ai.jobs where id = $1', [gone]);
+  await recordRun(db, run({ ref: { ...REF, number: 10 }, dryRun: false, job: gone }));
+  assert.deepEqual(await Promise.all([7, 8, 9, 10].map((number) => hasRun(db, { ...REF, number }, 'h1', false))), [false, true, true, true]);
   await db.close();
 });
 test('spentSince adds the cost of runs started at or after the time given', async () => {

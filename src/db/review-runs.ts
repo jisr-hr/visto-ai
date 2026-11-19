@@ -135,12 +135,13 @@ export async function spentSince(db: Db, since: string): Promise<number> {
   return rows[0]!.spent;
 }
 
-/** Whether the pull request has a run at this head, of the same kind (dry or live), whatever its outcome. */
+/** Whether the pull request has a run at this head, of the same kind (dry or live), whatever its outcome; a run whose job ended dropped as superseded does not count. */
 export async function hasRun(db: Db, ref: PullRequestRef, headSha: string, dryRun: boolean): Promise<boolean> {
   const rows = await db.query(
-    `select 1 from visto_ai.review_runs
-     where service = $1 and owner = $2 and repo = $3 and number = $4
-       and head_sha = $5 and dry_run = $6
+    `select 1 from visto_ai.review_runs r
+     where r.service = $1 and r.owner = $2 and r.repo = $3 and r.number = $4
+       and r.head_sha = $5 and r.dry_run = $6
+       and not exists (select 1 from visto_ai.jobs j where j.id = r.job and j.status = 'dropped' and j.outcome = 'superseded')
      limit 1`,
     [ref.service, storable(ref.owner).toLowerCase(), storable(ref.repo).toLowerCase(), ref.number, storable(headSha), dryRun]);
   return rows.length === 1;
