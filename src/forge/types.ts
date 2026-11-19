@@ -96,3 +96,15 @@ export interface WebhookReader {
   /** `headers`: the request's headers, names in lower case. `body`: the bytes as received. */
   read(headers: Record<string, string | undefined>, body: Buffer): WebhookReading;
 }
+
+export interface AppInfo {
+  botLogin: string;                          // the app's own account: "<slug>[bot]"
+  permissions: Record<string, string>;       // as the git service names them: { pull_requests: 'write', contents: 'read', ... }
+  events: string[];                          // the events the app is subscribed to
+}
+export interface FeatureOff { feature: 'reviews' | 'publishing' | 'commands' | 'capture'; missing: string }
+export interface AppIdentity {
+  read(): Promise<AppInfo>;
+  /** What the app lacks: one entry for each permission or event a feature needs and the app has not got. */
+  lacks(dryRun: boolean): Promise<FeatureOff[]>;
+}
