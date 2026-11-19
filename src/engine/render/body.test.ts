@@ -461,9 +461,6 @@ test('a score reason and the whole-file reason are made inert too', () => {
 });
 
 test('a fence is honoured only where it is certainly one', () => {
-  const listed = inert('- ```\n  x\n  ```\n\n@victim');
-  assert.equal(listed.includes(`@${ZW}victim`), true);
-  assert.equal(listed.endsWith('```'), false);
   assert.equal(inert('```\nx\n```\t\n@victim'), `\`\`\`\nx\n\`\`\`\t\n@${ZW}victim`);
   assert.equal(inert('```\nx\n   ```\n@victim'), `\`\`\`\nx\n   \`\`\`\n@${ZW}victim`);
 });
@@ -494,4 +491,34 @@ test('the body-only form carries the note about a moved line', () => {
   const r = result({ findings: [finding({ path: 'a.ts', line: 3, body: 'Detail.', requestedLine: 5 })] });
   const out = renderReview(r, { trigger: 'automatic', requestedBy: null, lineUrl: null, inline: false });
   assert.equal(out.body.includes('Refers to line 5, just outside the diff.'), true);
+});
+
+test('an indented fence is moved to the first column, where it is the same fence to GitHub as to the service', () => {
+  assert.equal(inert('intro\n  ```\nx @victim'), 'intro\n```\nx @victim\n```');
+  assert.equal(inert('   ~~~ts\ncode\n   ~~~\nafter @victim'), `~~~ts\ncode\n   ~~~\nafter @${ZW}victim`);
+  assert.equal(inert('a\n\n    ```\n@victim'), `a\n\n    \`\`\`\n@${ZW}victim`);
+  assert.equal(inert('- ```\n  x\n  ```\n\n@victim'), '- ```\n  x\n```\n\n@victim\n```');
+});
+test('a fence the summary leaves open cannot swallow the sections after it', () => {
+  const body = renderReview(result({ overview: 'intro\n  ```\nx' }), auto).body;
+  assert.equal(body.includes('intro\n```\nx\n```\n\n## '), true);
+});
+test('only spaces and tabs make a line blank', () => {
+  const live = (text: string): boolean => /(^|[^A-Za-z0-9_])@[A-Za-z0-9]/.test(inert(text));
+  for (const gap of ['\u00a0', '\u3000', '\ufeff', '\u2003', '\v', '\f']) assert.equal(live(`x \`a\n${gap}\n\` @victim \`y\``), false, JSON.stringify(gap));
+  for (const gap of ['', ' ', '\t', ' \t ']) assert.equal(inert(`x \`a\n${gap}\n\`@Injectable()\` here`), `x \`a\n${gap}\n\`@Injectable()\` here`);
+});
+test('a line of = or - under a line of text makes no heading, and a fence is left as it is', () => {
+  const text = 'Overall\n---\nfine\n\nTitle\n ===\n\n---\n\n```yaml\na: 1\n---\n# c\n```';
+  const body = renderReview(result({ overview: text }), auto).body;
+  assert.equal(body.includes('Overall\n\\---\nfine\n\nTitle\n \\===\n\n---\n\n```yaml\na: 1\n---\n# c\n```'), true);
+  const bodyOnly = renderReview(result({ findings: [finding({ body: 'Overall\n---' })] }), { ...auto, inline: false }).body;
+  assert.equal(bodyOnly.includes('  Overall\n  \\---'), true);
+});
+test('a cut inside a fence that came from an indented line closes it before the cut marker', () => {
+  const overview = `- \`\`\`\n  x\n  \`\`\`\n\n${'word word\n'.repeat(10_000)}`;
+  const body = renderReview(result({ overview }), auto).body;
+  const kept = body.slice(0, body.indexOf('\n\n_['));
+  assert.equal(kept.endsWith('\n```'), true);
+  assert.equal(kept.split('\n').filter((line) => line === '```').length, 2);
 });

@@ -52,9 +52,23 @@ function codeSpan(raw: string): string {
   return `${fence} ${text} ${fence}`;
 }
 
-// A model-written line must not become a heading of the review body.
+// A model-written line must not become a heading of the review body: not with a #, and not as a setext underline. A fence is left as it is.
 function noHeading(text: string): string {
-  return text.replace(/^( {0,3})#/gm, '$1\\#');
+  let open: Fence | null = null;
+  let before = '';
+  return text.split('\n').map((line) => {
+    const prev = before;
+    before = line;
+    if (open !== null) {
+      if (fenceCloses(line, open)) open = null;
+      return line;
+    }
+    open = fenceOpens(line, 3);
+    if (open !== null) return line;
+    if (/^ {0,3}#/.test(line)) return line.replace(/^( {0,3})#/, '$1\\#');
+    if (!BLANK.test(prev) && /^ {0,3}(=+|-+)[ \t]*$/.test(line)) return line.replace(/[=-]/, '\\$&');
+    return line;
+  }).join('\n');
 }
 
 const ZW = '\u200b';
@@ -112,6 +126,9 @@ function fenceCloses(line: string, open: Fence): boolean {
 
 const fenceLine = (open: Fence): string => `${open.indent}${open.char.repeat(open.size)}`;
 
+// A line is blank when it holds nothing but spaces and tabs.
+const BLANK = /^[ \t]*$/;
+
 // Model-written text made inert line by line; `fences` says whether a fence can open in it.
 function inertText(text: string, fences: boolean): string {
   let open: Fence | null = null;
@@ -123,11 +140,13 @@ function inertText(text: string, fences: boolean): string {
       lines.push(line);
       continue;
     }
-    open = fences ? fenceOpens(line, 0) : null;
+    open = fences ? fenceOpens(line, 3) : null;
     if (open !== null) {
+      // Written at the first column: there it is a fence to GitHub whatever came before it.
+      open = { ...open, indent: '' };
       dead = false;
-      lines.push(line);
-    } else if (line.trim() === '') {
+      lines.push(line.trimStart());
+    } else if (BLANK.test(line)) {
       dead = false;
       lines.push(line);
     } else {
