@@ -1,3 +1,4 @@
+import { createPrivateKey } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { parse, YAMLParseError } from 'yaml';
 import type { RepoConfig } from '../engine/types.ts';
@@ -15,14 +16,20 @@ export interface ScorerConfig { baseUrl: string; apiKey: string; model: string; 
 export interface DeploymentConfig {
   model: ModelConfig;
   scorer: ScorerConfig | null;
-  app: { webhookSecret: string } | null;
+  app: { id: string; privateKey: string; webhookSecret: string } | null;
   database: { url: string } | null;
   server: { port: number };
-  limits: { inputTokensPerCall: number; batchesPerReview: number };
-  repositories: { defaults: RepoConfig; overrides: Record<string, Partial<RepoConfig>> };
+  dryRun: boolean;
+  alerts: { webhook: string } | null;
+  limits: { inputTokensPerCall: number; batchesPerReview: number; spendPerDay: number; queueConcurrency: number };
+  repositories: { defaults: RepoSettings; overrides: Record<string, Partial<RepoSettings>> };
 }
 
-export type ServiceConfig = DeploymentConfig & { app: { webhookSecret: string }; database: { url: string } };
+export interface RepoSettings extends RepoConfig { ignoredAuthors: string[]; baseBranches: string[] }
+
+export type ServiceConfig = DeploymentConfig & {
+  app: { id: string; privateKey: string; webhookSecret: string }; database: { url: string }; dryRun: true;
+};
 
 export class ConfigError extends Error {
   issues: string[];
@@ -30,6 +37,20 @@ export class ConfigError extends Error {
     super(`invalid configuration:\n${issues.map((i) => `  - ${i}`).join('\n')}`);
     this.name = 'ConfigError';
     this.issues = issues;
+  }
+}
+
+function isHttpUrl(value: string): boolean {
+  if (!URL.canParse(value)) return false;
+  const { protocol } = new URL(value);
+  return protocol === 'http:' || protocol === 'https:';
+}
+
+function isRsaPrivateKey(pem: string): boolean {
+  try {
+    return createPrivateKey(pem).asymmetricKeyType === 'rsa';
+  } catch {
+    return false;
   }
 }
 
@@ -84,14 +105,32 @@ export function parseConfig(yamlText: string, env: Record<string, string | undef
     }
     scorer = { ...raw.scorer, apiKey: scorerKey };
   }
-  let app: { webhookSecret: string } | null = null;
+  let app: { id: string; privateKey: string; webhookSecret: string } | null = null;
   if (raw.app !== undefined) {
     const hookVar = raw.app.webhookSecret.env;
     const webhookSecret = env[hookVar];
     if (webhookSecret === undefined || webhookSecret === '') {
       throw new ConfigError([`app.webhookSecret: environment variable ${hookVar} is not set`]);
     }
-    app = { webhookSecret };
+    const keyVar = raw.app.privateKey.env;
+    const keyText = env[keyVar];
+    if (keyText === undefined || keyText === '') {
+      throw new ConfigError([`app.privateKey: environment variable ${keyVar} is not set`]);
+    }
+    const privateKey = keyText.replaceAll('\\n', '\n');
+    if (!isRsaPrivateKey(privateKey)) throw new ConfigError(['app.privateKey: must be an RSA private key in PEM form']);
+    app = { id: String(raw.app.id), privateKey, webhookSecret };
+  }
+  let alerts: { webhook: string } | null = null;
+  if (raw.alerts !== undefined) {
+    const urlVar = raw.alerts.webhook.env;
+    const webhook = env[urlVar];
+    if (webhook === undefined || webhook === '') {
+      throw new ConfigError([`alerts.webhook: environment variable ${urlVar} is not set`]);
+    }
+    // The URL is a credential of the alert channel, so the message never quotes it.
+    if (!isHttpUrl(webhook)) throw new ConfigError(['alerts.webhook: must be an http or https URL']);
+    alerts = { webhook };
   }
   let database: { url: string } | null = null;
   if (raw.database !== undefined) {
@@ -118,15 +157,22 @@ export function parseConfig(yamlText: string, env: Record<string, string | undef
     app,
     database,
     server: raw.server,
+    dryRun: raw.dryRun,
+    alerts,
     limits: raw.limits,
     repositories: {
-      defaults: { primaryBranches: defaults.primaryBranches, scoreThreshold: defaults.score.threshold },
+      defaults: {
+        primaryBranches: defaults.primaryBranches, scoreThreshold: defaults.score.threshold,
+        ignoredAuthors: defaults.ignoredAuthors, baseBranches: defaults.baseBranches,
+      },
       overrides: Object.fromEntries(
         Object.entries(overrides).map(([name, o]) => [
           name,
           {
             ...(o.primaryBranches === undefined ? {} : { primaryBranches: o.primaryBranches }),
             ...(o.score?.threshold === undefined ? {} : { scoreThreshold: o.score.threshold }),
+            ...(o.ignoredAuthors === undefined ? {} : { ignoredAuthors: o.ignoredAuthors }),
+            ...(o.baseBranches === undefined ? {} : { baseBranches: o.baseBranches }),
           },
         ]),
       ),
@@ -138,10 +184,12 @@ export function loadConfig(path: string, env: Record<string, string | undefined>
   return parseConfig(readFileSync(path, 'utf8'), env);
 }
 
-/** The config a running service needs. Throws a ConfigError naming each missing block. */
+/** The config a running service needs. Throws a ConfigError naming each missing block, and one when dryRun is not true. */
 export function serviceConfig(config: DeploymentConfig): ServiceConfig {
   const missing = [config.app === null ? 'app' : null, config.database === null ? 'database' : null].filter((n) => n !== null);
-  if (missing.length > 0) throw new ConfigError(missing.map((n) => `${n}: required to run the service`));
+  const issues = missing.map((n) => `${n}: required to run the service`);
+  if (!config.dryRun) issues.push('dryRun: must be true: this version cannot publish');
+  if (issues.length > 0) throw new ConfigError(issues);
   return config as ServiceConfig;
 }
 
@@ -151,9 +199,15 @@ export function contractFile(config: DeploymentConfig): string {
 }
 
 /** `fullName` is "owner/name", matched without regard to case. An override replaces only the keys it sets. */
-export function repoConfigFor(config: DeploymentConfig, fullName: string): RepoConfig {
+export function repoSettingsFor(config: DeploymentConfig, fullName: string): RepoSettings {
   const wanted = fullName.toLowerCase();
   const key = Object.keys(config.repositories.overrides).find((name) => name.toLowerCase() === wanted);
   const override = key === undefined ? {} : config.repositories.overrides[key]!;
   return { ...config.repositories.defaults, ...override };
+}
+
+/** The two keys the engine reads. */
+export function repoConfigFor(config: DeploymentConfig, fullName: string): RepoConfig {
+  const { primaryBranches, scoreThreshold } = repoSettingsFor(config, fullName);
+  return { primaryBranches, scoreThreshold };
 }

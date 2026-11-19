@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { loadMigrations, migrate } from './migrate.ts';
 import { pgliteDb } from './pglite.ts';
 import { testDb } from './testing.ts';
+import type { Db } from './types.ts';
 
 const one = { name: '0001_a', sql: 'create table visto_ai.a (n integer);' };
 const two = { name: '0002_b', sql: 'create table visto_ai.b (n integer); insert into visto_ai.b values (1);' };
@@ -61,5 +62,17 @@ test('testDb resolves with the ledger in place', async () => {
   const db = await testDb();
   const names = (await db.query<{ name: string }>('select name from visto_ai.schema_migrations')).map((r) => r.name);
   assert.ok(names.includes('0001_receiving'));
+  assert.ok(names.includes('0002_jobs'));
   await db.close();
+});
+test('a migration switches the statement timeout off for itself', async () => {
+  const db = await pgliteDb();
+  const seen: string[] = [];
+  const spy: Db = { ...db, transaction: (work) => db.transaction((tx) => work({
+    ...tx,
+    query: (text, params) => { seen.push(text); return tx.query(text, params); },
+    script: (sql) => { seen.push(sql); return tx.script(sql); },
+  })) };
+  await migrate(spy, [{ name: '0001_x', sql: 'create table visto_ai.x (n integer);' }]);
+  assert.equal(seen[0], 'set local statement_timeout = 0');
 });

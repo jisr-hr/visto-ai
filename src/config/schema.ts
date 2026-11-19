@@ -45,7 +45,9 @@ const scorer = z
   })
   .strict();
 
-const app = z.object({ webhookSecret: secretRef }).strict();
+const app = z.object({ id: z.number().int().min(1), privateKey: secretRef, webhookSecret: secretRef }).strict();
+
+const alerts = z.object({ webhook: secretRef }).strict();
 
 const database = z.object({ url: secretRef }).strict();
 
@@ -55,6 +57,8 @@ const limits = z
   .object({
     inputTokensPerCall: z.number().int().min(10000).default(200000),
     batchesPerReview: z.number().int().positive().default(6),
+    spendPerDay: z.number().positive().default(50),
+    queueConcurrency: z.number().int().min(1).max(20).default(2),
   })
   .strict();
 
@@ -64,6 +68,8 @@ const repoConfig = z
   .object({
     primaryBranches: z.array(z.string().min(1)).default(['main', 'master']),
     score: z.object({ threshold: threshold.default(70) }).strict().prefault({}),
+    ignoredAuthors: z.array(z.string().min(1)).default(['dependabot[bot]']),
+    baseBranches: z.array(z.string().min(1)).default([]),
   })
   .strict();
 
@@ -71,6 +77,8 @@ const repoOverride = z
   .object({
     primaryBranches: z.array(z.string().min(1)).optional(),
     score: z.object({ threshold: threshold.optional() }).strict().optional(),
+    ignoredAuthors: z.array(z.string().min(1)).optional(),
+    baseBranches: z.array(z.string().min(1)).optional(),
   })
   .strict();
 
@@ -88,6 +96,8 @@ export const configSchema = z
     app: app.optional(),
     database: database.optional(),
     server: server.prefault({}),
+    dryRun: z.boolean().default(false),
+    alerts: alerts.optional(),
     limits: limits.prefault({}),
     repositories: repositories.prefault({}),
   })

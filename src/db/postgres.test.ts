@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { postgresDbFrom } from './postgres.ts';
+import { INSTANCE_LOCK_KEY, POOL_OPTIONS, postgresDbFrom, takeInstanceLockOn } from './postgres.ts';
 import type { ClientLike, PoolLike } from './postgres.ts';
 
 function fakePool(options: { failOn?: string; rows?: unknown[] } = {}) {
@@ -125,4 +125,58 @@ test('a client with a normal rollback is released once, without destroying it', 
   await assert.rejects(() => db.transaction(async () => { throw new Error('x'); }));
   assert.equal(f.clientState.releaseArgs.length, 1);
   assert.ok(f.clientState.releaseArgs[0]!.length === 0 || f.clientState.releaseArgs[0]![0] === undefined);
+});
+test('the pool bounds a statement and keeps its connections alive', () => {
+  assert.deepEqual(POOL_OPTIONS, { max: 5, connectionTimeoutMillis: 5000, statement_timeout: 15000, keepAlive: true, keepAliveInitialDelayMillis: 10000 });
+});
+
+function fakeClient(held: boolean | Error) {
+  const listeners: Record<'error' | 'end', Array<(e?: Error) => void>> = { error: [], end: [] };
+  const calls: string[] = [];
+  const emit = (event: 'error' | 'end'): void => { for (const l of listeners[event]) l(event === 'error' ? new Error('gone') : undefined); };
+  return {
+    calls, emit,
+    connect: async (): Promise<void> => { calls.push('connect'); },
+    query: async (text: string, params?: unknown[]): Promise<{ rows: unknown[] }> => {
+      calls.push(`${text} ${JSON.stringify(params)}`);
+      if (held instanceof Error) throw held;
+      return { rows: [{ held }] };
+    },
+    // Like the real client: closing it emits `end`.
+    end: async (): Promise<void> => { calls.push('end'); emit('end'); },
+    on: (event: 'error' | 'end', listener: (e?: Error) => void): void => { listeners[event].push(listener); },
+  };
+}
+
+test('the lock is taken with one statement on its own connection', async () => {
+  const client = fakeClient(true);
+  assert.notEqual(await takeInstanceLockOn(client, () => {}), null);
+  assert.deepEqual(client.calls, ['connect', `select pg_try_advisory_lock($1) as held [${INSTANCE_LOCK_KEY}]`]);
+});
+test('when another instance holds the lock the answer is null, the connection is closed, and that is not a loss', async () => {
+  const client = fakeClient(false);
+  let lost = 0;
+  assert.equal(await takeInstanceLockOn(client, () => { lost += 1; }), null);
+  assert.deepEqual([client.calls.at(-1), lost], ['end', 0]);
+});
+test('a statement that fails rejects, the connection is closed, and that is not a loss', async () => {
+  const client = fakeClient(new Error('boom'));
+  let lost = 0;
+  await assert.rejects(takeInstanceLockOn(client, () => { lost += 1; }), /boom/);
+  assert.deepEqual([client.calls.at(-1), lost], ['end', 0]);
+});
+test('losing the connection after the lock was taken calls onLost once', async () => {
+  const client = fakeClient(true);
+  let lost = 0;
+  await takeInstanceLockOn(client, () => { lost += 1; });
+  client.emit('error');
+  client.emit('end');
+  assert.equal(lost, 1);
+});
+test('release closes the connection and is not a loss', async () => {
+  const client = fakeClient(true);
+  let lost = 0;
+  const lock = await takeInstanceLockOn(client, () => { lost += 1; });
+  await lock!.release();
+  assert.deepEqual([client.calls.at(-1), lost], ['end', 0]);
 });

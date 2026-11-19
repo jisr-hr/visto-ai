@@ -1,5 +1,5 @@
 import pg from 'pg';
-import type { Db } from './types.ts';
+import type { Db, InstanceLock } from './types.ts';
 
 export interface ClientLike { query(text: string, params?: unknown[]): Promise<{ rows: unknown[] }>; release(destroy?: boolean): void;
   on(event: 'error', listener: (error: Error) => void): unknown;
@@ -9,6 +9,9 @@ export interface PoolLike extends Pick<ClientLike, 'query'> {
   connect(): Promise<ClientLike>; end(): Promise<void>;
   on(event: 'error', listener: (error: Error) => void): unknown;
 }
+export const POOL_OPTIONS = {
+  max: 5, connectionTimeoutMillis: 5000, statement_timeout: 15000, keepAlive: true, keepAliveInitialDelayMillis: 10000,
+} as const;
 type Log = (entry: Record<string, unknown>) => void;
 
 function over(runner: Pick<ClientLike, 'query'>, rest: Pick<Db, 'transaction' | 'close'>): Db {
@@ -64,5 +67,62 @@ export function postgresDbFrom(pool: PoolLike, log: Log): Db {
 }
 
 export function postgresDb(url: string, log: Log): Db {
-  return postgresDbFrom(new pg.Pool({ connectionString: url, max: 5, connectionTimeoutMillis: 5000 }), log);
+  return postgresDbFrom(new pg.Pool({ connectionString: url, ...POOL_OPTIONS }), log);
+}
+
+export interface LockClientLike {
+  connect(): Promise<unknown>;
+  query(text: string, params?: unknown[]): Promise<{ rows: unknown[] }>;
+  end(): Promise<void>;
+  on(event: 'error' | 'end', listener: (error?: Error) => void): unknown;
+}
+export const INSTANCE_LOCK_KEY = 5684201;
+
+/**
+ * Takes the deployment's lock on `client`, which it connects and owns. null, with the client closed, when another
+ * instance holds it. `onLost` is called once, and only when the connection ends or fails after the lock was taken
+ * and before `release` was called.
+ */
+export async function takeInstanceLockOn(client: LockClientLike, onLost: () => void): Promise<InstanceLock | null> {
+  let taken = false;
+  let released = false;
+  let lost = false;
+  // A real client emits `end` after its own `end()`, so only a close between "taken" and "released" is a loss.
+  const onClose = (): void => {
+    if (!taken || released || lost) return;
+    lost = true;
+    onLost();
+  };
+  client.on('error', onClose);
+  client.on('end', onClose);
+  try {
+    await client.connect();
+    const rows = (await client.query('select pg_try_advisory_lock($1) as held', [INSTANCE_LOCK_KEY])).rows as Array<{ held: boolean }>;
+    if (rows[0]?.held !== true) {
+      await client.end();
+      return null;
+    }
+  } catch (error) {
+    try {
+      await client.end();
+    } catch {
+      // the original failure is the one to report
+    }
+    throw error;
+  }
+  taken = true;
+  return {
+    release: async () => {
+      released = true;
+      await client.end();
+    },
+  };
+}
+
+/** The same over a connection of its own to `url`. */
+export function takeInstanceLock(url: string, onLost: () => void): Promise<InstanceLock | null> {
+  return takeInstanceLockOn(
+    new pg.Client({ connectionString: url, keepAlive: true, keepAliveInitialDelayMillis: 10_000, connectionTimeoutMillis: 5000 }),
+    onLost,
+  );
 }

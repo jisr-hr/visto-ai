@@ -7,3 +7,5 @@ export interface Db {
   transaction<T>(work: (tx: Db) => Promise<T>): Promise<T>;
   close(): Promise<void>;
 }
+
+export interface InstanceLock { release(): Promise<void> }

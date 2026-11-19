@@ -23,6 +23,25 @@ export interface Source {
   getDefaultBranchFile(pr: PullRequestInfo, path: string): Promise<string | null>;
 }
 
+export interface LivePullRequest {
+  info: PullRequestInfo;                 // for an open pull request, baseSha is the merge base of its base and its head
+  state: 'open' | 'closed' | 'merged';
+}
+export interface ForgeAccess {
+  /** The pull request as the git service has it now. null when it is not there. Rejects with a short code. */
+  readPullRequest(ref: PullRequestRef, installation: string): Promise<LivePullRequest | null>;
+  /** A read-only source for one review, with that installation's token. Rejects with a short code. */
+  sourceFor(installation: string): Promise<Source>;
+}
+
+export interface HookDelivery { id: string; guid: string; at: string; ok: boolean }   // ok: the service answered it with success
+export interface HookDeliveries {
+  /** The app's own webhook deliveries made at or after `since`. `complete` is false when the listing stopped at its page limit. */
+  listSince(since: string): Promise<{ deliveries: HookDelivery[]; complete: boolean }>;
+  /** Asks the git service to send one delivery again. Rejects with a short code; `github_rate_limited` when told to slow down. */
+  redeliver(id: string): Promise<void>;
+}
+
 export type Association = 'owner' | 'member' | 'collaborator' | 'none';
 export interface RepoRef { owner: string; repo: string }
 export interface MergedPullRequest {

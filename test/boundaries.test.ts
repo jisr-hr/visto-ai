@@ -48,3 +48,7 @@ test('the shell may not import the GitHub adapter, and the service entry may', a
 test('the --import flag reaches test processes: fetch is blocked without importing setup', async () => {
   await assert.rejects(fetch('https://example.com'), (error: Error) => error.name === 'NetworkBlockedError');
 });
+test('the db part may not import from the engine', async () => {
+  assert.ok((await lint("import '../engine/x.ts';\n", 'src/db/x.ts')).includes('no-restricted-imports'));
+  assert.deepEqual(await lint("import '../forge/types.ts';\n", 'src/db/x.ts'), []);
+});

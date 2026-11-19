@@ -36,3 +36,9 @@ test('isLocalUrl accepts only plain http to this machine', () => {
     assert.equal(isLocalUrl(url), false, url);
   }
 });
+
+test('a pull request sample can carry another action and another head', () => {
+  const { body } = sampleWebhook('pull_request', 's', 'd1', { action: 'synchronize', head: 'def456' });
+  const payload = JSON.parse(body) as { action: string; pull_request: { head: { sha: string } } };
+  assert.deepEqual([payload.action, payload.pull_request.head.sha], ['synchronize', 'def456']);
+});

@@ -1,14 +1,21 @@
+import type { RepoSettings } from '../config/load.ts';
 import { recordActivity } from '../db/human-activity.ts';
-import { savePullRequest } from '../db/pull-requests.ts';
+import { enqueueJob } from '../db/jobs.ts';
+import { getPullRequest, savePullRequest } from '../db/pull-requests.ts';
 import { recordDelivery } from '../db/deliveries.ts';
 import type { Db } from '../db/types.ts';
 import type { WebhookReader } from '../forge/types.ts';
 import { captureOf } from './capture.ts';
+import { triggerOf } from './triggers.ts';
 
 export interface HttpAnswer { status: number; body: string }
 export interface ReceiveDeps {
   db: Db; reader: WebhookReader; clock: () => Date; log: (entry: Record<string, unknown>) => void;
+  settingsFor: (fullName: string) => RepoSettings;   // "owner/name"
+  onQueued: () => void;                              // called after the commit, once per delivery that stored or replaced a job
 }
+
+interface Queued { job: 'queued' | 'delayed' | null; skip: string | null }
 
 interface Who { delivery: string | null; name: string | null; action: string | null }
 const NOBODY: Who = { delivery: null, name: null, action: null };
@@ -44,25 +51,44 @@ export async function receive(
     }
     who = { delivery: reading.delivery, name: reading.name, action: reading.action };
     const capture = captureOf(reading.event, reading.delivery, deps.clock());
-    let stored: boolean;
+    let stored: Queued | null;
     try {
-      stored = await deps.db.transaction(async (tx) => {
+      stored = await deps.db.transaction(async (tx): Promise<Queued | null> => {
         const fresh = await recordDelivery(tx, {
           id: reading.delivery, name: reading.name, action: reading.action,
           outcome: capture.outcome, reason: capture.outcome === 'ignored' ? capture.reason : null,
         });
-        if (!fresh) return false;
+        if (!fresh) return null;
+        const queued: Queued = { job: null, skip: null };
         if (capture.outcome === 'handled') {
-          if (capture.pullRequest) await savePullRequest(tx, capture.pullRequest);
+          if (capture.pullRequest) {
+            const newest = await savePullRequest(tx, capture.pullRequest);
+            if (reading.event.kind === 'pull_request') {
+              // An older event judges the stored facts and only fills a gap; the newest replaces the pending job.
+              const current = newest ? capture.pullRequest : await getPullRequest(tx, capture.pullRequest.ref) ?? capture.pullRequest;
+              const ref = current.ref;
+              const trigger = triggerOf(reading.event.action, current, deps.settingsFor(`${ref.owner}/${ref.repo}`));
+              if (trigger.kind === 'skip') queued.skip = trigger.reason;
+              if (trigger.kind === 'queue') {
+                const now = deps.clock();
+                const id = await enqueueJob(tx, {
+                  ref, reason: trigger.reason, headSha: trigger.headSha,
+                  runAt: new Date(now.getTime() + trigger.delaySeconds * 1000).toISOString(),
+                  now: now.toISOString(), delivery: reading.delivery, replace: newest,
+                });
+                if (id !== null) queued.job = trigger.delaySeconds > 0 ? 'delayed' : 'queued';
+              }
+            }
+          }
           if (capture.activity) await recordActivity(tx, capture.activity);
         }
-        return true;
+        return queued;
       });
     } catch (err) {
       note(who, 'failed', 'storage_unavailable', describe(err));
       return { status: 503, body: 'storage_unavailable' };
     }
-    if (!stored) {
+    if (stored === null) {
       note(who, 'duplicate', null);
       return { status: 202, body: 'duplicate' };
     }
@@ -70,7 +96,18 @@ export async function receive(
       note(who, 'ignored', capture.reason);
       return { status: 202, body: 'ignored' };
     }
-    note(who, 'accepted', null);
+    if (reading.event.kind === 'pull_request') {
+      note(who, 'accepted', null, { job: stored.job, skip: stored.skip });
+      if (stored.job !== null) {
+        try {
+          deps.onQueued();
+        } catch {
+          // a wake-up that fails changes nothing
+        }
+      }
+    } else {
+      note(who, 'accepted', null);
+    }
     return { status: 202, body: 'accepted' };
   } catch (err) {
     note(who, 'failed', 'internal_error', describe(err));

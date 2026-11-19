@@ -8,15 +8,15 @@ const T = '2026-03-01T10:00:00Z';
 const repository = { name: 'shop', owner: { login: 'acme' } };
 const user = { login: 'octo-dev', type: 'User' };
 
-function payloadOf(kind: SampleKind): { event: string; payload: unknown } {
+function payloadOf(kind: SampleKind, action: string, head: string): { event: string; payload: unknown } {
   switch (kind) {
     case 'pull_request':
       return {
         event: 'pull_request',
         payload: {
-          action: 'opened', number: 7, repository, installation: { id: 99 },
+          action, number: 7, repository, installation: { id: 99 },
           pull_request: {
-            user, base: { ref: 'main' }, head: { ref: 'feat', sha: 'abc123' }, draft: false,
+            user, base: { ref: 'main' }, head: { ref: 'feat', sha: head }, draft: false,
             state: 'open', merged: false, merged_at: null, closed_at: null, merge_commit_sha: null, updated_at: T,
           },
         },
@@ -41,8 +41,10 @@ function payloadOf(kind: SampleKind): { event: string; payload: unknown } {
 }
 
 /** An invented, signed webhook: the headers to send and the body. */
-export function sampleWebhook(kind: SampleKind, secret: string, delivery: string): { headers: Record<string, string>; body: string } {
-  const { event, payload } = payloadOf(kind);
+export function sampleWebhook(
+  kind: SampleKind, secret: string, delivery: string, options: { action?: 'opened' | 'synchronize'; head?: string } = {},
+): { headers: Record<string, string>; body: string } {
+  const { event, payload } = payloadOf(kind, options.action ?? 'opened', options.head ?? 'abc123');
   const body = JSON.stringify(payload);
   return {
     headers: {
@@ -67,12 +69,12 @@ export function isLocalUrl(url: string): boolean {
 }
 
 async function run(argv: string[], env: Record<string, string | undefined>): Promise<number> {
-  const usage = 'usage: send-sample --url <local url> --secret-env <variable> [--kind pull_request|review|comment] [--delivery <id>]';
+  const usage = 'usage: send-sample --url <local url> --secret-env <variable> [--kind pull_request|review|comment] [--delivery <id>] [--action opened|synchronize] [--head <sha>]';
   let values;
   try {
     values = parseArgs({
       args: argv,
-      options: { url: { type: 'string' }, 'secret-env': { type: 'string' }, kind: { type: 'string' }, delivery: { type: 'string' } },
+      options: { url: { type: 'string' }, 'secret-env': { type: 'string' }, kind: { type: 'string' }, delivery: { type: 'string' }, action: { type: 'string' }, head: { type: 'string' } },
       strict: true,
     }).values;
   } catch {
@@ -80,6 +82,11 @@ async function run(argv: string[], env: Record<string, string | undefined>): Pro
     return 2;
   }
   const kind = values.kind ?? 'pull_request';
+  const action = values.action ?? 'opened';
+  if (!['opened', 'synchronize'].includes(action) || (kind !== 'pull_request' && (values.action !== undefined || values.head !== undefined))) {
+    console.log(usage);
+    return 2;
+  }
   const secretName = values['secret-env'];
   if (values.url === undefined || secretName === undefined || !(KINDS as string[]).includes(kind)) {
     console.log(usage);
@@ -95,7 +102,7 @@ async function run(argv: string[], env: Record<string, string | undefined>): Pro
     return 2;
   }
   const delivery = values.delivery ?? `sample-${Date.now()}`;
-  const { headers, body } = sampleWebhook(kind as SampleKind, secret, delivery);
+  const { headers, body } = sampleWebhook(kind as SampleKind, secret, delivery, { action: action as 'opened' | 'synchronize', ...(values.head === undefined ? {} : { head: values.head }) });
   try {
     const res = await fetch(values.url, { method: 'POST', headers, body, redirect: 'manual' });
     console.log(`${res.status} ${await res.text()}`);

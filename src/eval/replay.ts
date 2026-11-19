@@ -38,7 +38,10 @@ export function toReviewInput(c: EvalCase, config: DeploymentConfig, asOf: Date)
     },
     trigger: 'automatic',
     repoConfig: repoConfigFor(config, c.repo),
-    limits: { ...config.limits, modelTimeoutSeconds: config.model.timeoutSeconds },
+    limits: {
+      inputTokensPerCall: config.limits.inputTokensPerCall, batchesPerReview: config.limits.batchesPerReview,
+      modelTimeoutSeconds: config.model.timeoutSeconds,
+    },
     asOf,
     earlier: null,
   };

@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
-import { ConfigError, contractFile, parseConfig, repoConfigFor, serviceConfig } from './load.ts';
+import { generateKeyPairSync } from 'node:crypto';
+import { ConfigError, contractFile, parseConfig, repoConfigFor, repoSettingsFor, serviceConfig } from './load.ts';
 
 const minimal = 'model:\n  apiKey: { env: MODEL_KEY }\n  model: vendor/model-a\n';
 
@@ -9,7 +10,7 @@ test('defaults', () => {
   const c = parseConfig(minimal, { MODEL_KEY: 'k' });
   assert.equal(c.model.baseUrl, 'https://openrouter.ai/api/v1');
   assert.equal(c.model.apiKey, 'k');
-  assert.deepEqual(c.limits, { inputTokensPerCall: 200000, batchesPerReview: 6 });
+  assert.deepEqual(c.limits, { inputTokensPerCall: 200000, batchesPerReview: 6, spendPerDay: 50, queueConcurrency: 2 });
   assert.equal(c.model.timeoutSeconds, 240);
 });
 
@@ -231,8 +232,10 @@ test('the threshold is not required while no scorer is named', () => {
   assert.equal(parseConfig(minimal, { MODEL_KEY: 'k' }).repositories.defaults.scoreThreshold, 70);
 });
 
-const service = minimal + 'app:\n  webhookSecret: { env: HOOK }\ndatabase:\n  url: { env: DB_URL }\n';
-const serviceEnv = { MODEL_KEY: 'k', HOOK: 'hook-secret-value', DB_URL: 'postgres://u:db-password-value@db:5432/visto' };
+const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
+const PEM = privateKey.export({ type: 'pkcs8', format: 'pem' }) as string;
+const service = minimal + 'app:\n  id: 12345\n  privateKey: { env: APP_KEY }\n  webhookSecret: { env: HOOK }\ndatabase:\n  url: { env: DB_URL }\ndryRun: true\n';
+const serviceEnv = { MODEL_KEY: 'k', APP_KEY: PEM, HOOK: 'hook-secret-value', DB_URL: 'postgres://u:db-password-value@db:5432/visto' };
 
 test('without the service blocks app and database are null and the port is 8080', () => {
   const c = parseConfig(minimal, { MODEL_KEY: 'k' });
@@ -243,7 +246,7 @@ test('without the service blocks app and database are null and the port is 8080'
 
 test('the service blocks resolve their secrets', () => {
   const c = parseConfig(service, serviceEnv);
-  assert.deepEqual(c.app, { webhookSecret: 'hook-secret-value' });
+  assert.deepEqual(c.app, { id: '12345', privateKey: PEM, webhookSecret: 'hook-secret-value' });
   assert.equal(c.database?.url, serviceEnv.DB_URL);
 });
 
@@ -260,11 +263,11 @@ test('server.port is read and must be a port number', () => {
 
 test('an unset service variable names itself', () => {
   assert.throws(
-    () => parseConfig(service, { MODEL_KEY: 'k', DB_URL: serviceEnv.DB_URL }),
+    () => parseConfig(service, { MODEL_KEY: 'k', APP_KEY: PEM, DB_URL: serviceEnv.DB_URL }),
     (e: ConfigError) => e.issues.includes('app.webhookSecret: environment variable HOOK is not set'),
   );
   assert.throws(
-    () => parseConfig(service, { MODEL_KEY: 'k', HOOK: 'hook-secret-value' }),
+    () => parseConfig(service, { MODEL_KEY: 'k', APP_KEY: PEM, HOOK: 'hook-secret-value' }),
     (e: ConfigError) => e.issues.includes('database.url: environment variable DB_URL is not set'),
   );
 });
@@ -292,7 +295,7 @@ test('an unknown key inside app or database names the key', () => {
     (e: ConfigError) => e.issues.some((i) => i.includes('app2')),
   );
   assert.throws(
-    () => parseConfig(minimal + 'app:\n  webhookSecret: { env: HOOK }\n  appId: 1\n', serviceEnv),
+    () => parseConfig(minimal + 'app:\n  id: 12345\n  privateKey: { env: APP_KEY }\n  webhookSecret: { env: HOOK }\n  appId: 1\n', serviceEnv),
     (e: ConfigError) => e.issues.some((i) => i.startsWith('app') && i.includes('appId')),
   );
   assert.throws(
@@ -303,7 +306,7 @@ test('an unknown key inside app or database names the key', () => {
 
 test('serviceConfig names each missing block and returns a complete config', () => {
   assert.throws(
-    () => serviceConfig(parseConfig(minimal, { MODEL_KEY: 'k' })),
+    () => serviceConfig(parseConfig(`${minimal}dryRun: true\n`, { MODEL_KEY: 'k' })),
     (e: ConfigError) =>
       e instanceof ConfigError &&
       JSON.stringify(e.issues) === JSON.stringify(['app: required to run the service', 'database: required to run the service']),
@@ -318,9 +321,68 @@ test('the example file has no service blocks as shipped, and loads with them swi
   assert.equal(shipped.database, null);
   assert.deepEqual(shipped.server, { port: 8080 });
   const text = uncomment(example(), '# app:');
-  const env = { ...exampleEnv, WEBHOOK_SECRET: 'hook-secret-value', DATABASE_URL: 'postgres://u:p@db:5432/visto' };
+  const env = { ...exampleEnv, APP_PRIVATE_KEY: PEM, ALERT_WEBHOOK_URL: 'https://alerts.example.test/in/abc', WEBHOOK_SECRET: 'hook-secret-value', DATABASE_URL: 'postgres://u:p@db:5432/visto' };
   const c = parseConfig(text, env);
-  assert.equal(serviceConfig(c).app.webhookSecret, 'hook-secret-value');
+  assert.equal(c.app?.webhookSecret, 'hook-secret-value');
+  assert.equal(c.alerts?.webhook, env.ALERT_WEBHOOK_URL);
   assert.equal(c.database?.url, env.DATABASE_URL);
   assert.equal(c.server.port, 8080);
+});
+
+const SERVICE_YAML = `
+model: { apiKey: { env: MODEL_KEY }, model: m }
+app: { id: 12345, privateKey: { env: APP_KEY }, webhookSecret: { env: HOOK } }
+database: { url: { env: DB } }
+dryRun: true
+`;
+const ENV = { MODEL_KEY: 'k', APP_KEY: PEM, HOOK: 's', DB: 'postgres://u:p@db:5432/visto' };
+
+test('the app block carries the id as text, the key and the secret', () => {
+  assert.deepEqual(parseConfig(SERVICE_YAML, ENV).app, { id: '12345', privateKey: PEM, webhookSecret: 's' });
+});
+test('a private key written on one line with backslash-n is read as its lines', () => {
+  assert.equal(parseConfig(SERVICE_YAML, { ...ENV, APP_KEY: PEM.replaceAll('\n', '\\n') }).app?.privateKey, PEM);
+});
+test('a private key that is not an RSA key is refused and never printed', () => {
+  const ec = generateKeyPairSync('ec', { namedCurve: 'P-256' }).privateKey.export({ type: 'pkcs8', format: 'pem' }) as string;
+  for (const value of ['not-a-key-value', ec]) {
+    assert.throws(() => parseConfig(SERVICE_YAML, { ...ENV, APP_KEY: value }), (e: unknown) =>
+      e instanceof ConfigError && e.issues.length === 1 && e.issues[0] === 'app.privateKey: must be an RSA private key in PEM form'
+      && !e.message.includes('not-a-key-value'));
+  }
+});
+test('an app block without an id or a key is refused', () => {
+  const yaml = SERVICE_YAML.replace('id: 12345, privateKey: { env: APP_KEY }, ', '');
+  assert.throws(() => parseConfig(yaml, ENV), ConfigError);
+});
+test('what this plan adds has these defaults', () => {
+  const c = parseConfig('model: { apiKey: { env: MODEL_KEY }, model: m }', ENV);
+  assert.equal(c.dryRun, false);
+  assert.equal(c.alerts, null);
+  assert.deepEqual(c.limits, { inputTokensPerCall: 200000, batchesPerReview: 6, spendPerDay: 50, queueConcurrency: 2 });
+  assert.deepEqual(c.repositories.defaults.ignoredAuthors, ['dependabot[bot]']);
+  assert.deepEqual(c.repositories.defaults.baseBranches, []);
+});
+test('the alert webhook is read by reference, must be an http or https URL, and is never printed', () => {
+  const yaml = `${SERVICE_YAML}alerts: { webhook: { env: HOOK_URL } }\n`;
+  assert.deepEqual(parseConfig(yaml, { ...ENV, HOOK_URL: 'https://alerts.example.test/in/abc' }).alerts, { webhook: 'https://alerts.example.test/in/abc' });
+  assert.throws(() => parseConfig(yaml, { ...ENV, HOOK_URL: 'ftp://alerts.example.test/abc' }), (e: unknown) =>
+    e instanceof ConfigError && e.issues[0] === 'alerts.webhook: must be an http or https URL' && !e.message.includes('alerts.example.test'));
+});
+test('the queue concurrency is a whole number from 1 to 20, and the daily limit is positive', () => {
+  for (const limits of ['{ queueConcurrency: 0 }', '{ queueConcurrency: 21 }', '{ queueConcurrency: 1.5 }', '{ spendPerDay: 0 }']) {
+    assert.throws(() => parseConfig(`${SERVICE_YAML}limits: ${limits}\n`, ENV), ConfigError);
+  }
+});
+test('serviceConfig refuses a config that is not in dry run', () => {
+  const live = parseConfig(SERVICE_YAML.replace('dryRun: true', 'dryRun: false'), ENV);
+  assert.throws(() => serviceConfig(live), (e: unknown) =>
+    e instanceof ConfigError && e.issues.length === 1 && e.issues[0] === 'dryRun: must be true: this version cannot publish');
+  assert.equal(serviceConfig(parseConfig(SERVICE_YAML, ENV)).dryRun, true);
+});
+test('repoSettingsFor applies an override key by key, and repoConfigFor still returns the two keys the engine reads', () => {
+  const c = parseConfig(`${SERVICE_YAML}repositories:\n  overrides:\n    Acme/Shop: { baseBranches: [main], ignoredAuthors: [] }\n`, ENV);
+  assert.deepEqual(repoSettingsFor(c, 'acme/shop'), { primaryBranches: ['main', 'master'], scoreThreshold: 70, ignoredAuthors: [], baseBranches: ['main'] });
+  assert.deepEqual(repoSettingsFor(c, 'acme/other').ignoredAuthors, ['dependabot[bot]']);
+  assert.deepEqual(repoConfigFor(c, 'acme/shop'), { primaryBranches: ['main', 'master'], scoreThreshold: 70 });
 });

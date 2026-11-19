@@ -31,18 +31,22 @@ const reviewEvent: ForgeEvent = { kind: 'review', ref, review };
 function prEvent(over: Partial<PullRequestFacts> = {}): ForgeEvent {
   return { kind: 'pull_request', action: 'synchronize', facts: facts(over) };
 }
+const NO_JOBS = {
+  settingsFor: () => ({ primaryBranches: ['main'], scoreThreshold: 70, ignoredAuthors: [], baseBranches: [] }),
+  onQueued: () => {},
+};
 const headers = {};
 const empty = Buffer.from('');
 
 async function run(db: Db, reading: WebhookReading, logs: Record<string, unknown>[] = []) {
-  return receive({ db, reader: reader(reading), clock, log: (e) => logs.push(e) }, headers, empty);
+  return receive({ db, reader: reader(reading), clock, log: (e) => logs.push(e), ...NO_JOBS }, headers, empty);
 }
 
 test('a review by a person is stored before the answer, and answered accepted', async () => {
   const db = await testDb();
   try {
     const logs: Record<string, unknown>[] = [];
-    const answer = await receive({ db, reader: reader(read('d-1', reviewEvent)), clock, log: (e) => logs.push(e) }, {}, Buffer.from(''));
+    const answer = await receive({ db, reader: reader(read('d-1', reviewEvent)), clock, log: (e) => logs.push(e), ...NO_JOBS }, {}, Buffer.from(''));
     assert.deepEqual(answer, { status: 202, body: 'accepted' });
     assert.equal((await listActivity(db, ref)).length, 1);
     assert.deepEqual(logs, [{ event: 'webhook', delivery: 'd-1', name: 'pull_request_review', action: 'submitted', outcome: 'accepted', reason: null }]);
@@ -158,7 +162,7 @@ test('a reader that throws answers 500 and does not reject', async () => {
   try {
     const logs: Record<string, unknown>[] = [];
     const throwing: WebhookReader = { read: () => { throw new TypeError('do-not-log-this'); } };
-    const answer = await receive({ db, reader: throwing, clock, log: (e) => logs.push(e) }, headers, empty);
+    const answer = await receive({ db, reader: throwing, clock, log: (e) => logs.push(e), ...NO_JOBS }, headers, empty);
     assert.deepEqual(answer, { status: 500, body: 'internal_error' });
     assert.deepEqual(logs, [{
       event: 'webhook', delivery: null, name: null, action: null,
@@ -186,7 +190,7 @@ test('a logger that throws does not change the answer', async () => {
   const db = await testDb();
   try {
     const log = () => { throw new Error('logger down'); };
-    const answer = await receive({ db, reader: reader(read('d-1', reviewEvent)), clock, log }, headers, empty);
+    const answer = await receive({ db, reader: reader(read('d-1', reviewEvent)), clock, log, ...NO_JOBS }, headers, empty);
     assert.deepEqual(answer, { status: 202, body: 'accepted' });
     assert.equal((await listActivity(db, ref)).length, 1);
   } finally { await db.close(); }

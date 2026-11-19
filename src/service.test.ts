@@ -1,182 +1,446 @@
 import assert from 'node:assert/strict';
-import { test } from 'node:test';
+import { afterEach, test } from 'node:test';
+import { generateKeyPairSync } from 'node:crypto';
 import { pgliteDb } from './db/pglite.ts';
-import { testDb } from './db/testing.ts';
-import type { Db } from './db/types.ts';
-import type { ForgeEvent, WebhookReader } from './forge/types.ts';
+import type { Db, InstanceLock } from './db/types.ts';
+import { loadMigrations, MIGRATIONS_DIR, migrate } from './db/migrate.ts';
+import { claimJob, enqueueJob, finishJob, getJob, unfinishedJobs } from './db/jobs.ts';
+import { recordRun } from './db/review-runs.ts';
+import type { RunRecord } from './db/review-runs.ts';
+import { beat, readHeartbeat } from './db/heartbeat.ts';
 import { serviceConfig, parseConfig } from './config/load.ts';
-import { CLOSE_WAIT_MS, startService, STOP_WAIT_MS } from './service.ts';
+import type { ForgeEvent, HookDelivery, LivePullRequest, PullRequestAction, PullRequestFacts, Source } from './forge/types.ts';
+import type { ReviewDeps, ReviewInput, ReviewResult } from './engine/types.ts';
+import { BEAT_MS, CLOSE_WAIT_MS, DRAIN_WAIT_MS, startService, STOP_WAIT_MS, TICK_MS, UPKEEP_MS } from './service.ts';
 import type { Listening } from './service.ts';
 import type { RequestLike, ResponseLike } from './shell/http.ts';
 
-const config = serviceConfig(parseConfig(
-  'model:\n  apiKey: { env: K }\n  model: vendor/model-a\napp:\n  webhookSecret: { env: S }\ndatabase:\n  url: { env: U }\nserver:\n  port: 9191\n', { K: 'k', S: 's', U: 'postgres://u:p@h/d' }));
+const REF = { service: 'github', owner: 'acme', repo: 'shop', number: 7 } as const;
+const at = (seconds: number): string => new Date(Date.parse('2026-03-01T10:00:00.000Z') + seconds * 1000).toISOString();
 
-const reader: WebhookReader = {
-  read: () => ({ ok: true, delivery: 'd-1', name: 'ping', action: null, event: { kind: 'ping' } as ForgeEvent }),
+const job = (over = {}) => ({ ref: REF, reason: 'opened', headSha: 'h1', runAt: at(0), now: at(0), delivery: 'd1', replace: true, ...over });
+const run = (over: Partial<RunRecord> = {}): RunRecord => ({
+  ref: REF, job: null, trigger: 'automatic', mode: 'full', dryRun: true, headSha: 'h1', baseSha: 'b1',
+  outcome: 'ok', failureStage: null, failureCode: null, needsHuman: false, highestScore: 35,
+  body: 'text', comments: [{ path: 'a.ts', side: 'RIGHT', line: 3, body: 'note' }], result: { findings: [] },
+  usage: { calls: 2, inputTokens: 1000, outputTokens: 200, cachedTokens: 50, cost: 0.0375 },
+  startedAt: at(0), finishedAt: at(90), ...over,
+});
+const facts = (over: Partial<PullRequestFacts> = {}): PullRequestFacts => ({
+  ref: REF, author: 'octo-dev', authorIsBot: false, baseBranch: 'main', headBranch: 'feat', headSha: 'h1', draft: false,
+  state: 'open', mergedAt: null, closedAt: null, mergeCommit: null, installation: '99', updatedAt: at(0), ...over,
+});
+type PullRequestEvent = Extract<ForgeEvent, { kind: 'pull_request' }>;
+const pr = (action: PullRequestAction, over: Partial<PullRequestFacts> = {}): PullRequestEvent => ({ kind: 'pull_request', action, facts: facts(over) });
+const PING = { kind: 'ping' } as ForgeEvent;
+const LIVE: LivePullRequest = {
+  info: { ref: REF, title: 'Add things', description: '', author: 'octo-dev', baseBranch: 'main', headBranch: 'feat', baseSha: 'merge000', headSha: 'h1', draft: false },
+  state: 'open',
 };
-
-function request(): RequestLike {
-  return { method: 'POST', url: '/webhooks/github', headers: {}, async *[Symbol.asyncIterator]() { yield Buffer.from('{}'); } };
-}
-function response(done: () => void): ResponseLike & { status: number | null } {
-  const res = { status: null as number | null, writeHead(s: number) { res.status = s; }, end() { done(); } };
-  return res;
-}
-
-function recording(db: Db, log: string[]): Db {
-  return { ...db, close: async () => { log.push('db closed'); await db.close(); } };
-}
-
-test('startService migrates before it listens, on the configured port, and serves webhooks', async () => {
-  const log: string[] = [];
-  const db = recording(await pgliteDb(), log);
-  let port = 0;
-  let listener: ((req: RequestLike, res: ResponseLike) => void) | null = null;
-  let tableAtListen: unknown[] = [];
-  const service = await startService(config, {
-    db, reader, clock: () => new Date('2026-03-01T10:00:00.000Z'), log: () => {},
-    listen: async (l, p) => {
-      port = p; listener = l;
-      tableAtListen = await db.query("select 1 as x from information_schema.tables where table_schema = 'visto_ai' and table_name = 'deliveries'");
-      return { close: async () => {} };
-    },
-  });
-  assert.equal(port, 9191);
-  assert.equal(tableAtListen.length, 1);
-  await new Promise<void>((resolve) => { listener!(request(), response(resolve)); });
-  assert.deepEqual(await db.query('select id from visto_ai.deliveries'), [{ id: 'd-1' }]);
-  await service.stop();
+const USAGE = { calls: 2, inputTokens: 1000, outputTokens: 200, cachedTokens: 50, cost: 0.5 };
+const okResult = (): ReviewResult => ({
+  status: 'ok', failure: null, mode: 'full', overview: 'Looks fine.',
+  findings: [{ path: 'a.ts', side: 'RIGHT', line: 3, severity: 'minor', body: 'A note.', quote: 'x', requestedLine: null }],
+  unplaced: [], beyondDiff: [], coverage: { reviewed: ['a.ts'], notReviewed: [] }, usage: USAGE, models: ['m'], providers: [],
+  dependencies: { model: 'ok' }, audit: [], scores: [], verdict: { threshold: 70, needsHuman: false, highest: 35 }, teamFileInvalid: null,
 });
 
-test('stop closes the listener, then waits for a request in flight, then closes the database', async () => {
-  const real = await testDb();
-  const log: string[] = [];
-  const db = recording(real, log);
+const appKey = generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey.export({ type: 'pkcs8', format: 'pem' }) as string;
+const config = serviceConfig(parseConfig(
+  'model:\n  apiKey: { env: K }\n  model: vendor/model-a\napp:\n  id: 12345\n  privateKey: { env: A }\n  webhookSecret: { env: S }\ndatabase:\n  url: { env: U }\nserver:\n  port: 9191\nlimits:\n  spendPerDay: 50\ndryRun: true\n',
+  { K: 'k', A: appKey, S: 's', U: 'postgres://u:p@db.example.test/d' }));
+
+const never = (): Promise<never> => new Promise(() => {});
+
+interface Options {
+  lock?: null; listenError?: Error; now?: string; holdReview?: boolean;
+  listings?: Array<{ deliveries: HookDelivery[]; complete: boolean } | Error>;
+  migrationError?: Error; closeNever?: boolean; closeError?: Error; listenerCloseError?: Error; logThrows?: boolean;
+  /** The status the model endpoint's key route answers with; 200 when not given. */
+  keyStatus?: number;
+}
+interface Timer { ms: number; work: () => Promise<void>; cancelled: boolean }
+
+const opened: Db[] = [];
+const started: Array<{ stop(): Promise<void> }> = [];
+afterEach(async () => {
+  for (const service of started.splice(0)) await service.stop();
+  for (const db of opened.splice(0)) await db.close();
+});
+
+async function harness(options: Options = {}) {
+  const real = await pgliteDb();
+  opened.push(real);
+  const events: string[] = [];
+  const timers: Timer[] = [];
+  const inputs: ReviewInput[] = [];
+  const fetched: string[] = [];
+  const listedSince: string[] = [];
+  const logged: Array<Record<string, unknown>> = [];
+  const listings = [...(options.listings ?? [])];
+  let listener: ((req: RequestLike, res: ResponseLike) => void) | null = null;
+  let current: ForgeEvent = PING;
+  let delivered = 'd-1';
+  let releaseReview!: () => void;
+  const reviewHeld = new Promise<void>((done) => { releaseReview = done; });
+  let reviewCalled!: () => void;
+  const reviewed = new Promise<void>((done) => { reviewCalled = done; });
+
+  const db: Db = {
+    query: (text, params) => real.query(text, params),
+    script: (sql) => (options.migrationError === undefined ? real.script(sql) : Promise.reject(options.migrationError)),
+    transaction: async (work) => {
+      if (h.beforeTransaction !== undefined) await h.beforeTransaction();
+      return real.transaction(work);
+    },
+    close: () => {
+      events.push('close');
+      if (options.closeNever === true) return never();
+      if (options.closeError !== undefined) return Promise.reject(options.closeError);
+      return Promise.resolve();
+    },
+  };
+  const lock: InstanceLock = { release: async () => { events.push('release'); } };
+
+  const h = {
+    db, events, timers, inputs, fetched, listedSince, logged,
+    port: 0,
+    /** What the clock reads; a test may move it. */
+    now: options.now ?? at(0),
+    onListen: undefined as (() => Promise<void>) | undefined,
+    beforeListing: undefined as (() => Promise<void>) | undefined,
+    beforeTransaction: undefined as (() => Promise<void>) | undefined,
+    releaseReview: () => { releaseReview(); },
+    reviewed: () => reviewed,
+    start: async () => {
+      const service = await startService(config, {
+      db,
+      reader: { read: () => ({ ok: true as const, delivery: delivered, name: current.kind, action: current.kind === 'pull_request' ? current.action : null, event: current }) },
+      clock: () => new Date(h.now),
+      log: (e) => { logged.push(e); if (options.logThrows === true) throw new Error('logger down'); },
+      listen: async (l, p) => {
+        events.push('listen');
+        listener = l;
+        h.port = p;
+        if (h.onListen !== undefined) await h.onListen();
+        if (options.listenError !== undefined) throw options.listenError;
+        const listening: Listening = {
+          close: () => {
+            events.push('listener-close');
+            return options.listenerCloseError === undefined ? Promise.resolve() : Promise.reject(options.listenerCloseError);
+          },
+        };
+        return listening;
+      },
+      takeLock: async () => {
+        events.push('lock');
+        return options.lock === null ? null : lock;
+      },
+      forge: { readPullRequest: () => Promise.resolve(LIVE), sourceFor: () => Promise.resolve({} as Source) },
+      hooks: {
+        listSince: async (since) => {
+          listedSince.push(since);
+          if (h.beforeListing !== undefined) await h.beforeListing();
+          const next = listings.shift() ?? { deliveries: [], complete: true };
+          if (next instanceof Error) throw next;
+          return next;
+        },
+        redeliver: () => Promise.resolve(),
+      },
+      fetch: (async (url: string | URL | Request) => {
+        fetched.push(String(url));
+        return new Response('{}', { status: String(url).endsWith('/key') ? options.keyStatus ?? 200 : 200 });
+      }) as typeof fetch,
+      sleep: () => Promise.resolve(),
+      every: (ms, work) => {
+        const timer: Timer = { ms, work, cancelled: false };
+        timers.push(timer);
+        return () => { timer.cancelled = true; };
+      },
+      engineDeps: (source) => ({ source }) as ReviewDeps,
+      review: async (input) => {
+        inputs.push(input);
+        reviewCalled();
+        if (options.holdReview === true) await reviewHeld;
+        return okResult();
+      },
+      lineUrl: () => 'https://git.example.test/x',
+      });
+      started.push(service);
+      return service;
+    },
+    runTimer: (ms: number) => timers.find((t) => t.ms === ms)!.work(),
+    webhook: (event: ForgeEvent, delivery: string) => new Promise<{ status: number | null; body: string | null }>((resolve) => {
+      current = event;
+      delivered = delivery;
+      const answer = { status: null as number | null, body: null as string | null };
+      const req: RequestLike = { method: 'POST', url: '/webhooks/github', headers: {}, async *[Symbol.asyncIterator]() { yield Buffer.from('{}'); } };
+      listener!(req, {
+        writeHead(status: number) { answer.status = status; },
+        end(body: string) { answer.body = body; resolve(answer); },
+      });
+    }),
+    flush: async () => {
+      for (let i = 0; i < 5; i += 1) await new Promise((done) => setImmediate(done));
+    },
+  };
+  return h;
+}
+
+/** The log entries of a stop, without those every start writes. */
+const ofStop = (logged: Array<Record<string, unknown>>) => logged.filter((e) => e.event !== 'recovery' && e.event !== 'model_check');
+
+test('start takes the lock, then migrates and recovers, then listens', async () => {
+  const h = await harness();
+  await migrate(h.db, loadMigrations(MIGRATIONS_DIR));
+  const cut = (await enqueueJob(h.db, job()))!;
+  await claimJob(h.db, cut, at(0));
+  let seenAtListen: string | undefined;
+  h.onListen = async () => { seenAtListen = (await getJob(h.db, cut))?.status; };
+  await h.start();
+  assert.deepEqual([h.events.slice(0, 2), seenAtListen], [['lock', 'listen'], 'pending']);
+});
+test('a second instance is refused before it migrates or listens', async () => {
+  const h = await harness({ lock: null });
+  await assert.rejects(h.start(), /^Error: another_instance_running$/);
+  assert.deepEqual(h.events, ['lock', 'close']);
+  await assert.rejects(h.db.query('select 1 from visto_ai.jobs'));
+});
+test('when a later step of the start fails the lock is released and the database closed', async () => {
+  const h = await harness({ listenError: new Error('EADDRINUSE') });
+  await assert.rejects(h.start(), /EADDRINUSE/);
+  assert.deepEqual(h.events.slice(-2).sort(), ['close', 'release']);
+});
+test('a delivery that queues a review is run without waiting for the timer', async () => {
+  const h = await harness();
+  const service = await h.start();
+  await service.settled;
+  assert.deepEqual(await h.webhook(pr('opened'), 'd1'), { status: 202, body: 'accepted' });
+  await h.reviewed();
+  assert.equal(h.inputs[0]!.pullRequest.headSha, 'h1');
+});
+test('after listening it checks the key, asks for failed deliveries since the last heartbeat less two minutes, then starts beating', async () => {
+  const h = await harness({ now: at(600) });
+  await migrate(h.db, loadMigrations(MIGRATIONS_DIR));
+  await beat(h.db, at(0));
+  const service = await h.start();
+  await service.settled;
+  assert.deepEqual([h.fetched.some((u) => u.endsWith('/key')), h.listedSince, await readHeartbeat(h.db)], [true, [at(-120)], at(600)]);
+  assert.deepEqual(h.timers.map((t) => t.ms), [TICK_MS, UPKEEP_MS, BEAT_MS]);
+  assert.deepEqual(h.logged.filter((e) => e.event === 'model_check'), [{ event: 'model_check', result: 'ok' }]);
+});
+test('on a first start nothing is asked for again, and the beat starts', async () => {
+  const h = await harness();
+  const service = await h.start();
+  await service.settled;
+  assert.deepEqual([h.listedSince, await readHeartbeat(h.db), h.timers.some((t) => t.ms === BEAT_MS)], [[], at(0), true]);
+});
+test('a redelivery that does not get through is alerted once and tried again by the upkeep with the same look-back; the beat starts only when one does', async () => {
+  const h = await harness({ now: at(600), listings: [new Error('github_502'), new Error('github_502'), { deliveries: [], complete: true }] });
+  await migrate(h.db, loadMigrations(MIGRATIONS_DIR));
+  await beat(h.db, at(0));
+  const service = await h.start();
+  await service.settled;
+  assert.deepEqual([h.listedSince, await readHeartbeat(h.db), h.timers.some((t) => t.ms === BEAT_MS)], [[at(-120)], at(0), false]);
+  await h.runTimer(UPKEEP_MS);
+  await h.runTimer(UPKEEP_MS);
+  assert.deepEqual([h.listedSince, await readHeartbeat(h.db), h.timers.some((t) => t.ms === BEAT_MS)], [[at(-120), at(-120), at(-120)], at(600), true]);
+  const raised = h.logged.filter((e) => e.event === 'alert' && e.code === 'redelivery_failed');
+  assert.deepEqual(raised, [{ event: 'alert', code: 'redelivery_failed', reason: 'github_502', failed: 0, complete: false }]);
+  await h.runTimer(UPKEEP_MS);
+  assert.equal(h.listedSince.length, 3);
+});
+test('the upkeep checks the key and deletes jobs finished more than fourteen days ago', async () => {
+  const h = await harness();
+  const service = await h.start();
+  await service.settled;
+  const old = (await enqueueJob(h.db, job()))!;
+  await finishJob(h.db, old, 'done', 'reviewed', at(-15 * 86_400));
+  h.fetched.length = 0;
+  await h.runTimer(UPKEEP_MS);
+  assert.deepEqual([h.fetched.some((u) => u.endsWith('/key')), await getJob(h.db, old)], [true, null]);
+});
+test('nothing starts once the daily limit is reached, and the operator is told once', async () => {
+  const h = await harness();
+  const service = await h.start();
+  await service.settled;
+  await recordRun(h.db, run({ startedAt: at(0), usage: { ...run().usage, cost: 50 } }));
+  await h.webhook(pr('opened'), 'd1');
+  await h.runTimer(TICK_MS);
+  await h.runTimer(TICK_MS);
+  assert.deepEqual([h.inputs.length, (await unfinishedJobs(h.db))[0]!.status], [0, 'pending']);
+  assert.equal(h.logged.filter((e) => e.event === 'alert' && e.code === 'spend_limit').length, 1);
+});
+test('stop drains first: a running review finishes while webhooks are still accepted, then the listener, the database and the lock', async () => {
+  const h = await harness({ holdReview: true });
+  const service = await h.start();
+  await service.settled;
+  await h.webhook(pr('opened'), 'd1');
+  await h.reviewed();
+  const stopping = service.stop();
+  assert.deepEqual(await h.webhook(pr('opened', { headSha: 'h2', updatedAt: at(5) }), 'd2'), { status: 202, body: 'accepted' });
+  assert.equal(h.events.includes('listener-close'), false);
+  h.releaseReview();
+  await stopping;
+  assert.deepEqual(h.events.slice(-3), ['listener-close', 'close', 'release']);
+  const pending = await h.db.query<{ n: number }>("select count(*)::int as n from visto_ai.jobs where status = 'pending'");
+  assert.deepEqual([h.timers.every((t) => t.cancelled), pending[0]!.n], [true, 1]);
+});
+test('stop goes on once DRAIN_WAIT_MS has passed, and says how many reviews were cut', async (t) => {
+  const h = await harness({ holdReview: true });
+  const service = await h.start();
+  await service.settled;
+  await h.webhook(pr('opened'), 'd1');
+  await h.reviewed();
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const stopping = service.stop();
+  await h.flush();
+  t.mock.timers.tick(DRAIN_WAIT_MS);
+  await stopping;
+  assert.deepEqual(h.logged.find((e) => e.event === 'drain_timeout'), { event: 'drain_timeout', running: 1 });
+  assert.equal((await h.db.query<{ status: string }>('select status from visto_ai.jobs'))[0]!.status, 'running');
+});
+test('a redelivery attempt that is still under way when the upkeep runs is not started twice, and one beat is registered', async () => {
   let release!: () => void;
-  const gate = new Promise<void>((r) => { release = r; });
-  const slowReader: WebhookReader = { read: () => { log.push('read'); return reader.read({}, Buffer.alloc(0)); } };
-  const slowDb: Db = { ...db, transaction: async (work) => { await gate; log.push('stored'); return db.transaction(work); } };
-  let listener!: (req: RequestLike, res: ResponseLike) => void;
-  const service = await startService(config, {
-    db: slowDb, reader: slowReader, clock: () => new Date('2026-03-01T10:00:00.000Z'), log: () => {},
-    listen: async (l) => { listener = l; const l2: Listening = { close: async () => { log.push('listener closed'); } }; return l2; },
-  });
-  const answered = new Promise<void>((resolve) => { listener(request(), response(() => { log.push('answered'); resolve(); })); });
-  await new Promise((r) => setImmediate(r));
-  const stopped = service.stop().then(() => log.push('stopped'));
-  await new Promise((r) => setImmediate(r));
-  assert.deepEqual(log, ['read', 'listener closed']);
+  const held = new Promise<void>((done) => { release = done; });
+  const h = await harness({ now: at(600) });
+  h.beforeListing = () => held;
+  await migrate(h.db, loadMigrations(MIGRATIONS_DIR));
+  await beat(h.db, at(0));
+  const service = await h.start();
+  await h.flush();
+  const upkept = h.runTimer(UPKEEP_MS);
+  await h.flush();
+  assert.equal(h.listedSince.length, 1);
+  release();
+  await service.settled;
+  await upkept;
+  assert.deepEqual([h.listedSince.length, h.timers.filter((t) => t.ms === BEAT_MS).length], [1, 1]);
+  await service.stop();
+});
+test('a refused key stops the service from reviewing until the pause is over', async () => {
+  const h = await harness({ keyStatus: 401 });
+  const service = await h.start();
+  await service.settled;
+  await h.webhook(pr('opened'), 'd1');
+  await h.runTimer(TICK_MS);
+  await h.runTimer(TICK_MS);
+  assert.deepEqual([h.inputs.length, (await unfinishedJobs(h.db))[0]!.status], [0, 'pending']);
+  h.now = at(300);
+  await h.runTimer(TICK_MS);
+  await h.reviewed();
+  assert.equal(h.inputs.length, 1);
+  await service.stop();
+});
+test('a stop that comes while failed deliveries are being asked for starts no beat', async () => {
+  let release!: () => void;
+  const held = new Promise<void>((done) => { release = done; });
+  const h = await harness({ now: at(600) });
+  h.beforeListing = () => held;               // listSince waits for this before it answers
+  await migrate(h.db, loadMigrations(MIGRATIONS_DIR));
+  await beat(h.db, at(0));
+  const service = await h.start();
+  await h.flush();
+  const stopping = service.stop();
+  release();
+  await stopping;
+  await service.settled;
+  assert.deepEqual([await readHeartbeat(h.db), h.timers.some((t) => t.ms === BEAT_MS)], [at(0), false]);
+});
+
+// Plan 3's tests of the start and the stop, on the new harness.
+
+test('startService migrates before it listens, on the configured port, and serves webhooks', async () => {
+  const h = await harness();
+  let tableAtListen: unknown[] = [];
+  h.onListen = async () => {
+    tableAtListen = await h.db.query("select 1 as x from information_schema.tables where table_schema = 'visto_ai' and table_name = 'deliveries'");
+  };
+  const service = await h.start();
+  assert.equal(h.port, 9191);
+  assert.equal(tableAtListen.length, 1);
+  await h.webhook(PING, 'd-1');
+  assert.deepEqual(await h.db.query('select id from visto_ai.deliveries'), [{ id: 'd-1' }]);
+  await service.stop();
+});
+test('stop closes the listener, then waits for a request in flight, then closes the database', async () => {
+  const h = await harness();
+  const service = await h.start();
+  await service.settled;
+  let release!: () => void;
+  const gate = new Promise<void>((done) => { release = done; });
+  h.beforeTransaction = () => gate;
+  const answered = h.webhook(PING, 'd-1').then(() => { h.events.push('answered'); });
+  await h.flush();
+  const stopped = service.stop().then(() => { h.events.push('stopped'); });
+  await h.flush();
+  assert.deepEqual(h.events.slice(-1), ['listener-close']);
   release();
   await answered;
   await stopped;
-  assert.deepEqual(log, ['read', 'listener closed', 'stored', 'answered', 'db closed', 'stopped']);
+  assert.deepEqual(h.events.slice(-5), ['listener-close', 'answered', 'close', 'release', 'stopped']);
 });
-
-test('when listen rejects startService rejects and the database is closed', async () => {
-  const log: string[] = [];
-  const db = recording(await testDb(), log);
-  await assert.rejects(() => startService(config, {
-    db, reader, clock: () => new Date(), log: () => {}, listen: () => Promise.reject(new Error('port busy')),
-  }), { message: 'port busy' });
-  assert.deepEqual(log, ['db closed']);
+test('when a migration rejects startService rejects, nothing listens, and the database is closed', async () => {
+  const h = await harness({ migrationError: new Error('bad sql') });
+  await assert.rejects(h.start(), { message: 'bad sql' });
+  assert.equal(h.events.includes('listen'), false);
+  assert.deepEqual(h.events.slice(-2).sort(), ['close', 'release']);
 });
-
-test('when a migration rejects startService rejects and the database is closed', async () => {
-  const log: string[] = [];
-  const real = await testDb();
-  const db: Db = { ...recording(real, log), script: () => Promise.reject(new Error('bad sql')), transaction: () => Promise.reject(new Error('bad sql')) };
-  let listened = false;
-  await assert.rejects(() => startService(config, {
-    db, reader, clock: () => new Date(), log: () => {}, listen: async () => { listened = true; return { close: async () => {} }; },
-  }));
-  assert.equal(listened, false);
-  assert.deepEqual(log, ['db closed']);
-});
-
-const never = (): Promise<void> => new Promise(() => {});
-
 test('stop goes on to close the database once STOP_WAIT_MS has passed when a request never finishes', async (t) => {
+  const h = await harness();
+  const service = await h.start();
+  await service.settled;
+  h.beforeTransaction = never;
   t.mock.timers.enable({ apis: ['setTimeout'] });
-  const log: string[] = [];
-  const real = await testDb();
-  const db: Db = { ...recording(real, log), transaction: () => never() as Promise<never> };
-  let listener!: (req: RequestLike, res: ResponseLike) => void;
-  const service = await startService(config, {
-    db, reader, clock: () => new Date(), log: () => {},
-    listen: async (l) => { listener = l; return { close: async () => {} }; },
-  });
-  listener(request(), response(() => {}));
-  await new Promise((r) => setImmediate(r));
+  void h.webhook(PING, 'd-1');
+  await h.flush();
   const stopped = service.stop();
-  await new Promise((r) => setImmediate(r));
-  assert.deepEqual(log, []);
+  await h.flush();
+  assert.deepEqual([h.events.includes('listener-close'), h.events.includes('close')], [true, false]);
   t.mock.timers.tick(STOP_WAIT_MS);
   await stopped;
-  assert.deepEqual(log, ['db closed']);
+  assert.equal(h.events.includes('close'), true);
 });
-
 test('stop resolves once CLOSE_WAIT_MS has passed when the database never closes', async (t) => {
+  const h = await harness({ closeNever: true });
+  const service = await h.start();
+  await service.settled;
   t.mock.timers.enable({ apis: ['setTimeout'] });
-  const logs: Record<string, unknown>[] = [];
-  const db: Db = { ...(await testDb()), close: never };
-  const service = await startService(config, {
-    db, reader, clock: () => new Date(), log: (e) => logs.push(e), listen: async () => ({ close: async () => {} }),
-  });
   const stopped = service.stop();
-  await new Promise((r) => setImmediate(r));
+  while (!h.events.includes('close')) await h.flush();
   t.mock.timers.tick(CLOSE_WAIT_MS);
   await stopped;
-  assert.deepEqual(logs, [{ event: 'database_close_timeout' }]);
+  assert.deepEqual(ofStop(h.logged), [{ event: 'database_close_timeout' }]);
 });
-
 test('stop called twice returns the same promise and closes the database once', async () => {
-  const log: string[] = [];
-  const db = recording(await testDb(), log);
-  const service = await startService(config, {
-    db, reader, clock: () => new Date(), log: () => {}, listen: async () => ({ close: async () => {} }),
-  });
+  const h = await harness();
+  const service = await h.start();
   const first = service.stop();
   assert.equal(service.stop(), first);
   await first;
-  assert.deepEqual(log, ['db closed']);
+  assert.deepEqual(h.events.filter((e) => e === 'close'), ['close']);
 });
-
 test('a database whose close rejects does not make stop reject, and its message is not logged', async () => {
-  const logs: Record<string, unknown>[] = [];
-  const db: Db = { ...(await testDb()), close: () => Promise.reject(Object.assign(new Error('do-not-log-this'), { code: 'X1' })) };
-  const service = await startService(config, {
-    db, reader, clock: () => new Date(), log: (e) => logs.push(e), listen: async () => ({ close: async () => {} }),
-  });
+  const h = await harness({ closeError: Object.assign(new Error('do-not-log-this'), { code: 'X1' }) });
+  const service = await h.start();
+  await service.settled;
   await service.stop();
-  assert.deepEqual(logs, [{ event: 'database_close_failed', error: 'Error', code: 'X1' }]);
-  assert.ok(!JSON.stringify(logs).includes('do-not-log-this'));
+  assert.deepEqual(ofStop(h.logged), [{ event: 'database_close_failed', error: 'Error', code: 'X1' }]);
+  assert.ok(!JSON.stringify(h.logged).includes('do-not-log-this'));
 });
-
-test('a listener whose close rejects does not make stop reject; stop goes on and closes the database', async (t) => {
-  t.mock.timers.enable({ apis: ['setTimeout'] });
-  const logs: Record<string, unknown>[] = [];
-  const log: string[] = [];
-  const db = recording(await testDb(), log);
-  const service = await startService(config, {
-    db, reader, clock: () => new Date(), log: (e) => logs.push(e),
-    listen: async () => ({ close: () => Promise.reject(Object.assign(new Error('do-not-log-this'), { code: 'L1' })) }),
-  });
+test('a listener whose close rejects does not make stop reject; stop goes on and closes the database', async () => {
+  const h = await harness({ listenerCloseError: Object.assign(new Error('do-not-log-this'), { code: 'L1' }) });
+  const service = await h.start();
+  await service.settled;
   await service.stop();
-  assert.deepEqual(log, ['db closed']);
-  assert.deepEqual(logs, [{ event: 'listener_close_failed', error: 'Error', code: 'L1' }]);
-  assert.ok(!JSON.stringify(logs).includes('do-not-log-this'));
+  assert.deepEqual(h.events.slice(-2), ['close', 'release']);
+  assert.deepEqual(ofStop(h.logged), [{ event: 'listener_close_failed', error: 'Error', code: 'L1' }]);
+  assert.ok(!JSON.stringify(h.logged).includes('do-not-log-this'));
 });
-
-test('a logger that throws changes nothing about stop', async (t) => {
-  t.mock.timers.enable({ apis: ['setTimeout'] });
-  const log: string[] = [];
-  const real = await testDb();
-  const db: Db = { ...recording(real, log), close: () => { log.push('db closed'); return Promise.reject(new Error('close failed')); } };
-  const service = await startService(config, {
-    db, reader, clock: () => new Date(), log: () => { throw new Error('logger down'); },
-    listen: async () => ({ close: () => Promise.reject(new Error('listener failed')) }),
-  });
+test('a logger that throws changes nothing about stop', async () => {
+  const h = await harness({ logThrows: true, closeError: new Error('close failed'), listenerCloseError: new Error('listener failed') });
+  const service = await h.start();
+  await service.settled;
   await service.stop();
-  assert.deepEqual(log, ['db closed']);
+  assert.deepEqual(h.events.slice(-2), ['close', 'release']);
 });

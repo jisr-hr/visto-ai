@@ -4,7 +4,7 @@
 
 An open-source, self-hosted AI reviewer for pull requests. It looks for defects it can demonstrate, and it scores which parts of a change still need a human reviewer.
 
-> **Status: early development.** The review engine and an offline evaluation tool are built. The service receives GitHub's webhooks and records what people do on pull requests, but it reviews nothing yet, so Visto AI cannot review a live pull request. See [Status](#status).
+> **Status: early development.** The review engine and an offline evaluation tool are built. The service receives GitHub's webhooks, reads each pull request and runs the review in dry run: it records what it would have posted and posts nothing, so Visto AI cannot yet review a live pull request. See [Status](#status).
 
 ## Why
 
@@ -53,14 +53,15 @@ The full design, with every decision and its reason, is in [docs/superpowers/spe
 | Offline replay of past pull requests | Built and run |
 | Engine: the score | Built. Measured only where its owner has run the backtest |
 | Service: receiving webhooks and recording what people do on pull requests | Built |
-| Service: queue and publishing a review to GitHub | Planned |
+| Service: a queue of review jobs, run in dry run and recorded | Built |
+| Service: publishing a review to GitHub, and commands | Planned |
 | Merge gate | Planned |
 | Extensions and MCP tools | Planned |
 | Memory | Planned |
 | Automatic approval | Planned |
 | UI | Planned |
 
-What exists today is a library, a command-line tool, and a service that you can run with Docker. The service receives and records, and still reviews nothing.
+What exists today is a library, a command-line tool, and a service that you can run with Docker. The service receives, queues, reviews in dry run and records, and posts nothing.
 
 ## How the engine works
 
@@ -88,11 +89,15 @@ Tests never reach the network. The test setup blocks sockets and `fetch`, and cl
 
 ## Run the service
 
-The service records each signed delivery's id, and what the delivery says about people and the pull request, in its own Postgres. The payload itself is not kept. It reviews nothing yet.
+The service receives GitHub's signed webhooks and records each delivery's id and what it says about people and the pull request (the payload itself is not kept). When a pull request is opened, reopened, made ready for review, pushed to or given a new base branch, it queues a review. A push is reviewed after 180 quiet seconds, so several pushes in a row give one review. The review runs the engine on the pull request as GitHub has it then, in dry run: it is recorded in the database and **nothing is posted to GitHub**. Publishing, commands and the merge gate are not built, so the service starts only with `dryRun: true` in the config.
+
+To run it you need a GitHub App (its id, its private key and its webhook secret), a model key and a Postgres.
+
+What the app needs for a dry run, from what the service calls: read access to pull requests and to contents (and to metadata, which GitHub always asks for), and the events `pull_request`, `issue_comment`, `pull_request_review`, `pull_request_review_comment` and `pull_request_review_thread`. It reads pull requests and the files of the repository; it writes nothing. This has not yet been tried against a real app. With too little access every read is refused, and every job ends `attempts_exhausted` (or `not_found`, if GitHub answers the pull request itself with 404).
 
 ```bash
-cp env.example .env                       # then write your own passwords and secret
-cp config.example.yml config.local.yml    # then switch on the app, database and server blocks
+cp env.example .env                       # then write your own passwords, secret and keys
+cp config.example.yml config.local.yml    # then switch on the app and database blocks and write dryRun: true
 docker compose up -d --build --wait
 ```
 
@@ -103,7 +108,30 @@ set -a && . ./.env && set +a
 npm run dev:send-webhook -- --url http://localhost:8080/webhooks/github --secret-env WEBHOOK_SECRET --kind review
 ```
 
-The kinds are `pull_request`, `review` and `comment`. Stop it with `docker compose down`.
+The kinds are `pull_request`, `review` and `comment`. For the `pull_request` kind, `--action opened|synchronize` (default `opened`) and `--head <sha>` (default `abc123`) choose the action and the head commit, so two pushes can be sent with two heads. The other kinds refuse these options. Stop it with `docker compose down`.
+
+### Reading what a review would have posted
+
+Every attempt at a review, finished or failed, is a row of `visto_ai.review_runs`:
+
+```bash
+docker compose exec db psql -U postgres -d visto -c "select id, owner, repo, number, outcome, cost, body from visto_ai.review_runs order by id desc limit 5"
+```
+
+`body` is the text that would have been posted, `outcome` how the run ended and `cost` what the model calls cost, as recorded (see the daily limit below).
+
+### Running it
+
+- Run one instance per database. A second one stops at once with `another_instance_running`, and the first keeps running.
+- If the database restarts, the service notices that it has lost its lock, exits, and Compose starts it again.
+- Connect to Postgres directly. The lock and the statement timeout do not work through a pooler in transaction mode.
+- Stopping the service (`docker compose stop`) waits up to 10 minutes for the reviews that are running. The Compose file allows 660 seconds for it. A second signal ends it at once.
+- Every review costs money. The cost of a run is what the model endpoint reports with each answer; OpenRouter, the default, reports it in US dollars. For an endpoint that reports no cost, it is computed from `model.prices`, in whatever currency those prices are written in. With neither, the cost is recorded as 0.
+- The daily limit, `limits.spendPerDay` (50 when not written), is a number in the unit of those recorded costs. The service adds up the cost of the runs recorded since the start of the UTC day, so it can only see what is recorded: with an endpoint that reports no cost and no `prices`, it never stops anything, and it raises the alert `cost_unknown`. At 80% of the limit it raises `spend_80`, and at the limit `spend_limit`. Reviews then stop starting until the next UTC day; the ones already running finish. These three alerts are raised once per run of the service, so a restart can raise them again; `spend_80` and `spend_limit` are also raised once per UTC day. At most `limits.queueConcurrency` reviews run at once (2 when not written).
+- When the model's key is refused or its account is out of credit, reviews pause for 5 minutes at a time and the service raises one alert, `model_error`, and `model_ok` when the key works again. The jobs wait, but not for ever: a job that has waited 24 hours is dropped as `too_old`. A review refused after it had already made model calls uses up one of the job's three starts. Alerts go to the log always, and to `alerts.webhook` when you wrote it.
+- A job ends without a review when its three starts are used up (`attempts_exhausted`), when it is a day old (`too_old`), or when the pull request has changed by the time it runs: closed, turned into a draft, gone, given a new head (the new head gets a job of its own), or already reviewed at that head and base.
+- When GitHub cannot be reached, or refuses a read, before any model call, the run is recorded as failed and the job is tried again a minute later, and then 15 minutes after that: three starts in all.
+- A restart of the database, like any restart of the service in the middle of a review, cuts the reviews that are running. They run again afterwards while they have starts left, and their model calls are paid for again.
 
 Setup notes:
 
@@ -204,8 +232,8 @@ A file that cannot be used (invalid YAML, an unknown key, a refused pattern, con
 | `src/eval` | The `replay` and `compare` commands |
 | `src/eval/history` | The `import-history` command and the history file it writes |
 | `src/eval/backtest` | The `backtest` and `score-noise` commands: labels, the three numbers and the noise between runs |
-| `src/db` | The Postgres client, migrations and queries |
-| `src/shell` | Receiving a webhook and deciding what it stores |
+| `src/db` | The Postgres client, migrations, the queue's statements and the recorded runs |
+| `src/shell` | Receiving a webhook, the queue of review jobs, running a review, the daily limit and the model's health |
 | `src/service.ts`, `src/main.ts` | Starting and stopping the service |
 | `src/config` | Loading and validating configuration |
 | `contract` | The rules the model is given |
