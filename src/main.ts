@@ -1,7 +1,17 @@
+import { randomBytes } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { createServer as createHttpServer } from 'node:http';
 import type { Server } from 'node:http';
-import { ConfigError, loadConfig, serviceConfig } from './config/load.ts';
-import { postgresDb } from './db/postgres.ts';
+import { join } from 'node:path';
+import { ConfigError, contractFile, loadConfig, serviceConfig } from './config/load.ts';
+import { postgresDb, takeInstanceLock } from './db/postgres.ts';
+import { createModelClient } from './engine/model/client.ts';
+import { review } from './engine/review.ts';
+import { createJevScorer } from './engine/scorer/jev.ts';
+import { createGithubAccess } from './forge/github/access.ts';
+import { createAppAuth } from './forge/github/app-auth.ts';
+import { createGithubHookDeliveries } from './forge/github/hook-deliveries.ts';
+import { githubLineUrl } from './forge/github/links.ts';
 import { createGithubWebhookReader } from './forge/github/webhook.ts';
 import { startService } from './service.ts';
 import type { Listening } from './service.ts';
@@ -55,11 +65,40 @@ export async function main(argv: string[], env: Record<string, string | undefine
   let server: Server | null = null;
   let service: Awaited<ReturnType<typeof startService>>;
   try {
+    const { fetch } = globalThis;
+    const clock = (): Date => new Date();
+    const sleep = (ms: number): Promise<void> => new Promise((done) => { setTimeout(done, ms); });
+    // A key that cannot be read throws here and fails the start.
+    const auth = createAppAuth({ appId: config.app.id, privateKey: config.app.privateKey, fetch, clock });
+    const engine = {
+      model: createModelClient(config.model, { fetch, sleep }),
+      contract: readFileSync(join(import.meta.dirname, '..', 'contract', contractFile(config)), 'utf8'),
+      clock,
+      token: () => randomBytes(8).toString('hex'),
+      log,
+      ...(config.scorer === null ? {} : { scorer: createJevScorer(config.scorer, { fetch, sleep }) }),
+    };
     service = await startService(config, {
       db: postgresDb(config.database.url, log),
       reader: createGithubWebhookReader(config.app.webhookSecret),
-      clock: () => new Date(),
+      clock,
       log,
+      takeLock: () => takeInstanceLock(config.database.url, () => {
+        log({ event: 'instance_lock_lost' });
+        process.exit(1);
+      }),
+      forge: createGithubAccess({ auth, fetch }),
+      hooks: createGithubHookDeliveries({ auth, fetch }),
+      fetch,
+      sleep,
+      every: (ms, work) => {
+        const timer = setInterval(() => { void work(); }, ms);
+        timer.unref();
+        return () => { clearInterval(timer); };
+      },
+      engineDeps: (source) => ({ source, ...engine }),
+      review,
+      lineUrl: githubLineUrl,
       listen: (listener, port) => new Promise<Listening>((resolve, reject) => {
         const listening = createServer(listener);
         server = listening;
