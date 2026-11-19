@@ -45,7 +45,7 @@ const failed = (stage: 'context' | 'model', code: string, over: Partial<ReviewRe
 
 interface Options {
   live?: LivePullRequest | Error | null; result?: ReviewResult; settings?: RepoSettings; stored?: boolean;
-  recordFailures?: number; lostAnswer?: boolean;
+  recordFailures?: number; lostAnswer?: boolean; failQuery?: string;
 }
 
 async function harness(options: Options = {}) {
@@ -66,8 +66,12 @@ async function harness(options: Options = {}) {
   const live = options.live === undefined ? LIVE : options.live;
   let failuresLeft = options.recordFailures ?? 0;
   let lost = options.lostAnswer === true;
+  let queryFails = options.failQuery !== undefined;
   const wrapped: Db = {
-    query: (text, params) => db.query(text, params),
+    query: (text, params) => {
+      if (queryFails && text.includes(options.failQuery!)) { queryFails = false; return Promise.reject(new Error('Something private broke')); }
+      return db.query(text, params);
+    },
     script: (sql) => db.script(sql),
     close: () => db.close(),
     transaction: async (work) => {
@@ -274,4 +278,15 @@ test('the engine itself runs under the job', async () => {
   await runReviewJob(h.job, h.deps);
   const [stored] = await listRuns(db, REF);
   assert.deepEqual([stored!.outcome, (stored!.result as ReviewResult).coverage.reviewed], ['ok', ['a.ts']]);
+});
+test('a read that fails before the review puts the job back in a minute with its start counted, and writes no run', async () => {
+  for (const failQuery of ['visto_ai.pull_requests', 'visto_ai.review_runs']) {
+    const h = await harness({ failQuery });
+    await runReviewJob(h.job, h.deps);
+    const j = await getJob(db, h.job.id);
+    assert.deepEqual([j?.status, j?.runAt, j?.starts, h.inputs.length, (await listRuns(db, REF)).length], ['pending', at(60), 1, 0, 0]);
+    assert.equal(JSON.stringify(h.logged).includes('private'), false);
+    assert.equal(h.logged.at(-1)!.requeued, true);
+    await finishJob(db, h.job.id, 'dropped', 'test_over', at(1));
+  }
 });

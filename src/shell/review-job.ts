@@ -210,6 +210,9 @@ export async function runReviewJob(job: Job, deps: ReviewJobDeps): Promise<void>
       calls: usage.calls, cost: usage.cost, duration_ms: deps.clock().getTime() - now.getTime(), requeued,
     });
   } catch (error) {
-    log({ event: 'job', job: job.id, repo, number: job.ref.number, outcome: 'error', reason: codeOf(error) });
+    // Nothing has been spent on this path: put the job back, its start counted, as for a git service failure.
+    let requeued = false;
+    await tried(async () => { requeued = (await requeueJob(db, job.id, at(RETRY_WAIT_MS), nowIso, false)) === 'requeued'; });
+    log({ event: 'job', job: job.id, repo, number: job.ref.number, outcome: 'error', reason: codeOf(error), requeued });
   }
 }
