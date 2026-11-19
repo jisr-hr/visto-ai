@@ -418,6 +418,35 @@ test('what only looks like code is prose', () => {
   ];
   for (const text of cases) assert.equal(inert(text).includes(`@${ZW}victim`), true, text);
 });
+test('a review writes no live mention from the model, and keeps the one the service writes', () => {
+  const r = result({ overview: 'a.ts: see @octo-dev', findings: [finding({ path: 'a.ts', line: 3, body: 'ping @octo-dev' })] });
+  const out = renderReview(r, { trigger: 'manual', requestedBy: 'octo-lead', lineUrl: null, inline: true });
+  assert.equal(out.body.includes('@octo-dev'), false);
+  assert.equal(out.comments[0]!.body.includes('@octo-dev'), false);
+  assert.equal(out.body.includes('requested by @octo-lead'), true);
+});
+test('a first line cut out of a span is prose', () => {
+  const r = result({ findings: [finding({ path: 'a.ts', line: 3, body: '`@victim\nrest`' })] });
+  const out = renderReview(r, { trigger: 'automatic', requestedBy: null, lineUrl: null, inline: true });
+  assert.equal(out.body.includes('@victim'), false);
+  assert.equal(out.body.includes(`@${ZW}victim`), true);
+});
+test('without inline comments, every finding carries its whole text in the body and cannot forge a heading', () => {
+  const many = Array.from({ length: 30 }, (_, i) => finding({ path: 'a.ts', line: i + 1, body: `Finding ${i + 1}.\n\n## Overall\n\nDetail ${i + 1}.` }));
+  const r = result({ findings: many });
+  const inline = renderReview(r, { trigger: 'automatic', requestedBy: null, lineUrl: null, inline: true });
+  const bodyOnly = renderReview(r, { trigger: 'automatic', requestedBy: null, lineUrl: null, inline: false });
+  assert.deepEqual([inline.comments.length, bodyOnly.comments.length], [30, 0]);
+  assert.equal(inline.body.includes('Detail 1.'), false);
+  assert.equal(bodyOnly.body.includes('Detail 1.') && bodyOnly.body.includes('Detail 30.'), true);
+  assert.equal(bodyOnly.body.match(/^## Overall$/gm)?.length, 1);
+});
+test('a fence opened by the first line of a finding does not swallow the next bullet', () => {
+  const b = renderReview(result({ findings: [finding({ body: '```ts' }), finding({ line: 11, body: 'Next @octo-dev' })] }), auto).body;
+  assert.equal(b.includes('```'), true);
+  assert.equal(b.includes('@octo-dev'), false);
+  assert.equal(/^```/m.test(b), false);
+});
 test('a score reason and the whole-file reason are made inert too', () => {
   const r = scored([file('a.ts', { blocks: [block('B1', span(1, 1), 90, 'fix', 'ask @octo-dev <b>')] })]);
   const b = renderReview(r, auto).body;
@@ -502,4 +531,16 @@ test('only spaces and tabs make a line blank', () => {
   for (const gap of ['\u00a0', '\u3000', '\ufeff', '\u2003', '\v', '\f']) assert.equal(body(`Title\n${gap}\n---`).includes(`${gap}\n\\---`), true, JSON.stringify(gap));
   for (const gap of ['', ' ', '\t', ' \t ']) assert.equal(body(`Title\n${gap}\n---\n\nend`).includes('\n---\n\nend'), true, JSON.stringify(gap));
   assert.equal(body('a\n\n```\nx\n```\n---\nb').includes('```\nx\n```\n---\nb'), true);
+});
+test('a line separator in a fence line does not hide the fence', () => {
+  for (const sep of ['\u2028', '\u2029']) {
+    // the first line opens a fence, the second closes it, and what follows is prose
+    assert.equal(inert(`\`\`\`${sep}x\n\`\`\`\n@victim <img src=x> &#64;octo`), `\`\`\`${sep}x\n\`\`\`\n@${ZW}victim <${ZW}img src=x> &${ZW}#64;octo`, JSON.stringify(sep));
+    assert.equal(inert(`~~~${sep}\n~~~\n@victim`), `~~~${sep}\n~~~\n@${ZW}victim`, JSON.stringify(sep));
+    // a backtick after the separator: no fence opens, since the rest of a backtick fence's line holds no backtick
+    assert.equal(inert(`\`\`\`${sep}\`\n@victim`), `\`\`\`${sep}\`\n@${ZW}victim`, JSON.stringify(sep));
+    // the summary's sections are not swallowed and no heading is forged
+    const body = renderReview(result({ overview: `\`\`\`${sep}\n\`\`\`\nOverall\n---` }), auto).body;
+    assert.equal(body.includes(`\`\`\`${sep}\n\`\`\`\nOverall\n\\---\n\n## `), true, JSON.stringify(sep));
+  }
 });

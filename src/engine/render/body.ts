@@ -66,7 +66,7 @@ function noHeading(text: string): string {
       }
       return line;
     }
-    open = fenceOpens(line, 3);
+    open = fenceOpens(line);
     if (open !== null) return line;
     if (/^ {0,3}#/.test(line)) return line.replace(/^( {0,3})#/, '$1\\#');
     if (!BLANK.test(prev) && /^ {0,3}(=+|-+)[ \t]*$/.test(line)) return line.replace(/[=-]/, '\\$&');
@@ -84,10 +84,11 @@ function inertProse(line: string): string {
 
 type Fence = { indent: string; char: string; size: number };
 
-// A line that opens with three or more backticks or tildes, indented by at most `room` spaces; for backticks the rest of the line holds none.
-function fenceOpens(line: string, room: number): Fence | null {
-  const m = /^( *)(`{3,}|~{3,})(.*)$/.exec(line);
-  if (m === null || m[1]!.length > room || (m[2]![0] === '`' && m[3]!.includes('`'))) return null;
+// A line that opens with three or more backticks or tildes, indented by at most three spaces; for backticks the rest of the line holds none.
+// The rest of the line is any character: U+2028 and U+2029 do not end a line.
+function fenceOpens(line: string): Fence | null {
+  const m = /^( *)(`{3,}|~{3,})([^]*)$/.exec(line);
+  if (m === null || m[1]!.length > 3 || (m[2]![0] === '`' && m[3]!.includes('`'))) return null;
   return { indent: m[1]!, char: m[2]![0]!, size: m[2]!.length };
 }
 
@@ -123,7 +124,7 @@ function inertText(text: string, fences: boolean): string {
       lines.push(closes ? line.trimStart() : line);
       continue;
     }
-    open = fences ? fenceOpens(line, 3) : null;
+    open = fences ? fenceOpens(line) : null;
     if (open === null) lines.push(inertProse(line));
     else {
       open = { ...open, indent: '' };
@@ -136,7 +137,7 @@ function inertText(text: string, fences: boolean): string {
 // Text that follows the service's own words on one line: no fence can open in it, and nothing is appended.
 const inertInline = (text: string): string => inertText(text, false);
 
-/** Text the model wrote, made safe to post. Outside code: `&` is written as `&amp;`, every `<` as `&lt;`, and a mention gets a zero-width space after its `@`. A fence left open is closed. */
+/** Text the model wrote, made safe to post. Outside a fence a zero-width space follows every `@` that starts a mention, every `<` that starts raw HTML and every `&` that starts a character reference. Fence lines are moved to the first column, and a fence left open is closed. */
 export function inert(text: string): string {
   return inertText(text, true);
 }
@@ -277,7 +278,7 @@ const cutMarker = (removed: number): string => `_[\u2026 ${removed} characters o
 function closeOpenFence(text: string): string {
   let open: Fence | null = null;
   for (const line of text.split('\n')) {
-    if (open === null) open = fenceOpens(line, 3);
+    if (open === null) open = fenceOpens(line);
     else if (fenceCloses(line, open)) open = null;
   }
   return open === null ? text : `${text}\n${fenceLine(open)}`;
