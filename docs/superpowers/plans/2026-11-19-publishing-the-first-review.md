@@ -191,8 +191,8 @@ type Meta = { trigger: 'automatic' | 'manual'; requestedBy: string | null; lineU
 
 **What counts as code.** Only what is certainly code under CommonMark's own rules is left as it is; everything else is prose (calls 1 and 17). A rule that is generous here leaves a live mention, so when in doubt it is prose. `inert` first turns every `\r\n` and every lone `\r` into `\n`.
 
-- **A fence.** It opens at a line that starts **at its first column** with three or more backticks, or three or more tildes; for a backtick fence the rest of that line holds no backtick. An opener that is indented at all is not honoured: indented, it may be the inside of a list item, which only a full parser could tell. It ends at a line indented by at most three spaces that holds the same character, at the same or a greater length, followed by nothing but spaces and tabs; or at the end of the text. Nothing inside a fence is changed.
-- **An inline span.** Spans are found paragraph by paragraph (a paragraph is a run of lines with no empty line between them, outside fences), line by line, left to right:
+- **A fence.** It opens at a line that starts, after at most three spaces, with three or more backticks, or three or more tildes; for a backtick fence the rest of that line holds no backtick. **The opening line is written without those spaces, at its first column.** There it is a fence to GitHub whatever came before it: a line at the first column cannot belong to a list item or to a quote, and a fence may interrupt a paragraph. Left indented, the same line may be an opening fence of the top level, which runs to the end of the review when nothing closes it, or the closing fence of a list item; only a full parser could tell which. A line indented by four spaces or more, or by a tab, opens no fence here and is prose. The fence ends at a line indented by at most three spaces that holds the same character, at the same or a greater length, followed by nothing but spaces and tabs; or at the end of the text. Nothing else inside a fence is changed.
+- **An inline span.** Spans are found paragraph by paragraph (a paragraph is a run of lines with no blank line between them, outside fences; a line is blank only when it holds nothing but spaces and tabs, so a no-break space, a form feed or any other white space does not end a paragraph), line by line, left to right:
   - A run of backticks opens a span unless it is escaped. An odd number of backslashes right before the run makes its first backtick a plain character; what is left of the run, if anything, is the run.
   - It is closed by the next run of exactly the same length **on the same line**. A backslash before a closing run changes nothing.
   - When no such run is on that line, the rest of the line and **the rest of the paragraph** is prose: under CommonMark the opener may pair with a run on a later line, and what lies between would be code there and prose here, or the reverse.
@@ -205,6 +205,10 @@ type Meta = { trigger: 'automatic' | 'manual'; requestedBy: string | null; lineU
 - **Mentions.** An `@` starts a mention when the character after it is an ASCII letter or digit and the character before it, if any, is not an ASCII letter, an ASCII digit or an underscore. It gets a zero-width space after it. A letter that is not ASCII before the `@` does not protect it.
 
 **An open fence** is closed by one more line, at the first column, with the fence's own characters, so one piece cannot swallow the next.
+
+**Headings.** `noHeading`, which the summary and the body-only form go through, works on prose only: the lines of a fence are left as they are. Outside a fence it escapes a line that starts a heading with `#`, as now, and also a line made only of `=` or only of `-` (after any spaces, and before any spaces or tabs) that comes right after a line that is not blank: such a line turns the line above it into a heading. It gets a backslash before its first `=` or `-`. A line of `-` after a blank line is a rule and is left.
+
+**The cut.** `closeOpenFence` keeps its rule: an opening line indented by at most three spaces, closed at that line's own indent. After `inert`, every such line of the body outside a fence is a fence the service honoured: at the first column in the summary, and two spaces in under a bullet of the body-only form.
 
 **Where.** `inert` is applied to each piece of model-written text **as it is finally written**, and each piece is placed so that its first line starts a line of the document, which is what the rules above assume:
 
@@ -276,10 +280,6 @@ test('without inline comments, every finding carries its whole text in the body 
 
 ```ts
 test('a fence is honoured only where it is certainly one', () => {
-  // inside a list item: not at the first column, so prose, and nothing is appended that could open a fence
-  const listed = inert('- ```\n  x\n  ```\n\n@victim');
-  assert.equal(listed.includes(`@${ZW}victim`), true);
-  assert.equal(listed.endsWith('```'), false);
   // a closing fence may be followed by a tab
   assert.equal(inert('```\nx\n```\t\n@victim'), `\`\`\`\nx\n\`\`\`\t\n@${ZW}victim`);
   // a closing fence may be indented by up to three spaces
@@ -318,6 +318,45 @@ test('the body-only form carries the note about a moved line', () => {
 ```
 
 In the last-but-one test the finding's severity is whatever `findingAt` gives (the expected text writes it as `minor`; use the helper's). In the uneven case a fence opened with three backticks is closed by the run of four, so `after @victim` is prose. The non-ASCII letter in the second test is written as its escape.
+
+**Tests added after the second build of this task was reviewed.** `result`, `finding` and `auto` are the test file's own helpers (`auto` renders with inline comments); the white space of the third test is written as escapes:
+
+```ts
+test('an indented fence is moved to the first column, where it is the same fence to GitHub as to the service', () => {
+  // at the top level a fence may be indented by up to three spaces; left as it was and never closed, it would swallow the sections after the summary
+  assert.equal(inert('intro\n  ```\nx @victim'), 'intro\n```\nx @victim\n```');
+  assert.equal(inert('   ~~~ts\ncode\n   ~~~\nafter @victim'), `~~~ts\ncode\n   ~~~\nafter @${ZW}victim`);
+  // four spaces open no fence at the top level
+  assert.equal(inert('a\n\n    ```\n@victim'), `a\n\n    \`\`\`\n@${ZW}victim`);
+  // the closing line of a list item's fence: at the first column it ends the item and opens a fence, for GitHub as for the service
+  assert.equal(inert('- ```\n  x\n  ```\n\n@victim'), '- ```\n  x\n```\n\n@victim\n```');
+});
+test('a fence the summary leaves open cannot swallow the sections after it', () => {
+  const body = renderReview(result({ overview: 'intro\n  ```\nx' }), auto).body;
+  assert.equal(body.includes('intro\n```\nx\n```\n\n## '), true);
+});
+test('only spaces and tabs make a line blank', () => {
+  const live = (text: string): boolean => /(^|[^A-Za-z0-9_])@[A-Za-z0-9]/.test(inert(text));
+  for (const gap of ['\u00a0', '\u3000', '\ufeff', '\u2003', '\v', '\f']) assert.equal(live(`x \`a\n${gap}\n\` @victim \`y\``), false, JSON.stringify(gap));
+  for (const gap of ['', ' ', '\t', ' \t ']) assert.equal(inert(`x \`a\n${gap}\n\`@Injectable()\` here`), `x \`a\n${gap}\n\`@Injectable()\` here`);
+});
+test('a line of = or - under a line of text makes no heading, and a fence is left as it is', () => {
+  const text = 'Overall\n---\nfine\n\nTitle\n ===\n\n---\n\n```yaml\na: 1\n---\n# c\n```';
+  const body = renderReview(result({ overview: text }), auto).body;
+  assert.equal(body.includes('Overall\n\\---\nfine\n\nTitle\n \\===\n\n---\n\n```yaml\na: 1\n---\n# c\n```'), true);
+  const bodyOnly = renderReview(result({ findings: [finding({ body: 'Overall\n---' })] }), { ...auto, inline: false }).body;
+  assert.equal(bodyOnly.includes('  Overall\n  \\---'), true);
+});
+test('a cut inside a fence that came from an indented line closes it before the cut marker', () => {
+  const overview = `- \`\`\`\n  x\n  \`\`\`\n\n${'word word\n'.repeat(10_000)}`;
+  const body = renderReview(result({ overview }), auto).body;
+  const kept = body.slice(0, body.indexOf('\n\n_['));
+  assert.equal(kept.endsWith('\n```'), true);
+  assert.equal(kept.split('\n').filter((line) => line === '```').length, 2);
+});
+```
+
+The first of these replaces the three `listed` assertions of the test "a fence is honoured only where it is certainly one", which expected the opposite for the same input and are removed. In the third test the first list holds white space that is not a space or a tab: the paragraph goes on, so the run left open on its first line still makes the rest prose. In the last test the summary's third line becomes an opening fence at the first column, everything after it is inside that fence, and the cut lands there.
 
 Existing tests whose expected text holds a `<` the model wrote outside code change to `&lt;`; list them in the report.
 
@@ -1378,5 +1417,5 @@ None of this can be shown by a test or by the run in Task 9. Each needs a GitHub
 4. That the pull request's comment list names each comment's review, and returns each comment's text as it was sent, so the read-back matches them.
 5. That a reaction and a general comment need the `issues` permission and not less.
 6. The association GitHub reports for a commenter, also for a member whose membership is private (design 20, item 7).
-7. That a zero-width space after `@` stops a mention, that `&lt;` shows as `<`, and that both read well in a review.
+7. That a zero-width space after `@` stops a mention, that `&lt;` shows as `<`, and that both read well in a review. Also that a fence line at the first column, right after a list item whose own fence is still open, opens a new fence on GitHub as it does under CommonMark: the service leaves a mention inside such a fence as it is.
 8. One whole first review of a real pull request, and one `/review`.
