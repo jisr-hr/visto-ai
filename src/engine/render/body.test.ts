@@ -39,14 +39,14 @@ test('an empty overview leaves the summary out', () => {
 });
 test('an inline comment carries its tag, and a moved one its note', () => {
   const { comments } = renderReview(result({ findings: [finding({ line: 12, requestedLine: 15 })] }), auto);
-  assert.deepEqual(comments, [{ path: 'src/a.ts', side: 'RIGHT', line: 12, body: '**[major]** _(Refers to line 15, just outside the diff.)_\n\nBreaks on empty input.' }]);
+  assert.deepEqual(comments, [{ path: 'src/a.ts', side: 'RIGHT', line: 12, body: '**\\[major]** _(Refers to line 15, just outside the diff.)_\n\nBreaks on empty input.' }]);
 });
 test('an unmoved comment has no note', () => {
-  assert.equal(renderReview(result({ findings: [finding({ severity: 'minor' })] }), auto).comments[0]!.body, '**[minor]**\n\nBreaks on empty input.');
+  assert.equal(renderReview(result({ findings: [finding({ severity: 'minor' })] }), auto).comments[0]!.body, '**\\[minor]**\n\nBreaks on empty input.');
 });
 test('the left side says old line', () => {
   const { comments } = renderReview(result({ findings: [finding({ side: 'LEFT', line: 8, requestedLine: 9 })] }), auto);
-  assert.equal(comments[0]!.body, '**[major]** _(Refers to old line 9, just outside the diff.)_\n\nBreaks on empty input.');
+  assert.equal(comments[0]!.body, '**\\[major]** _(Refers to old line 9, just outside the diff.)_\n\nBreaks on empty input.');
   assert.equal(comments[0]!.side, 'LEFT');
 });
 test('sections appear in order and only when they have content', () => {
@@ -70,9 +70,9 @@ test('beyond-the-diff items do not count in the overall line', () => {
 });
 test('finding, unplaced, beyond and coverage bullets have the exact shape', () => {
   const b = renderReview(full, auto).body;
-  assert.ok(b.includes('\n- **[blocker]** `src/a.ts:3` \u2014 Breaks on empty input.\n'));
+  assert.ok(b.includes('\n- **\\[blocker]** `src/a.ts:3` \u2014 Breaks on empty input.\n'));
   assert.ok(b.includes('\n- `src/b.ts:4` (old file) \u2014 Name is unclear.\n'));
-  assert.ok(b.includes('## Beyond the diff\n\n- **[minor]** `src/c.ts:7` \u2014 Caller ignores the error.\n'));
+  assert.ok(b.includes('## Beyond the diff\n\n- **\\[minor]** `src/c.ts:7` \u2014 Caller ignores the error.\n'));
   assert.ok(b.includes("GitHub cannot show these inline: the line is outside this pull request's diff, or the file has no diff GitHub can comment on. They do not block the merge.\n\n- `src/b.ts:4`"));
   assert.ok(b.includes('## Coverage\n\nThese files were not reviewed:\n\n- `f0.bin`: no_diff\n- `f1.bin`: too_large\n- `f2.bin`: over_batch_limit\n\n## Overall'));
 });
@@ -121,7 +121,7 @@ test('renderReview returns a body within the limit', () => {
   assert.match(body, /## Overall\n\n0 blocker, 1 major, 0 minor\. Human review: not needed \(highest score 0%\)\.$/);
 });
 
-const MARKER_RE = /^_\[\u2026 (\d+) characters of the review were cut to fit GitHub's limit\]_$/m;
+const MARKER_RE = /^_\\\[\u2026 (\d+) characters of the review were cut to fit GitHub's limit\]_$/m;
 const OVERALL = '## Overall\n\nNo findings.';
 const UNPLACED = "## Findings not placed on the diff\n\nGitHub cannot show these inline.\n\n- `a.ts:9` \u2014 text";
 
@@ -233,7 +233,7 @@ test('an HTML comment opener written by the model is neutralised', () => {
   assert.ok(r.body.includes(`See <${ZW}!-- hidden -->.`));
   assert.ok(r.body.includes(`Bad <${ZW}!-- x`));
   assert.ok(r.body.includes(`Also <${ZW}!-- y`));
-  assert.equal(r.comments[0]!.body, `**[major]**\n\nBad <${ZW}!-- x`);
+  assert.equal(r.comments[0]!.body, `**\\[major]**\n\nBad <${ZW}!-- x`);
 });
 test('a heading line in the overview is escaped', () => {
   const b = renderReview(result({ overview: 'Text.\n## Overall\n   # Title\n    # code\nnot # a heading' }), auto).body;
@@ -242,7 +242,7 @@ test('a heading line in the overview is escaped', () => {
 });
 test('a path with a newline or a tab stays on its bullet line', () => {
   const b = renderReview(result({ beyondDiff: [beyond({ path: 'src/c.ts\n## Overall\tx' })], unplaced: [unplaced({ path: 'src/b\r\n.ts' })] }), auto).body;
-  assert.ok(b.includes('- **[minor]** `src/c.ts ## Overall x:7` \u2014 Caller ignores the error.\n'));
+  assert.ok(b.includes('- **\\[minor]** `src/c.ts ## Overall x:7` \u2014 Caller ignores the error.\n'));
   assert.ok(b.includes('- `src/b  .ts:4` \u2014 Name is unclear.\n'));
   assert.equal((b.match(/^## Overall$/gm) ?? []).length, 1);
 });
@@ -460,9 +460,9 @@ test('a fence is honoured only where it is certainly one', () => {
 });
 test("an inline comment keeps the model's text off the service's own line", () => {
   const out = renderReview(result({ findings: [finding({ path: 'a.ts', line: 3, severity: 'minor', body: '~~~\n@victim\n~~~' })] }), auto);
-  assert.equal(out.comments[0]!.body, '**[minor]**\n\n~~~\n@victim\n~~~');
+  assert.equal(out.comments[0]!.body, '**\\[minor]**\n\n~~~\n@victim\n~~~');
   const uneven = result({ findings: [finding({ path: 'a.ts', line: 3, severity: 'minor', body: '```\n@victim\n````\nafter @victim' })] });
-  assert.equal(renderReview(uneven, auto).comments[0]!.body, '**[minor]**\n\n```\n@victim\n````\nafter @' + ZW + 'victim');
+  assert.equal(renderReview(uneven, auto).comments[0]!.body, '**\\[minor]**\n\n```\n@victim\n````\nafter @' + ZW + 'victim');
 });
 test('the body-only form carries the note about a moved line', () => {
   const r = result({ findings: [finding({ path: 'a.ts', line: 3, body: 'Detail.', requestedLine: 5 })] });
@@ -490,7 +490,7 @@ test('a line of = or - under a line of text makes no heading, and a fence is lef
 test('a cut inside a fence that came from an indented line closes it before the cut marker', () => {
   const overview = `- \`\`\`\n  x\n  \`\`\`\n\n${'word word\n'.repeat(10_000)}`;
   const body = renderReview(result({ overview }), auto).body;
-  const kept = body.slice(0, body.indexOf('\n\n_['));
+  const kept = body.slice(0, body.indexOf('\n\n_\\['));
   assert.equal(kept.endsWith('\n```'), true);
   assert.equal(kept.split('\n').filter((line) => line === '```').length, 2);
 });
@@ -564,4 +564,41 @@ test('what is rendered holds no NUL and no lone surrogate, so storing it changes
   }
   for (const s of [out.body, stored(out.body)]) assert.equal((s.match(/^## Overall/gm) ?? []).length, 1);
   for (const s of out.comments.map((c) => c.body)) assert.equal(/^## Overall/m.test(stored(s)), false);
+});
+test("the service's own tags are written with an escaped bracket, so a definition the model wrote cannot make them links", () => {
+  const out = renderReview(result({ overview: '[major]: https://example.test/x', findings: [finding({ body: 'A note.\n\n[major]: https://example.test/x' })] }), auto);
+  for (const t of [out.body, out.comments[0]!.body]) {
+    assert.equal(t.includes('**\\[major]**'), true);
+    assert.equal(t.includes('**[major]**'), false);
+  }
+});
+test('a heading inside a quote or a list item is escaped, and indentation alone escapes nothing', () => {
+  // the overview is trimmed: a first paragraph keeps the text's own indentation
+  const summary = (text: string): string => /## Summary\n\nIntro\.\n\n([\s\S]*?)\n\n## Human review/.exec(renderReview(result({ overview: `Intro.\n\n${text}` }), auto).body)![1]!;
+  assert.equal(summary('> ## Overall'), '> \\## Overall');
+  assert.equal(summary('- ## Overall'), '- \\## Overall');
+  assert.equal(summary('1. # x'), '1. \\# x');
+  assert.equal(summary('> > - # x'), '> > - \\# x');
+  assert.equal(summary('> Overall\n> ---'), '> Overall\n> \\---');
+  for (const text of ['    # code', '- item #12', '>= 3 # x']) {
+    assert.equal(summary(text), text);
+    assert.equal(summary(`\`\`\`\n${text}\n\`\`\``), `\`\`\`\n${text}\n\`\`\``);
+  }
+  for (const text of ['> ## Overall', '- ## Overall', '1. # x', '> > - # x', '> Overall\n> ---']) assert.equal(summary(`\`\`\`\n${text}\n\`\`\``), `\`\`\`\n${text}\n\`\`\``);
+});
+test('an address keeps working: its @ is written %40, and a link in angle brackets stays one', () => {
+  assert.equal(inert('see https://www.npmjs.com/package/@types/node and [x](https://example.test/packages/@scope/x)'),
+    'see https://www.npmjs.com/package/%40types/node and [x](https://example.test/packages/%40scope/x)');
+  // before the ://, and where there is none, the rule is as it was
+  assert.equal(inert('[@types/node](https://example.test/@types/node) @octo-dev packages/@scope/x'),
+    `[@${ZW}types/node](https://example.test/%40types/node) @${ZW}octo-dev packages/@${ZW}scope/x`);
+  // an @ after a letter or digit is left as it is, in an address too
+  assert.equal(inert('ssh://git@example.test/x https://example.test/a@b'), 'ssh://git@example.test/x https://example.test/a@b');
+  // white space ends the run
+  assert.equal(inert('https://example.test/ @victim'), `https://example.test/ @${ZW}victim`);
+  assert.equal(inert('<https://example.test/@x> <http://example.test/x> <ftp://example.test/x> <httpx>'),
+    `<https://example.test/%40x> <http://example.test/x> <${ZW}ftp://example.test/x> <${ZW}httpx>`);
+  const live = (text: string): boolean => /@[A-Za-z0-9]/.test(inert(text).replace(/[A-Za-z0-9]@/g, ''));
+  for (const text of ['://@victim', 'x://@victim', 'https://@victim', '(https://example.test/)@victim', 'a://b\t@victim', '://x@@victim'])
+    assert.equal(live(text), false, JSON.stringify(text));
 });

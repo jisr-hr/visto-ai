@@ -52,7 +52,12 @@ function codeSpan(raw: string): string {
   return `${fence} ${text} ${fence}`;
 }
 
-// A model-written line must not become a heading of the review body: not with a #, and not as a setext underline. A fence is left as it is.
+// What may stand before a heading's # on its line: at most three spaces, then any mix of quote marks, bullets and ordered marks, with spaces and tabs between.
+const BEFORE_HASH = /^ {0,3}(?:(?:>|[-*+][ \t]|[0-9]{1,9}[.)][ \t])[ \t]*)*#/;
+// A setext underline, at the first column or after quote marks.
+const UNDERLINE = /^ {0,3}(?:>[ \t]*)*(=+|-+)[ \t]*$/;
+
+// A model-written line must not become a heading of the review body: not with a #, and not as a setext underline, at the top level, in a quote or in a list item. A fence is left as it is.
 function noHeading(text: string): string {
   let open: Fence | null = null;
   let before = ''; // the line above, or '' when it is blank or closed a fence
@@ -68,18 +73,30 @@ function noHeading(text: string): string {
     }
     open = fenceOpens(line);
     if (open !== null) return line;
-    if (/^ {0,3}#/.test(line)) return line.replace(/^( {0,3})#/, '$1\\#');
-    if (!BLANK.test(prev) && /^ {0,3}(=+|-+)[ \t]*$/.test(line)) return line.replace(/[=-]/, '\\$&');
+    if (BEFORE_HASH.test(line)) return line.replace(BEFORE_HASH, (m) => `${m.slice(0, -1)}\\#`);
+    if (!BLANK.test(prev) && UNDERLINE.test(line)) return line.replace(/[=-]/, '\\$&');
     return line;
   }).join('\n');
 }
 
 const ZW = '\u200b';
 
+const STARTS = new RegExp('@(?=[A-Za-z0-9])|<(?=[A-Za-z/!?])|&(?=(?:[A-Za-z][A-Za-z0-9]{0,31}|#[0-9]{1,7}|#[xX][0-9A-Fa-f]{1,6});)', 'g');
+
 // A zero-width space after what starts a mention, raw HTML or a character reference. Nothing is rewritten, so the text reads the same inside an inline span as outside one.
+// Decided once for each run without white space: in an address, after its ://, an @ is written %40; a < before http:// or https:// is left, as it cannot start raw HTML.
 function inertProse(line: string): string {
-  const reference = '(?=(?:[A-Za-z][A-Za-z0-9]{0,31}|#[0-9]{1,7}|#[xX][0-9A-Fa-f]{1,6});)';
-  return line.replace(new RegExp(`@(?=[A-Za-z0-9])|<(?=[A-Za-z/!?])|&${reference}`, 'g'), (m, at: number) => (m === '@' && /[A-Za-z0-9]/.test(line[at - 1] ?? '') ? m : `${m}${ZW}`));
+  return line.replace(/\S+/g, (run) => {
+    const scheme = run.indexOf('://');
+    return run.replace(STARTS, (m, at: number) => {
+      if (m === '@') {
+        if (/[A-Za-z0-9]/.test(run[at - 1] ?? '')) return m;
+        return scheme >= 0 && at > scheme ? '%40' : `${m}${ZW}`;
+      }
+      if (m === '<' && (run.startsWith('http://', at + 1) || run.startsWith('https://', at + 1))) return m;
+      return `${m}${ZW}`;
+    });
+  });
 }
 
 type Fence = { indent: string; char: string; size: number };
@@ -148,7 +165,7 @@ function bullets(items: string[], cap: boolean = true): string[] {
 }
 
 const located = (f: Finding | RawFinding): string =>
-  `- **[${f.severity}]** ${codeSpan(`${f.path}:${f.line}`)} \u2014 ${inertInline(firstLine(f.body))}`;
+  `- **\\[${f.severity}]** ${codeSpan(`${f.path}:${f.line}`)} \u2014 ${inertInline(firstLine(f.body))}`;
 const unplacedLine = (f: UnplacedFinding): string =>
   `- ${codeSpan(`${f.path}:${f.line}`)}${f.side === 'LEFT' ? ' (old file)' : ''} \u2014 ${inertInline(firstLine(f.body))}`;
 // A bullet with the whole text of its finding under it, as a continuation of the item.
@@ -165,7 +182,7 @@ const movedNote = (f: Finding): string =>
 // The service's own first line, an empty line, then the model's text.
 function commentBody(f: Finding): string {
   const note = movedNote(f);
-  return `**[${f.severity}]**${note === '' ? '' : ` ${note}`}\n\n${inert(f.body)}`;
+  return `**\\[${f.severity}]**${note === '' ? '' : ` ${note}`}\n\n${inert(f.body)}`;
 }
 
 // The part after the score: the category in a code span, then the dash and the reason when there is one.
@@ -283,7 +300,7 @@ function rendered(result: ReviewResult, meta: Meta): { body: string; comments: I
   return { body: fitBody(head.join('\n\n'), tail.join('\n\n')), comments };
 }
 
-const cutMarker = (removed: number): string => `_[\u2026 ${removed} characters of the review were cut to fit GitHub's limit]_`;
+const cutMarker = (removed: number): string => `_\\[\u2026 ${removed} characters of the review were cut to fit GitHub's limit]_`;
 
 // Close a code fence that a cut left open, at the opening fence's own indent.
 function closeOpenFence(text: string): string {
