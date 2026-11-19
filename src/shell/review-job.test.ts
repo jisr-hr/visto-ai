@@ -708,3 +708,17 @@ test('a refusal is recorded before it is answered, and an answer that cannot be 
   await runReviewJob(unrecorded.job, unrecorded.deps);
   assert.deepEqual([unrecorded.writes, (await getJob(db, unrecorded.job.id))?.status], [[], 'running']);
 });
+test('what is recorded is what was rendered, and a resumed start posts exactly that', async () => {
+  const NUL = String.fromCharCode(0);
+  const text = [`see @${NUL}victim and <${NUL}!-- hidden and &${NUL}#64;victim`, `\`\`${NUL}\``, '@victim', `${NUL}## Overall`, `end ${String.fromCharCode(0xd800)}`].join('\n');
+  const result = okResult({ overview: text, findings: [{ ...okResult().findings[0]!, body: text }] });
+  const expected = renderReview(result, { trigger: 'automatic', requestedBy: null, lineUrl: () => 'https://git.example.test/x', inline: true });
+  const before = await live({ result, posts: [new Error('github_502')] });
+  await runReviewJob(before.job, before.deps);
+  const [stored] = await listRuns(db, REF);
+  assert.equal(stored!.body, expected.body);
+  assert.deepEqual(stored!.comments, expected.comments);
+  const again = await live({ reuseJob: before.job.id });
+  await runReviewJob(again.job, again.deps);
+  assert.deepEqual(again.writes.filter((w) => w[0] === 'publishReview'), [['publishReview', 'h1', expected.body, 1]]);
+});

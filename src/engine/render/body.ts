@@ -240,7 +240,18 @@ function overallLine(result: ReviewResult): string {
   return parts.join(' ');
 }
 
+const NUL = String.fromCharCode(0);
+
+// Text that storing leaves as it is: every NUL becomes U+FFFD, as CommonMark reads it, and a lone surrogate becomes U+FFFD too. Lengths do not change.
+const asRead = (text: string): string => text.replaceAll(NUL, '\ufffd').toWellFormed();
+
+/** The review's body and inline comments, as they are posted and as they are stored: storing them changes nothing. */
 export function renderReview(result: ReviewResult, meta: Meta): { body: string; comments: InlineComment[] } {
+  const { body, comments } = rendered(result, meta);
+  return { body: asRead(body), comments: comments.map((c) => ({ ...c, body: asRead(c.body) })) };
+}
+
+function rendered(result: ReviewResult, meta: Meta): { body: string; comments: InlineComment[] } {
   const prefix: string[] = [];
   if (meta.trigger === 'manual') {
     prefix.push(meta.requestedBy === null ? '**Full review** requested.' : `**Full review** requested by @${meta.requestedBy}.`);

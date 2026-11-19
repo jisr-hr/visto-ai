@@ -544,3 +544,24 @@ test('a line separator in a fence line does not hide the fence', () => {
     assert.equal(body.includes(`\`\`\`${sep}\n\`\`\`\nOverall\n\\---\n\n## `), true, JSON.stringify(sep));
   }
 });
+
+test('what is rendered holds no NUL and no lone surrogate, so storing it changes nothing', () => {
+  const NUL = String.fromCharCode(0);
+  const HALF = String.fromCharCode(0xd800);
+  const text = [`see @${NUL}victim and <${NUL}!-- hidden and &${NUL}#64;victim`, `\`\`${NUL}\``, '@victim', `${NUL}## Overall`, `end ${HALF}`].join('\n');
+  const out = renderReview(result({ overview: text, findings: [finding({ body: text })] }), auto);
+  // what storing would have made of it: every NUL deleted
+  const stored = (t: string): string => t.replaceAll(NUL, '');
+  for (const t of [out.body, ...out.comments.map((c) => c.body)]) {
+    assert.equal(t.includes(NUL), false);
+    assert.equal(stored(t), t);
+    assert.equal(t.isWellFormed(), true);
+    for (const s of [t, stored(t)]) {
+      assert.equal(/@[A-Za-z]/.test(s), false, JSON.stringify(s));
+      assert.equal(/&#64;/.test(s), false, JSON.stringify(s));
+      assert.equal(s.includes('<!--'), false, JSON.stringify(s));
+    }
+  }
+  for (const s of [out.body, stored(out.body)]) assert.equal((s.match(/^## Overall/gm) ?? []).length, 1);
+  for (const s of out.comments.map((c) => c.body)) assert.equal(/^## Overall/m.test(stored(s)), false);
+});
