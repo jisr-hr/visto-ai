@@ -89,7 +89,7 @@ Tests never reach the network. The test setup blocks sockets and `fetch`, and cl
 
 ## Run the service
 
-The service receives GitHub's signed webhooks and records each delivery's id and what it says about people and the pull request (the payload itself is not kept). When a pull request is opened, reopened, made ready for review or pushed to, it queues a review. A push is reviewed after 180 quiet seconds, so several pushes in a row give one review. The review runs the engine on the pull request as GitHub has it then, in dry run: it is recorded in the database and **nothing is posted to GitHub**. Publishing, commands and the merge gate are not built, so the service starts only with `dryRun: true` in the config.
+The service receives GitHub's signed webhooks and records each delivery's id and what it says about people and the pull request (the payload itself is not kept). When a pull request is opened, reopened, made ready for review, pushed to or given a new base branch, it queues a review. A push is reviewed after 180 quiet seconds, so several pushes in a row give one review. The review runs the engine on the pull request as GitHub has it then, in dry run: it is recorded in the database and **nothing is posted to GitHub**. Publishing, commands and the merge gate are not built, so the service starts only with `dryRun: true` in the config.
 
 To run it you need a GitHub App (its id, its private key and its webhook secret), a model key and a Postgres.
 
@@ -116,7 +116,7 @@ Every attempt at a review, finished or failed, is a row of `visto_ai.review_runs
 docker compose exec db psql -U postgres -d visto -c "select id, owner, repo, number, outcome, cost, body from visto_ai.review_runs order by id desc limit 5"
 ```
 
-`body` is the text that would have been posted, `outcome` how the run ended and `cost` what the model calls cost, in the currency of your prices.
+`body` is the text that would have been posted, `outcome` how the run ended and `cost` what the model calls cost, as recorded (see the daily limit below).
 
 ### Running it
 
@@ -124,7 +124,9 @@ docker compose exec db psql -U postgres -d visto -c "select id, owner, repo, num
 - If the database restarts, the service notices that it has lost its lock, exits, and Compose starts it again.
 - Connect to Postgres directly. The lock and the statement timeout do not work through a pooler in transaction mode.
 - Stopping the service (`docker compose stop`) waits up to 10 minutes for the reviews that are running. The Compose file allows 660 seconds for it. A second signal ends it at once.
-- Every review costs money. The service stops starting reviews for the day when spending reaches `limits.spendPerDay` (50 US dollars when not written), and runs at most `limits.queueConcurrency` reviews at once (2 when not written). When the model's key is refused or its account is out of credit, reviews pause for 5 minutes at a time and the service sends one message to `alerts.webhook` if you wrote it. No job is lost meanwhile.
+- Every review costs money. The cost of a run is what the model endpoint reports with each answer; OpenRouter, the default, reports it in US dollars. For an endpoint that reports no cost, it is computed from `model.prices`, in whatever currency those prices are written in. With neither, the cost is recorded as 0.
+- The daily limit, `limits.spendPerDay` (50 when not written), is a number in the unit of those recorded costs. The service adds up the cost of the runs recorded since the start of the UTC day, so it can only see what is recorded: with an endpoint that reports no cost and no `prices`, it never stops anything, and it raises the alert `cost_unknown`, once. At 80% of the limit it raises `spend_80`, and at the limit `spend_limit`, each once per UTC day. Reviews then stop starting until the next UTC day; the ones already running finish. At most `limits.queueConcurrency` reviews run at once (2 when not written).
+- When the model's key is refused or its account is out of credit, reviews pause for 5 minutes at a time and the service raises one alert. No job is lost meanwhile. Alerts go to the log always, and to `alerts.webhook` when you wrote it.
 
 Setup notes:
 

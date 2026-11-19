@@ -21,7 +21,8 @@ model:
   extraBody: {}
   # Extra headers sent with every request.
   extraHeaders: {}
-  # Prices in your billing currency, used to report cost; null leaves cost at zero.
+  # Prices for an endpoint that reports no cost with its answers (OpenRouter does report it), in the currency you write them in.
+  # With neither a reported cost nor prices, the cost is 0 and the daily limit cannot see it.
   prices: null
   # prices: { inputPerMillion: 1.0, cachedInputPerMillion: 0.1, outputPerMillion: 4.0 }
   # How long one model call may take, at most 300.
@@ -32,7 +33,7 @@ limits:
   inputTokensPerCall: 200000
   # Batches of files allowed in one review.
   batchesPerReview: 6
-  # The most the service may spend on model calls in one day, in US dollars.
+  # The most the service may spend on model calls in one UTC day, in the unit of the recorded costs (US dollars with OpenRouter).
   spendPerDay: 50
   # How many review jobs may run at once (1 to 20).
   queueConcurrency: 2
