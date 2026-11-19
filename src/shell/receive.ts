@@ -75,6 +75,7 @@ export async function receive(
                   ref, reason: trigger.reason, headSha: trigger.headSha,
                   runAt: new Date(now.getTime() + trigger.delaySeconds * 1000).toISOString(),
                   now: now.toISOString(), delivery: reading.delivery, replace: newest,
+                  trigger: 'automatic', requestedBy: null, commentId: null, association: null, installation: null,
                 });
                 if (id !== null) queued.job = trigger.delaySeconds > 0 ? 'delayed' : 'queued';
               }

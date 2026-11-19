@@ -7,7 +7,9 @@ import { claimJob, deleteFinishedJobs, dropJobIfUnchanged, dueJobs, enqueueJob, 
 const REF = { service: 'github', owner: 'acme', repo: 'shop', number: 7 } as const;
 const at = (seconds: number): string => new Date(Date.parse('2026-03-01T10:00:00.000Z') + seconds * 1000).toISOString();
 
-const job = (over = {}) => ({ ref: REF, reason: 'opened', headSha: 'h1', runAt: at(0), now: at(0), delivery: 'd1', replace: true, ...over });
+const job = (over = {}) => ({ ref: REF, reason: 'opened', headSha: 'h1', runAt: at(0), now: at(0), delivery: 'd1', replace: true,
+  trigger: 'automatic' as 'automatic' | 'manual', requestedBy: null as string | null, commentId: null as string | null, association: null as string | null, installation: null as string | null, ...over });
+const manual = (over = {}) => job({ reason: 'command', headSha: '', trigger: 'manual', requestedBy: 'octo-lead', commentId: '31', association: 'member', installation: '99', ...over });
 
 test('a second trigger for a pull request replaces its pending job and starts it afresh', async () => {
   const db = await testDb();
@@ -16,7 +18,8 @@ test('a second trigger for a pull request replaces its pending job and starts it
   const second = (await enqueueJob(db, job({ reason: 'synchronize', headSha: 'h2', runAt: at(240), now: at(60), delivery: 'd2' })))!;
   assert.equal(second, first);
   assert.deepEqual(await unfinishedJobs(db), [{
-    id: first, ref: REF, reason: 'synchronize', headSha: 'h2', status: 'pending', outcome: null, runAt: at(240), starts: 0, createdAt: at(60),
+    id: first, ref: REF, reason: 'synchronize', headSha: 'h2',
+    trigger: 'automatic', requestedBy: null, commentId: null, association: null, installation: null, status: 'pending', outcome: null, runAt: at(240), starts: 0, createdAt: at(60),
   }]);
   await db.close();
 });
@@ -141,5 +144,46 @@ test('deleteFinishedJobs removes finished jobs older than the time given and no 
   const open = (await enqueueJob(db, job({ ref: { ...REF, number: 9 } })))!;
   assert.equal(await deleteFinishedJobs(db, at(50)), 1);
   assert.deepEqual([await getJob(db, old), (await getJob(db, recent))?.id, (await getJob(db, open))?.id], [null, recent, open]);
+  await db.close();
+});
+test('a manual job replaces the pending automatic one and carries who asked', async () => {
+  const db = await testDb();
+  const first = (await enqueueJob(db, job({ runAt: at(180) })))!;
+  assert.equal(await enqueueJob(db, manual({ runAt: at(5), now: at(5) })), first);
+  const j = await getJob(db, first);
+  assert.deepEqual(
+    [j?.trigger, j?.reason, j?.headSha, j?.runAt, j?.requestedBy, j?.commentId, j?.association, j?.installation, j?.starts],
+    ['manual', 'command', '', at(5), 'octo-lead', '31', 'member', '99', 0]);
+  await db.close();
+});
+test('a push does not replace a pending manual job', async () => {
+  const db = await testDb();
+  const first = (await enqueueJob(db, manual()))!;
+  assert.equal(await enqueueJob(db, job({ reason: 'synchronize', headSha: 'h2', runAt: at(240), now: at(60) })), null);
+  const j = await getJob(db, first);
+  assert.deepEqual([j?.trigger, j?.reason, j?.runAt], ['manual', 'command', at(0)]);
+  await db.close();
+});
+test('a manual job that may not replace is stored only when nothing is pending', async () => {
+  const db = await testDb();
+  const first = (await enqueueJob(db, job({ runAt: at(180) })))!;
+  assert.equal(await enqueueJob(db, manual({ replace: false })), null);
+  assert.deepEqual([(await getJob(db, first))?.trigger, (await unfinishedJobs(db)).length], ['automatic', 1]);
+  const alone = await enqueueJob(db, manual({ ref: { ...REF, number: 8 }, replace: false }));
+  assert.equal((await getJob(db, alone!))?.trigger, 'manual');
+  await db.close();
+});
+test('a second manual job replaces the first', async () => {
+  const db = await testDb();
+  const first = (await enqueueJob(db, manual()))!;
+  assert.equal(await enqueueJob(db, manual({ requestedBy: 'octo-dev', commentId: '32', now: at(9), runAt: at(9) })), first);
+  assert.deepEqual([(await getJob(db, first))?.requestedBy, (await unfinishedJobs(db)).length], ['octo-dev', 1]);
+  await db.close();
+});
+test('an automatic job is read back with no requester', async () => {
+  const db = await testDb();
+  const id = (await enqueueJob(db, job()))!;
+  const j = await getJob(db, id);
+  assert.deepEqual([j?.trigger, j?.requestedBy, j?.commentId, j?.association, j?.installation], ['automatic', null, null, null, null]);
   await db.close();
 });

@@ -119,7 +119,8 @@ export async function runReviewJob(job: Job, deps: ReviewJobDeps): Promise<void>
       if (live.info.headSha !== job.headSha) {
         const head = live.info.headSha;
         return await dropped('stale_head', () => db.transaction(async (tx) => {
-          await enqueueJob(tx, { ref: job.ref, reason: job.reason, headSha: head, runAt: at(QUIET_SECONDS * 1000), now: nowIso, delivery: null, replace: false });
+          await enqueueJob(tx, { ref: job.ref, reason: job.reason, headSha: head, runAt: at(QUIET_SECONDS * 1000), now: nowIso, delivery: null, replace: false,
+            trigger: 'automatic', requestedBy: null, commentId: null, association: null, installation: null });
           await finishJob(tx, job.id, 'dropped', 'stale_head', nowIso);
         }));
       }

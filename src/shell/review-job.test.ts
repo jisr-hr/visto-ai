@@ -17,6 +17,8 @@ import type { ReviewJobDeps } from './review-job.ts';
 const REF = { service: 'github', owner: 'acme', repo: 'shop', number: 7 } as const;
 const at = (seconds: number): string => new Date(Date.parse('2026-03-01T10:00:00.000Z') + seconds * 1000).toISOString();
 
+const AUTOMATIC = { trigger: 'automatic' as const, requestedBy: null, commentId: null, association: null, installation: null };
+
 let db: Db;
 beforeEach(async () => { db = await testDb(); });
 afterEach(async () => { await db.close(); });
@@ -59,7 +61,7 @@ async function harness(options: Options = {}) {
       mergedAt: null, closedAt: null, mergeCommit: null, installation: '99', updatedAt: at(0),
     });
   }
-  await enqueueJob(db, { ref: REF, reason: 'opened', headSha: 'h1', runAt: at(0), now: at(0), delivery: 'd1', replace: true });
+  await enqueueJob(db, { ref: REF, reason: 'opened', headSha: 'h1', runAt: at(0), now: at(0), delivery: 'd1', replace: true, ...AUTOMATIC });
   const jobs = await unfinishedJobs(db);
   let job = (await claimJob(db, jobs.find((j) => j.status === 'pending')!.id, at(0)))!;
   if (options.secondStart === true) {
@@ -184,7 +186,7 @@ test('a job whose head has moved is dropped, and the live head gets a job due af
 });
 test('a job whose head has moved leaves the job the newer head already has', async () => {
   const h = await harness({ live: { ...LIVE, info: { ...LIVE.info, headSha: 'h2' } } });
-  const own = (await enqueueJob(db, { ref: REF, reason: 'synchronize', headSha: 'h2', runAt: at(100), now: at(1), delivery: 'd9', replace: true }))!;
+  const own = (await enqueueJob(db, { ref: REF, reason: 'synchronize', headSha: 'h2', runAt: at(100), now: at(1), delivery: 'd9', replace: true, ...AUTOMATIC }))!;
   await runReviewJob(h.job, h.deps);
   assert.deepEqual((await unfinishedJobs(db)).map((j) => [j.id, j.reason, j.runAt]), [[own, 'synchronize', at(100)]]);
   assert.equal((await getJob(db, h.job.id))?.outcome, 'stale_head');

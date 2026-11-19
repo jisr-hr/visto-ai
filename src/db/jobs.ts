@@ -5,46 +5,65 @@ import type { Db } from './types.ts';
 export type JobStatus = 'pending' | 'running' | 'done' | 'dropped';
 export interface Job {
   id: number; ref: PullRequestRef;      // owner and repo in lower case
-  reason: string;                       // the event that queued it: opened, reopened, ready_for_review, synchronize, retargeted
-  headSha: string;                      // the head that event named
+  reason: string;                       // opened, reopened, ready_for_review, synchronize, retargeted, command or command_retry
+  headSha: string;                      // the head the event named; '' for a manual job, which reviews the live head
+  trigger: 'automatic' | 'manual';
+  requestedBy: string | null;           // who commented /review
+  commentId: string | null;             // that comment
+  association: string | null;           // the commenter's association with the repository, as the event gave it
+  installation: string | null;          // the installation the command came through
   status: JobStatus; outcome: string | null;
   runAt: string; starts: number; createdAt: string;
 }
 
 interface Row {
   id: number; service: 'github'; owner: string; repo: string; number: number;
-  reason: string; head_sha: string; status: JobStatus; outcome: string | null;
+  reason: string; head_sha: string; trigger: 'automatic' | 'manual';
+  requested_by: string | null; comment_id: string | null; association: string | null; installation: string | null;
+  status: JobStatus; outcome: string | null;
   run_at: Date; starts: number; created_at: Date;
 }
-const COLUMNS = 'id, service, owner, repo, number, reason, head_sha, status, outcome, run_at, starts, created_at';
+const COLUMNS = 'id, service, owner, repo, number, reason, head_sha, trigger, requested_by, comment_id, association, installation, '
+  + 'status, outcome, run_at, starts, created_at';
 
 function toJob(r: Row): Job {
   return {
     id: r.id, ref: { service: r.service, owner: r.owner, repo: r.repo, number: r.number },
-    reason: r.reason, headSha: r.head_sha, status: r.status, outcome: r.outcome,
+    reason: r.reason, headSha: r.head_sha, trigger: r.trigger,
+    requestedBy: r.requested_by, commentId: r.comment_id, association: r.association, installation: r.installation,
+    status: r.status, outcome: r.outcome,
     runAt: r.run_at.toISOString(), starts: r.starts, createdAt: r.created_at.toISOString(),
   };
 }
 
 /**
  * One pending job per pull request. With none, a job is stored and its id returned. With one: when `replace` is true
- * its reason, head, time and delivery are replaced, its starts go back to 0, its creation time becomes `now` and its id
- * is returned; when `replace` is false it is left as it is and null is returned.
+ * every field of the pending job becomes this job's, its starts go back to 0 and its id is returned, except that an
+ * automatic job never replaces a pending manual one (null is returned and nothing changes); when `replace` is false
+ * the pending job is left as it is and null is returned.
  */
-export async function enqueueJob(db: Db, j: { ref: PullRequestRef; reason: string; headSha: string; runAt: string; now: string; delivery: string | null; replace: boolean }): Promise<number | null> {
-  const onConflict = j.replace
-    ? `do update set reason = excluded.reason, head_sha = excluded.head_sha, run_at = excluded.run_at,
-              starts = 0, created_at = excluded.created_at, delivery = excluded.delivery`
-    : 'do nothing';
+export async function enqueueJob(db: Db, j: {
+  ref: PullRequestRef; reason: string; headSha: string; runAt: string; now: string; delivery: string | null; replace: boolean;
+  trigger: 'automatic' | 'manual'; requestedBy: string | null; commentId: string | null; association: string | null; installation: string | null;
+}): Promise<number | null> {
+  const onConflict = !j.replace
+    ? 'do nothing'
+    : `do update set reason = excluded.reason, head_sha = excluded.head_sha, trigger = excluded.trigger,
+              requested_by = excluded.requested_by, comment_id = excluded.comment_id, association = excluded.association,
+              installation = excluded.installation, run_at = excluded.run_at,
+              starts = 0, created_at = excluded.created_at, delivery = excluded.delivery
+       ${j.trigger === 'automatic' ? "where visto_ai.jobs.trigger = 'automatic'" : ''}`;
   const rows = await db.query<{ id: number }>(
-    `insert into visto_ai.jobs (service, owner, repo, number, reason, head_sha, status, run_at, starts, created_at, delivery)
-     values ($1, $2, $3, $4, $5, $6, 'pending', $7::timestamptz, 0, $8::timestamptz, $9)
+    `insert into visto_ai.jobs (service, owner, repo, number, reason, head_sha, status, run_at, starts, created_at, delivery,
+                                trigger, requested_by, comment_id, association, installation)
+     values ($1, $2, $3, $4, $5, $6, 'pending', $7::timestamptz, 0, $8::timestamptz, $9, $10, $11, $12, $13, $14)
      on conflict (service, owner, repo, number) where status = 'pending'
      ${onConflict}
      returning id`,
     [
       j.ref.service, storable(j.ref.owner).toLowerCase(), storable(j.ref.repo).toLowerCase(), j.ref.number,
       storable(j.reason), storable(j.headSha), j.runAt, j.now, storableOrNull(j.delivery),
+      j.trigger, storableOrNull(j.requestedBy), storableOrNull(j.commentId), storableOrNull(j.association), storableOrNull(j.installation),
     ]);
   return rows[0]?.id ?? null;
 }
