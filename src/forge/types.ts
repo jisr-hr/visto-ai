@@ -108,3 +108,21 @@ export interface AppIdentity {
   /** What the app lacks: one entry for each permission or event a feature needs and the app has not got. */
   lacks(dryRun: boolean): Promise<FeatureOff[]>;
 }
+export interface ReviewDraft {
+  commit: string;                            // the commit the review was computed for
+  body: string;
+  comments: Array<{ path: string; side: Side; line: number; body: string }>;
+}
+export interface PostedComment { id: string; path: string; side: Side; line: number | null; body: string }
+export interface ForgeWriter {
+  /** Posts one review as a comment, pinned to `draft.commit`. Rejects `review_rejected` when the git service refuses what it holds; any other failure rejects with a short code and says nothing about whether the review was created. */
+  publishReview(ref: PullRequestRef, installation: string, draft: ReviewDraft): Promise<{ id: string }>;
+  /** The app's own reviews of the pull request that have a body, newest first, each with the commit it is pinned to. */
+  listOwnReviews(ref: PullRequestRef, installation: string): Promise<Array<{ id: string; commit: string }>>;
+  /** The inline comments of one review, read from the pull request's own comment list. null when that list was cut short. */
+  listReviewComments(ref: PullRequestRef, installation: string, reviewId: string): Promise<PostedComment[] | null>;
+  /** Puts a reaction on a general comment of a pull request. */
+  react(ref: PullRequestRef, installation: string, commentId: string, reaction: 'eyes' | 'confused'): Promise<void>;
+  /** Writes a general comment on the pull request. */
+  comment(ref: PullRequestRef, installation: string, body: string): Promise<void>;
+}
