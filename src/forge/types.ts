@@ -86,7 +86,7 @@ export type ForgeEvent =
   | { kind: 'pull_request'; action: PullRequestAction; facts: PullRequestFacts }
   | { kind: 'review'; ref: PullRequestRef; review: HumanReview }
   | { kind: 'inline_comment'; ref: PullRequestRef; comment: HumanInlineComment }
-  | { kind: 'general_comment'; ref: PullRequestRef; comment: GeneralComment }
+  | { kind: 'general_comment'; ref: PullRequestRef; installation: string | null; comment: GeneralComment }
   | { kind: 'thread'; ref: PullRequestRef; action: 'resolved' | 'unresolved'; thread: string; rootComment: string | null; actor: string; actorIsBot: boolean }
   | { kind: 'ignored'; reason: 'unknown_event' | 'unknown_action' | 'not_a_pull_request' | 'malformed' };
 export type WebhookReading =

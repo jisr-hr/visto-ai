@@ -52,6 +52,12 @@ function refOf(p: Record<string, unknown>, number: unknown): PullRequestRef {
   return { service: 'github', owner, repo, number: whole(number) };
 }
 
+function installationOf(p: Record<string, unknown>): string | null {
+  const id = isObject(p.installation) ? p.installation.id : undefined;
+  if (id !== undefined && typeof id !== 'number' && typeof id !== 'string') throw bad();
+  return id === undefined ? null : String(id);
+}
+
 function factsOf(p: Record<string, unknown>): PullRequestFacts {
   const pr = obj(p.pull_request);
   const base = obj(pr.base);
@@ -61,14 +67,13 @@ function factsOf(p: Record<string, unknown>): PullRequestFacts {
   if (!merged && pr.state !== 'open' && pr.state !== 'closed') throw bad();
   let mergeCommit: string | null = null;
   if (merged && pr.merge_commit_sha !== undefined && pr.merge_commit_sha !== null) mergeCommit = str(pr.merge_commit_sha);
-  const id = isObject(p.installation) ? p.installation.id : undefined;
-  if (id !== undefined && typeof id !== 'number' && typeof id !== 'string') throw bad();
+  const installation = installationOf(p);
   return {
     ref: refOf(p, p.number), ...authorOf(pr.user),
     baseBranch: str(base.ref), headBranch: str(head.ref), headSha: str(head.sha), draft: pr.draft,
     state: merged ? 'merged' : (pr.state as 'open' | 'closed'),
     mergedAt: isoOrNull(pr.merged_at), closedAt: isoOrNull(pr.closed_at), mergeCommit,
-    installation: id === undefined ? null : String(id), updatedAt: iso(pr.updated_at),
+    installation, updatedAt: iso(pr.updated_at),
   };
 }
 
@@ -113,7 +118,7 @@ function build(name: string, p: Record<string, unknown>): ForgeEvent {
       if (issue.pull_request === undefined || issue.pull_request === null) return { kind: 'ignored', reason: 'not_a_pull_request' };
       const comment = generalCommentOf(p.comment);
       short(comment.id);
-      return { kind: 'general_comment', ref, comment: { ...comment, at: iso(comment.at) } };
+      return { kind: 'general_comment', ref, installation: installationOf(p), comment: { ...comment, at: iso(comment.at) } };
     }
     case 'pull_request_review_thread': {
       if (p.action !== 'resolved' && p.action !== 'unresolved') return unknownAction;

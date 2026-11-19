@@ -32,7 +32,7 @@ const inlinePayload = (over: Record<string, unknown> = {}, action = 'created') =
   },
 });
 const issuePayload = (issue: Record<string, unknown> = { number: 7, pull_request: {} }, action = 'created') => ({
-  action, repository: repo(), issue,
+  action, repository: repo(), issue, installation: { id: 99 },
   comment: { id: 31, user: user('octo-dev', 'User'), author_association: 'OWNER', created_at: T, body: 'hello' },
 });
 const threadPayload = (action = 'resolved', comments: unknown[] = [{ id: 21 }, { id: 22 }]) => ({
@@ -92,9 +92,12 @@ test('inline comment', () => {
 
 test('general comment', () => {
   assert.deepEqual(eventOf('issue_comment', issuePayload()), {
-    kind: 'general_comment', ref,
+    kind: 'general_comment', ref, installation: '99',
     comment: { id: '31', author: 'octo-dev', authorIsBot: false, association: 'owner', at: TI, body: 'hello' },
   });
+  const bare: Record<string, unknown> = issuePayload();
+  delete bare.installation;
+  assert.equal((eventOf('issue_comment', bare) as { installation: unknown }).installation, null);
   assert.deepEqual(eventOf('issue_comment', issuePayload({ number: 7 })), { kind: 'ignored', reason: 'not_a_pull_request' });
   assert.deepEqual(eventOf('issue_comment', issuePayload(undefined, 'edited')), { kind: 'ignored', reason: 'unknown_action' });
   assert.deepEqual(eventOf('issue_comment', issuePayload(undefined, 'deleted')), { kind: 'ignored', reason: 'unknown_action' });

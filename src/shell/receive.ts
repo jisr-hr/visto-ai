@@ -6,6 +6,7 @@ import { recordDelivery } from '../db/deliveries.ts';
 import type { Db } from '../db/types.ts';
 import type { WebhookReader } from '../forge/types.ts';
 import { captureOf } from './capture.ts';
+import { commandOf } from './commands.ts';
 import { triggerOf } from './triggers.ts';
 
 export interface HttpAnswer { status: number; body: string }
@@ -15,7 +16,10 @@ export interface ReceiveDeps {
   onQueued: () => void;                              // called after the commit, once per delivery that stored or replaced a job
 }
 
-interface Queued { job: 'queued' | 'delayed' | null; skip: string | null }
+interface Queued { job: 'queued' | 'delayed' | null; skip: string | null; command: 'review' | null }
+
+/** Associations that may replace a pending job with a command. */
+const HAS_ACCESS = new Set<string>(['owner', 'member', 'collaborator']);
 
 interface Who { delivery: string | null; name: string | null; action: string | null }
 const NOBODY: Who = { delivery: null, name: null, action: null };
@@ -59,7 +63,7 @@ export async function receive(
           outcome: capture.outcome, reason: capture.outcome === 'ignored' ? capture.reason : null,
         });
         if (!fresh) return null;
-        const queued: Queued = { job: null, skip: null };
+        const queued: Queued = { job: null, skip: null, command: null };
         if (capture.outcome === 'handled') {
           if (capture.pullRequest) {
             const newest = await savePullRequest(tx, capture.pullRequest);
@@ -82,6 +86,17 @@ export async function receive(
             }
           }
           if (capture.activity) await recordActivity(tx, capture.activity);
+          if (reading.event.kind === 'general_comment' && commandOf(reading.event.comment.body) === 'review') {
+            const { ref, installation, comment } = reading.event;
+            const now = deps.clock().toISOString();
+            const id = await enqueueJob(tx, {
+              ref, reason: 'command', headSha: '', runAt: now, now, delivery: reading.delivery,
+              replace: HAS_ACCESS.has(comment.association),
+              trigger: 'manual', requestedBy: comment.author, commentId: comment.id, association: comment.association, installation,
+            });
+            queued.command = 'review';
+            if (id !== null) queued.job = 'queued';
+          }
         }
         return queued;
       });
@@ -99,6 +114,15 @@ export async function receive(
     }
     if (reading.event.kind === 'pull_request') {
       note(who, 'accepted', null, { job: stored.job, skip: stored.skip });
+      if (stored.job !== null) {
+        try {
+          deps.onQueued();
+        } catch {
+          // a wake-up that fails changes nothing
+        }
+      }
+    } else if (stored.command !== null) {
+      note(who, 'accepted', null, { command: stored.command, job: stored.job });
       if (stored.job !== null) {
         try {
           deps.onQueued();
