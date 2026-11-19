@@ -1080,7 +1080,7 @@ This task is about **automatic** jobs. A manual job is Task 8's; until then it t
 2. **The live read** and **3. the checks** are as before.
 4. **Already reviewed?** `lastPublishedRun(db, job.ref)`. When there is one: the same head and base drops the job as `already_reviewed`; any other drops it as `later_head` (call 2). `hasOkRun` is not asked: a review that was computed and never published does not count.
 5. **A stored review?** `unpublishedRun(db, job.ref, head, base, now - STORED_REVIEW_MS)`. When there is one, this start is a **resumed** one: the engine is not called, nothing is rendered, neither the health nor the spend guard is told anything, and step 8 publishes that run (call 6).
-6. **The review** is as before.
+6. **The review.** A start that is not resumed first asks the git service what the database may not know: `writer.listOwnReviews(job.ref, installation)`. A review of the app's own on the live head drops the job as `already_reviewed`, and one on any other commit drops it as `later_head`, both before anything is paid. Without this, a review that is on the pull request but not in the database (its mark was lost and the head then moved, or the database was reset) would make every later head pay for a review that step 8 can only answer with `already_reviewed`. A rejection of that read is a failure of the git service before any model call and ends as one: a failed run with stage `prepare` and the rejection's code is recorded, and the job is put back with its start counted. Then the review is as before.
 7. **The record.**
    - A review that failed, a refused key, and a failure of the git service before any model call end as in plan 4. Nothing is published.
    - A review that ended `ok` but whose text could not be rendered (its body is empty) is recorded and the job finished in one transaction, `done` with outcome `render_failed`. It is never posted.
@@ -1096,6 +1096,8 @@ This task is about **automatic** jobs. A manual job is Task 8's; until then it t
 The `review` log entry gains `published` (true or false), `review` (the review's id or null), `publish` (the outcome's kind, or null when nothing was to publish), `publish_code` (the code of a `failed` publication, else null), `resumed` and `adopted`. On a resumed start it carries `calls: 0` and `cost: 0`: the review was logged with its cost when it was computed.
 
 The function's guarantees stand: it never rejects; before it resolves the job is finished, put back, or left `running` on purpose after three failed writes; once the engine has returned, nothing puts the job back except a publication that `failed`.
+
+**Changed after this task was reviewed.** The check before paying in step 6 was added then. In the tests below, every start out of dry run that is not resumed therefore begins with one `listOwnReviews` call; the test of a review on an earlier head expects the job dropped as `later_head` with no model call; and tests were added for a review on the live head that only the git service knows of, for a rejected read, and for a review that appears between the check and the publication. The tests as they stand are in `src/shell/review-job.test.ts`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1254,7 +1256,7 @@ A job whose `trigger` is `manual` differs from an automatic one in this (8.1, D1
 
 1. **Access.** Before any request, the job's `association` must be `owner`, `member` or `collaborator`. Otherwise the command is **refused** with `not_allowed`. In that same transaction an automatic job is stored for the pull request's stored head (`replace: false`, reason `opened`, due at once) when the pull request is stored and open: the command may have stood in the way of a push's job, and the head must still get its review (call 18).
 2. **The pull request.** After the live read, one that is not there ends the job as `dropped`, `not_found`, with no answer. One that is not open is refused with `closed`. The filters of automatic reviews are not applied, and the head is not compared: the job reviews the live head.
-3. **Already reviewed.** Out of dry run, a pull request that has a published review is refused with `already_reviewed`, whatever its head. In dry run a head that has an `ok` run is dropped as `already_reviewed`, as an automatic job is.
+3. **Already reviewed.** Out of dry run, a pull request that has a published review is refused with `already_reviewed`, whatever its head. In dry run a head that has an `ok` run is dropped as `already_reviewed`, as an automatic job is. Out of dry run, and when no stored review is waiting for the live head, the check of Task 7's step 6 is made here too, before the comment gets its `eyes`: a review of the app's own that only the git service knows of, on any commit, is a refusal with `already_reviewed`, and a rejection of that read ends as for an automatic job (a failed run recorded, the job put back, nothing said).
 4. **Accepted.** Only now the service puts an `eyes` reaction on the comment.
 5. **The review** runs with `trigger: 'manual'`, and the review text names who asked (`requestedBy`).
 6. **The ends.**
@@ -1275,8 +1277,8 @@ With `manualJob(options)`: the harness of Task 7 with a job enqueued as `manual`
 test('a /review from a member is accepted, reviewed as requested, and published', async () => {
   const h = await manualJob();
   await runReviewJob(h.job, h.deps);
-  assert.deepEqual(h.writes.map((w) => w[0]), ['react', 'listOwnReviews', 'publishReview', 'listReviewComments']);
-  assert.deepEqual(h.writes[0], ['react', '31', 'eyes']);
+  assert.deepEqual(h.writes.map((w) => w[0]), ['listOwnReviews', 'react', 'listOwnReviews', 'publishReview', 'listReviewComments']);
+  assert.deepEqual(h.writes[1], ['react', '31', 'eyes']);
   assert.deepEqual([h.inputs[0]!.trigger, (await listRuns(db, REF))[0]!.trigger, (await getJob(db, h.job.id))?.outcome], ['manual', 'manual', 'published']);
   assert.equal((await listRuns(db, REF))[0]!.body.includes('requested by @octo-lead'), true);
 });
@@ -1300,6 +1302,12 @@ test('a /review on a closed pull request, or on one that has its review, is refu
   await runReviewJob(second.job, second.deps);
   assert.deepEqual([second.writes, second.inputs.length],
     [[['react', '31', 'confused'], ['comment', '@octo-lead The review was not started (`already_reviewed`).']], 0]);
+});
+test('a /review on a pull request whose review only the git service knows of is refused before anything is paid', async () => {
+  const h = await manualJob({ own: [{ id: '470', commit: 'h0' }] });
+  await runReviewJob(h.job, h.deps);
+  assert.deepEqual(h.writes, [['listOwnReviews'], ['react', '31', 'confused'], ['comment', '@octo-lead The review was not started (`already_reviewed`).']]);
+  assert.deepEqual([h.inputs.length, (await getJob(db, h.job.id))?.outcome], [0, 'refused']);
 });
 test('a draft, an ignored author and a filtered base branch do not stop a /review, and the live head is the one reviewed', async () => {
   const h = await manualJob({ live: { ...LIVE, info: { ...LIVE.info, draft: true, author: 'dependabot[bot]', headSha: 'h9' } }, settings: { ...SETTINGS, baseBranches: ['release'] } });
