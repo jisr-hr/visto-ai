@@ -27,6 +27,7 @@ export async function migrate(db: Db, migrations: Migration[]): Promise<string[]
   for (const m of [...migrations].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))) {
     if (done.has(m.name)) continue;
     await db.transaction(async (tx) => {
+      await tx.query('set local statement_timeout = 0');
       await tx.script(m.sql);
       await tx.query('insert into visto_ai.schema_migrations (name) values ($1)', [m.name]);
     });

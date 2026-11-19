@@ -24,7 +24,7 @@ export default tseslint.config(
   {
     files: ['src/db/**/*.ts'],
     rules: {
-      'no-restricted-imports': ['error', { patterns: [githubAdapter] }],
+      'no-restricted-imports': ['error', { patterns: [githubAdapter, '**/engine/**'] }],
     },
   },
   {

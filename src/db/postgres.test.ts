@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { postgresDbFrom } from './postgres.ts';
+import { POOL_OPTIONS, postgresDbFrom } from './postgres.ts';
 import type { ClientLike, PoolLike } from './postgres.ts';
 
 function fakePool(options: { failOn?: string; rows?: unknown[] } = {}) {
@@ -125,4 +125,7 @@ test('a client with a normal rollback is released once, without destroying it', 
   await assert.rejects(() => db.transaction(async () => { throw new Error('x'); }));
   assert.equal(f.clientState.releaseArgs.length, 1);
   assert.ok(f.clientState.releaseArgs[0]!.length === 0 || f.clientState.releaseArgs[0]![0] === undefined);
+});
+test('the pool bounds a statement and keeps its connections alive', () => {
+  assert.deepEqual(POOL_OPTIONS, { max: 5, connectionTimeoutMillis: 5000, statement_timeout: 15000, keepAlive: true, keepAliveInitialDelayMillis: 10000 });
 });

@@ -9,6 +9,9 @@ export interface PoolLike extends Pick<ClientLike, 'query'> {
   connect(): Promise<ClientLike>; end(): Promise<void>;
   on(event: 'error', listener: (error: Error) => void): unknown;
 }
+export const POOL_OPTIONS = {
+  max: 5, connectionTimeoutMillis: 5000, statement_timeout: 15000, keepAlive: true, keepAliveInitialDelayMillis: 10000,
+} as const;
 type Log = (entry: Record<string, unknown>) => void;
 
 function over(runner: Pick<ClientLike, 'query'>, rest: Pick<Db, 'transaction' | 'close'>): Db {
@@ -64,5 +67,5 @@ export function postgresDbFrom(pool: PoolLike, log: Log): Db {
 }
 
 export function postgresDb(url: string, log: Log): Db {
-  return postgresDbFrom(new pg.Pool({ connectionString: url, max: 5, connectionTimeoutMillis: 5000 }), log);
+  return postgresDbFrom(new pg.Pool({ connectionString: url, ...POOL_OPTIONS }), log);
 }
