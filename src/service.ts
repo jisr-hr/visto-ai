@@ -5,8 +5,9 @@ import type { Db, InstanceLock } from './db/types.ts';
 import { repoSettingsFor } from './config/load.ts';
 import type { ServiceConfig } from './config/load.ts';
 import type { ReviewDeps, ReviewInput, ReviewResult } from './engine/types.ts';
-import type { ForgeAccess, HookDeliveries, Source, WebhookReader } from './forge/types.ts';
+import type { ForgeAccess, ForgeWriter, HookDeliveries, Source, WebhookReader } from './forge/types.ts';
 import { ALERT_TIMEOUT_MS, createAlerts } from './shell/alerts.ts';
+import { dryWriter } from './shell/dry-writer.ts';
 import { createListener } from './shell/http.ts';
 import type { RequestLike, ResponseLike } from './shell/http.ts';
 import { checkModelKey, createModelHealth } from './shell/model-health.ts';
@@ -26,6 +27,8 @@ export interface ServiceDeps {
   /** null when another instance holds the lock. */
   takeLock: () => Promise<InstanceLock | null>;
   forge: ForgeAccess; hooks: HookDeliveries;
+  /** What writes to the git service. In dry run the review job is given a writer that refuses every call instead. */
+  writer: ForgeWriter;
   fetch: typeof fetch;
   sleep: (ms: number) => Promise<void>;
   /** A repeating timer. Returns its cancel. `work` never rejects; what it returns is there for a test to wait on. */
@@ -86,7 +89,7 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps): Pr
       inputTokensPerCall: config.limits.inputTokensPerCall, batchesPerReview: config.limits.batchesPerReview,
       modelTimeoutSeconds: config.model.timeoutSeconds,
     },
-    dryRun: config.dryRun, engineDeps: deps.engineDeps, review: deps.review, lineUrl: deps.lineUrl, health, spend,
+    dryRun: config.dryRun, writer: config.dryRun ? dryWriter() : deps.writer, engineDeps: deps.engineDeps, review: deps.review, lineUrl: deps.lineUrl, health, spend,
   };
   const runner = createRunner({
     db, concurrency: config.limits.queueConcurrency, clock, log: say,

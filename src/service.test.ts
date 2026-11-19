@@ -78,6 +78,7 @@ async function harness(options: Options = {}) {
   const fetched: string[] = [];
   const listedSince: string[] = [];
   const logged: Array<Record<string, unknown>> = [];
+  const writes: unknown[][] = [];
   const listings = [...(options.listings ?? [])];
   let listener: ((req: RequestLike, res: ResponseLike) => void) | null = null;
   let current: ForgeEvent = PING;
@@ -104,7 +105,7 @@ async function harness(options: Options = {}) {
   const lock: InstanceLock = { release: async () => { events.push('release'); } };
 
   const h = {
-    db, events, timers, inputs, fetched, listedSince, logged,
+    db, events, timers, inputs, fetched, listedSince, logged, writes,
     port: 0,
     /** What the clock reads; a test may move it. */
     now: options.now ?? at(0),
@@ -147,6 +148,13 @@ async function harness(options: Options = {}) {
           return next;
         },
         redeliver: () => Promise.resolve(),
+      },
+      writer: {
+        publishReview: async (_ref, _installation, draft) => { writes.push(['publishReview', draft.commit]); return { id: '501' }; },
+        listOwnReviews: async () => { writes.push(['listOwnReviews']); return []; },
+        listReviewComments: async () => { writes.push(['listReviewComments']); return []; },
+        react: async () => { writes.push(['react']); },
+        comment: async () => { writes.push(['comment']); },
       },
       fetch: (async (url: string | URL | Request) => {
         fetched.push(String(url));
