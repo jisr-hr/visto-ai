@@ -473,9 +473,7 @@ export async function review(input: ReviewInput, deps: ReviewDeps): Promise<Revi
     });
   } catch (error) {
     let code = 'internal_error';
-    if (stage === 'context' && sourceErrors.has(error)) {
-      code = error instanceof Error && SOURCE_CODE.test(error.message) ? error.message : 'source_error';
-    }
+    if (stage === 'context' && sourceErrors.has(error)) code = errorCode(error);
     const name = error instanceof Error ? error.name : 'unknown';
     safeLog(deps, { event: 'internal_error', stage, name });
     return failedResult(stage, code, usage, audit, 'ok', input.repoConfig.scoreThreshold, due, said, answered);

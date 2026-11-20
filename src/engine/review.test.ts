@@ -1451,3 +1451,64 @@ test('a new hunk that only adds lines is not named for its removed lines, and a 
   await review({ ...input, mode: 'incremental', history: historyFrom(first, { lastReview: LAST, readAt: HEAD0 }) }, d);
   assert.ok(sentText(d).includes(`\n${CHANGED_LINE}R2, R10; removed lines of B2\n`));
 });
+
+test('a major the model raised on a changed line outside the diff is not hidden when it is placed on a neighbouring line', async (t) => {
+  const first = await firstOf([sixFile(5)], onLines());
+  const d = deps({ files: [sixFile(5)], answers: [onLines(['major', 9])] });
+  contents(d, { [`${HEAD0}:src/t.ts`]: `${sixLines(5)}l7\nl8\nprChanged9\n`, [`${NOW}:src/t.ts`]: `${sixLines(5)}l7\nl8\nbase9\n` });
+  const r = await review({ ...input, mode: 'incremental', history: historyFrom(first, { lastReview: LAST, readAt: HEAD0 }) }, d);
+  await t.test('the header says R9', () => {
+    assert.ok(sentText(d).includes(`\n${CHANGED_LINE}R9\n`));
+  });
+  await t.test('the major is a finding, placed on 6', () => {
+    assert.deepEqual([r.findings.map((f) => [f.severity, f.line, f.requestedLine]), linesOf(r.unchanged)], [[['major', 6, 9]], []]);
+  });
+});
+
+test('a file whose present content cannot be read counts as changed throughout', async () => {
+  const first = await firstOf([sixFile(2)], onLines());
+  const d = deps({ files: [sixFile(5)], answers: [onLines()] });
+  contents(d, { [`${HEAD0}:src/t.ts`]: sixLines(2) });
+  await review({ ...input, mode: 'incremental', history: historyFrom(first, { lastReview: LAST, readAt: HEAD0 }) }, d);
+  assert.ok(sentText(d).includes(`\n${CHANGED_LINE}all\n`));
+});
+
+test('two contents too different to compare count as changed throughout', async () => {
+  const many = (count: number, prefix: string): string => Array.from({ length: count }, (_, i) => `${prefix} ${i}`).join('\n') + '\n';
+  const first = await firstOf([sixFile(2)], onLines());
+  const d = deps({ files: [sixFile(5)], answers: [onLines()] });
+  contents(d, { [`${HEAD0}:src/t.ts`]: many(6000, 'old'), [`${NOW}:src/t.ts`]: many(6000, 'new') });
+  await review({ ...input, mode: 'incremental', history: historyFrom(first, { lastReview: LAST, readAt: HEAD0 }) }, d);
+  assert.ok(sentText(d).includes(`\n${CHANGED_LINE}all\n`));
+});
+
+test('line endings are made alike before the two contents are compared', async () => {
+  const first = await firstOf([sixFile(2)], onLines());
+  const d = deps({ files: [sixFile(5)], answers: [onLines()] });
+  contents(d, { [`${HEAD0}:src/t.ts`]: sixLines(2).replaceAll('\n', '\r\n'), [`${NOW}:src/t.ts`]: sixLines(5) });
+  await review({ ...input, mode: 'incremental', history: historyFrom(first, { lastReview: LAST, readAt: HEAD0 }) }, d);
+  assert.ok(sentText(d).includes(`\n${CHANGED_LINE}R4\n`));
+});
+
+test('the packer counts the line of what changed', async () => {
+  const first = await firstOf([sixFile(2)], onLines());
+  const at = { [`${HEAD0}:src/t.ts`]: sixLines(2), [`${NOW}:src/t.ts`]: sixLines(5) };
+  const probe = deps({ files: [sixFile(5)] });
+  contents(probe, at);
+  const [without] = (await buildFileContexts(input.pullRequest, [sixFile(5)], probe.source)).contexts;
+  // Room for the file as it is without the line, and not with it: the packer must cut the full file to make room.
+  const limits = { ...input.limits, inputTokensPerCall: fixedTokens(CONTRACT, input.pullRequest, false, LAST.overview) + unitTokens(without!) };
+  const d = deps({ files: [sixFile(5)], answers: [onLines()] });
+  contents(d, at);
+  const r = await review({ ...input, limits, mode: 'incremental', history: historyFrom(first, { lastReview: LAST, readAt: HEAD0 }) }, d);
+  assert.ok(without!.full !== null);
+  assert.deepEqual(r.audit.filter((e) => e.action === 'full_file_cut').map((e) => e.subject), ['src/t.ts']);
+});
+
+test('a full review with a history and no last review has no count', async () => {
+  const first = await firstOf([sixFile(2)], onLines());
+  const d = deps({ files: [sixFile(5)], answers: [onLines(['blocker', 2])] });
+  contents(d, { [`${HEAD0}:src/t.ts`]: sixLines(2), [`${NOW}:src/t.ts`]: sixLines(5) });
+  const r = await review({ ...input, mode: 'full', history: historyFrom(first, { readAt: HEAD0 }) }, d);
+  assert.deepEqual([r.status, linesOf(r.findings), 'blockingOnUnchanged' in r], ['ok', [['blocker', 2]], false]);
+});

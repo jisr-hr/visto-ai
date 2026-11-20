@@ -14,7 +14,9 @@ export function reconcileMode(
   const audit: AuditEntry[] = [];
   for (const finding of findings) {
     const changed = changedOf(finding.path);
-    if (changed === null || finding.severity === 'blocker' || isChanged(changed, blocksOf(finding.path), finding.side, finding.line)) {
+    // Placement may move a finding onto a neighbouring line: the line the model named counts too.
+    const onChanged = (line: number | null): boolean => changed !== null && line !== null && isChanged(changed, blocksOf(finding.path), finding.side, line);
+    if (changed === null || finding.severity === 'blocker' || onChanged(finding.line) || onChanged(finding.requestedLine)) {
       kept.push(finding);
     } else if (finding.severity === 'major') {
       unchanged.push(finding);

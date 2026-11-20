@@ -28,3 +28,16 @@ test('a file that is new to the reviewer, and a file with nothing said about it,
     assert.deepEqual([out.kept, out.unchanged, out.audit], [findings, [], []]);
   });
 });
+
+test('a finding placed on an unchanged line is judged by the line the model named too', async (t) => {
+  const changedOf = () => ({ all: false, right: [[9, 9]] as Range[], leftBlocks: [] });
+  const moved = (severity: Severity, requestedLine: number): Finding => ({ ...f(severity, 6), requestedLine });
+  await t.test('a major and a minor whose requested line changed are kept', () => {
+    const out = reconcileMode([moved('major', 9), moved('minor', 9)], changedOf, () => []);
+    assert.deepEqual([out.kept.map((x) => x.severity), out.unchanged, out.audit], [['major', 'minor'], [], []]);
+  });
+  await t.test('with a requested line that did not change the major is listed and the minor dropped', () => {
+    const out = reconcileMode([moved('major', 8), moved('minor', 8)], changedOf, () => []);
+    assert.deepEqual([out.kept, out.unchanged.map((x) => x.severity), out.audit.map((a) => a.reason)], [[], ['major'], ['unchanged_line']]);
+  });
+});
