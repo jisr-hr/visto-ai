@@ -215,7 +215,8 @@ export function scoresToStore(result: unknown): Array<{ path: string; hash: stri
 ```ts
 /**
  * What a review tells a person about scores and coverage, as one text that can be compared: the threshold, every file's path and final score,
- * every block at or above the threshold by path, hash and score, and the paths not reviewed, each list sorted. Null when the result cannot be read.
+ * every block at or above the threshold by path, hash and score, every file-level score at or above it with its source, and each path not reviewed
+ * with its reason, each list sorted. Null when the result cannot be read.
  */
 export function shownOf(result: unknown): string | null;
 ```
@@ -231,7 +232,7 @@ export function shownOf(result: unknown): string | null;
 7. **`coveredAt`** holds every non-null `diffHash` the path had in a **published** run that had the path in `coverage.reviewed`. The stored `covered` flag is not asked: whether every block has a score is asked afresh, of what the history keeps (Task 3). A file that counts as 100 for a character stripped from a changed line is stored as not covered in every run, and would otherwise be sent again in every review.
 8. **`readAt`** is taken from the newest published run that has the path in `coverage.reviewed`: its `headSha`, and the `hash` and the `hunkHash` of every block the path had in it, with or without an entry. Null when no published run read the file.
 9. **`lastReview`** is null when `last` is null; else `last.headSha` and its result's `overview` (`''` when it cannot be read). **`shown`** is `shownOf` the result of the newest published earlier run of any mode, a re-check too; null when there is none.
-10. `shownOf` reads the result defensively and answers null when its `scores`, its `verdict.threshold` or its `coverage.notReviewed` cannot be read. Otherwise it answers one JSON text of: the threshold; `[path, finalScore]` for every file, sorted by path; `[path, hash, score]` for every block that has an entry at or above the threshold, sorted; the paths not reviewed, sorted. Two results give the same text exactly when `Human review` and `Coverage` would name the same things with the same scores.
+10. `shownOf` reads the result defensively and answers null when its `scores`, its `verdict.threshold` or its `coverage.notReviewed` cannot be read. Otherwise it answers one JSON text of: the threshold; `[path, finalScore]` for every file, sorted by path; `[path, hash, score]` for every block that has an entry at or above the threshold, sorted; `[path, fileLevel.score, fileLevel.source]` for every file whose file-level score is at or above the threshold, sorted; `[path, reason]` for every file not reviewed, sorted. Two results give the same text exactly when `Human review` and `Coverage` would name the same things with the same scores.
 11. `lastReviewOf`: the newest run that is `published` and whose `mode` is not `recheck`.
 12. `scoresToStore`: one entry for each block of the result that has an entry and no `origin`, with the score that was given: `raisedFrom` when it is a number, else `entry.score`. A block's path is its file's. Parts are stored like any block, by their own hash.
 
