@@ -12,7 +12,7 @@ import { createGithubAccess } from './forge/github/access.ts';
 import { createAppAuth } from './forge/github/app-auth.ts';
 import { createAppInfo } from './forge/github/app-info.ts';
 import { createGithubHookDeliveries } from './forge/github/hook-deliveries.ts';
-import { githubLineUrl } from './forge/github/links.ts';
+import { githubCommentUrl, githubLineUrl } from './forge/github/links.ts';
 import { createGithubWebhookReader } from './forge/github/webhook.ts';
 import { createGithubWriter } from './forge/github/writer.ts';
 import { startService } from './service.ts';
@@ -151,6 +151,7 @@ export async function main(argv: string[], env: Record<string, string | undefine
         engineDeps: (source) => ({ source, ...engine }),
         review,
         lineUrl: githubLineUrl,
+        commentUrl: githubCommentUrl,
         listen: (listener, port) => new Promise<Listening>((resolve, reject) => {
           const listening = createServer(listener);
           server = listening;

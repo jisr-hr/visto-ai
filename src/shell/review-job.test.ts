@@ -5,15 +5,17 @@ import type { Db } from '../db/types.ts';
 import { enqueueJob, claimJob, finishJob, getJob, requeueJob, unfinishedJobs } from '../db/jobs.ts';
 import type { Job } from '../db/jobs.ts';
 import { savePullRequest } from '../db/pull-requests.ts';
-import { listRuns, markPublished } from '../db/review-runs.ts';
-import { listComments } from '../db/review-comments.ts';
+import { listRuns, markPublished, recordRun } from '../db/review-runs.ts';
+import type { RunRecord } from '../db/review-runs.ts';
+import { listComments, recordComments } from '../db/review-comments.ts';
+import type { StoredComment } from '../db/review-comments.ts';
 import type { RepoSettings } from '../config/load.ts';
-import type { ForgeWriter, LivePullRequest, PostedComment, Source } from '../forge/types.ts';
+import type { ForgeWriter, LivePullRequest, PostedComment, ReviewThread, Source } from '../forge/types.ts';
 import { review } from '../engine/review.ts';
 import { renderReview } from '../engine/render/body.ts';
 import type { BlockScore } from '../engine/score/types.ts';
 import { SUBMIT_REVIEW } from '../engine/model/submit-review.ts';
-import type { ModelClient, ModelResponse, ReviewDeps, ReviewInput, ReviewResult } from '../engine/types.ts';
+import type { ModelClient, ModelResponse, ReviewDeps, ReviewInput, ReviewResult, ThreadVerdict } from '../engine/types.ts';
 import { runReviewJob } from './review-job.ts';
 import type { ReviewJobDeps } from './review-job.ts';
 
@@ -98,6 +100,12 @@ interface Options {
   writeFails?: boolean;
   /** The first n statements that finish the job reject. */
   finishFailures?: number;
+  /** What listThreads answers, one answer for each call, the last one repeated; an Error rejects. [] when none is given. */
+  threads?: Array<ReviewThread[] | Error>;
+  /** What canResolve answers; true when not given. */
+  canResolve?: boolean;
+  /** replyToThread, editThreadComment and resolveThread reject. */
+  threadWriteFails?: boolean;
 }
 
 async function harness(options: Options = {}) {
@@ -141,6 +149,8 @@ async function harness(options: Options = {}) {
   const writes: unknown[][] = [];
   const posts = [...(options.posts ?? [])];
   const owns = [...(options.own ?? [])];
+  const threadAnswers = [...(options.threads ?? [])];
+  const threadWrite = (): void => { if (options.threadWriteFails === true) throw new Error('github_502'); };
   const writer: ForgeWriter = {
     publishReview: async (_ref, _installation, draft) => {
       writes.push(['publishReview', draft.commit, draft.body, draft.comments.length]);
@@ -168,6 +178,15 @@ async function harness(options: Options = {}) {
       writes.push(['comment', body]);
       if (options.writeFails === true) throw new Error('github_502');
     },
+    listThreads: async () => {
+      writes.push(['listThreads']);
+      const threads = (threadAnswers.length > 1 ? threadAnswers.shift() : threadAnswers[0]) ?? [];
+      if (threads instanceof Error) throw threads;
+      return threads;
+    },
+    replyToThread: async (_installation, threadId, body) => { writes.push(['replyToThread', threadId, body]); threadWrite(); },
+    editThreadComment: async (_installation, node, body) => { writes.push(['editThreadComment', node, body]); threadWrite(); },
+    resolveThread: async (_installation, threadId) => { writes.push(['resolveThread', threadId]); threadWrite(); },
   };
   let finishFailuresLeft = options.finishFailures ?? 0;
   /** Whether this statement is one that finishes the job, and is to reject. */
@@ -227,6 +246,8 @@ async function harness(options: Options = {}) {
       return Promise.resolve(options.result ?? (options.renderThrows === true ? flaggedResult() : okResult()));
     },
     lineUrl: () => { if (options.renderThrows === true) throw new Error('no_link'); return 'https://git.example.test/x'; },
+    commentUrl: (_ref, commentId) => `https://git.example.test/c/${commentId}`,
+    canResolve: () => Promise.resolve(options.canResolve ?? true),
     health: { reviewed: (code, when) => { healthCalls.push(code); healthTimes.push(when.toISOString()); } },
     spend: { noteRun: (usage) => { spendCalls.push(usage); } },
   };
@@ -235,6 +256,39 @@ async function harness(options: Options = {}) {
 const live = (options: Options = {}) => harness({ dryRun: false, ...options });
 /** A job a /review comment stored: by octo-lead, comment 31, through installation 99; out of dry run unless given. */
 const manualJob = (options: Options = {}) => harness({ dryRun: false, ...options, manual: true });
+
+/** The finding of the review published at h0, and what it rendered. */
+const MAJOR = { path: 'src/a.ts', side: 'RIGHT' as const, line: 12, severity: 'major' as const, body: 'A check is missing.', quote: 'y', requestedLine: null };
+const EARLIER_RESULT = okResult({ findings: [MAJOR] });
+const EARLIER = renderReview(EARLIER_RESULT, { trigger: 'automatic', requestedBy: null, lineUrl: () => 'https://git.example.test/x', inline: true });
+const STORED_8001: StoredComment = { commentId: '8001', path: 'src/a.ts', side: 'RIGHT', line: 12, severity: 'major', quote: 'y' };
+/** A live run recorded and not published: by default at h1 against merge000, with okResult and its rendered text. */
+const recorded = (over: Partial<RunRecord> = {}): Promise<number> => {
+  const result = (over.result as ReviewResult | undefined) ?? okResult();
+  const text = renderReview(result, { trigger: 'automatic', requestedBy: null, lineUrl: () => 'https://git.example.test/x', inline: true });
+  return recordRun(db, {
+    ref: REF, job: null, trigger: 'automatic', mode: 'full', dryRun: false, headSha: 'h1', baseSha: 'merge000', outcome: 'ok', failureStage: null, failureCode: null,
+    needsHuman: false, highestScore: 35, body: text.body, comments: text.comments, result, usage: USAGE, startedAt: at(-3600), finishedAt: at(-3500), ...over,
+  });
+};
+/** A review published as 401: its run at h0 against merge000, and its comment 8001 stored, unless told otherwise. */
+async function published(over: { head?: string; comments?: StoredComment[]; pullRequest?: number } = {}): Promise<number> {
+  const ref = over.pullRequest === undefined ? REF : { ...REF, number: over.pullRequest };
+  const id = await recorded({ ref, headSha: over.head ?? 'h0', result: EARLIER_RESULT });
+  await markPublished(db, id, { reviewId: '401', publishedAt: at(-3400), body: EARLIER.body, inlineDropped: false });
+  await recordComments(db, id, ref, over.comments ?? [STORED_8001]);
+  return id;
+}
+/** The thread of comment 8001, with one reply by octo-dev. */
+const THREAD: ReviewThread = {
+  id: 'PRRT_1', path: 'src/a.ts', side: 'RIGHT', line: 12, resolved: false, resolvedByApp: false,
+  comments: [
+    { id: '8001', node: 'PRRC_1', author: 'visto-test[bot]', authorIsBot: true, byApp: true, reviewId: '401', body: EARLIER.comments[0]!.body, at: at(-3400) },
+    { id: '8002', node: 'PRRC_2', author: 'octo-dev', authorIsBot: false, byApp: false, reviewId: null, body: 'The caller checks it.', at: at(-100) },
+  ],
+};
+const VERDICT: ThreadVerdict = { threadId: 'PRRT_1', commentId: '8001', verdict: 'answered', reply: 'The guard is in the caller.', fileChanged: false };
+const REPLY = '**Answered.** The guard is in the caller.\n\n<!-- visto-ai: review=501 head=h1 -->';
 
 /** Real engine dependencies around one changed file and a model that answers the forced call with no findings. */
 function engineDepsWithStubs(): ReviewDeps {
@@ -469,7 +523,7 @@ test('in dry run nothing is ever written to the git service', async () => {
   await runReviewJob(h.job, h.deps);
   assert.deepEqual([h.writes, (await listRuns(db, REF))[0]!.published, (await getJob(db, h.job.id))?.outcome], [[], false, 'reviewed']);
 });
-test('a pull request that already has its review is not reviewed again: the same head, or a later one', async () => {
+test('a pull request that already has its review is not reviewed again at the same head, and a later head is reviewed against it', async () => {
   const first = await live();
   await runReviewJob(first.job, first.deps);
   const same = await live();
@@ -477,8 +531,9 @@ test('a pull request that already has its review is not reviewed again: the same
   const later = await live({ head: 'h2' });
   await runReviewJob(later.job, later.deps);
   assert.deepEqual(
-    [(await getJob(db, same.job.id))?.outcome, (await getJob(db, later.job.id))?.outcome, same.inputs.length + later.inputs.length, (await listRuns(db, REF)).length],
-    ['already_reviewed', 'later_head', 0, 1]);
+    [(await getJob(db, same.job.id))?.outcome, (await getJob(db, later.job.id))?.outcome, same.inputs.length, later.inputs.length, (await listRuns(db, REF)).length],
+    ['already_reviewed', 'published', 0, 1, 2]);
+  assert.equal(later.inputs[0]!.earlier?.head, 'h1');
 });
 test('when the post cannot be made the review stays stored and the job is put back with its start counted', async () => {
   const h = await live({ posts: [new Error('github_502')] });
@@ -509,12 +564,13 @@ test('a review that was posted but not recorded as such is adopted, not posted a
   const [stored] = await listRuns(db, REF);
   assert.deepEqual([stored!.published, stored!.reviewId, again.inputs.length, again.writes.filter((w) => w[0] === 'publishReview').length], [true, '501', 0, 0]);
 });
-test('a review posted on an earlier head that the database never learned of stops a second first review', async () => {
+test('a review posted on an earlier head that the database never learned of, and has no run for, is logged and does not stop the review', async () => {
   const h = await live({ head: 'h2', own: [[{ id: '470', commit: 'h1' }]] });
   await runReviewJob(h.job, h.deps);
   const j = await getJob(db, h.job.id);
   assert.deepEqual([j?.status, j?.outcome, h.inputs.length, (await listRuns(db, REF)).length, h.writes.filter((w) => w[0] === 'publishReview').length],
-    ['dropped', 'later_head', 0, 0, 0]);
+    ['done', 'published', 1, 1, 1]);
+  assert.deepEqual(h.logged.filter((e) => e.event === 'unknown_review'), [{ event: 'unknown_review', job: h.job.id, review: '470' }]);
 });
 test('a review of its own on the live head that the database never learned of drops the job before anything is paid', async () => {
   const h = await live({ own: [[{ id: '480', commit: 'h1' }]] });
@@ -530,14 +586,14 @@ test('when the git service cannot say which reviews the app has, no model call i
   assert.deepEqual([h.inputs.length, runs.length, runs[0]!.outcome, runs[0]!.failureStage, runs[0]!.failureCode], [0, 1, 'failed', 'prepare', 'github_502']);
   assert.deepEqual([j?.status, j?.runAt, j?.starts], ['pending', at(60), 1]);
 });
-test('a review of its own that appears on another commit while the review runs stops the post', async () => {
+test('a review of its own that appears on another commit while the review runs does not stop the post', async () => {
   const h = await live({ own: [[], [{ id: '470', commit: 'h0' }]] });
   await runReviewJob(h.job, h.deps);
   const runs = await listRuns(db, REF);
-  assert.deepEqual([h.inputs.length, runs.length, runs[0]!.outcome, runs[0]!.published, h.writes.filter((w) => w[0] === 'publishReview').length],
-    [1, 1, 'ok', false, 0]);
+  assert.deepEqual([h.inputs.length, runs.length, runs[0]!.outcome, runs[0]!.published, runs[0]!.reviewId, h.writes.filter((w) => w[0] === 'publishReview').length],
+    [1, 1, 'ok', true, '501', 1]);
   const j = await getJob(db, h.job.id);
-  assert.deepEqual([j?.status, j?.outcome], ['done', 'already_reviewed']);
+  assert.deepEqual([j?.status, j?.outcome], ['done', 'published']);
 });
 test('a resumed start asks for the own reviews once, inside the publication, and dry run never asks', async () => {
   const before = await live({ posts: [new Error('github_502')] });
@@ -695,11 +751,14 @@ test('a /review on a closed pull request, or on one that has its review, is refu
   assert.deepEqual([second.writes, second.inputs.length],
     [[['react', '31', 'confused'], ['comment', '@octo-lead The review was not started (`already_reviewed`).']], 0]);
 });
-test('a /review on a pull request whose review only the git service knows of is refused before anything is paid', async () => {
-  const h = await manualJob({ own: [[{ id: '470', commit: 'h0' }]] });
+test('a /review on a head whose review only the git service knows of is refused before anything is paid; one on another commit does not stop it', async () => {
+  const h = await manualJob({ own: [[{ id: '470', commit: 'h1' }]] });
   await runReviewJob(h.job, h.deps);
   assert.deepEqual(h.writes, [['listOwnReviews'], ['react', '31', 'confused'], ['comment', '@octo-lead The review was not started (`already_reviewed`).']]);
   assert.deepEqual([h.inputs.length, (await getJob(db, h.job.id))?.outcome], [0, 'refused']);
+  const other = await manualJob({ pullRequest: 8, own: [[{ id: '470', commit: 'h0' }]] });
+  await runReviewJob(other.job, other.deps);
+  assert.deepEqual([other.inputs.length, (await getJob(db, other.job.id))?.outcome, other.writes.filter((w) => w[0] === 'publishReview').length], [1, 'published', 1]);
 });
 test('a draft, an ignored author and a filtered base branch do not stop a /review, and the live head is the one reviewed', async () => {
   const h = await manualJob({ live: { ...LIVE, info: { ...LIVE.info, draft: true, author: 'dependabot[bot]', headSha: 'h9' } }, settings: { ...SETTINGS, baseBranches: ['release'] } });
@@ -751,11 +810,11 @@ test('a /review whose text could not be rendered says so', async () => {
   assert.equal((await getJob(db, h.job.id))?.outcome, 'render_failed');
   assert.deepEqual(h.writes.slice(-2), [['react', '31', 'confused'], ['comment', '@octo-lead The review did not finish (`render_failed`).']]);
 });
-test('a /review whose publication finds a review of its own on another commit is refused', async () => {
+test('a /review whose publication finds a review of its own on another commit is published', async () => {
   const h = await manualJob({ own: [[], [{ id: '470', commit: 'h0' }]] });
   await runReviewJob(h.job, h.deps);
-  assert.deepEqual([(await getJob(db, h.job.id))?.outcome, h.inputs.length, h.writes.filter((w) => w[0] === 'publishReview').length], ['refused', 1, 0]);
-  assert.deepEqual(h.writes.slice(-2), [['react', '31', 'confused'], ['comment', '@octo-lead The review was not started (`already_reviewed`).']]);
+  assert.deepEqual([(await getJob(db, h.job.id))?.outcome, h.inputs.length, h.writes.filter((w) => w[0] === 'publishReview').length], ['published', 1, 1]);
+  assert.equal(h.writes.some((w) => w[0] === 'react' && w[2] === 'confused'), false);
 });
 test('in dry run a /review writes nothing, whether it is honoured, refused or fails', async () => {
   const ok = await manualJob({ dryRun: true });
@@ -792,4 +851,180 @@ test('what is recorded is what was rendered, and a resumed start posts exactly t
   const again = await live({ reuseJob: before.job.id });
   await runReviewJob(again.job, again.deps);
   assert.deepEqual(again.writes.filter((w) => w[0] === 'publishReview'), [['publishReview', 'h1', expected.body, 1]]);
+});
+test('a push after a published review is reviewed in full with its threads, published, and the verdict written into the thread', async () => {
+  await published();
+  const h = await live({ own: [[{ id: '401', commit: 'h0' }]], threads: [[THREAD]], result: okResult({ threadVerdicts: [VERDICT], threadsDue: 1 }) });
+  await runReviewJob(h.job, h.deps);
+  assert.equal(h.inputs[0]!.earlier?.head, 'h0');
+  assert.deepEqual(h.inputs[0]!.earlier?.threads.map((t) => [t.id, t.commentId, t.severity, t.settled, t.replies.length]), [['PRRT_1', '8001', 'major', false, 1]]);
+  assert.deepEqual(h.writes.map((w) => w[0]), ['listOwnReviews', 'listThreads', 'listOwnReviews', 'publishReview', 'listReviewComments', 'listThreads', 'replyToThread', 'resolveThread']);
+  assert.deepEqual(h.writes[6], ['replyToThread', 'PRRT_1', REPLY]);
+  assert.equal((await getJob(db, h.job.id))?.outcome, 'published');
+  assert.deepEqual(h.logged.filter((e) => e.event === 'thread_followup').map((e) => [e.review, e.replied, e.resolved, e.failed, e.missing, e.changed]), [['501', 1, 1, 0, 0, 0]]);
+});
+test('a thread someone wrote in after it was judged is left as it is, and the log counts it as changed', async () => {
+  await published();
+  const later: ReviewThread = { ...THREAD, comments: [...THREAD.comments, { ...THREAD.comments[1]!, id: '8003', node: 'PRRC_3', body: 'Wait, it is a bug.' }] };
+  const h = await live({ own: [[{ id: '401', commit: 'h0' }]], threads: [[THREAD], [later]], result: okResult({ threadVerdicts: [{ ...VERDICT, replies: 1 }], threadsDue: 1 }) });
+  await runReviewJob(h.job, h.deps);
+  assert.equal(h.writes.some((w) => w[0] === 'replyToThread' || w[0] === 'resolveThread'), false);
+  assert.deepEqual(h.logged.filter((e) => e.event === 'thread_followup').map((e) => [e.replied, e.resolved, e.missing, e.changed]), [[0, 0, 0, 1]]);
+  assert.equal((await getJob(db, h.job.id))?.outcome, 'published');
+});
+test('a later review posts the finding its thread already raised with the link to that thread', async () => {
+  await published();
+  const discussed = { path: 'src/a.ts', side: 'RIGHT' as const, line: 12, severity: 'major' as const, body: 'A check is missing.', commentId: '8001', resolved: false, settled: false };
+  const h = await live({ own: [[{ id: '401', commit: 'h0' }]], threads: [[THREAD]], result: okResult({ alreadyDiscussed: [discussed], threadsDue: 1 }) });
+  await runReviewJob(h.job, h.deps);
+  const posts = h.writes.filter((w) => w[0] === 'publishReview');
+  assert.equal(posts.length, 1);
+  assert.ok(String(posts[0]![2]).includes('## Already discussed'));
+  assert.ok(String(posts[0]![2]).includes('(https://git.example.test/c/8001)'));
+});
+test('a first review reads no thread and is told of no earlier state', async () => {
+  const h = await live();
+  await runReviewJob(h.job, h.deps);
+  assert.equal(h.writes.some((w) => w[0] === 'listThreads'), false);
+  assert.equal(h.inputs[0]!.earlier, null);
+  assert.equal((await getJob(db, h.job.id))?.outcome, 'published');
+});
+test('a head and base that are already reviewed are not reviewed again, by a push or by a command', async () => {
+  await published({ head: 'h1' });
+  const push = await live();
+  await runReviewJob(push.job, push.deps);
+  const j = await getJob(db, push.job.id);
+  assert.deepEqual([j?.status, j?.outcome, push.inputs.length], ['dropped', 'already_reviewed', 0]);
+  const command = await manualJob();
+  await runReviewJob(command.job, command.deps);
+  assert.deepEqual([(await getJob(db, command.job.id))?.outcome, command.inputs.length], ['refused', 0]);
+  assert.deepEqual(command.writes.at(-1), ['comment', '@octo-lead The review was not started (`already_reviewed`).']);
+});
+test('a /review on a later head is honoured', async () => {
+  await published();
+  const h = await manualJob({ own: [[{ id: '401', commit: 'h0' }]], threads: [[THREAD]] });
+  await runReviewJob(h.job, h.deps);
+  assert.equal(h.writes.some((w) => w[0] === 'react' && w[2] === 'eyes'), true);
+  assert.equal(h.inputs[0]!.earlier?.head, 'h0');
+  assert.equal((await getJob(db, h.job.id))?.outcome, 'published');
+});
+test('threads that cannot be read fail the start before anything is paid', async () => {
+  await published();
+  const h = await live({ threads: [new Error('github_502')] });
+  await runReviewJob(h.job, h.deps);
+  assert.equal(h.inputs.length, 0);
+  const failedRuns = (await listRuns(db, REF)).filter((r) => r.outcome === 'failed');
+  assert.deepEqual(failedRuns.map((r) => [r.failureStage, r.failureCode]), [['prepare', 'github_502']]);
+  const j = await getJob(db, h.job.id);
+  assert.deepEqual([j?.status, j?.runAt, j?.starts], ['pending', at(60), 1]);
+  assert.equal(h.writes.some((w) => w[0] === 'publishReview'), false);
+});
+test('a review the database lost track of is adopted into its recorded run, and the push is then reviewed against it', async () => {
+  const lostRun = await recorded({ headSha: 'h0', result: EARLIER_RESULT });
+  const h = await live({ own: [[{ id: '401', commit: 'h0' }]], threads: [[THREAD]] });
+  await runReviewJob(h.job, h.deps);
+  const adopted = (await listRuns(db, REF)).find((r) => r.id === lostRun)!;
+  assert.deepEqual([adopted.published, adopted.reviewId, adopted.publishedAt, adopted.body, adopted.inlineDropped], [true, '401', at(0), EARLIER.body, false]);
+  assert.deepEqual(h.logged.filter((e) => e.event === 'adopted_late'), [{ event: 'adopted_late', job: h.job.id, run: lostRun, review: '401' }]);
+  assert.deepEqual(h.writes.slice(0, 3), [['listOwnReviews'], ['listReviewComments', '401'], ['listThreads']]);
+  assert.equal(h.inputs[0]!.earlier?.head, 'h0');
+  assert.equal(h.inputs[0]!.earlier?.threads.length, 1);
+  assert.equal((await getJob(db, h.job.id))?.outcome, 'published');
+});
+test('a review of ours with no recorded run is logged and the pull request is reviewed without it', async () => {
+  const h = await live({ own: [[{ id: '401', commit: 'h0' }]] });
+  await runReviewJob(h.job, h.deps);
+  assert.deepEqual(h.logged.filter((e) => e.event === 'unknown_review'), [{ event: 'unknown_review', job: h.job.id, review: '401' }]);
+  assert.equal(h.inputs[0]!.earlier, null);
+  assert.equal(h.writes.some((w) => w[0] === 'listThreads'), false);
+  assert.equal(h.writes.filter((w) => w[0] === 'publishReview').length, 1);
+  assert.equal((await getJob(db, h.job.id))?.outcome, 'published');
+});
+test('a comment the read-back missed is stored from its thread before the review', async () => {
+  const run = await published({ comments: [] });
+  const h = await live({ own: [[{ id: '401', commit: 'h0' }]], threads: [[THREAD]] });
+  await runReviewJob(h.job, h.deps);
+  assert.deepEqual((await listComments(db, REF)).filter((c) => c.commentId === '8001'), [{ ...STORED_8001, run }]);
+  assert.equal(h.inputs[0]!.earlier?.threads.length, 1);
+});
+test('no verdict kept, no second read of the threads', async () => {
+  await published();
+  const h = await live({ own: [[{ id: '401', commit: 'h0' }]], threads: [[THREAD]] });
+  await runReviewJob(h.job, h.deps);
+  assert.equal(h.writes.filter((w) => w[0] === 'listThreads').length, 1);
+  assert.equal(h.logged.some((e) => e.event === 'thread_followup'), false);
+  assert.equal((await getJob(db, h.job.id))?.outcome, 'published');
+});
+test('without the permission the thread is answered and not resolved', async () => {
+  await published();
+  const h = await live({ threads: [[THREAD]], canResolve: false, result: okResult({ threadVerdicts: [VERDICT], threadsDue: 1 }) });
+  await runReviewJob(h.job, h.deps);
+  assert.deepEqual(h.writes.filter((w) => w[0] === 'replyToThread' || w[0] === 'resolveThread'), [['replyToThread', 'PRRT_1', REPLY]]);
+  const resolving = await live({ pullRequest: 8, threads: [[THREAD]], result: okResult({ threadVerdicts: [VERDICT], threadsDue: 1 }) });
+  resolving.deps.canResolve = () => Promise.reject(new Error('github_502'));
+  await published({ pullRequest: 8 });
+  await runReviewJob(resolving.job, resolving.deps);
+  assert.deepEqual(resolving.writes.filter((w) => w[0] === 'replyToThread' || w[0] === 'resolveThread'), [['replyToThread', 'PRRT_1', REPLY]]);
+});
+test('a follow-up that fails leaves the job published', async () => {
+  await published();
+  const h = await live({ threads: [[THREAD]], threadWriteFails: true, result: okResult({ threadVerdicts: [VERDICT], threadsDue: 1 }) });
+  await runReviewJob(h.job, h.deps);
+  assert.equal((await getJob(db, h.job.id))?.outcome, 'published');
+  assert.deepEqual(h.logged.filter((e) => e.event === 'thread_followup').map((e) => [e.replied, e.resolved, e.failed]), [[0, 0, 1]]);
+  await published({ pullRequest: 8 });
+  const unread = await live({ pullRequest: 8, threads: [[THREAD], new Error('github_502')], result: okResult({ threadVerdicts: [VERDICT], threadsDue: 1 }) });
+  await runReviewJob(unread.job, unread.deps);
+  assert.deepEqual(unread.logged.filter((e) => e.event === 'thread_followup_failed'), [{ event: 'thread_followup_failed', job: unread.job.id, reason: 'github_502' }]);
+  const j = await getJob(db, unread.job.id);
+  assert.deepEqual([j?.status, j?.outcome], ['done', 'published']);
+  assert.equal(unread.writes.some((w) => w[0] === 'replyToThread'), false);
+});
+test('a recorded review that is published by a later start writes its verdicts too', async () => {
+  await published();
+  await recorded({ result: okResult({ threadVerdicts: [VERDICT], threadsDue: 1 }) });
+  const h = await live({ own: [[{ id: '401', commit: 'h0' }]], threads: [[THREAD]] });
+  await runReviewJob(h.job, h.deps);
+  assert.equal(h.inputs.length, 0);
+  assert.deepEqual(h.writes.map((w) => w[0]), ['listOwnReviews', 'publishReview', 'listReviewComments', 'listThreads', 'replyToThread', 'resolveThread']);
+  assert.deepEqual(h.writes[4], ['replyToThread', 'PRRT_1', REPLY]);
+  assert.equal((await getJob(db, h.job.id))?.outcome, 'published');
+  // the review was posted already: publishRun adopts it, and its verdicts are written under its id
+  const ref8 = { ...REF, number: 8 };
+  await published({ pullRequest: 8 });
+  await recorded({ ref: ref8, result: okResult({ threadVerdicts: [VERDICT], threadsDue: 1 }) });
+  const adopted = await live({ pullRequest: 8, own: [[{ id: '502', commit: 'h1' }, { id: '401', commit: 'h0' }]], threads: [[THREAD]] });
+  await runReviewJob(adopted.job, adopted.deps);
+  assert.equal(adopted.writes.some((w) => w[0] === 'publishReview'), false);
+  assert.deepEqual(adopted.writes.filter((w) => w[0] === 'replyToThread'), [['replyToThread', 'PRRT_1', REPLY.replace('review=501', 'review=502')]]);
+  assert.deepEqual(adopted.logged.filter((e) => e.event === 'thread_followup').map((e) => e.review), ['502']);
+});
+test('a retargeted pull request at a head already reviewed is reviewed and posted, not adopted', async () => {
+  await published({ head: 'h1' });
+  const h = await live({ live: OTHER_BASE, own: [[{ id: '401', commit: 'h1' }]] });
+  await runReviewJob(h.job, h.deps);
+  assert.equal(h.inputs.length, 1);
+  assert.equal(h.writes.filter((w) => w[0] === 'publishReview').length, 1);
+  const newest = (await listRuns(db, REF)).at(-1)!;
+  assert.deepEqual([newest.baseSha, newest.published, newest.reviewId], ['merge999', true, '501']);
+});
+test('in dry run a later head is reviewed as before, and nothing is read or written', async () => {
+  await published();
+  const h = await harness({ dryRun: true });
+  await runReviewJob(h.job, h.deps);
+  assert.deepEqual(h.writes, []);
+  assert.equal(h.inputs[0]!.earlier, null);
+  assert.equal((await getJob(db, h.job.id))?.outcome, 'reviewed');
+});
+test('the review entry counts the threads that were due, the verdicts and the duplicates', async () => {
+  await published();
+  const h = await live({ threads: [[THREAD]], result: okResult({ threadVerdicts: [VERDICT], threadsDue: 1 }) });
+  await runReviewJob(h.job, h.deps);
+  const entry = h.logged.find((e) => e.event === 'review')!;
+  assert.deepEqual([entry.threads_due, entry.verdicts, entry.duplicates], [1, 1, 0]);
+  await recorded({ ref: { ...REF, number: 8 } });
+  const resumed = await live({ pullRequest: 8 });
+  await runReviewJob(resumed.job, resumed.deps);
+  const stored = resumed.logged.find((e) => e.event === 'review')!;
+  assert.deepEqual([stored.resumed, stored.threads_due, stored.verdicts, stored.duplicates], [true, 0, 0, 0]);
 });

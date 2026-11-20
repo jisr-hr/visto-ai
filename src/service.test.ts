@@ -99,6 +99,7 @@ async function harness(options: Options = {}) {
   const lacksCalls: boolean[] = [];
   const appInfo: AppIdentity = {
     read: () => Promise.reject(new Error('not_used')),
+    canResolve: () => Promise.resolve(false),
     lacks: (dryRun) => (order.push('lacks'), lacksCalls.push(dryRun), options.lacks instanceof Error ? Promise.reject(options.lacks) : Promise.resolve(options.lacks ?? [])),
   };
 
@@ -171,6 +172,10 @@ async function harness(options: Options = {}) {
         listReviewComments: async () => { writes.push(['listReviewComments']); return []; },
         react: async () => { writes.push(['react']); },
         comment: async () => { writes.push(['comment']); },
+        listThreads: () => Promise.reject(new Error('not_expected')),
+        replyToThread: () => Promise.reject(new Error('not_expected')),
+        editThreadComment: () => Promise.reject(new Error('not_expected')),
+        resolveThread: () => Promise.reject(new Error('not_expected')),
       },
       fetch: (async (url: string | URL | Request) => {
         fetched.push(String(url));
@@ -194,6 +199,7 @@ async function harness(options: Options = {}) {
         return okResult();
       },
       lineUrl: () => 'https://git.example.test/x',
+      commentUrl: (_ref, commentId) => `https://git.example.test/c/${commentId}`,
       });
       started.push(service);
       return service;

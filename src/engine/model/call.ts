@@ -2,7 +2,7 @@ import { isGrounded } from '../reconcile/grounding.ts';
 import type { AuditEntry, ChatMessage, Effort, ModelClient, ModelResponse, Usage } from '../types.ts';
 import { ProviderError } from './errors.ts';
 import type { ProviderErrorKind } from './errors.ts';
-import { SUBMIT_REVIEW, parseSubmitReview, submitReviewTool } from './submit-review.ts';
+import { SUBMIT_REVIEW, parseSubmitReview, submitReviewTool, submitReviewWithThreadsTool } from './submit-review.ts';
 import type { SubmitReviewArgs } from './submit-review.ts';
 
 // `models` and `providers`: those that answered, in call order.
@@ -27,9 +27,9 @@ function addUsage(a: Usage, b: Usage): Usage {
 
 type Verdict = { ok: true; value: SubmitReviewArgs } | { ok: false; reason: string };
 
-function judge(response: ModelResponse, prPaths: string[]): Verdict {
+function judge(response: ModelResponse, prPaths: string[], withThreads: boolean): Verdict {
   if (response.toolName !== SUBMIT_REVIEW || response.toolArguments === null) return { ok: false, reason: 'not_a_tool_call' };
-  const parsed = parseSubmitReview(response.toolArguments);
+  const parsed = parseSubmitReview(response.toolArguments, withThreads);
   if (!parsed.ok) return { ok: false, reason: parsed.reason };
   if (!isGrounded(parsed.value, prPaths)) return { ok: false, reason: UNGROUNDED };
   return { ok: true, value: parsed.value };
@@ -41,9 +41,10 @@ function rejectedText(response: ModelResponse): string {
 }
 
 export async function callBatch(
-  args: { messages: ChatMessage[]; effort: Effort; timeoutMs: number; prPaths: string[] },
+  args: { messages: ChatMessage[]; effort: Effort; timeoutMs: number; prPaths: string[]; withThreads?: boolean },
   model: ModelClient,
 ): Promise<BatchAnswer> {
+  const withThreads = args.withThreads === true;
   let usage = zeroUsage();
   const audit: AuditEntry[] = [];
   const models: string[] = [];
@@ -53,12 +54,12 @@ export async function callBatch(
   try {
     for (let attempt = 0; attempt < 2; attempt++) {
       const response = await model.complete({
-        messages, tools: [submitReviewTool], forcedTool: SUBMIT_REVIEW, effort: args.effort, timeoutMs: args.timeoutMs,
+        messages, tools: [withThreads ? submitReviewWithThreadsTool : submitReviewTool], forcedTool: SUBMIT_REVIEW, effort: args.effort, timeoutMs: args.timeoutMs,
       });
       usage = addUsage(usage, response.usage);
       models.push(response.model);
       if (response.provider !== null) providers.push(response.provider);
-      const verdict = judge(response, args.prPaths);
+      const verdict = judge(response, args.prPaths, withThreads);
       if (verdict.ok) return { ok: true, value: verdict.value, usage, models, providers, audit };
       reason = verdict.reason;
       if (attempt === 0) {

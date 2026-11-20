@@ -35,6 +35,8 @@ interface Options {
   posted?: PostedComment[] | Error;
   posts?: Array<{ id: string } | Error>;
   run?: StoredRun;
+  /** The ids of the reviews the database holds as published; none when not given. */
+  known?: ReadonlySet<string>;
 }
 
 function harness(options: Options = {}) {
@@ -65,10 +67,14 @@ function harness(options: Options = {}) {
     },
     react: async () => { calls.push(['react']); },
     comment: async () => { calls.push(['comment']); },
+    listThreads: () => Promise.reject(new Error('not_expected')),
+    replyToThread: () => Promise.reject(new Error('not_expected')),
+    editThreadComment: () => Promise.reject(new Error('not_expected')),
+    resolveThread: () => Promise.reject(new Error('not_expected')),
   };
   return {
-    calls, deps: { forge, writer, lineUrl },
-    args: { ref: REF, installation: '99', run: options.run ?? run, trigger: 'automatic' as const, requestedBy: null },
+    calls, deps: { forge, writer, lineUrl, commentUrl: (_ref: unknown, id: string) => `https://forge.example.test/c/${id}` },
+    args: { ref: REF, installation: '99', run: options.run ?? run, trigger: 'automatic' as const, requestedBy: null, known: options.known ?? new Set<string>() },
   };
 }
 
@@ -89,10 +95,18 @@ test('an adopted review that was posted without its inline comments is recorded 
   if (out.kind !== 'published') return;
   assert.deepEqual([out.reviewId, out.adopted, out.inlineDropped, out.body !== run.body], ['480', true, true, true]);
 });
-test("a review of the app's own on another commit means the pull request has its first review", async () => {
-  const h = harness({ own: [{ id: '470', commit: 'h0' }] });
-  assert.deepEqual(await publishRun(h.deps, h.args), { kind: 'already_reviewed' });
-  assert.equal(h.calls.some((c) => c[0] === 'publishReview'), false);
+test('a review on another commit does not stop the post', async () => {
+  const h = harness({ own: [{ id: '401', commit: 'h0' }], known: new Set(['401']) });
+  assert.deepEqual(await publishRun(h.deps, h.args), { kind: 'published', reviewId: '501', body: run.body, inlineDropped: false, adopted: false });
+  assert.deepEqual(h.calls, [['listOwnReviews'], ['publishReview', 'h1', run.body, 1]]);
+});
+test('only a review on this commit that the database does not know is adopted', async () => {
+  const unknown = harness({ own: [{ id: '401', commit: 'h1' }] });
+  assert.deepEqual(await publishRun(unknown.deps, unknown.args), { kind: 'published', reviewId: '401', body: run.body, inlineDropped: false, adopted: true });
+  assert.equal(unknown.calls.some((c) => c[0] === 'publishReview'), false);
+  const known = harness({ own: [{ id: '401', commit: 'h1' }], known: new Set(['401']) });
+  assert.deepEqual(await publishRun(known.deps, known.args), { kind: 'published', reviewId: '501', body: run.body, inlineDropped: false, adopted: false });
+  assert.deepEqual(known.calls, [['listOwnReviews'], ['publishReview', 'h1', run.body, 1]]);
 });
 test('nothing is posted for a head or a base that moved, or on a pull request that is closed or gone', async () => {
   const cases: Array<[LivePullRequest | null, PublishOutcome]> = [
@@ -145,4 +159,14 @@ test('any other failure says so with its code, and a post that failed is not rep
     assert.deepEqual(await publishRun(h.deps, h.args), { kind: 'failed', code });
     assert.equal(h.calls.filter((c) => c[0] === 'publishReview').length, options?.posts?.length ?? 0);
   }
+});
+test("the body-only form links each finding already discussed to its earlier thread", async () => {
+  const result: ReviewResult = { ...okResult(), alreadyDiscussed: [{ path: 'a.ts', side: 'RIGHT', line: 3, severity: 'major', body: 'Raised before.', commentId: '8001', resolved: false, settled: false }] };
+  const h = harness({ posts: [new Error('review_rejected'), { id: '502' }], run: { ...run, result } });
+  const out = await publishRun(h.deps, h.args);
+  assert.equal(out.kind, 'published');
+  if (out.kind !== 'published') return;
+  assert.equal(out.inlineDropped, true);
+  assert.ok(out.body.includes('## Already discussed'));
+  assert.ok(out.body.includes('(https://forge.example.test/c/8001)'));
 });

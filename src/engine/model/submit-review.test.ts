@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { parseSubmitReview, submitReviewTool, SUBMIT_REVIEW } from './submit-review.ts';
+import { parseSubmitReview, submitReviewTool, submitReviewWithThreadsTool, SUBMIT_REVIEW } from './submit-review.ts';
 
 const ok = { overview: 'Changes src/a.ts.', findings: [{ path: 'src/a.ts', side: 'RIGHT', line: 3, severity: 'major', body: 'Breaks on empty input.', quote: 'x()', beyond_diff: false }], files: [{ path: 'src/a.ts', change_summary: 'Adds a guard.', blocks: [{ id: 'B1', score: 45, category: 'fix', reason: 'Changes when the job runs.' }] }] };
 
@@ -167,4 +167,26 @@ test('null is still refused for a required field of a part, and in findings', ()
   assert.match(reasonOf(withBlock({ id: 'B1', parts: [{ first: 'R1', last: 'R20', score: null, category: 'test' }] })), /^files\[0\]\.blocks\[0\]\.parts\[0\]\.score: /);
   const t = structuredClone(ok) as { findings: Record<string, unknown>[] }; t.findings[0]!.quote = null;
   assert.match(reasonOf(t), /^findings\[0\]\.quote: /);
+});
+
+test('the tool of a first review does not know thread verdicts, and the other tool does', () => {
+  assert.ok(!JSON.stringify(submitReviewTool).includes('thread_verdicts'));
+  assert.ok(JSON.stringify(submitReviewWithThreadsTool).includes('thread_verdicts'));
+  assert.equal(submitReviewWithThreadsTool.function.name, submitReviewTool.function.name);
+});
+test('with threads, verdicts are read when given and are an empty list when absent or null; without, an answer that carries them is refused as it is today', () => {
+  const verdicts = [{ thread_id: 'T1', verdict: 'fixed', reply: 'Line 3 now guards it.' }, { thread_id: 'T2', verdict: 'open' }];
+  const given = parseSubmitReview(JSON.stringify({ ...ok, thread_verdicts: verdicts }), true);
+  assert.ok(given.ok);
+  assert.deepEqual(given.value.thread_verdicts, verdicts);
+  const absent = parseSubmitReview(JSON.stringify(ok), true);
+  assert.ok(absent.ok);
+  assert.deepEqual(absent.value.thread_verdicts, []);
+  const none = parseSubmitReview(JSON.stringify({ ...ok, thread_verdicts: null }), true);
+  assert.ok(none.ok);
+  assert.deepEqual(none.value.thread_verdicts, []);
+  const refused = parseSubmitReview(JSON.stringify({ ...ok, thread_verdicts: verdicts }));
+  assert.ok(!refused.ok);
+  assert.ok(refused.reason.includes('unexpected key thread_verdicts'));
+  assert.ok(!('thread_verdicts' in (parseSubmitReview(JSON.stringify(ok)) as { value: object }).value));
 });

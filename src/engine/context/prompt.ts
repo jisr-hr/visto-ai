@@ -2,8 +2,9 @@ import type { ChatMessage, PullRequestInfo } from '../types.ts';
 import { estimateTokens } from './batches.ts';
 import type { Batch } from './batches.ts';
 import { ANCHOR_LEGEND } from './diff.ts';
-import { submitReviewTool } from '../model/submit-review.ts';
+import { submitReviewTool, submitReviewWithThreadsTool } from '../model/submit-review.ts';
 import { MEASURE_NUMBER, MEASURE_TOKEN, fileSection } from './section.ts';
+import { THREAD_HEADING, THREAD_RULES, threadsPart } from './threads.ts';
 import { inlineText, stripControl, wrapData } from './untrusted.ts';
 
 // Room kept for the retry turn: the rejected answer (cut to 2,000 characters) and the rejection line.
@@ -48,6 +49,10 @@ export function buildMessages(args: {
   batch.files.forEach((c, i) => {
     parts.push(fileSection(c, firstFileNumber + i, fileCount, token));
   });
+  const threads = threadsPart(
+    batch.files.flatMap((c) => c.threads ?? []).sort((x, y) => Number(x.key.slice(1)) - Number(y.key.slice(1))), token,
+  );
+  if (threads !== '') parts.push(threads);
   return [
     { role: 'system', content: contract },
     { role: 'user', content: pullRequestHeader(pr, fileCount, token) },
@@ -57,13 +62,14 @@ export function buildMessages(args: {
 
 // Everything in a call except the file sections: the contract, the header, the
 // batch line, the legend, the tool definition and the retry turn.
-export function fixedTokens(contract: string, pr: PullRequestInfo): number {
+export function fixedTokens(contract: string, pr: PullRequestInfo, withThreads = false): number {
   return (
     estimateTokens(contract) +
     estimateTokens(pullRequestHeader(pr, MEASURE_NUMBER, MEASURE_TOKEN)) +
     estimateTokens(`Batch ${MEASURE_NUMBER} of ${MEASURE_NUMBER}.\n\n`) +
     estimateTokens(`${ANCHOR_LEGEND}\n\n`) +
-    estimateTokens(JSON.stringify(submitReviewTool)) +
+    estimateTokens(JSON.stringify(withThreads ? submitReviewWithThreadsTool : submitReviewTool)) +
+    (withThreads ? estimateTokens(`${THREAD_HEADING}\n\n${THREAD_RULES}\n\n`) : 0) +
     RETRY_ALLOWANCE_TOKENS
   );
 }

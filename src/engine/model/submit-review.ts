@@ -5,7 +5,8 @@ export const SUBMIT_REVIEW = 'submit_review';
 export interface RawPart { first: string; last: string; score: number; category: string; reason?: string }
 export interface RawBlock { id: string; score?: number; category?: string; reason?: string; parts?: RawPart[] }
 export interface RawFile { path: string; change_summary: string; score?: number; category?: string; reason?: string; blocks: RawBlock[] }
-export interface SubmitReviewArgs { overview: string; findings: RawFinding[]; files: RawFile[] }
+export interface RawVerdict { thread_id: string; verdict: string; reply?: string }
+export interface SubmitReviewArgs { overview: string; findings: RawFinding[]; files: RawFile[]; thread_verdicts?: RawVerdict[] }
 
 const findingSchema = z.object({
   path: z.string().trim().min(1),
@@ -54,17 +55,29 @@ const argsSchema = z.object({
   files: z.array(fileSchema),
 }).strict();
 
-const parameters = z.toJSONSchema(argsSchema) as Record<string, unknown>;
-delete parameters.$schema;
+// Only the shape of a verdict is checked here; a bad id or verdict is judged later.
+const verdictSchema = z.object({
+  thread_id: z.string(),
+  verdict: z.string(),
+  reply: optional(z.string()),
+});
 
-export const submitReviewTool: ToolDefinition = {
-  type: 'function',
-  function: {
-    name: SUBMIT_REVIEW,
-    description: 'Submit your review of the pull request. Call this tool exactly once, with your overview, all of your findings, and one entry for each file.',
-    parameters,
-  },
-};
+// A second schema beside the first, for a later review: the first tool's JSON stays what it was.
+const argsWithThreadsSchema = z.object({
+  ...argsSchema.shape,
+  thread_verdicts: optional(z.array(verdictSchema)),
+}).strict();
+
+const SUBMIT_DESCRIPTION = 'Submit your review of the pull request. Call this tool exactly once, with your overview, all of your findings, and one entry for each file.';
+
+function toolOf(schema: z.ZodType): ToolDefinition {
+  const parameters = z.toJSONSchema(schema) as Record<string, unknown>;
+  delete parameters.$schema;
+  return { type: 'function', function: { name: SUBMIT_REVIEW, description: SUBMIT_DESCRIPTION, parameters } };
+}
+
+export const submitReviewTool: ToolDefinition = toolOf(argsSchema);
+export const submitReviewWithThreadsTool: ToolDefinition = toolOf(argsWithThreadsSchema);
 
 const LEADING_TAG = /^\s*(?:\*\*)?\[(blocker|major|minor|nit)\](?:\*\*)?\s*/i;
 
@@ -84,19 +97,19 @@ function oneLine(text: string): string {
 }
 
 // A rejection reason is one line of at most MAX_REASON_CHARS characters.
-export function parseSubmitReview(json: string): { ok: true; value: SubmitReviewArgs } | { ok: false; reason: string } {
-  const parsed = parseArgs(json);
+export function parseSubmitReview(json: string, withThreads = false): { ok: true; value: SubmitReviewArgs } | { ok: false; reason: string } {
+  const parsed = parseArgs(json, withThreads);
   return parsed.ok ? parsed : { ok: false, reason: oneLine(parsed.reason).slice(0, MAX_REASON_CHARS) };
 }
 
-function parseArgs(json: string): { ok: true; value: SubmitReviewArgs } | { ok: false; reason: string } {
+function parseArgs(json: string, withThreads: boolean): { ok: true; value: SubmitReviewArgs } | { ok: false; reason: string } {
   let data: unknown;
   try {
     data = JSON.parse(json);
   } catch {
     return { ok: false, reason: 'not_json' };
   }
-  const parsed = argsSchema.safeParse(data);
+  const parsed = withThreads ? argsWithThreadsSchema.safeParse(data) : argsSchema.safeParse(data);
   if (!parsed.success) {
     const issue = parsed.error.issues[0];
     if (issue === undefined) return { ok: false, reason: 'invalid' };
@@ -113,5 +126,10 @@ function parseArgs(json: string): { ok: true; value: SubmitReviewArgs } | { ok: 
     if (body === '') return { ok: false, reason: `findings[${index}].body: empty after removing the severity tag` };
     findings.push({ ...finding, body });
   }
-  return { ok: true, value: { overview: parsed.data.overview, findings, files: parsed.data.files } };
+  const value: SubmitReviewArgs = { overview: parsed.data.overview, findings, files: parsed.data.files };
+  if (withThreads) {
+    const given = (parsed.data as { thread_verdicts?: RawVerdict[] }).thread_verdicts ?? [];
+    value.thread_verdicts = given.map((v) => (v.reply === undefined ? { thread_id: v.thread_id, verdict: v.verdict } : { thread_id: v.thread_id, verdict: v.verdict, reply: v.reply }));
+  }
+  return { ok: true, value };
 }

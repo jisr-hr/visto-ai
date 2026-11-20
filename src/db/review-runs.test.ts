@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { testDb } from './testing.ts';
-import { hasOkRun, hasRun, lastPublishedRun, listRuns, markPublished, recordRun, spentSince, unpublishedRun } from './review-runs.ts';
+import { adoptableRun, hasOkRun, hasRun, lastPublishedRun, listRuns, markPublished, recordRun, spentSince, unpublishedRun } from './review-runs.ts';
 import type { RunRecord } from './review-runs.ts';
 import { enqueueJob, finishJob } from './jobs.ts';
 
@@ -133,5 +133,20 @@ test('lastPublishedRun is the newest published run of the pull request', async (
   await recordRun(db, run({ dryRun: false, headSha: 'h2' }));
   await markPublished(db, a, { reviewId: '501', publishedAt: at(95), body: 'x', inlineDropped: false });
   assert.deepEqual([(await lastPublishedRun(db, REF))?.id, (await lastPublishedRun(db, { ...REF, number: 8 }))], [a, null]);
+  await db.close();
+});
+test('adoptableRun is the newest unpublished ok run of that head with a body, whatever its base; never a dry run, a failed run, a published one, an empty body or another head', async () => {
+  const db = await testDb();
+  assert.equal(await adoptableRun(db, REF, 'h1'), null);
+  await recordRun(db, run({ dryRun: true }));
+  await recordRun(db, run({ dryRun: false, outcome: 'failed', failureStage: 'model', failureCode: 'timeout' }));
+  await recordRun(db, run({ dryRun: false, body: '' }));
+  await recordRun(db, run({ dryRun: false, headSha: 'h2' }));
+  const posted = await recordRun(db, run({ dryRun: false }));
+  await markPublished(db, posted, { reviewId: '501', publishedAt: at(95), body: 'x', inlineDropped: false });
+  assert.equal(await adoptableRun(db, REF, 'h1'), null);
+  await recordRun(db, run({ dryRun: false, baseSha: 'b2' }));
+  const newest = await recordRun(db, run({ dryRun: false, baseSha: 'b3', startedAt: at(-90_000) }));
+  assert.deepEqual([(await adoptableRun(db, REF, 'h1'))?.id, await adoptableRun(db, { ...REF, number: 8 }, 'h1')], [newest, null]);
   await db.close();
 });

@@ -1,6 +1,7 @@
 import type { AppInfo, ForgeWriter, PostedComment, PullRequestRef, ReviewDraft } from '../types.ts';
 import type { AppAuth } from './app-auth.ts';
 import { createGithubHttp, isObject, jsonOf } from './http.ts';
+import { createGithubThreads } from './threads.ts';
 
 export const MAX_REVIEW_PAGES = 10;
 export const MAX_COMMENT_PAGES = 20;
@@ -49,6 +50,8 @@ export function createGithubWriter(opts: { auth: AppAuth; info: { read(): Promis
   };
 
   return {
+    ...createGithubThreads(opts),
+
     async publishReview(ref: PullRequestRef, installation: string, draft: ReviewDraft) {
       digits(installation);
       const { token, http } = await httpFor(installation);

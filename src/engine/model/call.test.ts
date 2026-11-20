@@ -3,7 +3,7 @@ import test from 'node:test';
 import type { ChatMessage, ModelClient, ModelRequest, ModelResponse, Usage } from '../types.ts';
 import { callBatch } from './call.ts';
 import { ProviderError } from './errors.ts';
-import { SUBMIT_REVIEW, submitReviewTool } from './submit-review.ts';
+import { SUBMIT_REVIEW, submitReviewTool, submitReviewWithThreadsTool } from './submit-review.ts';
 
 const usage = (calls = 1): Usage => ({ calls, inputTokens: 100, outputTokens: 10, cachedTokens: 5, cost: 0.5 });
 const toolCall = (args: unknown, model = 'm', provider: string | null = null): ModelResponse =>
@@ -185,4 +185,19 @@ test('a clean pull request answer is retried until the overview names a file', a
   assert.ok(r.ok);
   assert.equal(model.calls, 2);
   assert.ok(model.requests[1]!.messages.at(-1)!.content.includes(UNGROUNDED));
+});
+
+test('a call of a run with threads is sent the tool that takes verdicts, and its answer is parsed with it', async () => {
+  const withVerdicts = { ...valid, thread_verdicts: [{ thread_id: 'T1', verdict: 'open' }] };
+  const model = stubModel(toolCall(withVerdicts));
+  const r = await callBatch({ ...args, withThreads: true }, model);
+  assert.ok(r.ok);
+  assert.deepEqual(model.requests[0]!.tools, [submitReviewWithThreadsTool]);
+  assert.deepEqual(r.value.thread_verdicts, [{ thread_id: 'T1', verdict: 'open' }]);
+  const plain = stubModel(toolCall(withVerdicts), toolCall(withVerdicts));
+  const refused = await callBatch(args, plain);
+  assert.ok(!refused.ok);
+  assert.deepEqual(plain.requests[0]!.tools, [submitReviewTool]);
+  assert.equal(plain.calls, 2);
+  assert.ok(refused.reason.includes('unexpected key thread_verdicts'));
 });
