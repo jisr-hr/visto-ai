@@ -3,6 +3,8 @@ import type { FileContext } from './context/build.ts';
 import { packBatches } from './context/batches.ts';
 import type { Batch } from './context/batches.ts';
 import { orderByPriority } from './context/priority.ts';
+import { attachThreads } from './context/threads.ts';
+import type { ShownThread } from './context/threads.ts';
 import { buildMessages, fixedTokens, headerStripCounts } from './context/prompt.ts';
 import { callBatch } from './model/call.ts';
 import type { BatchAnswer } from './model/call.ts';
@@ -68,7 +70,7 @@ function okResult(overview: string, threshold: number, rest: Partial<ReviewResul
 const distinct = (values: string[]): string[] => [...new Set(values)];
 
 interface BatchOutcome {
-  answers: { value: SubmitReviewArgs; files: string[] }[]; // each answer with the paths of the files it was given
+  answers: { value: SubmitReviewArgs; files: string[]; threads?: string[] }[]; // each answer with the paths of the files it was given, and, in a run with threads, the keys of their threads
   reviewed: string[];
   failedFiles: string[];
   failedCodes: string[]; // codes of the parts that ended failed, in order
@@ -87,6 +89,7 @@ interface Run {
   deps: ReviewDeps;
   fileCount: number;
   batchCount: number;
+  withThreads: boolean; // the run shows earlier threads: its calls take the tool with verdicts
 }
 
 // A failing logger must never change a review.
@@ -105,7 +108,7 @@ async function oneCall(run: Run, files: FileContext[], firstFileNumber: number, 
     batchIndex, batchCount: run.batchCount, token: run.token,
   });
   const answer = await callBatch(
-    { messages, effort: run.effort, timeoutMs: run.limits.modelTimeoutSeconds * 1000, prPaths: files.map((f) => f.file.path) },
+    { messages, effort: run.effort, timeoutMs: run.limits.modelTimeoutSeconds * 1000, prPaths: files.map((f) => f.file.path), ...(run.withThreads ? { withThreads: true } : {}) },
     run.deps.model,
   );
   safeLog(run.deps, {
@@ -137,7 +140,10 @@ async function attempt(run: Run, ctl: Control, out: BatchOutcome, batch: Batch, 
     out.providers.push(...answer.providers);
     out.audit.push(...answer.audit);
     if (answer.ok) {
-      out.answers.push({ value: answer.value, files: files.map((f) => f.file.path) });
+      const paths = files.map((f) => f.file.path);
+      out.answers.push(run.withThreads
+        ? { value: answer.value, files: paths, threads: files.flatMap((f) => (f.threads ?? []).map((t) => t.key)) }
+        : { value: answer.value, files: paths });
       out.reviewed.push(...files.map((f) => f.file.path));
     }
   };
@@ -206,7 +212,7 @@ export async function review(input: ReviewInput, deps: ReviewDeps): Promise<Revi
     const teamFileInvalid = floors.invalid;
     if (teamFileInvalid !== null) audit.push({ stage: 'context', action: 'team_file_invalid', subject: REPO_FILE, reason: teamFileInvalid });
 
-    const budget = input.limits.inputTokensPerCall - fixedTokens(deps.contract, pr);
+    let budget = input.limits.inputTokensPerCall - fixedTokens(deps.contract, pr);
     if (budget <= 0) return failedResult('context', 'budget_too_small', usage, audit, 'ok', threshold);
 
     const stripped = headerStripCounts(pr);
@@ -214,8 +220,14 @@ export async function review(input: ReviewInput, deps: ReviewDeps): Promise<Revi
       if (stripped[subject] > 0) audit.push({ stage: 'context', action: 'control_characters_stripped', subject, reason: String(stripped[subject]) });
     }
     const built = await buildFileContexts(pr, orderByPriority(files), source);
-    const packed = packBatches(built.contexts, budget, input.limits.batchesPerReview);
-    audit.push(...built.audit, ...packed.audit);
+    const attached = attachThreads(built.contexts, input.earlier);
+    const withThreads = attached.shown.length > 0;
+    if (withThreads) {
+      budget = input.limits.inputTokensPerCall - fixedTokens(deps.contract, pr, true);
+      if (budget <= 0) return failedResult('context', 'budget_too_small', usage, audit, 'ok', threshold);
+    }
+    const packed = packBatches(attached.contexts, budget, input.limits.batchesPerReview);
+    audit.push(...built.audit, ...attached.audit, ...packed.audit);
     if (packed.batches.length === 0) {
       const scored = reconcileScores([], built.contexts, new Set(packed.notReviewed.map((n) => n.path)), floors);
       return okResult('No reviewable changes.', threshold, {
@@ -228,7 +240,7 @@ export async function review(input: ReviewInput, deps: ReviewDeps): Promise<Revi
     const run: Run = {
       contexts: built.contexts, limits: input.limits,
       effort: chooseEffort(pr, files, input.repoConfig), token: deps.token(), pr, deps,
-      fileCount: packed.batches.reduce((n, b) => n + b.files.length, 0), batchCount: packed.batches.length,
+      fileCount: packed.batches.reduce((n, b) => n + b.files.length, 0), batchCount: packed.batches.length, withThreads,
     };
     const firsts: number[] = [];
     let seen = 0;
@@ -263,6 +275,11 @@ export async function review(input: ReviewInput, deps: ReviewDeps): Promise<Revi
       ...outcomes.flatMap((o) => o.failedFiles.map((path): NotReviewed => ({ path, reason: 'batch_failed' }))),
     ];
     const notRead = new Set(notReviewed.map((n) => n.path));
+    // `shown` is kept for the verdicts that a later task judges.
+    const shown: ShownThread[] = attached.shown;
+    for (const s of shown) {
+      if (notRead.has(s.file)) audit.push({ stage: 'context', action: 'thread_not_shown', subject: s.key, reason: 'file_not_reviewed' });
+    }
     let scoreAnswers = outcomes.flatMap((o) => o.answers);
     if (deps.scorer !== undefined) {
       const reviewed = new Set(outcomes.flatMap((o) => o.reviewed));

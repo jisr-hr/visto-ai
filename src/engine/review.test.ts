@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { fixedTokens } from './context/prompt.ts';
 import { ProviderError } from './model/errors.ts';
-import { SUBMIT_REVIEW } from './model/submit-review.ts';
+import { SUBMIT_REVIEW, submitReviewTool, submitReviewWithThreadsTool } from './model/submit-review.ts';
 import { chooseEffort, review } from './review.ts';
 import type {
   ChangedFile, ModelClient, ModelRequest, ModelResponse, PullRequestInfo, RepoConfig, ReviewDeps, ReviewInput, ScoreAnswer, ScoreRequest, Scorer,
@@ -684,4 +684,23 @@ test('the scorer is sent the file as the review model received it, with the full
   assert.equal(scorer.requests.length, 1);
   assert.ok(!scorer.requests[0]!.text.includes('### Full file'));
   assert.ok(!d.model.requests[0]!.messages[2]!.content.includes('### Full file'));
+});
+
+test('a later review shows the thread in the call that holds its file, and a first review is sent nothing new', async () => {
+  const dueThread = {
+    id: 'PRRT_1', commentId: 'C1', path: 'src/a.ts', side: 'RIGHT' as const, line: 2, severity: 'major' as const, quote: '', body: 'Wrong value.',
+    openedAt: { head: 'abcdef0', diffHash: null }, resolved: false, settled: false, lastVerdict: null, replies: [],
+  };
+  const later = deps({ files: [fileA], answers: [answerOnA] });
+  await review({ ...input, earlier: { head: 'abcdef0', threads: [dueThread] } }, later);
+  const sent = later.model.requests[0]!;
+  assert.ok(sent.messages[2]!.content.includes('### Thread T1'));
+  assert.deepEqual(sent.tools, [submitReviewWithThreadsTool]);
+  const first = deps({ files: [fileA], answers: [answerOnA] });
+  await review(input, first);
+  const away = deps({ files: [fileA], answers: [answerOnA] });
+  const r = await review({ ...input, earlier: { head: 'abcdef0', threads: [{ ...dueThread, path: 'src/gone.ts' }] } }, away);
+  assert.deepEqual(away.model.requests, first.model.requests);
+  assert.deepEqual(first.model.requests[0]!.tools, [submitReviewTool]);
+  assert.ok(r.audit.some((e) => e.action === 'thread_not_shown' && e.subject === 'T1' && e.reason === 'file_not_in_diff'));
 });

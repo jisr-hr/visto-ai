@@ -5,6 +5,7 @@ import type { Batch } from './batches.ts';
 import { buildFileContexts } from './build.ts';
 import type { FileContext } from './build.ts';
 import { ANCHOR_LEGEND } from './diff.ts';
+import { threadsPart } from './threads.ts';
 import { buildMessages, fixedTokens, headerStripCounts, pullRequestHeader } from './prompt.ts';
 import { submitReviewTool } from '../model/submit-review.ts';
 import type { ChangedFile, PullRequestInfo, Source } from '../types.ts';
@@ -171,4 +172,25 @@ test('control characters are stripped from the description', () => {
   assert.ok(m[1]!.content.includes('Adds totals and more'));
   assert.ok(!m[1]!.content.includes('\u200b'));
   assert.ok(!m[1]!.content.includes('\u202e'));
+});
+
+const oneThread = { key: 'T1', file: 'src/a.ts', due: true, thread: {
+  id: 'PRRT_1', commentId: 'C1', path: 'src/a.ts', side: 'RIGHT' as const, line: 12, severity: 'major' as const, quote: 'x()', body: 'Breaks.',
+  openedAt: { head: 'abcdef0', diffHash: null }, resolved: false, settled: false, lastVerdict: null, replies: [],
+} };
+test('a call that shows no thread is sent what it was sent before', () => {
+  const plain = buildMessages({ ...args, batch: { files: [ctx('src/a.ts')], tokens: 1 } });
+  const empty = buildMessages({ ...args, batch: { files: [ctx('src/a.ts', { threads: [] })], tokens: 1 } });
+  assert.deepEqual(empty, plain);
+  assert.ok(!plain[2]!.content.includes('Earlier threads'));
+});
+test('the threads of a call follow its files', () => {
+  const m = buildMessages({ ...args, batch: { files: [ctx('src/a.ts', { threads: [oneThread] }), ctx('src/b.ts')], tokens: 1 } });
+  const last = m[2]!.content;
+  assert.ok(last.endsWith(`\n\n${threadsPart([oneThread], 'tok')}`));
+  assert.ok(last.indexOf('## File 2/3') < last.indexOf('## Earlier threads'));
+});
+test('the room kept for a run with threads holds the rules and the larger tool', () => {
+  assert.ok(fixedTokens('CONTRACT', pr, true) > fixedTokens('CONTRACT', pr));
+  assert.equal(fixedTokens('CONTRACT', pr), fixedTokens('CONTRACT', pr, false));
 });

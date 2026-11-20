@@ -9,6 +9,7 @@ import { fullFileContext, numberLines } from './full-file.ts';
 import type { FullFile } from './full-file.ts';
 import { isLowPriority, orderByPriority } from './priority.ts';
 import { testCandidates } from './test-pair.ts';
+import type { ShownThread } from './threads.ts';
 import { hasHidden, stripControl } from './untrusted.ts';
 
 export interface FileContext {
@@ -24,6 +25,8 @@ export interface FileContext {
   plan: ScorePlan; // who scores the file: the model, a fixed rule, or nobody
   // An added or removed line held a character that was stripped before anyone saw it.
   hidden: boolean;
+  // The earlier threads on this file, when a later review shows them; absent in a first review.
+  threads?: ShownThread[];
 }
 
 const isNoNewlineMarker = (line: HunkLine | undefined): boolean => line?.kind === 'meta' && line.text.startsWith('\\');

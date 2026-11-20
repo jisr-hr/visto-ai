@@ -16,13 +16,28 @@ export interface ModelClient { complete(request: ModelRequest): Promise<ModelRes
 export interface Limits { inputTokensPerCall: number; batchesPerReview: number; modelTimeoutSeconds: number }
 export interface RepoConfig { primaryBranches: string[]; scoreThreshold: number }
 
+export interface EarlierReply { author: string; kind: 'person' | 'bot' | 'app'; body: string }
+export interface EarlierThread {
+  id: string;                         // the git service's id of the thread
+  commentId: string;                  // its first comment
+  path: string; side: Side; line: number | null;   // where it sits now
+  severity: Severity; quote: string;  // of the finding that opened it
+  body: string;                       // the first comment's text, as the git service has it
+  openedAt: { head: string; diffHash: string | null };   // the head of the run that posted it, and the hash of its file's diff in that run
+  resolved: boolean;
+  settled: boolean;                   // resolved in a way that needs no further verdict
+  lastVerdict: 'fixed' | 'answered' | 'open' | null;     // the newest verdict an earlier published run kept
+  replies: EarlierReply[];            // oldest first
+}
+export interface EarlierState { head: string; threads: EarlierThread[] }   // head: of the last published review
+
 export interface ReviewInput {
   pullRequest: PullRequestInfo;
   trigger: 'automatic' | 'manual';
   repoConfig: RepoConfig;
   limits: Limits;
   asOf: Date;
-  earlier: null;              // a pull request's earlier state arrives with a later plan
+  earlier: EarlierState | null; // what the last published review left on the pull request; null for a first review
 }
 export interface ScoreRequest { text: string; blocks: string[] } // blocks: ids to score, in diff order; never empty
 export interface ScoredItem { score: number; category: string; reason: string }
