@@ -53,5 +53,5 @@ export function openReply(verdict: ThreadVerdict): string | null {
 export function openAgainReply(verdict: ThreadVerdict, head: string): string {
   const reason = reasonOf(verdict);
   const short = head.slice(0, SHORT_HEAD).replace(/[^A-Za-z0-9]/g, '');
-  return asRead(`**Open again.** The review of \`${short}\` no longer finds this fixed.${reason === '' ? '' : ` ${reason}`}`);
+  return asRead(`**Open again.** The review of \`${short}\` finds this open.${reason === '' ? '' : ` ${reason}`}`);
 }

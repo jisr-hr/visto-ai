@@ -36,7 +36,7 @@ test('a reason with line breaks and runs of white space is one line', () => {
 test('an open verdict answers only with a reason, and an open-again reply names the commit', () => {
   assert.equal(openReply(V({ verdict: 'open', reply: '' })), null);
   assert.equal(openReply(V({ verdict: 'open', reply: 'The total is still unchecked.' })), '**Still open.** The total is still unchecked.');
-  assert.equal(openAgainReply(V({ verdict: 'open', reply: '' }), 'abcdef0123456789'), '**Open again.** The review of `abcdef012345` no longer finds this fixed.');
-  assert.equal(openAgainReply(V({ verdict: 'open', reply: 'Still wrong.' }), 'abcdef0123456789'), '**Open again.** The review of `abcdef012345` no longer finds this fixed. Still wrong.');
+  assert.equal(openAgainReply(V({ verdict: 'open', reply: '' }), 'abcdef0123456789'), '**Open again.** The review of `abcdef012345` finds this open.');
+  assert.equal(openAgainReply(V({ verdict: 'open', reply: 'Still wrong.' }), 'abcdef0123456789'), '**Open again.** The review of `abcdef012345` finds this open. Still wrong.');
   assert.ok(!hasMarker(openAgainReply(V({ verdict: 'open' }), 'abcdef0123456789')));
 });
