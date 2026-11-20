@@ -229,6 +229,9 @@ export async function review(input: ReviewInput, deps: ReviewDeps): Promise<Revi
     const packed = packBatches(attached.contexts, budget, input.limits.batchesPerReview);
     audit.push(...built.audit, ...attached.audit, ...packed.audit);
     if (packed.batches.length === 0) {
+      for (const s of attached.shown) {
+        if (packed.notReviewed.some((n) => n.path === s.file)) audit.push({ stage: 'context', action: 'thread_not_shown', subject: s.key, reason: 'file_not_reviewed' });
+      }
       const scored = reconcileScores([], built.contexts, new Set(packed.notReviewed.map((n) => n.path)), floors);
       return okResult('No reviewable changes.', threshold, {
         coverage: { reviewed: [], notReviewed: packed.notReviewed }, audit: [...audit, ...scored.audit],

@@ -49,7 +49,9 @@ export function buildMessages(args: {
   batch.files.forEach((c, i) => {
     parts.push(fileSection(c, firstFileNumber + i, fileCount, token));
   });
-  const threads = threadsPart(batch.files.flatMap((c) => c.threads ?? []), token);
+  const threads = threadsPart(
+    batch.files.flatMap((c) => c.threads ?? []).sort((x, y) => Number(x.key.slice(1)) - Number(y.key.slice(1))), token,
+  );
   if (threads !== '') parts.push(threads);
   return [
     { role: 'system', content: contract },

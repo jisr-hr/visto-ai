@@ -704,3 +704,18 @@ test('a later review shows the thread in the call that holds its file, and a fir
   assert.deepEqual(first.model.requests[0]!.tools, [submitReviewTool]);
   assert.ok(r.audit.some((e) => e.action === 'thread_not_shown' && e.subject === 'T1' && e.reason === 'file_not_in_diff'));
 });
+test('a thread on a file that was not reviewed is named even when no call is made', async () => {
+  const dueThread = {
+    id: 'PRRT_1', commentId: 'C1', path: 'src/a.ts', side: 'RIGHT' as const, line: 2, severity: 'major' as const, quote: '', body: 'Wrong value.',
+    openedAt: { head: 'abcdef0', diffHash: null }, resolved: false, settled: false, lastVerdict: null, replies: [],
+  };
+  const tiny: ReviewInput = {
+    ...input, earlier: { head: 'abcdef0', threads: [dueThread] },
+    limits: { ...input.limits, inputTokensPerCall: fixedTokens(CONTRACT, input.pullRequest, true) + 50 },
+  };
+  const d = deps({ files: [fileA] });
+  const r = await review(tiny, d);
+  assert.equal(d.model.requests.length, 0);
+  assert.deepEqual(r.coverage.notReviewed, [{ path: 'src/a.ts', reason: 'too_large' }]);
+  assert.ok(r.audit.some((e) => e.action === 'thread_not_shown' && e.subject === 'T1' && e.reason === 'file_not_reviewed'));
+});

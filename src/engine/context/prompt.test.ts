@@ -194,3 +194,14 @@ test('the room kept for a run with threads holds the rules and the larger tool',
   assert.ok(fixedTokens('CONTRACT', pr, true) > fixedTokens('CONTRACT', pr));
   assert.equal(fixedTokens('CONTRACT', pr), fixedTokens('CONTRACT', pr, false));
 });
+test('the threads of a call are written in key order, whatever the order of its files', () => {
+  const at = (key: string) => ({ ...oneThread, key });
+  const m = buildMessages({
+    ...args,
+    batch: { files: [ctx('src/a.ts', { threads: [at('T10'), at('T2')] }), ctx('src/b.ts', { threads: [at('T9'), at('T1')] })], tokens: 1 },
+  });
+  const c = m[2]!.content;
+  const order = ['T1', 'T2', 'T9', 'T10'].map((k) => c.indexOf(`### Thread ${k}\n`));
+  assert.ok(order.every((n) => n > 0));
+  assert.deepEqual([...order].sort((x, y) => x - y), order);
+});
