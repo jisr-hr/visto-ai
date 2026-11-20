@@ -1,4 +1,5 @@
 import type { FileContext } from './build.ts';
+import { changedText } from './increment.ts';
 import { inlineText, wrapData } from './untrusted.ts';
 
 // A token that never occurs in stripped text, so measuring never deletes anything
@@ -24,6 +25,9 @@ export function fileSection(c: FileContext, k: number, fileCount: number, token:
       : 'whole-file score: allowed');
   } else if (c.plan.kind === 'model_whole') {
     lines.push('whole-file score: required. The file moved to another directory and its content did not change. Score the move itself.');
+  }
+  if (c.changed !== undefined) {
+    lines.push(`lines changed since this file was last reviewed: ${changedText(c.changed)}`);
   }
   if (c.diffText !== null) {
     lines.push(wrapData(`diff ${path}`, c.diffText, token));

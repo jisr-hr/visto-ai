@@ -2,6 +2,8 @@ import { buildFileContexts } from './context/build.ts';
 import type { FileContext } from './context/build.ts';
 import { packBatches } from './context/batches.ts';
 import type { Batch } from './context/batches.ts';
+import { changedLines, isChanged } from './context/increment.ts';
+import type { Changed } from './context/increment.ts';
 import { renderAnchoredDiff } from './context/diff.ts';
 import { orderByPriority } from './context/priority.ts';
 import { attachThreads, isDue } from './context/threads.ts';
@@ -14,6 +16,7 @@ import { NOTHING_READ, filesToSend } from './plan.ts';
 import { inPool } from './pool.ts';
 import type { Control } from './pool.ts';
 import { reconcile } from './reconcile/index.ts';
+import { reconcileMode } from './reconcile/mode.ts';
 import { normalizePath } from './reconcile/placement.ts';
 import { reconcileScores, verdictOf } from './reconcile/scores.ts';
 import { dropDuplicates, reconcileVerdicts } from './reconcile/threads.ts';
@@ -23,7 +26,7 @@ import { shownOf } from './score/shown.ts';
 import type { ScoredBy, ScoreEntry, ScoreHistory } from './score/types.ts';
 import { askScorer, summariesOf } from './scorer/ask.ts';
 import type {
-  AuditEntry, ChangedFile, Discussed, EarlierThread, Effort, NotReviewed, PullRequestInfo, RepoConfig, ReviewDeps, ReviewInput, ReviewResult, Severity, Side, Source, Usage,
+  AuditEntry, ChangedFile, Discussed, EarlierThread, Effort, Finding, NotReviewed, PullRequestInfo, RepoConfig, ReviewDeps, ReviewInput, ReviewResult, Severity, Side, Source, Usage,
 } from './types.ts';
 
 const CONCURRENCY = 2;
@@ -239,6 +242,49 @@ async function keepScores(contexts: FileContext[], history: ScoreHistory | null,
   return audit;
 }
 
+type Content = (path: string, sha: string) => Promise<string | null>;
+const everything = (): Changed => ({ all: true, right: [], leftBlocks: [] });
+const errorCode = (error: unknown): string => (error instanceof Error && SOURCE_CODE.test(error.message) ? error.message : 'source_error');
+
+/** What of a file changed since a published review last read it. A read that rejects is passed on. */
+async function changedSince(c: FileContext, headSha: string, content: Content): Promise<Changed> {
+  const readAt = c.kept?.readAt ?? null;
+  if (readAt === null) return everything();
+  if (readAt.head === headSha) return { all: false, right: [], leftBlocks: [] };
+  const leftBlocks = c.blocks.filter((b) => !readAt.hashes.has(b.hash)).map((b) => b.id);
+  if (c.file.status === 'removed') return { all: false, right: [], leftBlocks };
+  const now = await content(c.file.path, headSha);
+  if (now === null) return everything();
+  let before = await content(c.file.path, readAt.head);
+  if (before === null && c.file.previousPath !== null) before = await content(c.file.previousPath, readAt.head);
+  if (before === null) return everything();
+  const right = changedLines(before.replaceAll('\r\n', '\n'), now.replaceAll('\r\n', '\n'));
+  return right === null ? everything() : { all: false, right, leftBlocks };
+}
+
+/**
+ * In a full review of a later head: how many placed blocker and major findings sit on a line unchanged since their file was last read.
+ * A read that rejects leaves the count out and is named in the audit: the review is already paid for.
+ */
+async function countUnchanged(findings: Finding[], contexts: FileContext[], headSha: string, content: Content, audit: AuditEntry[]): Promise<number | undefined> {
+  const blocking = findings.filter((f) => f.severity !== 'minor');
+  const known = new Map<string, { changed: Changed; blocks: FileContext['blocks'] }>();
+  for (const path of distinct(blocking.map((f) => f.path))) {
+    const c = contexts.find((one) => one.file.path === path && one.plan.kind === 'model');
+    if (c === undefined) continue;
+    try {
+      known.set(path, { changed: await changedSince(c, headSha, content), blocks: c.blocks });
+    } catch (error) {
+      audit.push({ stage: 'reconcile', action: 'unchanged_count_failed', subject: path, reason: errorCode(error) });
+      return undefined;
+    }
+  }
+  return blocking.filter((f) => {
+    const one = known.get(f.path);
+    return one !== undefined && !isChanged(one.changed, one.blocks, f.side, f.line);
+  }).length;
+}
+
 export async function review(input: ReviewInput, deps: ReviewDeps): Promise<ReviewResult> {
   let stage: 'context' | 'model' = 'context';
   const sourceErrors = new Set<unknown>(); // what the source rejected with; a caught probe failure is not fatal
@@ -303,6 +349,10 @@ export async function review(input: ReviewInput, deps: ReviewDeps): Promise<Revi
       ];
     };
     const leftOutAudit = plan.leftOut.flatMap(leaveOut);
+    // Before packing, so that the size of a file counts its line of what changed; a read that rejects fails the review here.
+    if (mode !== 'full') {
+      for (const c of plan.send) if (c.plan.kind === 'model') c.changed = await changedSince(c, pr.headSha, built.content);
+    }
     let shown: ShownThread[] = attached.shown.filter((s) => !covered.has(s.file));
     const withThreads = shown.length > 0;
     if (withThreads) {
@@ -380,6 +430,18 @@ export async function review(input: ReviewInput, deps: ReviewDeps): Promise<Revi
     const away = dropDuplicates(rec.unplaced, earlierThreads, judged.verdicts, files);
     audit.push(...placed.audit, ...away.audit);
     const alreadyDiscussed = [...placed.dropped, ...away.dropped].flatMap(({ finding, thread }) => discussed(finding, thread));
+    let findings = placed.kept;
+    let byMode: { unchanged: Finding[] } | { blockingOnUnchanged: number } | Record<string, never> = {};
+    if (mode !== 'full') {
+      const sent = new Map(plan.send.map((c) => [c.file.path, c]));
+      const moded = reconcileMode(placed.kept, (path) => sent.get(path)?.changed ?? null, (path) => sent.get(path)?.blocks ?? []);
+      audit.push(...moded.audit);
+      findings = moded.kept;
+      byMode = { unchanged: moded.unchanged };
+    } else if ((input.history?.lastReview ?? null) !== null) {
+      const count = await countUnchanged(placed.kept, built.contexts, pr.headSha, built.content, audit);
+      if (count !== undefined) byMode = { blockingOnUnchanged: count };
+    }
     let scoreAnswers = outcomes.flatMap((o) => o.answers);
     if (deps.scorer !== undefined) {
       const reviewed = new Set(outcomes.flatMap((o) => o.reviewed));
@@ -403,7 +465,7 @@ export async function review(input: ReviewInput, deps: ReviewDeps): Promise<Revi
     const scored = reconcileScores(scoreAnswers, built.contexts, notRead, floors, by);
     audit.push(...scored.audit);
     return okResult(rec.overview, threshold, due, said, {
-      findings: placed.kept, unplaced: away.kept, beyondDiff: rec.beyondDiff,
+      findings, ...byMode, unplaced: away.kept, beyondDiff: rec.beyondDiff,
       threadVerdicts: judged.verdicts, alreadyDiscussed,
       coverage: { reviewed: outcomes.flatMap((o) => o.reviewed), notReviewed },
       usage, ...answered, dependencies: { model: modelState }, audit,

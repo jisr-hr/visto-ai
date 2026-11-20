@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { estimateTokens, packBatches } from './batches.ts';
+import { estimateTokens, packBatches, unitTokens } from './batches.ts';
 import type { Batch } from './batches.ts';
 import { buildFileContexts } from './build.ts';
 import type { FileContext } from './build.ts';
@@ -102,6 +102,19 @@ test('a file with nothing left to score is told it takes no whole-file score', (
   // A moved file is still asked for its score of the move.
   const moved = ctx('lib/a.ts', { plan: { kind: 'model_whole' }, kept: kept(true) });
   assert.match(header(moved), /whole-file score: required\./);
+});
+test('a file that is sent in an incremental review says which lines changed, and a file without the field says nothing', async (t) => {
+  const header = (c: FileContext): string => buildMessages({ ...args, batch: { files: [c], tokens: 1 } })[2]!.content;
+  const changed = ctx('src/a.ts', { changed: { all: false, right: [[4, 4]], leftBlocks: ['B2'] } });
+  await t.test('the line stands after the whole-file line', () => {
+    assert.match(header(changed), /\ndeletions: 1\nwhole-file score: allowed\nlines changed since this file was last reviewed: R4; removed lines of B2\n<<<data/);
+  });
+  await t.test('a file without the field says nothing', () => {
+    assert.doesNotMatch(header(ctx('src/a.ts')), /lines changed since/);
+  });
+  await t.test('the packer counts the line', () => {
+    assert.ok(unitTokens(changed) > unitTokens(ctx('src/a.ts')));
+  });
 });
 test('an excerpt and a paired test are labelled', () => {
   const m = buildMessages({

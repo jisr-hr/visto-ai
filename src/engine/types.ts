@@ -104,6 +104,8 @@ export interface ReviewResult {
   threadsDue?: number;                // how many threads this run owed a verdict
   alreadyDiscussed?: Discussed[];     // major and blocker findings dropped as duplicates of an earlier thread
   nothingToDo?: boolean;              // true when an incremental review or a re-check read nothing and would tell a person what the newest published review tells
+  unchanged?: Finding[];              // in an incremental review and a re-check: majors on lines unchanged since their file was last read, listed in the body only
+  blockingOnUnchanged?: number;       // in a full review of a later head: its blocker and major findings on lines unchanged since their file was last read
 }
 export type { ChangedFile, PullRequestInfo, Side, Source };
 export type {

@@ -12,7 +12,7 @@ import { shownOf } from './score/shown.ts';
 import type { BlockScore, ScoreHistory } from './score/types.ts';
 import type {
   ChangedFile, EarlierThread, ModelClient, ModelRequest, ModelResponse, PullRequestInfo, RepoConfig, ReviewDeps, ReviewInput, ReviewResult, ScoreAnswer, ScoreRequest, Scorer,
-  Source, Usage,
+  Severity, Source, Usage,
 } from './types.ts';
 
 const CONTRACT = 'You review pull requests.';
@@ -876,9 +876,15 @@ test('with no history and no lookup the request is the one a first review sends 
 // The history a first review's stored result leaves, read as the shell reads it: each block with its entry,
 // and each hunk the run cut wholly into scored parts with their places.
 // `covered`: the first review was published, so each file it read is covered at the diff it had.
-function historyFrom(first: ReviewResult, extra: { covered?: boolean; lastReview?: ScoreHistory['lastReview']; shown?: string | null } = {}): ScoreHistory {
+// `readAt`: the head of the published run that read each file the first review read, with the hashes it had then.
+function historyFrom(first: ReviewResult, extra: {
+  covered?: boolean; lastReview?: ScoreHistory['lastReview']; shown?: string | null; readAt?: string;
+} = {}): ScoreHistory {
   const stored = JSON.parse(JSON.stringify(first)) as ReviewResult;
   const read = new Set(extra.covered === true ? stored.coverage.reviewed : []);
+  const readAtOf = (f: ReviewResult['scores'][number]) => (extra.readAt !== undefined && stored.coverage.reviewed.includes(f.path)
+    ? { head: extra.readAt, hashes: [...new Set(f.blocks.flatMap((one) => [one.hash, one.hunkHash]))] }
+    : null);
   return {
     by: 'model', lastReview: extra.lastReview ?? null, shown: extra.shown ?? null,
     files: stored.scores.map((f) => {
@@ -889,7 +895,7 @@ function historyFrom(first: ReviewResult, extra: { covered?: boolean; lastReview
         blocks: f.blocks.filter((one) => one.entry !== null).map((one) => ({ hash: one.hash, entry: one.entry!, raisedFrom: one.raisedFrom ?? null })),
         splits: [...hunks].filter(([, parts]) => parts.every((p) => p.range !== undefined && p.entry !== null))
           .map(([hunkHash, parts]) => ({ hunkHash, parts: parts.map((p) => ({ hash: p.hash, range: p.range! })) })),
-        stoodFor: [], wholeFile: f.wholeFile, coveredAt: read.has(f.path) && f.diffHash !== null ? [f.diffHash] : [], readAt: null,
+        stoodFor: [], wholeFile: f.wholeFile, coveredAt: read.has(f.path) && f.diffHash !== null ? [f.diffHash] : [], readAt: readAtOf(f),
       };
     }),
   };
@@ -1262,4 +1268,174 @@ test('a full review of a later head reads every file, the uncovered ones first',
 test('a review with no mode is a full review', async () => {
   const r = await review({ ...input, history: { by: 'model', lastReview: LAST, shown: null, files: [] } }, deps({ files: [fileA], answers: [answerOnA] }));
   assert.deepEqual([r.mode, 'since' in r, 'nothingToDo' in r], ['full', false, false]);
+});
+
+// Lines changed since a file was last read.
+const NOW = input.pullRequest.headSha;
+const CHANGED_LINE = 'lines changed since this file was last reviewed: ';
+const sixLines = (delay: number, top = ''): string => `${top}l1\nconst a = 1;\nl3\nconst delay = ${delay};\nl5\nl6\n`;
+const sixPatch = (delay: number, start = 1): string =>
+  [`@@ -${start},6 +${start},6 @@`, ' l1', '-const a = 0;', '+const a = 1;', ' l3', ` const delay = ${delay};`, ' l5', ' l6'].join('\n');
+const sixFile = (delay: number, extra: Partial<ChangedFile> = {}): ChangedFile =>
+  ({ path: 'src/t.ts', previousPath: null, status: 'modified', additions: 1, deletions: 1, patch: sixPatch(delay), ...extra });
+const onLines = (...found: Array<[Severity, number]>) => ({
+  overview: 'src/t.ts reviewed.', files: [],
+  findings: found.map(([severity, line]) => ({ path: 'src/t.ts', side: 'RIGHT', line, severity, body: `Look at line ${line}.`, quote: '', beyond_diff: false })),
+});
+// The file's content at each `<sha>:<path>`; every read is recorded, and a value that is an Error is a rejection.
+function contents(d: ReturnType<typeof deps>, at: Record<string, string | Error>): string[] {
+  const asked: string[] = [];
+  d.source.getFileContent = async (_p, path, sha) => {
+    asked.push(`${sha}:${path}`);
+    const value = at[`${sha}:${path}`];
+    if (value instanceof Error) throw value;
+    return value ?? null;
+  };
+  return asked;
+}
+const sentText = (d: ReturnType<typeof deps>): string => d.model.requests[0]!.messages[2]!.content;
+const linesOf = (findings: Array<{ severity: Severity; line: number }> | undefined) => (findings ?? []).map((f) => [f.severity, f.line]);
+
+test('an incremental review tells the model which lines changed, lists a major on an unchanged line and keeps one on a changed line', async (t) => {
+  const first = await firstOf([sixFile(2)], onLines());
+  const d = deps({ files: [sixFile(5)], answers: [onLines(['major', 4], ['major', 2])] });
+  contents(d, { [`${HEAD0}:src/t.ts`]: sixLines(2), [`${NOW}:src/t.ts`]: sixLines(5) });
+  const r = await review({ ...input, mode: 'incremental', history: historyFrom(first, { lastReview: LAST, readAt: HEAD0 }) }, d);
+  await t.test('the header names the changed line', () => {
+    assert.ok(sentText(d).includes(`\nwhole-file score: allowed\n${CHANGED_LINE}R4\n`));
+  });
+  await t.test('the major on the changed line is a finding', () => {
+    assert.deepEqual(linesOf(r.findings), [['major', 4]]);
+  });
+  await t.test('the major on the unchanged line is listed', () => {
+    assert.deepEqual(linesOf(r.unchanged), [['major', 2]]);
+  });
+});
+
+test('a re-check treats every line of a file read at this head as unchanged', async (t) => {
+  const first = await firstOf([sixFile(5)], onLines());
+  const d = deps({ files: [sixFile(5)], answers: [onLines(['major', 4], ['blocker', 2])] });
+  const r = await review({ ...input, mode: 'recheck', history: historyFrom(first, { lastReview: LAST, readAt: NOW }) }, d);
+  await t.test('the header says none', () => {
+    assert.ok(sentText(d).includes(`\n${CHANGED_LINE}none\n`));
+  });
+  await t.test('a major goes to unchanged', () => {
+    assert.deepEqual(linesOf(r.unchanged), [['major', 4]]);
+  });
+  await t.test('a blocker stays', () => {
+    assert.deepEqual(linesOf(r.findings), [['blocker', 2]]);
+  });
+});
+
+test('a re-check of a file the last review listed as not reviewed measures from the review that did read it', async (t) => {
+  const first = await firstOf([sixFile(2)], onLines());
+  const d = deps({ files: [sixFile(5)], answers: [onLines(['major', 4])] });
+  contents(d, { [`${HEAD0}:src/t.ts`]: sixLines(2), [`${NOW}:src/t.ts`]: sixLines(5) });
+  const history = historyFrom(first, { lastReview: { head: NOW, overview: LAST.overview }, readAt: HEAD0 });
+  const r = await review({ ...input, mode: 'recheck', history }, d);
+  await t.test('the file is sent', () => {
+    assert.equal(named(d, 'src/t.ts'), 1);
+  });
+  await t.test('the header says R4', () => {
+    assert.ok(sentText(d).includes(`\n${CHANGED_LINE}R4\n`));
+  });
+  await t.test('the major on line 4 is a finding, not listed as unchanged', () => {
+    assert.deepEqual([linesOf(r.findings), linesOf(r.unchanged)], [[['major', 4]], []]);
+  });
+});
+
+test('a file no published review has read is changed throughout', async (t) => {
+  const first = await firstOf([sixFile(2)], onLines());
+  const d = deps({ files: [sixFile(5)], answers: [onLines(['minor', 2])] });
+  const r = await review({ ...input, mode: 'incremental', history: historyFrom(first, { lastReview: LAST }) }, d);
+  await t.test('the header says all', () => {
+    assert.ok(sentText(d).includes(`\n${CHANGED_LINE}all\n`));
+  });
+  await t.test('a minor on it is kept', () => {
+    assert.deepEqual(linesOf(r.findings), [['minor', 2]]);
+  });
+});
+
+test('the same block at other line numbers is not changed', async () => {
+  const first = await firstOf([sixFile(2)], onLines());
+  const top = Array.from({ length: 10 }, (_, i) => `top ${i}\n`).join('');
+  const d = deps({ files: [sixFile(2, { patch: sixPatch(2, 11) })], answers: [onLines()] });
+  contents(d, { [`${HEAD0}:src/t.ts`]: sixLines(2), [`${NOW}:src/t.ts`]: sixLines(2, top) });
+  await review({ ...input, mode: 'incremental', history: historyFrom(first, { lastReview: LAST, readAt: HEAD0 }) }, d);
+  assert.ok(sentText(d).includes(`\n${CHANGED_LINE}R1-R10\n`));
+});
+
+test('a file that cannot be read at the earlier head counts as changed throughout', async (t) => {
+  const first = await firstOf([sixFile(2)], onLines());
+  const d = deps({ files: [sixFile(5, { status: 'renamed', previousPath: 'src/old.ts' })], answers: [onLines()] });
+  const asked = contents(d, { [`${NOW}:src/t.ts`]: sixLines(5) });
+  await review({ ...input, mode: 'incremental', history: historyFrom(first, { lastReview: LAST, readAt: HEAD0 }) }, d);
+  await t.test('it is looked for at its path and at its previous path', () => {
+    assert.deepEqual(asked.filter((key) => key.startsWith(HEAD0)), [`${HEAD0}:src/t.ts`, `${HEAD0}:src/old.ts`]);
+  });
+  await t.test('the header says all', () => {
+    assert.ok(sentText(d).includes(`\n${CHANGED_LINE}all\n`));
+  });
+});
+
+test('a removed file read before has no changed line but the removed lines of a new hunk', async (t) => {
+  const gone = (patch: string[]): ChangedFile => ({ path: 'src/gone.ts', previousPath: null, status: 'removed', additions: 0, deletions: 4, patch: patch.join('\n') });
+  const hunkOne = ['@@ -1,2 +0,0 @@', '-const a = 1;', '-const b = 2;'];
+  const answer = { overview: 'src/gone.ts is removed.', findings: [], files: [] };
+  const first = await firstOf([gone(hunkOne)], answer);
+  const d = deps({ files: [gone([...hunkOne, '@@ -10,2 +0,0 @@', '-const c = 3;', '-const d = 4;'])], answers: [answer] });
+  const asked = contents(d, {});
+  await review({ ...input, mode: 'incremental', history: historyFrom(first, { lastReview: LAST, readAt: HEAD0 }) }, d);
+  await t.test('no content is read for it', () => {
+    assert.deepEqual(asked.filter((key) => key.endsWith(':src/gone.ts')), []);
+  });
+  await t.test('the header names the removed lines of the new hunk', () => {
+    assert.ok(sentText(d).includes(`\n${CHANGED_LINE}removed lines of B2\n`));
+  });
+});
+
+test('a failed read of the earlier content fails an incremental review before any model call', async () => {
+  const first = await firstOf([sixFile(2)], onLines());
+  const d = deps({ files: [sixFile(5)], answers: [onLines()] });
+  contents(d, { [`${HEAD0}:src/t.ts`]: new Error('github_502'), [`${NOW}:src/t.ts`]: sixLines(5) });
+  const r = await review({ ...input, mode: 'incremental', history: historyFrom(first, { lastReview: LAST, readAt: HEAD0 }) }, d);
+  assert.deepEqual([r.status, r.failure, r.usage.calls, d.model.requests.length], ['failed', { stage: 'context', code: 'github_502' }, 0, 0]);
+});
+
+test('a full review of a later head counts its blocking findings on unchanged lines and changes nothing else', async (t) => {
+  const first = await firstOf([sixFile(2)], onLines());
+  const d = deps({ files: [sixFile(5)], answers: [onLines(['blocker', 2], ['major', 4], ['minor', 3])] });
+  contents(d, { [`${HEAD0}:src/t.ts`]: sixLines(2), [`${NOW}:src/t.ts`]: sixLines(5) });
+  const r = await review({ ...input, mode: 'full', history: historyFrom(first, { lastReview: LAST, readAt: HEAD0 }) }, d);
+  await t.test('the count is the blocker on an unchanged line', () => {
+    assert.equal(r.blockingOnUnchanged, 1);
+  });
+  await t.test('the findings are as returned', () => {
+    assert.deepEqual([linesOf(r.findings), 'unchanged' in r], [[['blocker', 2], ['major', 4], ['minor', 3]], false]);
+  });
+  await t.test('no header line', () => {
+    assert.ok(!sentText(d).includes(CHANGED_LINE));
+  });
+});
+
+test('a failed read while counting leaves the count out and the review whole', async (t) => {
+  const first = await firstOf([sixFile(2)], onLines());
+  const d = deps({ files: [sixFile(5)], answers: [onLines(['blocker', 2])] });
+  contents(d, { [`${HEAD0}:src/t.ts`]: new Error('github_502'), [`${NOW}:src/t.ts`]: sixLines(5) });
+  const r = await review({ ...input, mode: 'full', history: historyFrom(first, { lastReview: LAST, readAt: HEAD0 }) }, d);
+  await t.test('the review is ok and keeps its findings', () => {
+    assert.deepEqual([r.status, linesOf(r.findings)], ['ok', [['blocker', 2]]]);
+  });
+  await t.test('the count is absent', () => {
+    assert.equal('blockingOnUnchanged' in r, false);
+  });
+  await t.test('the audit names the failed count', () => {
+    assert.deepEqual(r.audit.filter((e) => e.action === 'unchanged_count_failed'),
+      [{ stage: 'reconcile', action: 'unchanged_count_failed', subject: 'src/t.ts', reason: 'github_502' }]);
+  });
+});
+
+test('a first review has no such count', async () => {
+  const r = await review(input, deps({ files: [sixFile(5)], answers: [onLines(['blocker', 2])] }));
+  assert.deepEqual([r.status, 'blockingOnUnchanged' in r], ['ok', false]);
 });
