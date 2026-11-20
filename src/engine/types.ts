@@ -30,6 +30,17 @@ export interface EarlierThread {
   replies: EarlierReply[];            // oldest first
 }
 export interface EarlierState { head: string; threads: EarlierThread[] }   // head: of the last published review
+export interface ThreadVerdict {
+  threadId: string; commentId: string;
+  verdict: 'fixed' | 'answered' | 'open';
+  reply: string;              // the model's reason as one line: every run of white space made one space, trimmed, at most 600 characters; '' when it gave none
+  fileChanged: boolean;       // for `fixed`: the thread's file has another diff than when the thread was opened
+}
+export interface Discussed {
+  path: string; side: Side; line: number; severity: 'blocker' | 'major'; body: string;
+  commentId: string;                    // the first comment of the thread that already raised it
+  resolved: boolean; settled: boolean;  // that thread, at the moment the finding was dropped
+}
 
 export interface ReviewInput {
   pullRequest: PullRequestInfo;
@@ -82,6 +93,10 @@ export interface ReviewResult {
   scores: FileScore[];        // one per changed file; empty when the review failed
   verdict: Verdict;
   teamFileInvalid: string | null; // why the repository's .visto-ai.yml cannot be used; null when it can, or on a failed review
+  // Each optional because a result stored before these existed has none: read as empty, or 0. The engine always sets them.
+  threadVerdicts?: ThreadVerdict[];   // the verdicts this run kept
+  threadsDue?: number;                // how many threads this run owed a verdict
+  alreadyDiscussed?: Discussed[];     // major and blocker findings dropped as duplicates of an earlier thread
 }
 export type { ChangedFile, PullRequestInfo, Side, Source };
 export type {

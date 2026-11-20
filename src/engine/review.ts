@@ -3,7 +3,7 @@ import type { FileContext } from './context/build.ts';
 import { packBatches } from './context/batches.ts';
 import type { Batch } from './context/batches.ts';
 import { orderByPriority } from './context/priority.ts';
-import { attachThreads } from './context/threads.ts';
+import { attachThreads, isDue } from './context/threads.ts';
 import type { ShownThread } from './context/threads.ts';
 import { buildMessages, fixedTokens, headerStripCounts } from './context/prompt.ts';
 import { callBatch } from './model/call.ts';
@@ -14,10 +14,11 @@ import type { Control } from './pool.ts';
 import { reconcile } from './reconcile/index.ts';
 import { normalizePath } from './reconcile/placement.ts';
 import { reconcileScores, verdictOf } from './reconcile/scores.ts';
+import { dropDuplicates, reconcileVerdicts } from './reconcile/threads.ts';
 import { REPO_FILE, parseRepoFile } from './score/floors.ts';
 import { askScorer, summariesOf } from './scorer/ask.ts';
 import type {
-  AuditEntry, ChangedFile, Effort, NotReviewed, PullRequestInfo, RepoConfig, ReviewDeps, ReviewInput, ReviewResult, Source, Usage,
+  AuditEntry, ChangedFile, Discussed, EarlierThread, Effort, NotReviewed, PullRequestInfo, RepoConfig, ReviewDeps, ReviewInput, ReviewResult, Severity, Side, Source, Usage,
 } from './types.ts';
 
 const CONCURRENCY = 2;
@@ -49,18 +50,20 @@ const noneAnswered = (): Answered => ({ models: [], providers: [] });
 
 // A review that did not finish never tells anyone that a pull request needs no person.
 function failedResult(
-  stage: 'context' | 'model', code: string, usage: Usage, audit: AuditEntry[], model: 'ok' | 'error', threshold: number,
+  stage: 'context' | 'model', code: string, usage: Usage, audit: AuditEntry[], model: 'ok' | 'error', threshold: number, due: number,
   answered: Answered = noneAnswered(),
 ): ReviewResult {
   return {
+    threadVerdicts: [], threadsDue: due, alreadyDiscussed: [],
     scores: [], verdict: { threshold, needsHuman: true, highest: 100 }, teamFileInvalid: null,
     status: 'failed', failure: { stage, code }, mode: 'full', overview: '', findings: [], unplaced: [], beyondDiff: [],
     coverage: { reviewed: [], notReviewed: [] }, usage, ...answered, dependencies: { model }, audit,
   };
 }
 
-function okResult(overview: string, threshold: number, rest: Partial<ReviewResult>): ReviewResult {
+function okResult(overview: string, threshold: number, due: number, rest: Partial<ReviewResult>): ReviewResult {
   return {
+    threadVerdicts: [], threadsDue: due, alreadyDiscussed: [],
     scores: [], verdict: verdictOf([], threshold), teamFileInvalid: null,
     status: 'ok', failure: null, mode: 'full', overview, findings: [], unplaced: [], beyondDiff: [],
     coverage: { reviewed: [], notReviewed: [] }, usage: zeroUsage(), models: [], providers: [], dependencies: { model: 'ok' }, audit: [], ...rest,
@@ -68,6 +71,15 @@ function okResult(overview: string, threshold: number, rest: Partial<ReviewResul
 }
 
 const distinct = (values: string[]): string[] => [...new Set(values)];
+
+// A major or blocker finding dropped as a duplicate, with the thread that already raised it; a minor one is not kept.
+function discussed(f: { path: string; side: Side; line: number; severity: Severity; body: string }, thread: EarlierThread): Discussed[] {
+  if (f.severity === 'minor') return [];
+  return [{
+    path: f.path, side: f.side, line: f.line, severity: f.severity, body: f.body,
+    commentId: thread.commentId, resolved: thread.resolved, settled: thread.settled,
+  }];
+}
 
 interface BatchOutcome {
   answers: { value: SubmitReviewArgs; files: string[]; threads?: string[] }[]; // each answer with the paths of the files it was given, and, in a run with threads, the keys of their threads
@@ -187,7 +199,10 @@ export async function review(input: ReviewInput, deps: ReviewDeps): Promise<Revi
   let usage = zeroUsage();
   let answered = noneAnswered();
   const audit: AuditEntry[] = [];
+  let due = 0;
   try {
+    // Every thread the run owes a verdict, whether or not its file is shown.
+    due = (input.earlier?.threads ?? []).filter(isDue).length;
     const pr = input.pullRequest;
     const guard = async <T>(call: () => Promise<T>): Promise<T> => {
       try {
@@ -205,7 +220,7 @@ export async function review(input: ReviewInput, deps: ReviewDeps): Promise<Revi
 
     const threshold = input.repoConfig.scoreThreshold;
     const files = await source.listFiles(pr);
-    if (files.length === 0) return okResult('No changes to review.', threshold, {});
+    if (files.length === 0) return okResult('No changes to review.', threshold, due, {});
 
     // Read only when there is something to floor; a rejection fails the review here, like any source error.
     const floors = parseRepoFile(await source.getDefaultBranchFile(pr, REPO_FILE));
@@ -213,7 +228,7 @@ export async function review(input: ReviewInput, deps: ReviewDeps): Promise<Revi
     if (teamFileInvalid !== null) audit.push({ stage: 'context', action: 'team_file_invalid', subject: REPO_FILE, reason: teamFileInvalid });
 
     let budget = input.limits.inputTokensPerCall - fixedTokens(deps.contract, pr);
-    if (budget <= 0) return failedResult('context', 'budget_too_small', usage, audit, 'ok', threshold);
+    if (budget <= 0) return failedResult('context', 'budget_too_small', usage, audit, 'ok', threshold, due);
 
     const stripped = headerStripCounts(pr);
     for (const subject of ['title', 'description'] as const) {
@@ -224,7 +239,7 @@ export async function review(input: ReviewInput, deps: ReviewDeps): Promise<Revi
     const withThreads = attached.shown.length > 0;
     if (withThreads) {
       budget = input.limits.inputTokensPerCall - fixedTokens(deps.contract, pr, true);
-      if (budget <= 0) return failedResult('context', 'budget_too_small', usage, audit, 'ok', threshold);
+      if (budget <= 0) return failedResult('context', 'budget_too_small', usage, audit, 'ok', threshold, due);
     }
     const packed = packBatches(attached.contexts, budget, input.limits.batchesPerReview);
     audit.push(...built.audit, ...attached.audit, ...packed.audit);
@@ -233,7 +248,7 @@ export async function review(input: ReviewInput, deps: ReviewDeps): Promise<Revi
         if (packed.notReviewed.some((n) => n.path === s.file)) audit.push({ stage: 'context', action: 'thread_not_shown', subject: s.key, reason: 'file_not_reviewed' });
       }
       const scored = reconcileScores([], built.contexts, new Set(packed.notReviewed.map((n) => n.path)), floors);
-      return okResult('No reviewable changes.', threshold, {
+      return okResult('No reviewable changes.', threshold, due, {
         coverage: { reviewed: [], notReviewed: packed.notReviewed }, audit: [...audit, ...scored.audit],
         scores: scored.scores, verdict: verdictOf(scored.scores, threshold), teamFileInvalid,
       });
@@ -268,7 +283,7 @@ export async function review(input: ReviewInput, deps: ReviewDeps): Promise<Revi
     const fatal = codes.find((c) => c === 'auth' || c === 'no_credit');
     const everyBatchFailed = outcomes.every((o) => o.answers.length === 0);
     if (fatal !== undefined || everyBatchFailed) {
-      return failedResult('model', fatal ?? codes[0] ?? 'internal_error', usage, audit, modelState, threshold, answered);
+      return failedResult('model', fatal ?? codes[0] ?? 'internal_error', usage, audit, modelState, threshold, due, answered);
     }
 
     const rec = reconcile(outcomes.flatMap((o) => o.answers), built.contexts);
@@ -278,11 +293,17 @@ export async function review(input: ReviewInput, deps: ReviewDeps): Promise<Revi
       ...outcomes.flatMap((o) => o.failedFiles.map((path): NotReviewed => ({ path, reason: 'batch_failed' }))),
     ];
     const notRead = new Set(notReviewed.map((n) => n.path));
-    // `shown` is kept for the verdicts that a later task judges.
     const shown: ShownThread[] = attached.shown;
     for (const s of shown) {
       if (notRead.has(s.file)) audit.push({ stage: 'context', action: 'thread_not_shown', subject: s.key, reason: 'file_not_reviewed' });
     }
+    const judged = reconcileVerdicts(outcomes.flatMap((o) => o.answers), shown, built.contexts, pr.headSha);
+    audit.push(...judged.audit);
+    const earlierThreads = input.earlier?.threads ?? [];
+    const placed = dropDuplicates(rec.findings, earlierThreads, judged.verdicts, files);
+    const away = dropDuplicates(rec.unplaced, earlierThreads, judged.verdicts, files);
+    audit.push(...placed.audit, ...away.audit);
+    const alreadyDiscussed = [...placed.dropped, ...away.dropped].flatMap(({ finding, thread }) => discussed(finding, thread));
     let scoreAnswers = outcomes.flatMap((o) => o.answers);
     if (deps.scorer !== undefined) {
       const reviewed = new Set(outcomes.flatMap((o) => o.reviewed));
@@ -305,8 +326,9 @@ export async function review(input: ReviewInput, deps: ReviewDeps): Promise<Revi
     }
     const scored = reconcileScores(scoreAnswers, built.contexts, notRead, floors);
     audit.push(...scored.audit);
-    return okResult(rec.overview, threshold, {
-      findings: rec.findings, unplaced: rec.unplaced, beyondDiff: rec.beyondDiff,
+    return okResult(rec.overview, threshold, due, {
+      findings: placed.kept, unplaced: away.kept, beyondDiff: rec.beyondDiff,
+      threadVerdicts: judged.verdicts, alreadyDiscussed,
       coverage: { reviewed: outcomes.flatMap((o) => o.reviewed), notReviewed },
       usage, ...answered, dependencies: { model: modelState }, audit,
       scores: scored.scores, verdict: verdictOf(scored.scores, threshold), teamFileInvalid,
@@ -318,6 +340,6 @@ export async function review(input: ReviewInput, deps: ReviewDeps): Promise<Revi
     }
     const name = error instanceof Error ? error.name : 'unknown';
     safeLog(deps, { event: 'internal_error', stage, name });
-    return failedResult(stage, code, usage, audit, 'ok', input.repoConfig.scoreThreshold, answered);
+    return failedResult(stage, code, usage, audit, 'ok', input.repoConfig.scoreThreshold, due, answered);
   }
 }

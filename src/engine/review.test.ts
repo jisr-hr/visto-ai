@@ -5,7 +5,7 @@ import { ProviderError } from './model/errors.ts';
 import { SUBMIT_REVIEW, submitReviewTool, submitReviewWithThreadsTool } from './model/submit-review.ts';
 import { chooseEffort, review } from './review.ts';
 import type {
-  ChangedFile, ModelClient, ModelRequest, ModelResponse, PullRequestInfo, RepoConfig, ReviewDeps, ReviewInput, ScoreAnswer, ScoreRequest, Scorer,
+  ChangedFile, EarlierThread, ModelClient, ModelRequest, ModelResponse, PullRequestInfo, RepoConfig, ReviewDeps, ReviewInput, ScoreAnswer, ScoreRequest, Scorer,
   Source, Usage,
 } from './types.ts';
 
@@ -718,4 +718,38 @@ test('a thread on a file that was not reviewed is named even when no call is mad
   assert.equal(d.model.requests.length, 0);
   assert.deepEqual(r.coverage.notReviewed, [{ path: 'src/a.ts', reason: 'too_large' }]);
   assert.ok(r.audit.some((e) => e.action === 'thread_not_shown' && e.subject === 'T1' && e.reason === 'file_not_reviewed'));
+});
+
+const earlierThread = (over: Partial<EarlierThread> = {}): EarlierThread => ({
+  id: 'PRRT_1', commentId: 'C1', path: 'src/a.ts', side: 'RIGHT', line: 2, severity: 'major', quote: 'const a = 1;', body: 'Wrong value.',
+  openedAt: { head: 'abcdef0', diffHash: null }, resolved: true, settled: false, lastVerdict: null, replies: [], ...over,
+});
+test('a later review keeps a verdict, drops a finding its thread already raised, and counts the threads that were due', async () => {
+  const answer = {
+    ...answerOnA,
+    findings: [{ ...answerOnA.findings[0]!, quote: 'const a = 1;' }],
+    thread_verdicts: [{ thread_id: 'T1', verdict: 'open' }],
+  };
+  const threads = [earlierThread(), earlierThread({ id: 'PRRT_2', commentId: 'C2', path: 'src/gone.ts' })];
+  const r = await review({ ...input, earlier: { head: 'abcdef0', threads } }, deps({ files: [fileA], answers: [answer] }));
+  assert.deepEqual(r.findings, []);
+  assert.deepEqual(r.alreadyDiscussed, [
+    { path: 'src/a.ts', side: 'RIGHT', line: 2, severity: 'major', body: 'Wrong value.', commentId: 'C1', resolved: true, settled: false },
+  ]);
+  assert.deepEqual(r.threadVerdicts, [{ threadId: 'PRRT_1', commentId: 'C1', verdict: 'open', reply: '', fileChanged: false }]);
+  assert.equal(r.threadsDue, 2);
+  assert.ok(r.audit.some((e) => e.action === 'thread_not_shown' && e.subject === 'T2' && e.reason === 'file_not_in_diff'));
+  assert.ok(r.audit.some((e) => e.stage === 'reconcile' && e.action === 'duplicate' && e.subject === 'src/a.ts:2' && e.reason === 'same_quote'));
+});
+test('a review that fails, and one with nothing to read, still say how many threads were due', async () => {
+  const earlier = { head: 'abcdef0', threads: [earlierThread(), earlierThread({ id: 'PRRT_2', severity: 'minor' })] };
+  const failed = await review({ ...input, earlier }, deps({ files: [fileA], answers: [new ProviderError('auth', 'a', null, null)] }));
+  const empty = await review({ ...input, earlier }, deps({ files: [] }));
+  const unreadable = await review({ ...input, earlier }, deps({ files: [binaryNoPatch] }));
+  const tooSmall = await review({ ...input, earlier, limits: { ...input.limits, inputTokensPerCall: 1 } }, deps({ files: [fileA] }));
+  const first = await review(input, deps({ files: [fileA], answers: [answerOnA] }));
+  for (const [name, r, status] of [['failed', failed, 'failed'], ['empty', empty, 'ok'], ['unreadable', unreadable, 'ok'], ['too small', tooSmall, 'failed']] as const) {
+    assert.deepEqual([r.status, r.threadsDue, r.threadVerdicts, r.alreadyDiscussed], [status, 1, [], []], name);
+  }
+  assert.deepEqual([first.threadsDue, first.threadVerdicts, first.alreadyDiscussed, first.findings.length], [0, [], [], 1]);
 });
