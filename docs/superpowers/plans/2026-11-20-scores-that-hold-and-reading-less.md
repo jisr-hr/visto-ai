@@ -619,7 +619,7 @@ export function reconcileMode(
    - the file is removed: no new-side line; `leftBlocks` as below. No content is read;
    - else `right` is `changedLines` of the file's content at `kept.readAt.head` and at the present head, each with `\r\n` made `\n`. The earlier content is read at the file's path, and at its `previousPath` when that answers null. When either content is null, or the two cannot be compared, `{ all: true }`.
 
-   `leftBlocks` holds the ids of the file's hunks whose hash is not in `kept.readAt.hashes`.
+   `leftBlocks` holds the ids of the file's hunks that have a removed line and whose hash is not in `kept.readAt.hashes`. A new hunk that only adds lines is not listed: its lines are in `right`.
 2. `changedLines` uses `patchFromContents` and returns the new-side numbers of its added lines as ranges; null when that gives up.
 3. `isChanged`: true when `all`; for `RIGHT`, when the line is inside one of `right`; for `LEFT`, when the line is among the old-side lines of one of `leftBlocks`.
 4. **In `incremental` and `recheck`,** `changed` is set on every `model` file that is sent, on the object that is packed, before packing. Its header gets one more line after the whole-file line: `lines changed since this file was last reviewed: <changedText>`. In `full` mode no header changes. A read of the earlier content that rejects fails the review as any source error does: it is before any model call, and the job puts such a job back.
