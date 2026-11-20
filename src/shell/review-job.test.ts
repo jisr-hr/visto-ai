@@ -872,6 +872,16 @@ test('a thread someone wrote in after it was judged is left as it is, and the lo
   assert.deepEqual(h.logged.filter((e) => e.event === 'thread_followup').map((e) => [e.replied, e.resolved, e.missing, e.changed]), [[0, 0, 0, 1]]);
   assert.equal((await getJob(db, h.job.id))?.outcome, 'published');
 });
+test('a later review posts the finding its thread already raised with the link to that thread', async () => {
+  await published();
+  const discussed = { path: 'src/a.ts', side: 'RIGHT' as const, line: 12, severity: 'major' as const, body: 'A check is missing.', commentId: '8001', resolved: false, settled: false };
+  const h = await live({ own: [[{ id: '401', commit: 'h0' }]], threads: [[THREAD]], result: okResult({ alreadyDiscussed: [discussed], threadsDue: 1 }) });
+  await runReviewJob(h.job, h.deps);
+  const posts = h.writes.filter((w) => w[0] === 'publishReview');
+  assert.equal(posts.length, 1);
+  assert.ok(String(posts[0]![2]).includes('## Already discussed'));
+  assert.ok(String(posts[0]![2]).includes('(https://git.example.test/c/8001)'));
+});
 test('a first review reads no thread and is told of no earlier state', async () => {
   const h = await live();
   await runReviewJob(h.job, h.deps);

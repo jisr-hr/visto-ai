@@ -160,3 +160,13 @@ test('any other failure says so with its code, and a post that failed is not rep
     assert.equal(h.calls.filter((c) => c[0] === 'publishReview').length, options?.posts?.length ?? 0);
   }
 });
+test("the body-only form links each finding already discussed to its earlier thread", async () => {
+  const result: ReviewResult = { ...okResult(), alreadyDiscussed: [{ path: 'a.ts', side: 'RIGHT', line: 3, severity: 'major', body: 'Raised before.', commentId: '8001', resolved: false, settled: false }] };
+  const h = harness({ posts: [new Error('review_rejected'), { id: '502' }], run: { ...run, result } });
+  const out = await publishRun(h.deps, h.args);
+  assert.equal(out.kind, 'published');
+  if (out.kind !== 'published') return;
+  assert.equal(out.inlineDropped, true);
+  assert.ok(out.body.includes('## Already discussed'));
+  assert.ok(out.body.includes('(https://forge.example.test/c/8001)'));
+});
