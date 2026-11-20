@@ -1439,3 +1439,15 @@ test('a first review has no such count', async () => {
   const r = await review(input, deps({ files: [sixFile(5)], answers: [onLines(['blocker', 2])] }));
   assert.deepEqual([r.status, 'blockingOnUnchanged' in r], ['ok', false]);
 });
+
+test('a new hunk that only adds lines is not named for its removed lines, and a new hunk with a removed line is', async () => {
+  const first = await firstOf([sixFile(2)], onLines());
+  const patch = ['@@ -1,2 +1,3 @@', ' a1', '+new2', ' a3', '@@ -8,3 +9,3 @@', ' b9', '-old', '+b10', ' b11'].join('\n');
+  const d = deps({ files: [sixFile(2, { patch, additions: 2 })], answers: [onLines()] });
+  contents(d, {
+    [`${HEAD0}:src/t.ts`]: 'a1\na3\nl4\nl5\nl6\nl7\nl8\nb9\nold\nb11\n',
+    [`${NOW}:src/t.ts`]: 'a1\nnew2\na3\nl4\nl5\nl6\nl7\nl8\nb9\nb10\nb11\n',
+  });
+  await review({ ...input, mode: 'incremental', history: historyFrom(first, { lastReview: LAST, readAt: HEAD0 }) }, d);
+  assert.ok(sentText(d).includes(`\n${CHANGED_LINE}R2, R10; removed lines of B2\n`));
+});

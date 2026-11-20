@@ -2,7 +2,7 @@ import { buildFileContexts } from './context/build.ts';
 import type { FileContext } from './context/build.ts';
 import { packBatches } from './context/batches.ts';
 import type { Batch } from './context/batches.ts';
-import { changedLines, isChanged } from './context/increment.ts';
+import { changedLines, isChanged, leftBlocksOf } from './context/increment.ts';
 import type { Changed } from './context/increment.ts';
 import { renderAnchoredDiff } from './context/diff.ts';
 import { orderByPriority } from './context/priority.ts';
@@ -251,7 +251,7 @@ async function changedSince(c: FileContext, headSha: string, content: Content): 
   const readAt = c.kept?.readAt ?? null;
   if (readAt === null) return everything();
   if (readAt.head === headSha) return { all: false, right: [], leftBlocks: [] };
-  const leftBlocks = c.blocks.filter((b) => !readAt.hashes.has(b.hash)).map((b) => b.id);
+  const leftBlocks = leftBlocksOf(c.blocks, readAt.hashes);
   if (c.file.status === 'removed') return { all: false, right: [], leftBlocks };
   const now = await content(c.file.path, headSha);
   if (now === null) return everything();

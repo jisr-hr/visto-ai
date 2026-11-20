@@ -16,6 +16,11 @@ export function changedLines(before: string, now: string): Range[] | null {
   return toRanges(parsePatch(patch).flatMap((h) => h.lines.filter((l) => l.kind === 'add').map((l) => l.newLine!)));
 }
 
+/** The ids of the hunks that have a removed line and whose hash is not in `hashes`: a hunk that only adds lines has its new lines in `right`. */
+export function leftBlocksOf(blocks: Block[], hashes: ReadonlySet<string>): string[] {
+  return blocks.filter((b) => b.changed.some((a) => a.side === 'LEFT') && !hashes.has(b.hash)).map((b) => b.id);
+}
+
 /** Whether a placed finding sits on a line that changed. `blocks` are the file's hunks. */
 export function isChanged(changed: Changed, blocks: Block[], side: Side, line: number): boolean {
   if (changed.all) return true;
