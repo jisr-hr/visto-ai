@@ -18,6 +18,7 @@ export function missingFor(info: AppInfo, dryRun: boolean): FeatureOff[] {
   need('reviews', 'contents', 'read');
   subscribe('reviews', 'pull_request');
   if (!dryRun) need('publishing', 'pull_requests', 'write');
+  if (!dryRun) need('resolving', 'contents', 'write');
   if (!dryRun) need('commands', 'issues', 'write');
   subscribe('commands', 'issue_comment');
   for (const event of ['pull_request_review', 'pull_request_review_comment', 'pull_request_review_thread', 'issue_comment']) subscribe('capture', event);
@@ -64,5 +65,9 @@ export function createAppInfo(opts: { auth: AppAuth; fetch: typeof fetch; apiBas
     return started;
   }
 
-  return { read, lacks: async (dryRun) => missingFor(await read(), dryRun) };
+  return {
+    read,
+    lacks: async (dryRun) => missingFor(await read(), dryRun),
+    canResolve: async () => WRITE.has((await read()).permissions.contents ?? ''),
+  };
 }

@@ -21,7 +21,7 @@ function setup(answers: Array<Response | Error>) {
 }
 
 const APP = { slug: 'visto-test', permissions: { pull_requests: 'write', contents: 'read' }, events: ['pull_request', 'issue_comment'] };
-const FULL: AppInfo = { botLogin: 'visto-test[bot]', permissions: { pull_requests: 'write', contents: 'read', issues: 'write' },
+const FULL: AppInfo = { botLogin: 'visto-test[bot]', permissions: { pull_requests: 'write', contents: 'write', issues: 'write' },
   events: ['pull_request', 'issue_comment', 'pull_request_review', 'pull_request_review_comment', 'pull_request_review_thread'] };
 
 test('the app is read with its own token and remembered', async () => {
@@ -56,6 +56,7 @@ test('each thing an app lacks is named with the feature it switches off', () => 
   assert.deepEqual(missingFor({ botLogin: 'visto-test[bot]', permissions: { pull_requests: 'read' }, events: ['pull_request'] }, false), [
     { feature: 'reviews', missing: 'contents:read' },
     { feature: 'publishing', missing: 'pull_requests:write' },
+    { feature: 'resolving', missing: 'contents:write' },
     { feature: 'commands', missing: 'issues:write' },
     { feature: 'commands', missing: 'event:issue_comment' },
     { feature: 'capture', missing: 'event:pull_request_review' },
@@ -66,5 +67,18 @@ test('each thing an app lacks is named with the feature it switches off', () => 
 });
 test('lacks reads the app and says what is missing', async () => {
   const { info } = setup([new Response(JSON.stringify(APP))]);
-  assert.deepEqual((await info.lacks(false)).map((m) => m.missing), ['issues:write', 'event:pull_request_review', 'event:pull_request_review_comment', 'event:pull_request_review_thread']);
+  assert.deepEqual((await info.lacks(false)).map((m) => m.missing), ['contents:write', 'issues:write', 'event:pull_request_review', 'event:pull_request_review_comment', 'event:pull_request_review_thread']);
+});
+test('resolving is lacking out of dry run when contents is only read, and not otherwise', () => {
+  const read = { ...FULL, permissions: { ...FULL.permissions, contents: 'read' } };
+  assert.deepEqual(missingFor(read, false), [{ feature: 'resolving', missing: 'contents:write' }]);
+  assert.deepEqual(missingFor(read, true), []);
+  assert.deepEqual(missingFor(FULL, false), []);
+});
+test('canResolve is true for write and admin contents only', async () => {
+  for (const [level, expected] of [['read', false], ['write', true], ['admin', true]] as const) {
+    const { info } = setup([new Response(JSON.stringify({ ...APP, permissions: { contents: level } }))]);
+    assert.equal(await info.canResolve(), expected);
+  }
+  assert.equal(await setup([new Response(JSON.stringify({ ...APP, permissions: {} }))]).info.canResolve(), false);
 });

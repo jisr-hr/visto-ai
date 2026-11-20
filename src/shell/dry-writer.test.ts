@@ -10,4 +10,8 @@ test('in dry run every write is refused', async () => {
   await assert.rejects(w.listReviewComments(ref, '99', '1'), /^Error: dry_run$/);
   await assert.rejects(w.react(ref, '99', '31', 'eyes'), /^Error: dry_run$/);
   await assert.rejects(w.comment(ref, '99', 'x'), /^Error: dry_run$/);
+  await assert.rejects(w.listThreads(ref, '99'), /^Error: dry_run$/);
+  await assert.rejects(w.replyToThread('99', 'PRRT_1', 'x'), /^Error: dry_run$/);
+  await assert.rejects(w.editThreadComment('99', 'PRRC_1', 'x'), /^Error: dry_run$/);
+  await assert.rejects(w.resolveThread('99', 'PRRT_1'), /^Error: dry_run$/);
 });

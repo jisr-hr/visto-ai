@@ -168,6 +168,10 @@ async function harness(options: Options = {}) {
       writes.push(['comment', body]);
       if (options.writeFails === true) throw new Error('github_502');
     },
+    listThreads: () => Promise.reject(new Error('not_expected')),
+    replyToThread: () => Promise.reject(new Error('not_expected')),
+    editThreadComment: () => Promise.reject(new Error('not_expected')),
+    resolveThread: () => Promise.reject(new Error('not_expected')),
   };
   let finishFailuresLeft = options.finishFailures ?? 0;
   /** Whether this statement is one that finishes the job, and is to reject. */

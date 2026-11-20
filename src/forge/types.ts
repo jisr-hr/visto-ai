@@ -102,11 +102,13 @@ export interface AppInfo {
   permissions: Record<string, string>;       // as the git service names them: { pull_requests: 'write', contents: 'read', ... }
   events: string[];                          // the events the app is subscribed to
 }
-export interface FeatureOff { feature: 'reviews' | 'publishing' | 'commands' | 'capture'; missing: string }
+export interface FeatureOff { feature: 'reviews' | 'publishing' | 'resolving' | 'commands' | 'capture'; missing: string }
 export interface AppIdentity {
   read(): Promise<AppInfo>;
   /** What the app lacks: one entry for each permission or event a feature needs and the app has not got. */
   lacks(dryRun: boolean): Promise<FeatureOff[]>;
+  /** True when the app may resolve a review thread: its `contents` permission is write or admin. */
+  canResolve(): Promise<boolean>;
 }
 export interface ReviewDraft {
   commit: string;                            // the commit the review was computed for
@@ -114,6 +116,21 @@ export interface ReviewDraft {
   comments: Array<{ path: string; side: Side; line: number; body: string }>;
 }
 export interface PostedComment { id: string; path: string; side: Side; line: number | null; body: string }
+export interface ThreadComment {
+  id: string;                 // the comment's number, as text
+  node: string;               // the git service's own id of the comment, used to edit it
+  author: string; authorIsBot: boolean;
+  byApp: boolean;             // written by this app's own account
+  reviewId: string | null;    // the review the comment belongs to
+  body: string; at: string;
+}
+export interface ReviewThread {
+  id: string;                 // the git service's id of the thread
+  path: string; side: Side;
+  line: number | null;        // where the thread sits now; null when its line is no longer in the diff
+  resolved: boolean; resolvedByApp: boolean;
+  comments: ThreadComment[];  // oldest first, never empty; the first one opened the thread
+}
 export interface ForgeWriter {
   /** Posts one review as a comment, pinned to `draft.commit`. Rejects `review_rejected` when the git service refuses what it holds; any other failure rejects with a short code and says nothing about whether the review was created. */
   publishReview(ref: PullRequestRef, installation: string, draft: ReviewDraft): Promise<{ id: string }>;
@@ -125,4 +142,12 @@ export interface ForgeWriter {
   react(ref: PullRequestRef, installation: string, commentId: string, reaction: 'eyes' | 'confused'): Promise<void>;
   /** Writes a general comment on the pull request. */
   comment(ref: PullRequestRef, installation: string, body: string): Promise<void>;
+  /** Every review thread of the pull request, with all its comments. Rejects with a short code; `github_too_many_pages` when a paging cap is reached. */
+  listThreads(ref: PullRequestRef, installation: string): Promise<ReviewThread[]>;
+  /** Replies in a thread. Sent once. */
+  replyToThread(installation: string, threadId: string, body: string): Promise<void>;
+  /** Rewrites one comment, named by its `node`. Sent once. */
+  editThreadComment(installation: string, commentNode: string, body: string): Promise<void>;
+  /** Marks a thread resolved. Sent once. */
+  resolveThread(installation: string, threadId: string): Promise<void>;
 }

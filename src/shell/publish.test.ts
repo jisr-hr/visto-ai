@@ -65,6 +65,10 @@ function harness(options: Options = {}) {
     },
     react: async () => { calls.push(['react']); },
     comment: async () => { calls.push(['comment']); },
+    listThreads: () => Promise.reject(new Error('not_expected')),
+    replyToThread: () => Promise.reject(new Error('not_expected')),
+    editThreadComment: () => Promise.reject(new Error('not_expected')),
+    resolveThread: () => Promise.reject(new Error('not_expected')),
   };
   return {
     calls, deps: { forge, writer, lineUrl },

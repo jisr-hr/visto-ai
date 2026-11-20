@@ -1,5 +1,5 @@
 import type { Span } from '../../engine/score/types.ts';
-import type { PullRequestInfo } from '../types.ts';
+import type { PullRequestInfo, PullRequestRef } from '../types.ts';
 
 const GITHUB_WEB = 'https://github.com';
 
@@ -12,4 +12,10 @@ export function githubLineUrl(pr: PullRequestInfo, file: { path: string; previou
   const path = left ? (file.previousPath ?? file.path) : file.path;
   const lines = span.first === span.last ? `L${span.first}` : `L${span.first}-L${span.last}`;
   return `${GITHUB_WEB}/${pr.ref.owner}/${pr.ref.repo}/blob/${sha}/${encodePath(path)}#${lines}`;
+}
+
+/** A link to one review comment of a pull request. */
+export function githubCommentUrl(ref: PullRequestRef, commentId: string): string {
+  if (!/^[0-9]+$/.test(commentId)) throw new Error('github_bad_path');
+  return `${GITHUB_WEB}/${ref.owner}/${ref.repo}/pull/${ref.number}#discussion_r${commentId}`;
 }
