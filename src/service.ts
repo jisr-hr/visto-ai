@@ -39,6 +39,7 @@ export interface ServiceDeps {
   engineDeps: (source: Source) => ReviewDeps;
   review: (input: ReviewInput, deps: ReviewDeps) => Promise<ReviewResult>;
   lineUrl: ReviewJobDeps['lineUrl'];
+  commentUrl: ReviewJobDeps['commentUrl'];
 }
 export const STOP_WAIT_MS = 10_000;
 export const CLOSE_WAIT_MS = 5_000;
@@ -99,6 +100,7 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps): Pr
       modelTimeoutSeconds: config.model.timeoutSeconds,
     },
     dryRun: config.dryRun, writer: config.dryRun ? dryWriter() : deps.writer, engineDeps: deps.engineDeps, review: deps.review, lineUrl: deps.lineUrl, health, spend,
+    commentUrl: deps.commentUrl, canResolve: () => deps.appInfo.canResolve(),
   };
   const runner = createRunner({
     db, concurrency: config.limits.queueConcurrency, clock, log: say,

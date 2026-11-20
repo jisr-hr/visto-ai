@@ -9,18 +9,20 @@ export type PublishOutcome =
   | { kind: 'published'; reviewId: string; body: string; inlineDropped: boolean; adopted: boolean }
   | { kind: 'moved'; head: string }          // the head or the base is not the one the review was computed for
   | { kind: 'closed' }
-  | { kind: 'already_reviewed' }             // the app has a review on another commit of this pull request
   | { kind: 'rejected' }
   | { kind: 'failed'; code: string };
 
 export interface PublishDeps {
   forge: ForgeAccess; writer: ForgeWriter;
   lineUrl: (pr: PullRequestInfo, file: { path: string; previousPath: string | null }, span: Span) => string;
+  commentUrl: (ref: PullRequestRef, commentId: string) => string;
 }
 
 /** Publishes one recorded review, or says why not. Writes nothing to the database. Never rejects. */
 export async function publishRun(deps: PublishDeps, args: {
   ref: PullRequestRef; installation: string; run: StoredRun; trigger: 'automatic' | 'manual'; requestedBy: string | null;
+  /** The ids of the reviews the database holds as published for this pull request. */
+  known: ReadonlySet<string>;
 }): Promise<PublishOutcome> {
   const { ref, installation, run } = args;
   try {
@@ -34,11 +36,12 @@ export async function publishRun(deps: PublishDeps, args: {
     /** The review as it is written when the inline comments are not posted. */
     const bodyOnly = (): string => renderReview(run.result as ReviewResult, {
       trigger: args.trigger, requestedBy: args.requestedBy, lineUrl: (file, span) => deps.lineUrl(info, file, span), inline: false,
+      commentUrl: (id) => deps.commentUrl(ref, id),
     }).body;
 
-    // 2. Already posted?
+    // 2. Already posted? Only a review of the app's own on this commit that the database does not know.
     const own = await deps.writer.listOwnReviews(ref, installation);
-    const same = own.find((review) => review.commit === run.headSha);
+    const same = own.find((review) => review.commit === run.headSha && !args.known.has(review.id));
     if (same !== undefined) {
       let inlineDropped = false;
       if (hadInline) {
@@ -47,7 +50,6 @@ export async function publishRun(deps: PublishDeps, args: {
       }
       return { kind: 'published', reviewId: same.id, body: inlineDropped ? bodyOnly() : run.body, inlineDropped, adopted: true };
     }
-    if (own.length > 0) return { kind: 'already_reviewed' };
 
     // 3. The post.
     try {

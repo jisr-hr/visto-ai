@@ -114,6 +114,20 @@ export async function unpublishedRun(db: Db, ref: PullRequestRef, headSha: strin
   return rows[0] === undefined ? null : toRun(rows[0], r);
 }
 
+/** The newest run of the pull request at this head that is not a dry run, ended ok, has a body that is not empty and is not published. */
+export async function adoptableRun(db: Db, ref: PullRequestRef, headSha: string): Promise<StoredRun | null> {
+  const r = lowered(ref);
+  const rows = await db.query<Row>(
+    `select ${COLUMNS}
+     from visto_ai.review_runs
+     where service = $1 and owner = $2 and repo = $3 and number = $4
+       and dry_run = false and outcome = 'ok' and body <> '' and published = false and head_sha = $5
+     order by id desc
+     limit 1`,
+    [r.service, r.owner, r.repo, r.number, storable(headSha)]);
+  return rows[0] === undefined ? null : toRun(rows[0], r);
+}
+
 /** The newest published run of the pull request. */
 export async function lastPublishedRun(db: Db, ref: PullRequestRef): Promise<StoredRun | null> {
   const r = lowered(ref);

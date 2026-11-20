@@ -199,6 +199,7 @@ async function harness(options: Options = {}) {
         return okResult();
       },
       lineUrl: () => 'https://git.example.test/x',
+      commentUrl: (_ref, commentId) => `https://git.example.test/c/${commentId}`,
       });
       started.push(service);
       return service;

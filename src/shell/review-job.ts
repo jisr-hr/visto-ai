@@ -2,22 +2,25 @@ import type { RepoSettings } from '../config/load.ts';
 import { enqueueJob, finishJob, requeueJob } from '../db/jobs.ts';
 import type { Job } from '../db/jobs.ts';
 import { getPullRequest } from '../db/pull-requests.ts';
-import { recordComments } from '../db/review-comments.ts';
-import { hasOkRun, hasRun, lastPublishedRun, markPublished, recordRun, unpublishedRun } from '../db/review-runs.ts';
+import { listComments, recordComments } from '../db/review-comments.ts';
+import type { StoredComment } from '../db/review-comments.ts';
+import { adoptableRun, hasOkRun, hasRun, listRuns, markPublished, recordRun, unpublishedRun } from '../db/review-runs.ts';
 import type { RunRecord, StoredRun } from '../db/review-runs.ts';
 import type { Db } from '../db/types.ts';
 import { renderReview } from '../engine/render/body.ts';
 import type { InlineComment } from '../engine/render/body.ts';
 import type { Span } from '../engine/score/types.ts';
-import type { Limits, ReviewDeps, ReviewInput, ReviewResult, Usage } from '../engine/types.ts';
-import type { ForgeAccess, ForgeWriter, LivePullRequest, PullRequestInfo, Source } from '../forge/types.ts';
+import type { EarlierState, Limits, ReviewDeps, ReviewInput, ReviewResult, ThreadVerdict, Usage } from '../engine/types.ts';
+import type { ForgeAccess, ForgeWriter, LivePullRequest, PullRequestInfo, PullRequestRef, ReviewThread, Source } from '../forge/types.ts';
 import { PAUSE_MS } from './model-health.ts';
 import type { ModelHealth } from './model-health.ts';
 import { codeOf } from './codes.ts';
 import { failureText, mayCommand, refusalText } from './commands.ts';
+import { earlierOf, missedComments } from './earlier.ts';
 import { matchPosted } from './posted.ts';
 import { publishRun } from './publish.ts';
 import type { PublishOutcome } from './publish.ts';
+import { followUp, planFollowUp } from './thread-followup.ts';
 import { QUIET_SECONDS, skipReason } from './triggers.ts';
 
 export const RECORD_WAITS_MS = [1_000, 5_000];
@@ -41,8 +44,24 @@ export interface ReviewJobDeps {
   /** The engine's entry point. */
   review: (input: ReviewInput, deps: ReviewDeps) => Promise<ReviewResult>;
   lineUrl: (pr: PullRequestInfo, file: { path: string; previousPath: string | null }, span: Span) => string;
+  /** A link to one review comment of the pull request. */
+  commentUrl: (ref: PullRequestRef, commentId: string) => string;
+  /** Whether the app may resolve a review thread. */
+  canResolve: () => Promise<boolean>;
   health: Pick<ModelHealth, 'reviewed'>;
   spend: { noteRun(usage: Usage): void };
+}
+
+/** The newest published run of these, or null. */
+function newestPublished(runs: StoredRun[]): StoredRun | null {
+  let newest: StoredRun | null = null;
+  for (const r of runs) if (r.published && (newest === null || r.id > newest.id)) newest = r;
+  return newest;
+}
+
+/** The review ids of the published runs. */
+function knownOf(runs: StoredRun[]): Set<string> {
+  return new Set(runs.filter((r) => r.published && r.reviewId !== null).map((r) => r.reviewId!));
 }
 
 const NO_USAGE: Usage = { calls: 0, inputTokens: 0, outputTokens: 0, cachedTokens: 0, cost: 0 };
@@ -51,6 +70,24 @@ const NO_USAGE: Usage = { calls: 0, inputTokens: 0, outputTokens: 0, cachedToken
 function findingsOf(result: unknown): number {
   const findings = (result as { findings?: unknown } | null | undefined)?.findings;
   return Array.isArray(findings) ? findings.length : 0;
+}
+
+/** The thread verdicts an engine result, or a stored one, kept; none when it has none. */
+function verdictsOf(result: unknown): ThreadVerdict[] {
+  const verdicts = (result as { threadVerdicts?: unknown } | null | undefined)?.threadVerdicts;
+  return Array.isArray(verdicts) ? verdicts as ThreadVerdict[] : [];
+}
+
+/** How many threads an engine result, or a stored one, owed a verdict; 0 when it does not say. */
+function threadsDueOf(result: unknown): number {
+  const due = (result as { threadsDue?: unknown } | null | undefined)?.threadsDue;
+  return typeof due === 'number' && Number.isFinite(due) ? due : 0;
+}
+
+/** How many findings an engine result, or a stored one, dropped as already discussed; 0 when it does not say. */
+function duplicatesOf(result: unknown): number {
+  const discussed = (result as { alreadyDiscussed?: unknown } | null | undefined)?.alreadyDiscussed;
+  return Array.isArray(discussed) ? discussed.length : 0;
 }
 
 /**
@@ -158,6 +195,29 @@ export async function runReviewJob(job: Job, deps: ReviewJobDeps): Promise<void>
     }
   };
 
+  /**
+   * Writes the verdicts a published run kept into their threads. Only after the publication was recorded and the job finished;
+   * never rejects, and nothing in it changes the job's outcome.
+   */
+  const threadFollowUp = async (target: StoredRun, installation: string, reviewId: string): Promise<void> => {
+    try {
+      const verdicts = verdictsOf(target.result);
+      if (verdicts.length === 0) return;
+      const threads = await deps.writer.listThreads(job.ref, installation);
+      let canResolve = false;
+      try {
+        canResolve = await deps.canResolve();
+      } catch {
+        // a permission that cannot be read is read as not granted
+      }
+      const plan = planFollowUp({ verdicts, threads, reviewId, head: target.headSha, canResolve });
+      const done = await followUp({ writer: deps.writer, sleep: deps.sleep, log }, { installation, actions: plan.actions });
+      log({ event: 'thread_followup', job: job.id, run: target.id, review: reviewId, ...done, missing: plan.missing });
+    } catch (error) {
+      log({ event: 'thread_followup_failed', job: job.id, reason: codeOf(error) });
+    }
+  };
+
   let result: ReviewResult | null = null;
   try {
     // 1. The installation: the job's own, else the stored pull request's.
@@ -177,6 +237,9 @@ export async function runReviewJob(job: Job, deps: ReviewJobDeps): Promise<void>
     }
 
     let resumed: StoredRun | null = null;
+    /** The pull request's runs, as read out of dry run; empty in dry run. */
+    let runs: StoredRun[] = [];
+    let earlier: EarlierState | null = null;
 
     // 2. The live read.
     let live: LivePullRequest | null = null;
@@ -210,16 +273,19 @@ export async function runReviewJob(job: Job, deps: ReviewJobDeps): Promise<void>
       if (deps.dryRun) {
         if (await hasOkRun(db, job.ref, live.info.headSha, live.info.baseSha, true)) return await drop('already_reviewed');
       } else {
-        // Already reviewed? Only a published review counts.
-        const last = await lastPublishedRun(db, job.ref);
-        if (last !== null && manual) {
-          await refuse(installation, 'already_reviewed');
-          return;
+        // The record. Already reviewed? Only a published review of this head and this base counts.
+        runs = await listRuns(db, job.ref);
+        let last = newestPublished(runs);
+        if (last !== null && last.headSha === live.info.headSha && last.baseSha === live.info.baseSha) {
+          if (manual) {
+            await refuse(installation, 'already_reviewed');
+            return;
+          }
+          return await drop('already_reviewed');
         }
-        if (last !== null) return await drop(last.headSha === live.info.headSha && last.baseSha === live.info.baseSha ? 'already_reviewed' : 'later_head');
         // A stored review? This start then publishes it: no engine, no render, no guard.
         resumed = await unpublishedRun(db, job.ref, live.info.headSha, live.info.baseSha, new Date(now.getTime() - STORED_REVIEW_MS).toISOString());
-        // What the database may not know: a review of the app's own already on the pull request. Asked before anything is paid.
+        // What the database may not know: a review of the app's own on the pull request that no published run has. Asked before anything is paid.
         if (resumed === null) {
           let own: Array<{ id: string; commit: string }> | null = null;
           try {
@@ -227,13 +293,57 @@ export async function runReviewJob(job: Job, deps: ReviewJobDeps): Promise<void>
           } catch (error) {
             prepareError = error;
           }
-          if (own !== null && own.length > 0 && manual) {
-            await refuse(installation, 'already_reviewed');
-            return;
-          }
-          if (own !== null && own.length > 0) {
+          if (own !== null) {
+            const known = knownOf(runs);
+            const unknown = own.filter((r) => !known.has(r.id));
             const head = live.info.headSha;
-            return await drop(own.some((r) => r.commit === head) ? 'already_reviewed' : 'later_head');
+            if (unknown.some((r) => r.commit === head)) {
+              if (manual) {
+                await refuse(installation, 'already_reviewed');
+                return;
+              }
+              return await drop('already_reviewed');
+            }
+            let adopted = false;
+            // The list is newest first: each other one is looked at oldest first.
+            for (const review of [...unknown].reverse()) {
+              const found = await adoptableRun(db, job.ref, review.commit);
+              if (found === null) {
+                log({ event: 'unknown_review', job: job.id, review: review.id });
+                continue;
+              }
+              // Recorded as posted with its inline comments: the read-back stores what it finds.
+              await markPublished(db, found.id, { reviewId: review.id, publishedAt: nowIso, body: found.body, inlineDropped: false });
+              adopted = true;
+              log({ event: 'adopted_late', job: job.id, run: found.id, review: review.id });
+              await readBack(found, installation, review.id);
+            }
+            if (adopted) {
+              runs = await listRuns(db, job.ref);
+              last = newestPublished(runs);
+            }
+          }
+          // The earlier state: the last published review and its threads, read before anything is paid.
+          if (prepareError === null && last !== null) {
+            let threads: ReviewThread[] | null = null;
+            try {
+              threads = await deps.writer.listThreads(job.ref, installation);
+            } catch (error) {
+              prepareError = error;
+            }
+            if (threads !== null) {
+              let stored = await listComments(db, job.ref);
+              try {
+                const missed = missedComments({ runs, stored, threads });
+                const byRun = new Map<number, StoredComment[]>();
+                for (const m of missed) byRun.set(m.run, [...(byRun.get(m.run) ?? []), m]);
+                for (const [runId, comments] of byRun) await recordComments(db, runId, job.ref, comments);
+                stored = [...stored, ...missed];
+              } catch (error) {
+                log({ event: 'repair_failed', job: job.id, reason: codeOf(error) });
+              }
+              earlier = earlierOf({ last, runs, stored, threads });
+            }
           }
         }
       }
@@ -260,7 +370,7 @@ export async function runReviewJob(job: Job, deps: ReviewJobDeps): Promise<void>
           result = await deps.review({
             pullRequest: pr.info, trigger: job.trigger,
             repoConfig: { primaryBranches: settings.primaryBranches, scoreThreshold: settings.scoreThreshold },
-            limits: deps.limits, asOf: now, earlier: null,
+            limits: deps.limits, asOf: now, earlier,
           }, deps.engineDeps(source));
         } catch {
           failure = { stage: 'engine', code: 'internal_error' };
@@ -275,7 +385,10 @@ export async function runReviewJob(job: Job, deps: ReviewJobDeps): Promise<void>
     if (result !== null) {
       const info = live!.info;
       try {
-        ({ body, comments } = renderReview(result, { trigger: job.trigger, requestedBy, lineUrl: (file, span) => deps.lineUrl(info, file, span), inline: true }));
+        ({ body, comments } = renderReview(result, {
+          trigger: job.trigger, requestedBy, lineUrl: (file, span) => deps.lineUrl(info, file, span), inline: true,
+          commentUrl: (id) => deps.commentUrl(job.ref, id),
+        }));
       } catch {
         log({ event: 'render_failed', job: job.id, repo, number: job.ref.number });
       }
@@ -353,8 +466,8 @@ export async function runReviewJob(job: Job, deps: ReviewJobDeps): Promise<void>
     let publish: PublishOutcome | null = null;
     const target = toPublish;
     if (!deps.dryRun && written && target !== null) {
-      const out = await publishRun({ forge: deps.forge, writer: deps.writer, lineUrl: deps.lineUrl },
-        { ref: job.ref, installation, run: target, trigger: job.trigger, requestedBy });
+      const out = await publishRun({ forge: deps.forge, writer: deps.writer, lineUrl: deps.lineUrl, commentUrl: deps.commentUrl },
+        { ref: job.ref, installation, run: target, trigger: job.trigger, requestedBy, known: knownOf(runs) });
       publish = out;
       const finish = (outcome: string): Promise<boolean> => tried(async () => { await finishJob(db, job.id, 'done', outcome, nowIso); });
       if (out.kind === 'published') {
@@ -362,7 +475,10 @@ export async function runReviewJob(job: Job, deps: ReviewJobDeps): Promise<void>
           await markPublished(tx, target.id, { reviewId: out.reviewId, publishedAt: later(0), body: out.body, inlineDropped: out.inlineDropped });
           await finishJob(tx, job.id, 'done', 'published', nowIso);
         }));
-        if (written) await readBack(target, installation, out.reviewId);
+        if (written) {
+          await readBack(target, installation, out.reviewId);
+          await threadFollowUp(target, installation, out.reviewId);
+        }
       } else if (out.kind === 'moved' && manual && job.reason === 'command') {
         // A command starts over once, as a new job for the live head.
         written = await tried(() => db.transaction(async (tx) => {
@@ -386,8 +502,6 @@ export async function runReviewJob(job: Job, deps: ReviewJobDeps): Promise<void>
         }));
       } else if (out.kind === 'closed') {
         written = await finish('closed');
-      } else if (out.kind === 'already_reviewed') {
-        written = manual ? await refuse(installation, 'already_reviewed') : await finish('already_reviewed');
       } else if (out.kind === 'rejected') {
         written = await finish('publish_rejected');
         if (written) await fail(installation, 'publish_rejected');
@@ -406,6 +520,7 @@ export async function runReviewJob(job: Job, deps: ReviewJobDeps): Promise<void>
       published: publish?.kind === 'published', review: publish?.kind === 'published' ? publish.reviewId : null,
       publish: publish?.kind ?? null, publish_code: publish?.kind === 'failed' ? publish.code : null,
       resumed: resumed !== null, adopted: publish?.kind === 'published' && publish.adopted,
+      threads_due: threadsDueOf(result ?? resumed?.result), verdicts: verdictsOf(result ?? resumed?.result).length, duplicates: duplicatesOf(result ?? resumed?.result),
     });
   } catch (error) {
     if (result !== null) {
