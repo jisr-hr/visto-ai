@@ -739,7 +739,7 @@ test('a later review keeps a verdict, drops a finding its thread already raised,
   assert.deepEqual(r.threadVerdicts, [{ threadId: 'PRRT_1', commentId: 'C1', verdict: 'open', reply: '', fileChanged: false, replies: 0 }]);
   assert.equal(r.threadsDue, 2);
   assert.ok(r.audit.some((e) => e.action === 'thread_not_shown' && e.subject === 'T2' && e.reason === 'file_not_in_diff'));
-  assert.ok(r.audit.some((e) => e.stage === 'reconcile' && e.action === 'duplicate' && e.subject === 'src/a.ts:2' && e.reason === 'same_quote'));
+  assert.ok(r.audit.some((e) => e.stage === 'reconcile' && e.action === 'duplicate' && e.subject === 'src/a.ts:2' && e.reason === 'near_thread'));
 });
 test('a review that fails, and one with nothing to read, still say how many threads were due', async () => {
   const earlier = { head: 'abcdef0', threads: [earlierThread(), earlierThread({ id: 'PRRT_2', severity: 'minor' })] };

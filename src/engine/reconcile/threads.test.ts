@@ -110,16 +110,18 @@ test('a reason that holds only characters nobody can see is no reason', () => {
 });
 
 const finding = (over = {}) => ({ path: 'src/a.ts', side: 'RIGHT' as const, line: 14, severity: 'major' as const, quote: 'total = a +  b', body: 'x', ...over });
-test('a finding that quotes the code of an earlier thread, or sits within 3 lines of one of its class, is a duplicate', () => {
+test('a finding that sits within 3 lines of an earlier thread of its class, or quotes the code of one whose line is gone, is a duplicate', () => {
   const t = thread({ line: 12, quote: ' total = a + b ' });
-  assert.deepEqual(dropDuplicates([finding({ line: 40 })], [t], [], FILES).audit.map((a) => a.reason), ['same_quote']);
+  assert.deepEqual(dropDuplicates([finding({ line: 40 })], [t], [], FILES).kept.length, 1);                          // the same quote far from a thread that has a line
+  assert.deepEqual(dropDuplicates([finding({ line: 40 })], [{ ...t, line: null }], [], FILES).audit.map((a) => a.reason), ['same_quote']);
+  assert.deepEqual(dropDuplicates([finding()], [t], [], FILES).audit.map((a) => a.reason), ['near_thread']);
   assert.deepEqual(dropDuplicates([finding({ quote: 'other' })], [t], [], FILES).audit.map((a) => a.reason), ['near_thread']);
   assert.deepEqual(dropDuplicates([finding({ quote: 'other', line: 16 })], [t], [], FILES).kept.length, 1);          // 4 lines away
   assert.deepEqual(dropDuplicates([finding({ quote: 'other', side: 'LEFT' })], [t], [], FILES).kept.length, 1);      // the other side
   assert.deepEqual(dropDuplicates([finding({ quote: '' })], [thread({ line: null, quote: '' })], [], FILES).kept.length, 1);
 });
 test('a duplicate is audited by its place and goes to dropped with its thread', () => {
-  const t = thread({ quote: 'total = a + b' });
+  const t = thread({ line: null, quote: 'total = a + b' });
   const f = finding({ line: 40 });
   const out = dropDuplicates([f, finding({ quote: 'other', line: 80 })], [t], [], FILES);
   assert.deepEqual(out.dropped, [{ finding: f, thread: t }]);
@@ -133,7 +135,8 @@ test('a blocking finding is never a duplicate of a minor thread, and a minor one
   assert.deepEqual(dropDuplicates([finding({ severity: 'minor', quote: 'other' })], [minorThread], [], FILES).audit.map((a) => a.reason), ['near_thread']);
   const majorThread = thread({ quote: 'total = a + b' });
   assert.equal(dropDuplicates([finding({ severity: 'minor', quote: 'other' })], [majorThread], [], FILES).kept.length, 1);
-  assert.deepEqual(dropDuplicates([finding({ severity: 'minor' })], [majorThread], [], FILES).audit.map((a) => a.reason), ['same_quote']);
+  assert.deepEqual(dropDuplicates([finding({ severity: 'minor' })], [majorThread], [], FILES).kept.length, 1);
+  assert.deepEqual(dropDuplicates([finding({ severity: 'minor' })], [{ ...majorThread, line: null }], [], FILES).audit.map((a) => a.reason), ['same_quote']);
 });
 test('a thread marked fixed, in this run or an earlier one, hides nothing', () => {
   const t = thread({ quote: 'total = a + b' });
@@ -146,7 +149,7 @@ test('a thread marked fixed, in this run or an earlier one, hides nothing', () =
 });
 test('a thread on the file under its earlier name counts, and a thread on another file does not', () => {
   const moved: ChangedFile[] = [{ ...fileOf(PATCH_A), status: 'renamed', previousPath: 'lib/a.ts' }];
-  assert.deepEqual(dropDuplicates([finding()], [thread({ path: 'lib/a.ts', quote: 'total = a + b' })], [], moved).audit.map((a) => a.reason), ['same_quote']);
+  assert.deepEqual(dropDuplicates([finding()], [thread({ path: 'lib/a.ts', line: null, quote: 'total = a + b' })], [], moved).audit.map((a) => a.reason), ['same_quote']);
   assert.equal(dropDuplicates([finding()], [thread({ path: 'src/z.ts', quote: 'total = a + b' })], [], moved).kept.length, 1);
 });
 test('the first thread that matches, in the order given, decides', () => {

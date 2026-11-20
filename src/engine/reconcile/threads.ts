@@ -66,7 +66,7 @@ export function reconcileVerdicts(
 
 const blocking = (severity: Severity): boolean => severity !== 'minor';
 
-/** Drops each finding that an earlier thread on its file already raised; the first thread that matches, in the order given, decides. */
+/** Drops each finding that an earlier thread on its file already raised: within 3 lines of a thread of its class on the same side, or quoting the code of a thread whose line is gone. The first thread that matches, in the order given, decides. */
 export function dropDuplicates<F extends { path: string; side: Side; line: number; severity: Severity; quote: string }>(
   findings: F[], threads: EarlierThread[], verdicts: ThreadVerdict[], files: ChangedFile[],
 ): { kept: F[]; dropped: Array<{ finding: F; thread: EarlierThread }>; audit: AuditEntry[] } {
@@ -82,7 +82,8 @@ export function dropDuplicates<F extends { path: string; side: Side; line: numbe
       if (thread.path !== finding.path && (previous === null || thread.path !== previous)) continue;
       if (latest(thread) === 'fixed') continue;
       if (thread.severity === 'minor' && blocking(finding.severity)) continue;
-      if (quote !== '' && quote === oneLine(thread.quote)) {
+      // The quote decides only for a thread whose line is no longer in the diff: a short line such as a closing brace recurs far away.
+      if (thread.line === null && quote !== '' && quote === oneLine(thread.quote)) {
         match = { thread, reason: 'same_quote' };
       } else if (thread.line !== null && thread.side === finding.side && Math.abs(thread.line - finding.line) <= NEAR_LINES
         && blocking(thread.severity) === blocking(finding.severity)) {
