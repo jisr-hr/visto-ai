@@ -31,7 +31,14 @@ const FILES: ChangedFile[] = [fileOf(PATCH_A)];
 
 test('a verdict for a thread that is due, from the call that held its file, is kept', () => {
   const out = reconcileVerdicts([answer([{ thread_id: 'T1', verdict: 'answered', reply: ' The guard is\n in the caller. ' }])], [shown()], [ctxA], 'h2');
-  assert.deepEqual(out, { verdicts: [{ threadId: 'PRRT_1', commentId: '9001', verdict: 'answered', reply: 'The guard is in the caller.', fileChanged: false }], audit: [] });
+  assert.deepEqual(out, { verdicts: [{ threadId: 'PRRT_1', commentId: '9001', verdict: 'answered', reply: 'The guard is in the caller.', fileChanged: false, replies: 1 }], audit: [] });
+});
+test('a kept verdict records how many replies its thread had when it was judged', () => {
+  const two = [{ author: 'octo-dev', kind: 'person' as const, body: 'a' }, { author: 'visto-test', kind: 'app' as const, body: 'b' }];
+  const out = (over: Partial<EarlierThread>, verdict: string) => reconcileVerdicts([answer([{ thread_id: 'T1', verdict, reply: REASON }])], [shown(over)], [ctxB], 'h2').verdicts.map((v) => v.replies);
+  assert.deepEqual(out({ replies: two }, 'answered'), [2]);
+  assert.deepEqual(out({ replies: [] }, 'fixed'), [0]);
+  assert.deepEqual(out({ replies: two }, 'open'), [2]);
 });
 test('a verdict the model had no right to give is dropped, and says why', () => {
   const cases: Array<[string, () => ReturnType<typeof reconcileVerdicts>]> = [

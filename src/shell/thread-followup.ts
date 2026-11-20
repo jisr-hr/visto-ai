@@ -10,14 +10,26 @@ export type FollowUp =
 
 export const FOLLOW_UP_PAUSE_MS = 1000;
 
-/** What to write in the threads for these verdicts. `missing` counts verdicts whose thread is no longer there. Writes nothing. */
-export function planFollowUp(args: { verdicts: ThreadVerdict[]; threads: ReviewThread[]; reviewId: string; head: string; canResolve: boolean }): { actions: FollowUp[]; missing: number } {
+const VERDICTS: readonly unknown[] = ['fixed', 'answered', 'open'];
+
+/**
+ * What to write in the threads for these verdicts. Writes nothing. A verdict that is none of the three is skipped.
+ * `missing` counts verdicts whose thread is no longer there; `changed` counts verdicts whose thread someone other than the app wrote in after it was judged.
+ */
+export function planFollowUp(args: { verdicts: ThreadVerdict[]; threads: ReviewThread[]; reviewId: string; head: string; canResolve: boolean }): { actions: FollowUp[]; missing: number; changed: number } {
   const actions: FollowUp[] = [];
   let missing = 0;
+  let changed = 0;
   for (const verdict of args.verdicts) {
+    if (!VERDICTS.includes(verdict.verdict)) continue;
     const thread = args.threads.find((t) => t.id === verdict.threadId);
     if (thread === undefined) {
       missing += 1;
+      continue;
+    }
+    // The first comment and the replies the verdict was judged on come first; a later comment by the app itself is no change.
+    if (verdict.replies !== undefined && thread.comments.slice(1 + verdict.replies).some((c) => !c.byApp)) {
+      changed += 1;
       continue;
     }
     // The first comment is the finding and is never rewritten.
@@ -40,7 +52,7 @@ export function planFollowUp(args: { verdicts: ThreadVerdict[]; threads: ReviewT
       actions.push({ kind: 'reply', thread: thread.id, body: clearingReply(verdict, args.reviewId, args.head), resolve: wantsResolve });
     }
   }
-  return { actions, missing };
+  return { actions, missing, changed };
 }
 
 /** Makes each write once, in order. Never rejects. */

@@ -861,7 +861,16 @@ test('a push after a published review is reviewed in full with its threads, publ
   assert.deepEqual(h.writes.map((w) => w[0]), ['listOwnReviews', 'listThreads', 'listOwnReviews', 'publishReview', 'listReviewComments', 'listThreads', 'replyToThread', 'resolveThread']);
   assert.deepEqual(h.writes[6], ['replyToThread', 'PRRT_1', REPLY]);
   assert.equal((await getJob(db, h.job.id))?.outcome, 'published');
-  assert.deepEqual(h.logged.filter((e) => e.event === 'thread_followup').map((e) => [e.review, e.replied, e.resolved, e.failed, e.missing]), [['501', 1, 1, 0, 0]]);
+  assert.deepEqual(h.logged.filter((e) => e.event === 'thread_followup').map((e) => [e.review, e.replied, e.resolved, e.failed, e.missing, e.changed]), [['501', 1, 1, 0, 0, 0]]);
+});
+test('a thread someone wrote in after it was judged is left as it is, and the log counts it as changed', async () => {
+  await published();
+  const later: ReviewThread = { ...THREAD, comments: [...THREAD.comments, { ...THREAD.comments[1]!, id: '8003', node: 'PRRC_3', body: 'Wait, it is a bug.' }] };
+  const h = await live({ own: [[{ id: '401', commit: 'h0' }]], threads: [[THREAD], [later]], result: okResult({ threadVerdicts: [{ ...VERDICT, replies: 1 }], threadsDue: 1 }) });
+  await runReviewJob(h.job, h.deps);
+  assert.equal(h.writes.some((w) => w[0] === 'replyToThread' || w[0] === 'resolveThread'), false);
+  assert.deepEqual(h.logged.filter((e) => e.event === 'thread_followup').map((e) => [e.replied, e.resolved, e.missing, e.changed]), [[0, 0, 0, 1]]);
+  assert.equal((await getJob(db, h.job.id))?.outcome, 'published');
 });
 test('a first review reads no thread and is told of no earlier state', async () => {
   const h = await live();

@@ -56,7 +56,7 @@ export function reconcileVerdicts(
       const before = s.thread.openedAt.diffHash;
       const ctx = contexts.find((c) => c.file.path === s.file);
       const fileChanged = verdict === 'fixed' && before !== null && ctx !== undefined && fileDiffHash(ctx.hunks) !== before;
-      verdicts.push({ threadId: s.thread.id, commentId: s.thread.commentId, verdict, reply, fileChanged });
+      verdicts.push({ threadId: s.thread.id, commentId: s.thread.commentId, verdict, reply, fileChanged, replies: s.thread.replies.length });
     }
   }
   return { verdicts, audit };

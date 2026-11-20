@@ -35,6 +35,7 @@ export interface ThreadVerdict {
   verdict: 'fixed' | 'answered' | 'open';
   reply: string;              // the model's reason as one line: every run of white space made one space, trimmed, at most 600 characters; '' when it gave none
   fileChanged: boolean;       // for `fixed`: the thread's file has another diff than when the thread was opened
+  replies?: number;           // how many replies the thread had when it was judged; absent on a verdict stored before this was recorded
 }
 export interface Discussed {
   path: string; side: Side; line: number; severity: 'blocker' | 'major'; body: string;

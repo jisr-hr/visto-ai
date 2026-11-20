@@ -16,7 +16,7 @@ const thread = (...replies: ThreadComment[]): ReviewThread => ({
 const plan = (verdicts: ThreadVerdict[], threads: ReviewThread[], canResolve = true) => planFollowUp({ verdicts, threads, reviewId: '501', head: 'abc1234', canResolve });
 
 test('a verdict that clears replies with the marker and then resolves', () => {
-  assert.deepEqual(plan([V()], [thread(byPerson('Done.'))]), { actions: [{ kind: 'reply', thread: 'PRRT_1', body: clearingReply(V(), '501', 'abc1234'), resolve: true }], missing: 0 });
+  assert.deepEqual(plan([V()], [thread(byPerson('Done.'))]), { actions: [{ kind: 'reply', thread: 'PRRT_1', body: clearingReply(V(), '501', 'abc1234'), resolve: true }], missing: 0, changed: 0 });
 });
 test("the app's own last reply is rewritten, not stacked, and the finding itself is never rewritten", () => {
   assert.deepEqual(plan([V()], [thread(byApp('**Fixed.**\n\n<!-- visto-ai: review=401 head=aaa1111 -->', 'PRRC_5'))]).actions,
@@ -49,8 +49,31 @@ test("an open verdict rewrites the app's own confirmation", () => {
     [{ kind: 'edit', thread: 'PRRT_1', comment: 'PRRC_5', body: openAgainReply(open, 'abc1234'), resolve: false }]);
 });
 test('a verdict whose thread is gone is counted and writes nothing', () => {
-  assert.deepEqual(plan([V()], []), { actions: [], missing: 1 });
+  assert.deepEqual(plan([V()], []), { actions: [], missing: 1, changed: 0 });
   assert.deepEqual(plan([V({ threadId: 'PRRT_7' }), V()], [thread(byPerson('Done.'))]).missing, 1);
+});
+test('a verdict is not written into a thread in which someone else wrote after it was judged, and it is counted', () => {
+  const open = V({ verdict: 'open', reply: 'The total is still unchecked.', replies: 1 });
+  const later = thread(byPerson('It is fine.'), byPerson('Wait, it is a bug.'));
+  assert.deepEqual(plan([V({ replies: 1 })], [later]), { actions: [], missing: 0, changed: 1 });
+  assert.deepEqual(plan([open], [later]), { actions: [], missing: 0, changed: 1 });
+  const afterApp = thread(byPerson('It is fine.'), byApp('**Still open.** x'), byPerson('Wait, it is a bug.'));
+  assert.deepEqual(plan([V({ replies: 1 })], [afterApp]), { actions: [], missing: 0, changed: 1 });
+});
+test('a verdict is planned as before when only the app wrote since, nothing was written since, or it holds no count', () => {
+  const judged = V({ replies: 1 });
+  const onlyApp = thread(byPerson('Done.'), byApp('**Fixed.**\n\n<!-- visto-ai: review=401 head=aaa1111 -->', 'PRRC_5'));
+  assert.deepEqual(plan([judged], [onlyApp]), { actions: [{ kind: 'edit', thread: 'PRRT_1', comment: 'PRRC_5', body: clearingReply(judged, '501', 'abc1234'), resolve: true }], missing: 0, changed: 0 });
+  assert.deepEqual(plan([judged], [thread(byPerson('Done.'))]), { actions: [{ kind: 'reply', thread: 'PRRT_1', body: clearingReply(judged, '501', 'abc1234'), resolve: true }], missing: 0, changed: 0 });
+  const later = thread(byPerson('Done.'), byPerson('Wait, it is a bug.'));
+  assert.deepEqual(plan([V()], [later]), { actions: [{ kind: 'reply', thread: 'PRRT_1', body: clearingReply(V(), '501', 'abc1234'), resolve: true }], missing: 0, changed: 0 });
+});
+test('a stored verdict that is none of the three plans nothing and is not counted', () => {
+  for (const verdict of ['weird', undefined]) {
+    const odd = { ...V(), verdict } as unknown as ThreadVerdict;
+    assert.deepEqual(plan([odd], [thread(byPerson('Done.'))]), { actions: [], missing: 0, changed: 0 });
+    assert.deepEqual(plan([odd], []), { actions: [], missing: 0, changed: 0 });
+  }
 });
 
 function fakeWriter(calls: unknown[][], opts: { failReplyIn?: string; failResolveIn?: string } = {}): ForgeWriter {

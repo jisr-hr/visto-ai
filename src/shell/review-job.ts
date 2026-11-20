@@ -212,7 +212,7 @@ export async function runReviewJob(job: Job, deps: ReviewJobDeps): Promise<void>
       }
       const plan = planFollowUp({ verdicts, threads, reviewId, head: target.headSha, canResolve });
       const done = await followUp({ writer: deps.writer, sleep: deps.sleep, log }, { installation, actions: plan.actions });
-      log({ event: 'thread_followup', job: job.id, run: target.id, review: reviewId, ...done, missing: plan.missing });
+      log({ event: 'thread_followup', job: job.id, run: target.id, review: reviewId, ...done, missing: plan.missing, changed: plan.changed });
     } catch (error) {
       log({ event: 'thread_followup_failed', job: job.id, reason: codeOf(error) });
     }
