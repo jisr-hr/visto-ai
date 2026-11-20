@@ -703,7 +703,7 @@ test('a failed incremental review keeps the first line of its mode', () => {
   const failed = result({ status: 'failed', failure: { stage: 'model', code: 'no_credit' }, mode: 'incremental', since: SINCE });
   assert.equal(renderReview(failed, auto).body, '**Incremental review** of the changes since `0123456789ab`.\n\n## Overall\n\nThe review could not be completed (model: no_credit).\n\nHuman review: needed, because the review did not finish.');
 });
-test('the section for code unchanged since the last review stands between the unplaced and the discussed ones', () => {
+test('the section for code unchanged since the last review stands after Findings and before the unplaced and the discussed ones', () => {
   const longBody = 'The total is never checked.\n\nSecond paragraph.\n\n## Not a heading';
   const r = result({
     mode: 'incremental', since: SINCE, unplaced: [unplaced()], alreadyDiscussed: [discussed()],
@@ -711,10 +711,13 @@ test('the section for code unchanged since the last review stands between the un
   });
   const b = renderReview(r, auto).body;
   const heading = '## On code unchanged since the last review';
-  const order = ['## Findings not placed on the diff', heading, '## Already discussed', '## Overall'].map((h) => b.indexOf(`${h}\n`));
+  const order = [heading, '## Findings not placed on the diff', '## Already discussed', '## Overall'].map((h) => b.indexOf(`${h}\n`));
   assert.deepEqual(order, [...order].sort((x, y) => x - y));
   assert.ok(order.every((i) => i >= 0));
-  assert.ok(b.includes(`${heading}\n\nThese are on lines that have not changed since the reviewer last read their file. They are not posted as comments and do not hold a merge.\n\n- **\\[major]** \`src/a.ts:21\` \u2014 The total is never checked.\n\n  The total is never checked.\n\n  Second paragraph.\n\n  \\## Not a heading\n\n## Already discussed`));
+  assert.ok(b.includes(`${heading}\n\nThese are on lines that have not changed since the reviewer last read their file. They are not posted as comments and do not hold a merge.\n\n- **\\[major]** \`src/a.ts:21\` \u2014 The total is never checked.\n\n  The total is never checked.\n\n  Second paragraph.\n\n  \\## Not a heading\n\n## Findings not placed on the diff`));
+  const withFinding = renderReview({ ...r, findings: [finding()] }, auto).body;
+  assert.ok(withFinding.indexOf('## Findings\n') < withFinding.indexOf(heading));
+  assert.ok(withFinding.indexOf(heading) < withFinding.indexOf('## Findings not placed on the diff'));
   // whole text, whatever meta.inline says
   assert.equal(renderReview(r, { ...auto, inline: false }).body, b);
   assert.deepEqual(renderReview(r, auto).comments, []);
@@ -757,4 +760,35 @@ test('a result stored before the new fields renders as before', () => {
   assert.equal(renderReview(added, auto).body, renderReview(old, auto).body);
   assert.equal(renderReview(old, auto).body.includes('unchanged'), false);
   assert.equal(renderReview({ ...old, unchanged: null as unknown as Finding[] }, auto).body, renderReview(old, auto).body);
+});
+
+test('a damaged list of unchanged findings is skipped', () => {
+  const base = renderReview(result(), auto).body;
+  const damaged: unknown[][] = [[null], ['str'], [5], [{}], [{ path: 'a', line: 1, severity: 'major' }], [{ path: 'a', line: 1, severity: 'major', body: 7 }],
+    [{ path: 'a', line: 1.5, severity: 'major', body: 'x' }], [{ path: 'a', line: 1, severity: 'huge', body: 'x' }], [{ path: 1, line: 1, severity: 'major', body: 'x' }]];
+  for (const list of damaged) {
+    const b = renderReview(result({ unchanged: list as Finding[] }), auto).body;
+    assert.equal(b, base);
+  }
+  const mixed = renderReview(result({ unchanged: [null as unknown as Finding, finding({ line: 21 })] }), auto).body;
+  assert.equal((mixed.match(/^- \*\*/gm) ?? []).length, 1);
+  assert.ok(mixed.includes('1 major on code unchanged since the last review.'));
+});
+test('a long unchanged section is cut in the head and never pushes Overall out', () => {
+  const many = Array.from({ length: 4000 }, (_, i) => finding({ line: i + 1, body: 'The total is never checked here.' }));
+  const b = renderReview(result({ unchanged: many, unplaced: [unplaced()] }), auto).body;
+  assert.ok(b.length <= MAX_BODY_CHARS);
+  assert.ok(b.includes('## Human review\n'));
+  assert.ok(b.includes('characters of the review were cut'));
+  assert.ok(b.endsWith('4000 major on code unchanged since the last review. Human review: not needed (highest score 0%).'));
+  assert.ok(b.includes('## Findings not placed on the diff\n'));
+});
+const rf = (over: Partial<BlockScore>): string => noted(over);
+test('a raised note is written only for a whole number from 0 to 100', () => {
+  const plain = '- [lines 5-6](u:src/a.ts:5), 85% `calculation` \u2014 Changes tax.';
+  for (const raisedFrom of [NaN, -5, 0.5, 101, 'x']) assert.equal(rf({ raisedFrom: raisedFrom as unknown as number }), plain);
+  assert.equal(rf({ raisedFrom: NaN, origin: 'earlier_run' }), `${plain} _(kept from an earlier review)_`);
+  assert.equal(rf({ raisedFrom: 0 }), `${plain} _(0% was given; a block this file lost had scored 85%)_`);
+  assert.equal(rf({ raisedFrom: 60, origin: 'other_pull_request' }), `${plain} _(60% was given; a block this file lost had scored 85%)_`);
+  assert.equal(rf({ origin: 'elsewhere' as unknown as 'earlier_run' }), plain);
 });

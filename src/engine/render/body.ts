@@ -212,7 +212,7 @@ function blockLine(file: FileScore, block: BlockScore, entry: ScoreEntry, lineUr
   const label = `${span.side === 'LEFT' ? 'old ' : ''}${range}`;
   const shown = lineUrl === null ? label : `[${label}](${lineUrl(file, span)})`;
   const base = `- ${shown}, ${entry.score}% ${scoreTail(entry)}`;
-  if (typeof block.raisedFrom === 'number') return `${base} _(${block.raisedFrom}% was given; a block this file lost had scored ${entry.score}%)_`;
+  if (Number.isInteger(block.raisedFrom) && block.raisedFrom! >= 0 && block.raisedFrom! <= 100) return `${base} _(${block.raisedFrom}% was given; a block this file lost had scored ${entry.score}%)_`;
   if (block.origin === 'earlier_run') return `${base} _(kept from an earlier review)_`;
   if (block.origin === 'other_pull_request') return `${base} _(scored on another pull request)_`;
   return base;
@@ -252,7 +252,16 @@ function humanReviewSection(result: ReviewResult, lineUrl: Meta['lineUrl']): str
 
 const UNCHANGED_HEADING = '## On code unchanged since the last review';
 const UNCHANGED_NOTE = 'These are on lines that have not changed since the reviewer last read their file. They are not posted as comments and do not hold a merge.';
-const unchangedOf = (result: ReviewResult): Finding[] => (Array.isArray(result.unchanged) ? result.unchanged : []);
+const SEVERITIES: readonly unknown[] = ['blocker', 'major', 'minor'];
+// A stored list may be damaged: only an item with every field this code reads, of the right kind, is kept.
+const unchangedOf = (result: ReviewResult): Finding[] => {
+  if (!Array.isArray(result.unchanged)) return [];
+  return (result.unchanged as unknown[]).filter((x): x is Finding => {
+    if (typeof x !== 'object' || x === null) return false;
+    const f = x as Record<string, unknown>;
+    return typeof f.path === 'string' && typeof f.body === 'string' && SEVERITIES.includes(f.severity) && Number.isInteger(f.line);
+  });
+};
 
 // A stored result may hold a mode or a since that this code does not know: the first reads as full, the second as absent.
 function firstLineOf(result: ReviewResult, meta: Meta): string | null {
@@ -327,13 +336,14 @@ function rendered(result: ReviewResult, meta: Meta): { body: string; comments: I
     const items = meta.inline ? bullets(result.findings.map(located)) : bullets(result.findings.map(locatedWhole), false);
     head.push(['## Findings', '', ...items].join('\n'));
   }
+  // Always in the head, uncapped: a long section is cut there and never takes room from the tail.
+  const unchanged = unchangedOf(result);
+  if (unchanged.length > 0) {
+    head.push([UNCHANGED_HEADING, '', UNCHANGED_NOTE, '', ...bullets(unchanged.map(locatedWhole), false)].join('\n'));
+  }
   const rest = result.unplaced.length > 0 ? tail : head;
   if (result.unplaced.length > 0) {
     tail.push([UNPLACED_HEADING, '', UNPLACED_NOTE, '', ...bullets(result.unplaced.map(unplacedLine))].join('\n'));
-  }
-  const unchanged = unchangedOf(result);
-  if (unchanged.length > 0) {
-    rest.push([UNCHANGED_HEADING, '', UNCHANGED_NOTE, '', ...bullets(unchanged.map(locatedWhole), false)].join('\n'));
   }
   const discussed = result.alreadyDiscussed ?? [];
   if (discussed.length > 0) {
