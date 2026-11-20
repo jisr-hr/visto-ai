@@ -38,23 +38,26 @@ export function packBatches(
       else notReviewed.push({ path, reason: plan.reason });
       continue;
     }
-    // Shed the test, then the full file, then the threads, until the unit fits an empty call.
-    let c = original;
-    const cuts: AuditEntry[] = [];
-    const cut = (action: string): void => {
-      cuts.push({ stage: 'context', action, subject: path, reason: 'over_call_budget' });
+    // Shed the test, then the full file, until the unit fits an empty call; when the threads must go too,
+    // start again from the file as given without its threads, and shed only as much of it as that unit needs.
+    let cuts: AuditEntry[] = [];
+    const shed = (from: FileContext): FileContext => {
+      let c = from;
+      cuts = [];
+      if (unitTokens(c) > budget && c.test !== null) {
+        c = { ...c, test: null };
+        cuts.push({ stage: 'context', action: 'test_file_cut', subject: path, reason: 'over_call_budget' });
+      }
+      if (unitTokens(c) > budget && c.full !== null) {
+        c = { ...c, full: null };
+        cuts.push({ stage: 'context', action: 'full_file_cut', subject: path, reason: 'over_call_budget' });
+      }
+      return c;
     };
-    if (unitTokens(c) > budget && c.test !== null) {
-      c = { ...c, test: null };
-      cut('test_file_cut');
-    }
-    if (unitTokens(c) > budget && c.full !== null) {
-      c = { ...c, full: null };
-      cut('full_file_cut');
-    }
+    let c = shed(original);
     if (unitTokens(c) > budget && (c.threads ?? []).length > 0) {
-      for (const t of c.threads ?? []) cuts.push({ stage: 'context', action: 'thread_not_shown', subject: t.key, reason: 'over_call_budget' });
-      c = { ...c, threads: [] };
+      c = shed({ ...original, threads: [] });
+      for (const t of original.threads ?? []) cuts.push({ stage: 'context', action: 'thread_not_shown', subject: t.key, reason: 'over_call_budget' });
     }
     if (unitTokens(c) > budget) {
       notReviewed.push({ path, reason: 'too_large' });

@@ -113,3 +113,22 @@ test('a file that its threads push over the budget loses its test, then its full
   assert.deepEqual(c.notReviewed, [{ path: 'a', reason: 'too_large' }]);
   assert.deepEqual(c.audit, []);
 });
+test('when its threads are shed, a file gets back its full file and its test if they then fit', () => {
+  const big = (key: string): ShownThread => ({ ...aThread(key), thread: { ...aThread(key).thread, body: text(200) } });
+  const t = [big('T1'), big('T2')];
+  const bare = ctx('a', 40, { full: 50, test: 50 });
+  assert.ok(unitTokens({ ...ctx('a', 40), threads: t }) > unitTokens(bare)); // the threads do not fit even on the diff alone
+  const out = packBatches([{ ...bare, threads: t }], unitTokens(bare), 6);
+  const placed = out.batches[0]!.files[0]!;
+  assert.deepEqual([placed.full, placed.test, placed.threads], [bare.full, bare.test, []]);
+  assert.deepEqual(out.audit, [
+    { stage: 'context', action: 'thread_not_shown', subject: 'T1', reason: 'over_call_budget' },
+    { stage: 'context', action: 'thread_not_shown', subject: 'T2', reason: 'over_call_budget' },
+  ]);
+  // room for the full file but not the test: only the test is cut
+  const noTest = { ...bare, test: null };
+  const some = packBatches([{ ...bare, threads: t }], unitTokens(noTest), 6);
+  const kept = some.batches[0]!.files[0]!;
+  assert.deepEqual([kept.full, kept.test, kept.threads], [bare.full, null, []]);
+  assert.deepEqual(some.audit.map((e) => e.action), ['test_file_cut', 'thread_not_shown', 'thread_not_shown']);
+});
