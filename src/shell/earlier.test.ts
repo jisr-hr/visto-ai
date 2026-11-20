@@ -53,7 +53,23 @@ test('a thread is settled only when it is resolved and the app resolved it or a 
     settled({ resolved: true, comments: [ROOT, reply('octo-dev')] }),
     settled({ resolved: false, comments: [ROOT, reply('octo-dev')] }),
     settled({ resolved: true, comments: [ROOT, reply('helper-bot', { authorIsBot: true })] }),
-  ], [false, true, true, false, false]);
+  ], [false, false, true, false, false]);
+});
+test("the app resolved it only when the thread also holds the app's own reply with a marker", () => {
+  const settled = (over: Partial<ReviewThread>) => earlierOf(args([thread(over)])).threads[0]!.settled;
+  const MARKED = 'Answered.\n\n<!-- visto-ai: review=402 head=h2 -->';
+  assert.deepEqual([
+    settled({ resolved: true, resolvedByApp: true }),
+    settled({ resolved: true, resolvedByApp: true, comments: [ROOT, reply('visto-test', { byApp: true, authorIsBot: true, body: MARKED })] }),
+    // not the app's: another bot under the same login (a person's reply settles the thread on its own, so a bot shows the rule alone)
+    settled({ resolved: true, resolvedByApp: true, comments: [ROOT, reply('visto-test', { authorIsBot: true, body: MARKED })] }),
+    settled({ resolved: true, resolvedByApp: true, comments: [ROOT, reply('visto-test', { byApp: true, authorIsBot: true, body: 'Answered.' })] }),
+    settled({ resolved: true, resolvedByApp: false, comments: [ROOT, reply('visto-test', { byApp: true, authorIsBot: true, body: MARKED })] }),
+  ], [false, true, false, false, false]);
+});
+test('a thread listed twice is handed on once, as first listed', () => {
+  const out = earlierOf(args([thread(), thread({ line: 99 })]));
+  assert.deepEqual(out.threads.map((t) => [t.id, t.line]), [['PRRT_1', 12]]);
 });
 test('the newest published verdict on a thread is its last verdict', () => {
   const runs = [

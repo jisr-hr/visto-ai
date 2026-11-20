@@ -1,6 +1,7 @@
 import type { StoredComment } from '../db/review-comments.ts';
 import type { StoredRun } from '../db/review-runs.ts';
 import type { EarlierReply, EarlierState, EarlierThread, Severity } from '../engine/types.ts';
+import { hasMarker } from '../engine/render/thread-reply.ts';
 import type { PostedComment, ReviewThread } from '../forge/types.ts';
 import { matchPosted } from './posted.ts';
 
@@ -51,7 +52,10 @@ export function earlierOf(args: { last: StoredRun; runs: StoredRun[]; stored: St
   const byComment = new Map(args.stored.filter((s) => SEVERITIES.includes(s.severity)).map((s) => [s.commentId, s]));
   const newestFirst = args.runs.filter((r) => r.published).sort((a, b) => b.id - a.id);
   const threads: EarlierThread[] = [];
+  const listed = new Set<string>();
   for (const t of args.threads) {
+    if (listed.has(t.id)) continue;
+    listed.add(t.id);
     const first = t.comments[0]!;
     const row = byComment.get(first.id);
     if (row === undefined) continue;
@@ -69,7 +73,8 @@ export function earlierOf(args: { last: StoredRun; runs: StoredRun[]; stored: St
       severity: row.severity as Severity, quote: row.quote, body: first.body,
       openedAt: { head: opened === undefined ? '' : opened.headSha, diffHash: opened === undefined ? null : diffHashOf(opened, row.path) },
       resolved: t.resolved,
-      settled: t.resolved && (t.resolvedByApp || replies.some((r) => r.kind === 'person')),
+      // The app resolved it only when the app's own reply with a marker stands in the thread too: a login alone proves nothing.
+      settled: t.resolved && ((t.resolvedByApp && t.comments.some((c) => c.byApp && hasMarker(c.body))) || replies.some((r) => r.kind === 'person')),
       lastVerdict, replies,
     });
   }
