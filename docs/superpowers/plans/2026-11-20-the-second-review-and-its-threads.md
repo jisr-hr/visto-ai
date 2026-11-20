@@ -868,3 +868,17 @@ Nothing in this plan meets GitHub. These join the twelve of plan 5; each needs a
 10. That `#discussion_r<id>` on the pull request's page opens the thread.
 11. That a hidden comment line at the end of a reply is kept as written and is not shown.
 12. One whole second review, which also needs a model key and is the only place a model meets the thread rules: a finding, a reply by a person, a push, a verdict written into the thread. Under the review contract and under the scorer's.
+
+---
+
+## After the review of the whole branch
+
+The branch was reviewed as a whole after its eight tasks, and one wave of fixes followed. The notes file beside this plan (`2026-11-20-the-second-review-and-its-threads-notes.md`, decisions 15 to 21) says what changed and why. Where a task above says otherwise, the notes say what was built:
+
+- Task 2: when a file's threads are shed, its full file and its paired test come back if they then fit.
+- Task 3: `same_quote` decides only for a thread whose line is no longer in the diff; a kept verdict records how many replies its thread had (`replies`); a reason is cleaned of control characters before it is made one line.
+- Task 4: the "Open again." sentence says that the review of that commit finds the thread open.
+- Task 5: a thread counts as resolved by the app only when a comment of the app's own ends with a marker; a thread that is listed twice is handed on once.
+- Task 6: nothing is written for a verdict whose thread someone else wrote in after it was judged (counted as `changed`), nor for a stored verdict that is none of the three.
+- Task 7: the `thread_followup` log entry has `changed`.
+- Task 8: the real run was made after the fix wave, on its code.
