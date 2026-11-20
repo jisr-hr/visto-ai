@@ -1,11 +1,14 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { unitTokens } from './context/batches.ts';
 import { buildFileContexts, hunksOf } from './context/build.ts';
 import { buildMessages, fixedTokens } from './context/prompt.ts';
 import { ProviderError } from './model/errors.ts';
 import { SUBMIT_REVIEW, submitReviewTool, submitReviewWithThreadsTool } from './model/submit-review.ts';
+import { NOTHING_READ } from './plan.ts';
 import { chooseEffort, review } from './review.ts';
 import { blocksOf } from './score/blocks.ts';
+import { shownOf } from './score/shown.ts';
 import type { BlockScore, ScoreHistory } from './score/types.ts';
 import type {
   ChangedFile, EarlierThread, ModelClient, ModelRequest, ModelResponse, PullRequestInfo, RepoConfig, ReviewDeps, ReviewInput, ReviewResult, ScoreAnswer, ScoreRequest, Scorer,
@@ -872,10 +875,12 @@ test('with no history and no lookup the request is the one a first review sends 
 
 // The history a first review's stored result leaves, read as the shell reads it: each block with its entry,
 // and each hunk the run cut wholly into scored parts with their places.
-function historyFrom(first: ReviewResult): ScoreHistory {
+// `covered`: the first review was published, so each file it read is covered at the diff it had.
+function historyFrom(first: ReviewResult, extra: { covered?: boolean; lastReview?: ScoreHistory['lastReview']; shown?: string | null } = {}): ScoreHistory {
   const stored = JSON.parse(JSON.stringify(first)) as ReviewResult;
+  const read = new Set(extra.covered === true ? stored.coverage.reviewed : []);
   return {
-    by: 'model', lastReview: null, shown: null,
+    by: 'model', lastReview: extra.lastReview ?? null, shown: extra.shown ?? null,
     files: stored.scores.map((f) => {
       const hunks = new Map<string, BlockScore[]>();
       for (const one of f.blocks) hunks.set(one.hunkHash, [...(hunks.get(one.hunkHash) ?? []), one]);
@@ -884,7 +889,7 @@ function historyFrom(first: ReviewResult): ScoreHistory {
         blocks: f.blocks.filter((one) => one.entry !== null).map((one) => ({ hash: one.hash, entry: one.entry!, raisedFrom: one.raisedFrom ?? null })),
         splits: [...hunks].filter(([, parts]) => parts.every((p) => p.range !== undefined && p.entry !== null))
           .map(([hunkHash, parts]) => ({ hunkHash, parts: parts.map((p) => ({ hash: p.hash, range: p.range! })) })),
-        stoodFor: [], wholeFile: f.wholeFile, coveredAt: [], readAt: null,
+        stoodFor: [], wholeFile: f.wholeFile, coveredAt: read.has(f.path) && f.diffHash !== null ? [f.diffHash] : [], readAt: null,
       };
     }),
   };
@@ -961,4 +966,300 @@ test('with a scorer set, each score the scorer gave says so', async () => {
   assert.deepEqual(r.scores[0]!.blocks.map((one) => one.by), ['scorer']);
   const plain = await review(input, deps({ files: [fileA], answers: [scored('src/a.ts', 20)] }));
   assert.equal('by' in plain.scores[0]!.blocks[0]!, false);
+});
+
+// Reading less.
+const HEAD0 = 'c'.repeat(40);
+const LAST = { head: HEAD0, overview: 'Changes the retry delay and the tries.' };
+const LAST_LINE = 'The last review of this pull request summarized it as below. It describes an earlier state of the code and proves nothing about the code you are given.';
+const valueFile = (path: string, value: number): ChangedFile => ({ path, previousPath: null, status: 'modified', additions: 1, deletions: 1, patch: delayPatch(value) });
+const fileT = valueFile('src/t.ts', 2);
+const fileU = valueFile('src/u.ts', 2);
+const blockAnswer = (scores: Record<string, number>) => ({
+  overview: `${Object.keys(scores).join(' and ')} reviewed.`, findings: [],
+  files: Object.entries(scores).map(([path, score]) => ({ path, change_summary: 'Changes the delay.', blocks: [{ id: 'B1', score, category: 'fix', reason: 'Changes the delay.' }] })),
+});
+const firstOf = (files: ChangedFile[], answer: unknown): Promise<ReviewResult> => review(input, deps({ files, answers: [answer] }));
+const named = (d: ReturnType<typeof deps>, path: string): number => d.model.requests.filter((q) => q.messages[2]!.content.includes(path)).length;
+const finals = (r: ReviewResult): Record<string, number> => Object.fromEntries(r.scores.map((one) => [one.path, one.finalScore]));
+const notSent = (r: ReviewResult): string[][] => r.audit.filter((e) => e.action === 'not_sent').map((e) => [e.subject, e.reason]);
+const asset: ChangedFile = { path: 'logo.png', previousPath: null, status: 'modified', additions: 0, deletions: 0, patch: null };
+
+test('an incremental review sends only the file whose diff changed, and scores the other from what it keeps', async () => {
+  const first = await firstOf([fileT, fileU], blockAnswer({ 'src/t.ts': 40, 'src/u.ts': 20 }));
+  const d = deps({ files: [fileT, valueFile('src/u.ts', 5)], answers: [blockAnswer({ 'src/u.ts': 30 })] });
+  const r = await review({ ...input, mode: 'incremental', history: historyFrom(first, { covered: true, lastReview: LAST }) }, d);
+  assert.equal(r.status, 'ok');
+  assert.equal(d.model.requests.length, 1);
+  assert.deepEqual([named(d, 'src/u.ts'), named(d, 'src/t.ts')], [1, 0]);
+  assert.deepEqual(finals(r), { 'src/t.ts': 40, 'src/u.ts': 30 });
+  assert.deepEqual(r.scores.find((one) => one.path === 'src/t.ts')!.blocks.map((one) => [one.entry?.score, one.origin]), [[40, 'earlier_run']]);
+  assert.deepEqual(notSent(r), [['src/t.ts', 'covered']]);
+  assert.deepEqual(r.coverage, { reviewed: ['src/u.ts'], notReviewed: [] });
+  assert.deepEqual([r.mode, r.since], ['incremental', HEAD0]);
+  assert.ok(d.model.requests[0]!.messages[1]!.content.endsWith(
+    `\n${LAST_LINE}\n<<<data abcdef0123456789 last review overview>>>\n${LAST.overview}\n<<<end abcdef0123456789>>>`,
+  ));
+});
+
+test('a moved file an earlier review scored is not sent again and keeps its score, in an incremental review and in a full one', async (t) => {
+  const movedAnswer = {
+    overview: 'Moves lib/x.ts and changes src/a.ts.', findings: [],
+    files: [
+      { path: 'lib/x.ts', change_summary: 'Moves the file.', blocks: [], score: 35, category: 'rename', reason: 'Moves the file.' },
+      { path: 'src/a.ts', change_summary: 'Changes the values.', blocks: [{ id: 'B1', score: 20, category: 'fix', reason: '' }] },
+    ],
+  };
+  const withMoved = (d: ReturnType<typeof deps>): ReturnType<typeof deps> => {
+    d.source.getFileContent = async (_p, path) => (path === 'src/x.ts' || path === 'lib/x.ts' ? 'same\n' : null);
+    return d;
+  };
+  const first = await review(input, withMoved(deps({ files: [fileA, movedAway], answers: [movedAnswer] })));
+  assert.deepEqual(first.scores.find((one) => one.path === 'lib/x.ts')!.fileLevel, { score: 35, source: 'whole_file' });
+  const history = historyFrom(first, { covered: true, lastReview: LAST });
+  await t.test('incremental', async () => {
+    const d = withMoved(deps({ files: [fileA, movedAway] }));
+    const r = await review({ ...input, mode: 'incremental', history }, d);
+    assert.equal(d.model.requests.length, 0);
+    assert.deepEqual(r.scores.find((one) => one.path === 'lib/x.ts')!.fileLevel, { score: 35, source: 'whole_file' });
+    assert.deepEqual(notSent(r), [['src/a.ts', 'covered'], ['lib/x.ts', 'covered']]);
+    assert.deepEqual(r.coverage, { reviewed: [], notReviewed: [] });
+  });
+  await t.test('full', async () => {
+    const d = withMoved(deps({ files: [fileA, movedAway], answers: [answerOnA] }));
+    const r = await review({ ...input, mode: 'full', history }, d);
+    assert.equal(d.model.requests.length, 1);
+    assert.deepEqual([named(d, 'src/a.ts'), named(d, 'lib/x.ts')], [1, 0]);
+    assert.deepEqual(r.scores.find((one) => one.path === 'lib/x.ts')!.fileLevel, { score: 35, source: 'whole_file' });
+    assert.deepEqual(notSent(r), [['lib/x.ts', 'covered']]);
+    assert.deepEqual(r.coverage, { reviewed: ['src/a.ts'], notReviewed: [] });
+  });
+});
+
+test('the sentence of a last review that read nothing is not passed on as its overview', async () => {
+  const plain = deps({ files: [fileA], answers: [answerOnA] });
+  await review(input, plain);
+  const d = deps({ files: [fileA], answers: [answerOnA] });
+  await review({ ...input, mode: 'incremental', history: { by: 'model', lastReview: { head: HEAD0, overview: NOTHING_READ }, shown: null, files: [] } }, d);
+  assert.equal(d.model.requests[0]!.messages[1]!.content, plain.model.requests[0]!.messages[1]!.content);
+});
+
+test('a last review whose overview is empty passes on no overview', async () => {
+  const plain = deps({ files: [fileA], answers: [answerOnA] });
+  await review(input, plain);
+  const d = deps({ files: [fileA], answers: [answerOnA] });
+  await review({ ...input, mode: 'recheck', history: { by: 'model', lastReview: { head: HEAD0, overview: ' \n ' }, shown: null, files: [] } }, d);
+  assert.equal(d.model.requests[0]!.messages[1]!.content, plain.model.requests[0]!.messages[1]!.content);
+});
+
+test('a full review shows no last review overview', async () => {
+  const plain = deps({ files: [fileA], answers: [answerOnA] });
+  await review(input, plain);
+  const d = deps({ files: [fileA], answers: [answerOnA] });
+  await review({ ...input, mode: 'full', history: { by: 'model', lastReview: LAST, shown: null, files: [] } }, d);
+  assert.deepEqual(d.model.requests, plain.model.requests);
+});
+
+const fortyAdded: ChangedFile = {
+  path: 'src/t.ts', previousPath: null, status: 'added', additions: 40, deletions: 0,
+  patch: ['@@ -0,0 +1,40 @@', ...Array.from({ length: 40 }, (_, i) => `+const row${i} = ${i * 31};`)].join('\n'),
+};
+const splitInTwo = onT({ blocks: [{ id: 'B1', parts: [
+  { first: 'R1', last: 'R20', score: 30, category: 'test' }, { first: 'R21', last: 'R40', score: 80, category: 'data_model', reason: 'Adds a table.' },
+] }] });
+
+test('a hunk split in the first review does not send its file again', async () => {
+  const first = await firstOf([fortyAdded], splitInTwo);
+  assert.deepEqual(first.scores[0]!.blocks.map((one) => [one.id, one.range]), [['B1.1', [0, 19]], ['B1.2', [20, 39]]]);
+  const d = deps({ files: [fortyAdded, fileA], answers: [answerOnA] });
+  const r = await review({ ...input, mode: 'incremental', history: historyFrom(first, { covered: true, lastReview: LAST }) }, d);
+  assert.equal(d.model.requests.length, 1);
+  assert.equal(named(d, 'src/t.ts'), 0);
+  assert.deepEqual(r.scores.find((one) => one.path === 'src/t.ts')!.blocks.map((one) => [one.id, one.entry?.score]), [['B1.1', 30], ['B1.2', 80]]);
+  assert.deepEqual(notSent(r), [['src/t.ts', 'covered']]);
+});
+
+test('a thread that is not due on a file left out is named in the audit and not shown', async () => {
+  const first = await firstOf([fileT, fileU], blockAnswer({ 'src/t.ts': 40, 'src/u.ts': 20 }));
+  const minor = earlierThread({ path: 'src/t.ts', line: 11, severity: 'minor', resolved: false });
+  const d = deps({ files: [fileT, valueFile('src/u.ts', 5)], answers: [blockAnswer({ 'src/u.ts': 30 })] });
+  const r = await review({
+    ...input, mode: 'incremental', earlier: { head: HEAD0, threads: [minor] }, history: historyFrom(first, { covered: true, lastReview: LAST }),
+  }, d);
+  assert.equal(d.model.requests.length, 1);
+  assert.deepEqual(d.model.requests[0]!.tools, [submitReviewTool]);
+  assert.ok(!d.model.requests[0]!.messages[2]!.content.includes('### Thread'));
+  assert.deepEqual(r.audit.filter((e) => e.action === 'thread_not_shown'), [{ stage: 'context', action: 'thread_not_shown', subject: 'T1', reason: 'file_covered' }]);
+  assert.deepEqual([r.threadsDue, r.threadVerdicts], [0, []]);
+});
+
+test('a thread that is due keeps its covered file in an incremental review', async () => {
+  const first = await firstOf([fileT, fileU], blockAnswer({ 'src/t.ts': 40, 'src/u.ts': 20 }));
+  const due = earlierThread({ path: 'src/t.ts', line: 11, resolved: false });
+  const d = deps({ files: [fileT, fileU], answers: [{ ...blockAnswer({ 'src/t.ts': 40 }), thread_verdicts: [{ thread_id: 'T1', verdict: 'open' }] }] });
+  const r = await review({ ...input, mode: 'incremental', earlier: { head: HEAD0, threads: [due] }, history: historyFrom(first, { covered: true, lastReview: LAST }) }, d);
+  assert.deepEqual([d.model.requests.length, named(d, 'src/t.ts'), named(d, 'src/u.ts')], [1, 1, 0]);
+  assert.deepEqual(d.model.requests[0]!.tools, [submitReviewWithThreadsTool]);
+  assert.deepEqual(notSent(r), [['src/u.ts', 'covered']]);
+  assert.deepEqual(r.threadVerdicts?.map((v) => v.verdict), ['open']);
+});
+
+test('with nothing new the model is not called and the result says so', async () => {
+  const first = await firstOf([fileT, fileU], blockAnswer({ 'src/t.ts': 40, 'src/u.ts': 20 }));
+  const history = historyFrom(first, { covered: true, lastReview: LAST, shown: shownOf(first) });
+  for (const mode of ['incremental', 'recheck'] as const) {
+    const d = deps({ files: [fileT, fileU] });
+    const r = await review({ ...input, mode, history }, d);
+    assert.deepEqual([d.model.requests.length, r.nothingToDo, r.status, r.overview, r.mode, r.since], [0, true, 'ok', NOTHING_READ, mode, HEAD0], mode);
+    assert.deepEqual(finals(r), { 'src/t.ts': 40, 'src/u.ts': 20 }, mode);
+    assert.deepEqual(r.scores.map((one) => one.blocks.map((b) => b.origin)), [['earlier_run'], ['earlier_run']], mode);
+    assert.deepEqual([r.findings, r.usage.calls, r.coverage], [[], 0, { reviewed: [], notReviewed: [] }], mode);
+    assert.deepEqual(r.verdict, first.verdict, mode);
+    assert.deepEqual(notSent(r), [['src/t.ts', 'covered'], ['src/u.ts', 'covered']], mode);
+  }
+});
+
+test('a review that would say something the newest one does not is not nothing new', async (t) => {
+  const first = await firstOf([fileT, fileU], blockAnswer({ 'src/t.ts': 40, 'src/u.ts': 20 }));
+  const history = historyFrom(first, { covered: true, lastReview: LAST, shown: shownOf(first) });
+  const quiet = (r: ReviewResult, d: ReturnType<typeof deps>): void => {
+    assert.deepEqual([d.model.requests.length, r.status, r.overview, 'nothingToDo' in r], [0, 'ok', NOTHING_READ, false]);
+  };
+  await t.test('a new file with no diff', async () => {
+    const d = deps({ files: [fileT, fileU, binaryNoPatch] });
+    const r = await review({ ...input, mode: 'incremental', history }, d);
+    quiet(r, d);
+    assert.deepEqual(r.coverage.notReviewed, [{ path: 'logo.bin', reason: 'no_diff' }]);
+    assert.equal(finals(r)['logo.bin'], 100);
+  });
+  await t.test('a due thread whose file left the diff', async () => {
+    const d = deps({ files: [fileT, fileU] });
+    const r = await review({ ...input, mode: 'incremental', earlier: { head: HEAD0, threads: [earlierThread({ path: 'src/gone.ts', resolved: false })] }, history }, d);
+    quiet(r, d);
+    assert.equal(r.threadsDue, 1);
+  });
+  await t.test('a flagged block put back into a covered file', async () => {
+    const flagged = await firstOf([fileT, fileU], blockAnswer({ 'src/t.ts': 80, 'src/u.ts': 20 }));
+    // The newest review was of a head where src/t.ts had left the diff: it did not list the block.
+    const newest = await review({ ...input, mode: 'incremental', history: historyFrom(flagged, { covered: true, lastReview: LAST }) }, deps({ files: [fileU] }));
+    assert.deepEqual(finals(newest), { 'src/u.ts': 20 });
+    const d = deps({ files: [fileT, fileU] });
+    const r = await review({ ...input, mode: 'incremental', history: historyFrom(flagged, { covered: true, lastReview: LAST, shown: shownOf(newest) }) }, d);
+    quiet(r, d);
+    assert.deepEqual(finals(r), { 'src/t.ts': 80, 'src/u.ts': 20 });
+    assert.equal(r.verdict.needsHuman, true);
+  });
+  await t.test('a new file scored by a fixed rule', async () => {
+    const d = deps({ files: [fileT, fileU, asset] });
+    const r = await review({ ...input, mode: 'incremental', history }, d);
+    quiet(r, d);
+    assert.equal(finals(r)['logo.png'], 10);
+  });
+  await t.test('a history that does not say what the newest review showed', async () => {
+    const d = deps({ files: [fileT, fileU] });
+    const r = await review({ ...input, mode: 'incremental', history: { ...history, shown: null } }, d);
+    quiet(r, d);
+  });
+});
+
+test('a pull request with a file nobody can read still ends as nothing new when nothing else changed', async () => {
+  const first = await firstOf([fileT, fileU, binaryNoPatch], blockAnswer({ 'src/t.ts': 40, 'src/u.ts': 20 }));
+  assert.deepEqual(first.coverage.notReviewed, [{ path: 'logo.bin', reason: 'no_diff' }]);
+  const d = deps({ files: [fileT, fileU, binaryNoPatch] });
+  const r = await review({ ...input, mode: 'incremental', history: historyFrom(first, { covered: true, lastReview: LAST, shown: shownOf(first) }) }, d);
+  assert.deepEqual([d.model.requests.length, r.nothingToDo, r.coverage.notReviewed], [0, true, [{ path: 'logo.bin', reason: 'no_diff' }]]);
+});
+
+test('a file with a stripped character on a changed line is read once, then left out, and still counts as 100', async () => {
+  const hiddenFile: ChangedFile = { path: 'src/h.ts', previousPath: null, status: 'modified', additions: 1, deletions: 1, patch: '@@ -1 +1 @@\n-a\n+a\u202e' };
+  const first = await firstOf([hiddenFile], blockAnswer({ 'src/h.ts': 5 }));
+  assert.deepEqual([first.coverage.reviewed, first.scores[0]!.covered, first.scores[0]!.finalScore], [['src/h.ts'], false, 100]);
+  const d = deps({ files: [hiddenFile, fileA], answers: [answerOnA] });
+  const r = await review({ ...input, mode: 'incremental', history: historyFrom(first, { covered: true, lastReview: LAST }) }, d);
+  assert.equal(d.model.requests.length, 1);
+  assert.equal(named(d, 'src/h.ts'), 0);
+  assert.deepEqual(notSent(r), [['src/h.ts', 'covered']]);
+  assert.deepEqual(r.scores.find((one) => one.path === 'src/h.ts')!.fileLevel, { score: 100, source: 'hidden_characters' });
+  assert.equal(finals(r)['src/h.ts'], 100);
+});
+
+test('a covered file that finds no room is scored from what it keeps and not listed as not reviewed', async (t) => {
+  const [fa, fb, fc, fd, fe] = ['a', 'b', 'c', 'd', 'e'].map((n) => fileAt(`src/${n}.ts`)) as [ChangedFile, ChangedFile, ChangedFile, ChangedFile, ChangedFile];
+  const first = await firstOf([fc, fd], blockAnswer({ 'src/c.ts': 30, 'src/d.ts': 40 }));
+  const history = historyFrom(first, { covered: true, lastReview: LAST });
+  const built = await buildFileContexts(input.pullRequest, [fa], deps({ files: [] }).source);
+  const unit = unitTokens(built.contexts[0]!);
+  const roomForTwo: ReviewInput = {
+    ...input, mode: 'full', history,
+    limits: { ...input.limits, batchesPerReview: 1, inputTokensPerCall: fixedTokens(CONTRACT, input.pullRequest) + 2 * unit + Math.floor(unit / 2) },
+  };
+  await t.test('the covered files keep their scores and are not listed', async () => {
+    const d = deps({ files: [fc, fd, fa, fb], answers: [blockAnswer({ 'src/a.ts': 10, 'src/b.ts': 15 })] });
+    const r = await review(roomForTwo, d);
+    assert.equal(d.model.requests.length, 1);
+    assert.deepEqual(['src/a.ts', 'src/b.ts', 'src/c.ts', 'src/d.ts'].map((p) => named(d, p)), [1, 1, 0, 0]);
+    assert.deepEqual(r.coverage, { reviewed: ['src/a.ts', 'src/b.ts'], notReviewed: [] });
+    assert.deepEqual(notSent(r), [['src/c.ts', 'covered'], ['src/d.ts', 'covered']]);
+    assert.deepEqual(finals(r), { 'src/a.ts': 10, 'src/b.ts': 15, 'src/c.ts': 30, 'src/d.ts': 40 });
+  });
+  await t.test('an uncovered file that finds no room is still listed and counts as 100', async () => {
+    const d = deps({ files: [fc, fd, fa, fb, fe], answers: [blockAnswer({ 'src/a.ts': 10, 'src/b.ts': 15 })] });
+    const r = await review(roomForTwo, d);
+    assert.deepEqual(r.coverage.notReviewed, [{ path: 'src/e.ts', reason: 'over_batch_limit' }]);
+    assert.equal(finals(r)['src/e.ts'], 100);
+    assert.deepEqual(notSent(r), [['src/c.ts', 'covered'], ['src/d.ts', 'covered']]);
+  });
+  await t.test('a thread on a covered file that finds no room is named as on a covered file and gets no verdict', async () => {
+    const minor = earlierThread({ path: 'src/c.ts', severity: 'minor', resolved: false });
+    const withThread: ReviewInput = {
+      ...roomForTwo, earlier: { head: HEAD0, threads: [minor] },
+      limits: { ...roomForTwo.limits, inputTokensPerCall: fixedTokens(CONTRACT, input.pullRequest, true) + 2 * unit + Math.floor(unit / 2) },
+    };
+    const d = deps({ files: [fc, fd, fa, fb], answers: [{ ...blockAnswer({ 'src/a.ts': 10, 'src/b.ts': 15 }), thread_verdicts: [{ thread_id: 'T1', verdict: 'open' }] }] });
+    const r = await review(withThread, d);
+    assert.deepEqual([d.model.requests.length, named(d, 'src/c.ts'), r.coverage.notReviewed], [1, 0, []]);
+    assert.deepEqual(r.audit.filter((e) => e.action === 'thread_not_shown'), [{ stage: 'context', action: 'thread_not_shown', subject: 'T1', reason: 'file_covered' }]);
+    assert.deepEqual(r.threadVerdicts, []);
+  });
+});
+
+test('a failed review says the mode it was given', async () => {
+  const history: ScoreHistory = { by: 'model', lastReview: LAST, shown: null, files: [] };
+  const r = await review({ ...input, mode: 'incremental', history }, deps({ files: [], listError: new Error('github_502') }));
+  assert.deepEqual([r.status, r.failure, r.mode, r.since], ['failed', { stage: 'context', code: 'github_502' }, 'incremental', HEAD0]);
+});
+
+test('every result a review ends with early says the mode and the head it was given', async () => {
+  const at: ReviewInput = { ...input, mode: 'recheck', history: { by: 'model', lastReview: LAST, shown: null, files: [] } };
+  const down = new ProviderError('provider', 'p', 502, null);
+  const empty = await review(at, deps({ files: [] }));
+  const tooSmall = await review({ ...at, limits: { ...at.limits, inputTokensPerCall: 10 } }, deps({ files: [fileA] }));
+  const failed = await review(at, deps({ files: [fileA], answers: [down, down] }));
+  const thrown = await review(at, deps({ files: [fileA], answers: [] }));
+  for (const [name, r, overview] of [['empty', empty, 'No changes to review.'], ['too small', tooSmall, ''], ['failed', failed, ''], ['thrown', thrown, '']] as const) {
+    assert.deepEqual([r.overview, r.mode, r.since], [overview, 'recheck', HEAD0], name);
+  }
+  // With no last review there is nothing it is measured from.
+  const noLast = await review({ ...at, history: null }, deps({ files: [] }));
+  assert.deepEqual([noLast.mode, 'since' in noLast], ['recheck', false]);
+});
+
+test('a full review of a later head reads every file, the uncovered ones first', async () => {
+  const first = await firstOf([fileT, fileU], blockAnswer({ 'src/t.ts': 40, 'src/u.ts': 20 }));
+  // The new file is as large as the others and its path sorts last: only the rule puts it first.
+  const d = deps({ files: [fileT, fileU, valueFile('src/z.ts', 2)], answers: [blockAnswer({ 'src/z.ts': 10 })] });
+  const r = await review({ ...input, mode: 'full', history: historyFrom(first, { covered: true, lastReview: LAST }) }, d);
+  assert.equal(d.model.requests.length, 1);
+  const sent = d.model.requests[0]!.messages[2]!.content;
+  const order = ['## File 1/3: src/z.ts', '## File 2/3: src/t.ts', '## File 3/3: src/u.ts'].map((h) => sent.indexOf(h));
+  assert.ok(order.every((n) => n >= 0));
+  assert.deepEqual([...order].sort((x, y) => x - y), order);
+  assert.deepEqual(r.coverage.reviewed, ['src/z.ts', 'src/t.ts', 'src/u.ts']);
+  assert.deepEqual([r.mode, 'since' in r, 'nothingToDo' in r], ['full', false, false]);
+  assert.ok(!d.model.requests[0]!.messages[1]!.content.includes(LAST_LINE));
+});
+
+test('a review with no mode is a full review', async () => {
+  const r = await review({ ...input, history: { by: 'model', lastReview: LAST, shown: null, files: [] } }, deps({ files: [fileA], answers: [answerOnA] }));
+  assert.deepEqual([r.mode, 'since' in r, 'nothingToDo' in r], ['full', false, false]);
 });

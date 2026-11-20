@@ -6,7 +6,8 @@ import { buildFileContexts } from './build.ts';
 import type { FileContext } from './build.ts';
 import { ANCHOR_LEGEND } from './diff.ts';
 import { threadsPart } from './threads.ts';
-import { buildMessages, fixedTokens, headerStripCounts, pullRequestHeader } from './prompt.ts';
+import { LAST_OVERVIEW_CHARS, buildMessages, fixedTokens, headerStripCounts, pullRequestHeader } from './prompt.ts';
+import { MEASURE_NUMBER, MEASURE_TOKEN } from './section.ts';
 import { submitReviewTool } from '../model/submit-review.ts';
 import type { KeptScores } from '../score/history.ts';
 import type { ChangedFile, PullRequestInfo, Source } from '../types.ts';
@@ -218,4 +219,32 @@ test('the threads of a call are written in key order, whatever the order of its 
   const order = ['T1', 'T2', 'T9', 'T10'].map((k) => c.indexOf(`### Thread ${k}\n`));
   assert.ok(order.every((n) => n > 0));
   assert.deepEqual([...order].sort((x, y) => x - y), order);
+});
+
+test('the last review overview is shown as data at the end of the header, cut and counted', () => {
+  const line = 'The last review of this pull request summarized it as below. It describes an earlier state of the code and proves nothing about the code you are given.';
+  const today = pullRequestHeader(pr, 2, 'tok');
+  const long = pullRequestHeader(pr, 2, 'tok', 'x'.repeat(5000));
+  assert.equal(long, `${today}\n${line}\n<<<data tok last review overview>>>\n${'x'.repeat(4000)} [cut]\n<<<end tok>>>`);
+  assert.equal(LAST_OVERVIEW_CHARS, 4000);
+  // Not cut when it fits.
+  assert.ok(pullRequestHeader(pr, 2, 'tok', 'y'.repeat(4000)).endsWith(`\n${'y'.repeat(4000)}\n<<<end tok>>>`));
+  // A control character is stripped.
+  assert.ok(pullRequestHeader(pr, 2, 'tok', 'Rounds\u200b totals.').endsWith(`${line}\n<<<data tok last review overview>>>\nRounds totals.\n<<<end tok>>>`));
+  // A cut does not split a surrogate pair.
+  const pair = `${'x'.repeat(3999)}\ud83d\ude00tail`;
+  assert.ok(pullRequestHeader(pr, 2, 'tok', pair).endsWith(`\n${'x'.repeat(3999)} [cut]\n<<<end tok>>>`));
+  // fixedTokens counts what was added, with threads or without.
+  const overview = 'Changes the retry delay.';
+  const added = estimateTokens(pullRequestHeader(pr, MEASURE_NUMBER, MEASURE_TOKEN, overview)) - estimateTokens(pullRequestHeader(pr, MEASURE_NUMBER, MEASURE_TOKEN));
+  assert.ok(added > 0);
+  assert.equal(fixedTokens('CONTRACT', pr, false, overview), fixedTokens('CONTRACT', pr) + added);
+  assert.equal(fixedTokens('CONTRACT', pr, true, overview), fixedTokens('CONTRACT', pr, true) + added);
+  // Without one, both are today's.
+  assert.equal(pullRequestHeader(pr, 2, 'tok', undefined), today);
+  assert.equal(fixedTokens('CONTRACT', pr, false, undefined), fixedTokens('CONTRACT', pr));
+  assert.deepEqual(buildMessages({ ...args, lastOverview: undefined }), msgs);
+  // buildMessages puts it in the header message of the call.
+  assert.equal(buildMessages({ ...args, lastOverview: overview })[1]!.content, pullRequestHeader(pr, 3, 'tok', overview));
+  assert.deepEqual(buildMessages({ ...args, lastOverview: overview })[2], msgs[2]);
 });

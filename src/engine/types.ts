@@ -84,7 +84,8 @@ export interface NotReviewed { path: string; reason: NotReviewedReason }
 export interface ReviewResult {
   status: 'ok' | 'failed';
   failure: { stage: 'context' | 'model'; code: string } | null;
-  mode: 'full';
+  mode: 'full' | 'incremental' | 'recheck';
+  since?: string;             // the head of the last review this run reads on from; absent in a full review, or with no last review
   overview: string;
   findings: Finding[];
   unplaced: UnplacedFinding[];
@@ -102,6 +103,7 @@ export interface ReviewResult {
   threadVerdicts?: ThreadVerdict[];   // the verdicts this run kept
   threadsDue?: number;                // how many threads this run owed a verdict
   alreadyDiscussed?: Discussed[];     // major and blocker findings dropped as duplicates of an earlier thread
+  nothingToDo?: boolean;              // true when an incremental review or a re-check read nothing and would tell a person what the newest published review tells
 }
 export type { ChangedFile, PullRequestInfo, Side, Source };
 export type {
