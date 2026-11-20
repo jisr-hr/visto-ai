@@ -6,9 +6,9 @@ import { ProviderError } from './model/errors.ts';
 import { SUBMIT_REVIEW, submitReviewTool, submitReviewWithThreadsTool } from './model/submit-review.ts';
 import { chooseEffort, review } from './review.ts';
 import { blocksOf } from './score/blocks.ts';
-import type { ScoreHistory } from './score/types.ts';
+import type { BlockScore, ScoreHistory } from './score/types.ts';
 import type {
-  ChangedFile, EarlierThread, ModelClient, ModelRequest, ModelResponse, PullRequestInfo, RepoConfig, ReviewDeps, ReviewInput, ScoreAnswer, ScoreRequest, Scorer,
+  ChangedFile, EarlierThread, ModelClient, ModelRequest, ModelResponse, PullRequestInfo, RepoConfig, ReviewDeps, ReviewInput, ReviewResult, ScoreAnswer, ScoreRequest, Scorer,
   Source, Usage,
 } from './types.ts';
 
@@ -868,4 +868,97 @@ test('with no history and no lookup the request is the one a first review sends 
   }));
   assert.equal(built.contexts[0]!.kept, undefined);
   assert.deepEqual(d.model.requests[0]!.tools, [submitReviewTool]);
+});
+
+// The history a first review's stored result leaves, read as the shell reads it: each block with its entry,
+// and each hunk the run cut wholly into scored parts with their places.
+function historyFrom(first: ReviewResult): ScoreHistory {
+  const stored = JSON.parse(JSON.stringify(first)) as ReviewResult;
+  return {
+    by: 'model', lastReview: null, shown: null,
+    files: stored.scores.map((f) => {
+      const hunks = new Map<string, BlockScore[]>();
+      for (const one of f.blocks) hunks.set(one.hunkHash, [...(hunks.get(one.hunkHash) ?? []), one]);
+      return {
+        path: f.path,
+        blocks: f.blocks.filter((one) => one.entry !== null).map((one) => ({ hash: one.hash, entry: one.entry!, raisedFrom: one.raisedFrom ?? null })),
+        splits: [...hunks].filter(([, parts]) => parts.every((p) => p.range !== undefined && p.entry !== null))
+          .map(([hunkHash, parts]) => ({ hunkHash, parts: parts.map((p) => ({ hash: p.hash, range: p.range! })) })),
+        stoodFor: [], wholeFile: f.wholeFile, coveredAt: [], readAt: null,
+      };
+    }),
+  };
+}
+const withoutOrigin = (blocks: BlockScore[]) => blocks.map((one) => { const rest = { ...one }; delete rest.origin; return rest; });
+
+test('a second review of an unchanged file gives it the same scores without asking for them', async () => {
+  const scoredT = { ...answerOnT, files: [{ path: 'src/t.ts', change_summary: 'Changes the delay and the tries.', blocks: [
+    { id: 'B1', score: 45, category: 'calculation', reason: 'Doubles the delay.' }, { id: 'B2', score: 10, category: 'fix', reason: '' },
+  ] }] };
+  const first = await review(input, deps({ files: [fileTwo], answers: [scoredT] }));
+  const none = { ...answerOnT, files: [{ path: 'src/t.ts', change_summary: 'Changes the delay and the tries.', blocks: [] }] };
+  const d = deps({ files: [fileTwo], answers: [none] });
+  const second = await review({ ...input, history: historyFrom(first) }, d);
+  assert.deepEqual(headersOf(d), ['### Block B1 (2 changed lines, scored)', '### Block B2 (2 changed lines, scored)']);
+  assert.deepEqual(second.scores[0]!.blocks.map((one) => one.origin), ['earlier_run', 'earlier_run']);
+  assert.deepEqual(withoutOrigin(second.scores[0]!.blocks), first.scores[0]!.blocks);
+  assert.deepEqual([second.scores[0]!.finalScore, second.scores[0]!.covered], [45, true]);
+});
+
+const delayPatch = (value: number) => ['@@ -10,3 +10,3 @@', ' keep', '-const delay = 1;', `+const delay = ${value};`, ' keep'].join('\n');
+const delayFile = (value: number): ChangedFile => ({ path: 'src/t.ts', previousPath: null, status: 'modified', additions: 1, deletions: 1, patch: delayPatch(value) });
+const onT = (file: Record<string, unknown>) => ({ ...answerOnT, files: [{ path: 'src/t.ts', change_summary: 'Changes the delay.', blocks: [], ...file }] });
+
+test('an edited block cannot buy a lower score, by a block score or by a whole-file score', async (t) => {
+  const first = await review(input, deps({ files: [delayFile(2)], answers: [onT({ blocks: [{ id: 'B1', score: 80, category: 'calculation', reason: 'Changes the delay.' }] })] }));
+  assert.equal(first.scores[0]!.finalScore, 80);
+  await t.test('by a block score', async () => {
+    const second = await review({ ...input, history: historyFrom(first) }, deps({
+      files: [delayFile(5)], answers: [onT({ blocks: [{ id: 'B1', score: 20, category: 'fix', reason: 'Small change.' }] })],
+    }));
+    const [block] = second.scores[0]!.blocks;
+    assert.deepEqual([block!.entry, block!.raisedFrom], [{ score: 80, category: 'fix', reason: 'Small change.' }, 20]);
+    assert.equal(second.scores[0]!.finalScore, 80);
+  });
+  await t.test('by a whole-file score', async () => {
+    const second = await review({ ...input, history: historyFrom(first) }, deps({
+      files: [delayFile(5)], answers: [onT({ score: 20, category: 'fix', reason: 'Small change.' })],
+    }));
+    const [block] = second.scores[0]!.blocks;
+    assert.deepEqual([block!.entry, block!.raisedFrom], [{ score: 80, category: 'fix', reason: 'Small change.' }, 20]);
+    assert.equal(second.scores[0]!.finalScore, 80);
+  });
+});
+
+test('a hunk split in a first review keeps its parts and their scores in the second', async () => {
+  const fortyLines = ['@@ -0,0 +1,40 @@', ...Array.from({ length: 40 }, (_, i) => `+const row${i} = ${i * 31};`)].join('\n');
+  const added: ChangedFile = { path: 'src/t.ts', previousPath: null, status: 'added', additions: 40, deletions: 0, patch: fortyLines };
+  const split = onT({ blocks: [{ id: 'B1', parts: [
+    { first: 'R1', last: 'R20', score: 30, category: 'test' }, { first: 'R21', last: 'R40', score: 80, category: 'data_model', reason: 'Adds a table.' },
+  ] }] });
+  const first = await review(input, deps({ files: [added], answers: [split] }));
+  assert.deepEqual(first.scores[0]!.blocks.map((one) => [one.id, one.range]), [['B1.1', [0, 19]], ['B1.2', [20, 39]]]);
+  const d = deps({ files: [added], answers: [onT({})] });
+  const second = await review({ ...input, history: historyFrom(first) }, d);
+  assert.deepEqual(headersOf(d), ['### Block B1 (40 changed lines, scored)']);
+  assert.deepEqual(second.scores[0]!.blocks.map((one) => [one.id, one.entry?.score, one.range, one.origin]), [
+    ['B1.1', 30, [0, 19], 'earlier_run'], ['B1.2', 80, [20, 39], 'earlier_run'],
+  ]);
+  assert.deepEqual([second.scores[0]!.finalScore, second.scores[0]!.covered], [80, true]);
+});
+
+test('a file with an earlier thread and a history still shows its scored blocks', async () => {
+  const d = deps({ files: [fileTwo], answers: [answerOnT] });
+  const earlier = { head: 'abcdef0', threads: [earlierThread({ path: 'src/t.ts', line: 11, quote: 'const delay = 2;' })] };
+  await review({ ...input, earlier, history: historyOf([[hashB1!, 40]]) }, d);
+  assert.ok(d.model.requests[0]!.messages[2]!.content.includes('### Thread T1'));
+  assert.deepEqual(headersOf(d), ['### Block B1 (2 changed lines, scored)', '### Block B2 (2 changed lines, not scored)']);
+});
+
+test('with a scorer set, each score the scorer gave says so', async () => {
+  const scorer = scorerStub(() => ({ blocks: { B1: refunds } }));
+  const r = await review(input, deps({ files: [fileA], answers: [scored('src/a.ts', 20)], scorer }));
+  assert.deepEqual(r.scores[0]!.blocks.map((one) => one.by), ['scorer']);
+  const plain = await review(input, deps({ files: [fileA], answers: [scored('src/a.ts', 20)] }));
+  assert.equal('by' in plain.scores[0]!.blocks[0]!, false);
 });

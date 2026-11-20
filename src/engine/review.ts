@@ -18,7 +18,7 @@ import { reconcileScores, verdictOf } from './reconcile/scores.ts';
 import { dropDuplicates, reconcileVerdicts } from './reconcile/threads.ts';
 import { REPO_FILE, parseRepoFile } from './score/floors.ts';
 import { blocksToLookUp, keptScores } from './score/history.ts';
-import type { ScoreEntry, ScoreHistory } from './score/types.ts';
+import type { ScoredBy, ScoreEntry, ScoreHistory } from './score/types.ts';
 import { askScorer, summariesOf } from './scorer/ask.ts';
 import type {
   AuditEntry, ChangedFile, Discussed, EarlierThread, Effort, NotReviewed, PullRequestInfo, RepoConfig, ReviewDeps, ReviewInput, ReviewResult, Severity, Side, Source, Usage,
@@ -259,6 +259,8 @@ export async function review(input: ReviewInput, deps: ReviewDeps): Promise<Revi
     };
 
     const threshold = input.repoConfig.scoreThreshold;
+    // Who gives the block scores of this run; a moved file's whole-file score is the review model's either way.
+    const by: ScoredBy = deps.scorer !== undefined ? 'scorer' : 'model';
     const files = await source.listFiles(pr);
     if (files.length === 0) return okResult('No changes to review.', threshold, due, {});
 
@@ -289,7 +291,7 @@ export async function review(input: ReviewInput, deps: ReviewDeps): Promise<Revi
       for (const s of attached.shown) {
         if (packed.notReviewed.some((n) => n.path === s.file)) audit.push({ stage: 'context', action: 'thread_not_shown', subject: s.key, reason: 'file_not_reviewed' });
       }
-      const scored = reconcileScores([], built.contexts, new Set(packed.notReviewed.map((n) => n.path)), floors);
+      const scored = reconcileScores([], built.contexts, new Set(packed.notReviewed.map((n) => n.path)), floors, by);
       return okResult('No reviewable changes.', threshold, due, {
         coverage: { reviewed: [], notReviewed: packed.notReviewed }, audit: [...audit, ...scored.audit],
         scores: scored.scores, verdict: verdictOf(scored.scores, threshold), teamFileInvalid,
@@ -366,7 +368,7 @@ export async function review(input: ReviewInput, deps: ReviewDeps): Promise<Revi
       }));
       scoreAnswers = [...asked.answers, ...wholeAnswers];
     }
-    const scored = reconcileScores(scoreAnswers, built.contexts, notRead, floors);
+    const scored = reconcileScores(scoreAnswers, built.contexts, notRead, floors, by);
     audit.push(...scored.audit);
     return okResult(rec.overview, threshold, due, {
       findings: placed.kept, unplaced: away.kept, beyondDiff: rec.beyondDiff,
