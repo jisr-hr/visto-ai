@@ -8,6 +8,7 @@ import { ANCHOR_LEGEND } from './diff.ts';
 import { threadsPart } from './threads.ts';
 import { buildMessages, fixedTokens, headerStripCounts, pullRequestHeader } from './prompt.ts';
 import { submitReviewTool } from '../model/submit-review.ts';
+import type { KeptScores } from '../score/history.ts';
 import type { ChangedFile, PullRequestInfo, Source } from '../types.ts';
 
 const pr: PullRequestInfo = {
@@ -87,6 +88,19 @@ test('per-file lines follow the heading, previous path only when renamed', () =>
   });
   assert.match(renamed[2]!.content, /## File 1\/3: src\/n\.ts\nstatus: renamed\nadditions: 0\ndeletions: 0\nprevious path: src\/o\.ts\nwhole-file score: allowed\n<<<data/);
   assert.doesNotMatch(msgs[2]!.content, /previous path/);
+});
+test('a file with nothing left to score is told it takes no whole-file score', () => {
+  const kept = (settled: boolean): KeptScores => ({
+    blocks: [], entries: new Map(), stoodFor: new Set(), wholeFile: null, floor: 0, settled, covered: false, scoredHunks: new Set(['B1']), readAt: null,
+  });
+  const header = (c: FileContext): string => buildMessages({ ...args, batch: { files: [c], tokens: 1 } })[2]!.content;
+  assert.match(header(ctx('src/a.ts', { kept: kept(true) })), /\ndeletions: 1\nwhole-file score: not allowed\. Every block of this file already has its score\.\n<<<data/);
+  assert.doesNotMatch(header(ctx('src/a.ts', { kept: kept(true) })), /whole-file score: allowed/);
+  assert.match(header(ctx('src/a.ts', { kept: kept(false) })), /\ndeletions: 1\nwhole-file score: allowed\n<<<data/);
+  assert.equal(header(ctx('src/a.ts', { kept: kept(false) })), header(ctx('src/a.ts')));
+  // A moved file is still asked for its score of the move.
+  const moved = ctx('lib/a.ts', { plan: { kind: 'model_whole' }, kept: kept(true) });
+  assert.match(header(moved), /whole-file score: required\./);
 });
 test('an excerpt and a paired test are labelled', () => {
   const m = buildMessages({

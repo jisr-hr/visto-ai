@@ -1,9 +1,12 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { fixedTokens } from './context/prompt.ts';
+import { buildFileContexts, hunksOf } from './context/build.ts';
+import { buildMessages, fixedTokens } from './context/prompt.ts';
 import { ProviderError } from './model/errors.ts';
 import { SUBMIT_REVIEW, submitReviewTool, submitReviewWithThreadsTool } from './model/submit-review.ts';
 import { chooseEffort, review } from './review.ts';
+import { blocksOf } from './score/blocks.ts';
+import type { ScoreHistory } from './score/types.ts';
 import type {
   ChangedFile, EarlierThread, ModelClient, ModelRequest, ModelResponse, PullRequestInfo, RepoConfig, ReviewDeps, ReviewInput, ScoreAnswer, ScoreRequest, Scorer,
   Source, Usage,
@@ -773,4 +776,96 @@ test('with two calls, each thread keeps the verdict of the call that showed it, 
   assert.deepEqual(d.model.requests.map((q) => q.messages[2]!.content.match(/### Thread T\d/g)), [['### Thread T1'], ['### Thread T2']]);
   assert.deepEqual(r.threadVerdicts?.map((v) => [v.threadId, v.verdict, v.reply]), [['PRRT_1', 'fixed', 'From the call of src/a.ts.'], ['PRRT_2', 'answered', 'From the call of src/b.ts.']]);
   assert.deepEqual(r.audit.filter((e) => e.action === 'verdict_dropped').map((e) => [e.subject, e.reason]), [['T2', 'not_shown'], ['T1', 'not_shown']]);
+});
+
+// Scores that hold across reviews.
+const twoHunkPatch = [
+  '@@ -10,3 +10,3 @@', ' keep', '-const delay = 1;', '+const delay = 2;', ' keep',
+  '@@ -50,3 +50,3 @@', ' keep', '-const tries = 1;', '+const tries = 3;', ' keep',
+].join('\n');
+const fileTwo: ChangedFile = { path: 'src/t.ts', previousPath: null, status: 'modified', additions: 2, deletions: 2, patch: twoHunkPatch };
+const [hashB1, hashB2] = blocksOf(hunksOf(twoHunkPatch).hunks).map((b) => b.hash);
+const historyOf = (blocks: Array<[string, number]>): ScoreHistory => ({
+  by: 'model', lastReview: null, shown: null,
+  files: [{
+    path: 'src/t.ts', blocks: blocks.map(([hash, score]) => ({ hash, entry: { score, category: 'fix', reason: '' }, raisedFrom: null })),
+    splits: [], stoodFor: [], wholeFile: null, coveredAt: [], readAt: null,
+  }],
+});
+const answerOnT = { overview: 'src/t.ts reviewed.', findings: [], files: [] };
+const headersOf = (d: ReturnType<typeof deps>): string[] => d.model.requests[0]!.messages[2]!.content.match(/### Block B\d \([^)]*\)/g) ?? [];
+
+test('a later review asks the model only for the blocks that have no score', async () => {
+  const d = deps({ files: [fileTwo], answers: [answerOnT] });
+  const r = await review({ ...input, history: historyOf([[hashB1!, 40]]) }, d);
+  assert.equal(r.status, 'ok');
+  assert.deepEqual(headersOf(d), ['### Block B1 (2 changed lines, scored)', '### Block B2 (2 changed lines, not scored)']);
+  assert.ok(d.model.requests[0]!.messages[2]!.content.includes('whole-file score: allowed'));
+  // Every block scored: the file is told it takes no whole-file score.
+  const all = deps({ files: [fileTwo], answers: [answerOnT] });
+  await review({ ...input, history: historyOf([[hashB1!, 40], [hashB2!, 10]]) }, all);
+  assert.deepEqual(headersOf(all), ['### Block B1 (2 changed lines, scored)', '### Block B2 (2 changed lines, scored)']);
+  assert.ok(all.model.requests[0]!.messages[2]!.content.includes('whole-file score: not allowed. Every block of this file already has its score.'));
+});
+
+test('a later review asks the second scorer only for the blocks that have no score', async () => {
+  const scorer = scorerStub(() => ({ blocks: { B2: refunds } }));
+  const d = deps({ files: [fileTwo, fileA], answers: [answerOnT], scorer });
+  await review({ ...input, history: { ...historyOf([[hashB1!, 40]]), by: 'scorer' } }, d);
+  const byFile = scorer.requests.map((q) => [q.text.includes('src/t.ts') ? 'src/t.ts' : 'src/a.ts', q.blocks]);
+  assert.deepEqual(byFile.sort(), [['src/a.ts', ['B1']], ['src/t.ts', ['B2']]]);
+});
+
+test('a failed lookup across pull requests is named in the audit and the review goes on', async () => {
+  const d = deps({ files: [fileTwo], answers: [answerOnT] });
+  const asked: Array<Array<{ path: string; hash: string }>> = [];
+  d.reusableScores = (blocks) => { asked.push(blocks); return Promise.reject(new Error('db_down')); };
+  const r = await review(input, d);
+  assert.equal(r.status, 'ok');
+  assert.deepEqual(asked, [[{ path: 'src/t.ts', hash: hashB1 }, { path: 'src/t.ts', hash: hashB2 }]]);
+  assert.deepEqual(r.audit.filter((e) => e.action === 'reuse_failed'), [{ stage: 'context', action: 'reuse_failed', subject: 'scores', reason: 'db_down' }]);
+  assert.deepEqual(headersOf(d), ['### Block B1 (2 changed lines, not scored)', '### Block B2 (2 changed lines, not scored)']);
+  // An error without a short code is named internal_error.
+  const odd = deps({ files: [fileTwo], answers: [answerOnT] });
+  odd.reusableScores = () => Promise.reject(new Error('Connection refused at 10.0.0.1'));
+  const again = await review(input, odd);
+  assert.equal(again.status, 'ok');
+  assert.deepEqual(again.audit.filter((e) => e.action === 'reuse_failed').map((e) => e.reason), ['internal_error']);
+  // Nothing to look up: no call.
+  const settled = deps({ files: [fileTwo], answers: [answerOnT] });
+  let calls = 0;
+  settled.reusableScores = () => { calls += 1; return Promise.resolve([]); };
+  await review({ ...input, history: historyOf([[hashB1!, 40], [hashB2!, 10]]) }, settled);
+  assert.equal(calls, 0);
+});
+
+test('an answer of the lookup for a block that was not asked, or with a score that is none, is not used', async () => {
+  const fix = (score: number) => ({ score, category: 'fix' as const, reason: '' });
+  const d = deps({ files: [fileTwo], answers: [answerOnT] });
+  d.reusableScores = () => Promise.resolve([
+    { path: 'src/t.ts', hash: hashB1!, entry: fix(50.5) },
+    { path: 'src/t.ts', hash: hashB1!, entry: fix(101) },
+    { path: 'src/t.ts', hash: hashB1!, entry: fix(-1) },
+    { path: 'src/other.ts', hash: hashB1!, entry: fix(50) },
+    { path: 'src/t.ts', hash: 'f'.repeat(64), entry: fix(50) },
+    { path: 'src/t.ts', hash: hashB2!, entry: fix(20) },
+  ]);
+  const r = await review(input, d);
+  assert.equal(r.status, 'ok');
+  assert.deepEqual(headersOf(d), ['### Block B1 (2 changed lines, not scored)', '### Block B2 (2 changed lines, scored)']);
+});
+
+test('with no history and no lookup the request is the one a first review sends today', async () => {
+  const d = deps({ files: [fileTwo], answers: [answerOnT] });
+  await review(input, d);
+  const none = deps({ files: [fileTwo], answers: [answerOnT] });
+  await review({ ...input, history: null }, none);
+  assert.deepEqual(none.model.requests, d.model.requests);
+  const built = await buildFileContexts(input.pullRequest, [fileTwo], d.source);
+  assert.deepEqual(d.model.requests[0]!.messages, buildMessages({
+    contract: CONTRACT, pr: input.pullRequest, fileCount: 1, firstFileNumber: 1,
+    batch: { files: built.contexts, tokens: 0 }, batchIndex: 0, batchCount: 1, token: 'abcdef0123456789',
+  }));
+  assert.equal(built.contexts[0]!.kept, undefined);
+  assert.deepEqual(d.model.requests[0]!.tools, [submitReviewTool]);
 });

@@ -19,7 +19,9 @@ export function fileSection(c: FileContext, k: number, fileCount: number, token:
     lines.push(`previous path: ${inlineText(c.file.previousPath)}`);
   }
   if (c.plan.kind === 'model') {
-    lines.push('whole-file score: allowed');
+    lines.push(c.kept?.settled === true
+      ? 'whole-file score: not allowed. Every block of this file already has its score.'
+      : 'whole-file score: allowed');
   } else if (c.plan.kind === 'model_whole') {
     lines.push('whole-file score: required. The file moved to another directory and its content did not change. Score the move itself.');
   }

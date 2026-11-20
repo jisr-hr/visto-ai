@@ -1,6 +1,7 @@
 import type { AuditEntry, ChangedFile, PullRequestInfo, Source } from '../types.ts';
 import { blocksOf } from '../score/blocks.ts';
 import { scorePlan } from '../score/rules.ts';
+import type { KeptScores } from '../score/history.ts';
 import type { ScorePlan } from '../score/rules.ts';
 import type { Block } from '../score/types.ts';
 import { commentableRanges, parsePatch, patchFromContents, renderAnchoredDiff } from './diff.ts';
@@ -27,6 +28,8 @@ export interface FileContext {
   hidden: boolean;
   // The earlier threads on this file, when a later review shows them; absent in a first review.
   threads?: ShownThread[];
+  // What the pull request's earlier runs, or other pull requests, already settle for this file; absent when nothing does.
+  kept?: KeptScores;
 }
 
 const isNoNewlineMarker = (line: HunkLine | undefined): boolean => line?.kind === 'meta' && line.text.startsWith('\\');

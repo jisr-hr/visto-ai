@@ -1,6 +1,6 @@
 // src/engine/types.ts
 import type { ChangedFile, PullRequestInfo, Side, Source } from '../forge/types.ts';
-import type { FileScore, ScoreHistory, Verdict } from './score/types.ts';
+import type { FileScore, ScoreEntry, ScoreHistory, Verdict } from './score/types.ts';
 
 export type Severity = 'blocker' | 'major' | 'minor';
 export interface AuditEntry { stage: string; action: string; subject: string; reason: string }
@@ -70,6 +70,8 @@ export interface ReviewDeps {
   token: () => string;        // fresh random text for data markers, 16 hex characters
   log: (entry: Record<string, unknown>) => void;
   scorer?: Scorer;            // scores the blocks in place of the review model, when set
+  /** The highest scores other pull requests of the repository stored for these blocks in the last 30 days. May reject. */
+  reusableScores?: (blocks: Array<{ path: string; hash: string }>) => Promise<Array<{ path: string; hash: string; entry: ScoreEntry }>>;
 }
 
 export interface RawFinding { path: string; side: Side; line: number; severity: Severity; body: string; quote: string; beyond_diff: boolean }

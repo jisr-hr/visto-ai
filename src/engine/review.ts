@@ -2,6 +2,7 @@ import { buildFileContexts } from './context/build.ts';
 import type { FileContext } from './context/build.ts';
 import { packBatches } from './context/batches.ts';
 import type { Batch } from './context/batches.ts';
+import { renderAnchoredDiff } from './context/diff.ts';
 import { orderByPriority } from './context/priority.ts';
 import { attachThreads, isDue } from './context/threads.ts';
 import type { ShownThread } from './context/threads.ts';
@@ -16,6 +17,8 @@ import { normalizePath } from './reconcile/placement.ts';
 import { reconcileScores, verdictOf } from './reconcile/scores.ts';
 import { dropDuplicates, reconcileVerdicts } from './reconcile/threads.ts';
 import { REPO_FILE, parseRepoFile } from './score/floors.ts';
+import { blocksToLookUp, keptScores } from './score/history.ts';
+import type { ScoreEntry, ScoreHistory } from './score/types.ts';
 import { askScorer, summariesOf } from './scorer/ask.ts';
 import type {
   AuditEntry, ChangedFile, Discussed, EarlierThread, Effort, NotReviewed, PullRequestInfo, RepoConfig, ReviewDeps, ReviewInput, ReviewResult, Severity, Side, Source, Usage,
@@ -193,6 +196,43 @@ async function attempt(run: Run, ctl: Control, out: BatchOutcome, batch: Batch, 
   }
 }
 
+const isWholeScore = (value: unknown): boolean => Number.isInteger(value) && (value as number) >= 0 && (value as number) <= 100;
+
+/**
+ * Sets on each context what its history, or another pull request, already settles, and shows those hunks as scored.
+ * Touches nothing when there is no history and no lookup. A failed lookup is named in the audit and counts as no answer.
+ */
+async function keepScores(contexts: FileContext[], history: ScoreHistory | null, deps: ReviewDeps): Promise<AuditEntry[]> {
+  if (history === null && deps.reusableScores === undefined) return [];
+  const audit: AuditEntry[] = [];
+  const wanted = blocksToLookUp(contexts, history);
+  const reused: Array<{ path: string; hash: string; entry: ScoreEntry }> = [];
+  if (wanted.length > 0 && deps.reusableScores !== undefined) {
+    const asked = new Set(wanted.map((w) => `${w.path}\n${w.hash}`));
+    let answer: unknown = [];
+    try {
+      answer = await deps.reusableScores(wanted);
+    } catch (error) {
+      const reason = error instanceof Error && SOURCE_CODE.test(error.message) ? error.message : 'internal_error';
+      audit.push({ stage: 'context', action: 'reuse_failed', subject: 'scores', reason });
+    }
+    for (const one of Array.isArray(answer) ? (answer as unknown[]) : []) {
+      if (typeof one !== 'object' || one === null) continue;
+      const { path, hash, entry } = one as { path?: unknown; hash?: unknown; entry?: { score?: unknown } | null };
+      if (typeof path !== 'string' || typeof hash !== 'string' || !asked.has(`${path}\n${hash}`)) continue;
+      if (typeof entry !== 'object' || entry === null || !isWholeScore(entry.score)) continue;
+      reused.push({ path, hash, entry: entry as ScoreEntry });
+    }
+  }
+  for (const context of contexts) {
+    const kept = keptScores(context, history, reused.filter((r) => r.path === context.file.path));
+    if (kept === null) continue;
+    context.kept = kept;
+    if (kept.scoredHunks.size > 0) context.diffText = renderAnchoredDiff(context.hunks, kept.scoredHunks);
+  }
+  return audit;
+}
+
 export async function review(input: ReviewInput, deps: ReviewDeps): Promise<ReviewResult> {
   let stage: 'context' | 'model' = 'context';
   const sourceErrors = new Set<unknown>(); // what the source rejected with; a caught probe failure is not fatal
@@ -235,6 +275,8 @@ export async function review(input: ReviewInput, deps: ReviewDeps): Promise<Revi
       if (stripped[subject] > 0) audit.push({ stage: 'context', action: 'control_characters_stripped', subject, reason: String(stripped[subject]) });
     }
     const built = await buildFileContexts(pr, orderByPriority(files), source);
+    // Before the threads are attached, so that the copies attachThreads makes carry what is kept.
+    const reuseAudit = await keepScores(built.contexts, input.history ?? null, deps);
     const attached = attachThreads(built.contexts, input.earlier);
     const withThreads = attached.shown.length > 0;
     if (withThreads) {
@@ -242,7 +284,7 @@ export async function review(input: ReviewInput, deps: ReviewDeps): Promise<Revi
       if (budget <= 0) return failedResult('context', 'budget_too_small', usage, audit, 'ok', threshold, due);
     }
     const packed = packBatches(attached.contexts, budget, input.limits.batchesPerReview);
-    audit.push(...built.audit, ...attached.audit, ...packed.audit);
+    audit.push(...built.audit, ...reuseAudit, ...attached.audit, ...packed.audit);
     if (packed.batches.length === 0) {
       for (const s of attached.shown) {
         if (packed.notReviewed.some((n) => n.path === s.file)) audit.push({ stage: 'context', action: 'thread_not_shown', subject: s.key, reason: 'file_not_reviewed' });
