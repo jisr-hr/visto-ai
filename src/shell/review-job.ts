@@ -3,7 +3,6 @@ import { enqueueJob, finishJob, requeueJob } from '../db/jobs.ts';
 import type { Job } from '../db/jobs.ts';
 import { getPullRequest } from '../db/pull-requests.ts';
 import { recordComments } from '../db/review-comments.ts';
-import type { StoredComment } from '../db/review-comments.ts';
 import { hasOkRun, hasRun, lastPublishedRun, markPublished, recordRun, unpublishedRun } from '../db/review-runs.ts';
 import type { RunRecord, StoredRun } from '../db/review-runs.ts';
 import type { Db } from '../db/types.ts';
@@ -16,6 +15,7 @@ import { PAUSE_MS } from './model-health.ts';
 import type { ModelHealth } from './model-health.ts';
 import { codeOf } from './codes.ts';
 import { failureText, mayCommand, refusalText } from './commands.ts';
+import { matchPosted } from './posted.ts';
 import { publishRun } from './publish.ts';
 import type { PublishOutcome } from './publish.ts';
 import { QUIET_SECONDS, skipReason } from './triggers.ts';
@@ -150,17 +150,7 @@ export async function runReviewJob(job: Job, deps: ReviewJobDeps): Promise<void>
         log({ event: 'readback_failed', job: job.id, run: target.id, reason: 'cut_short' });
         return;
       }
-      const findings = (target.result as ReviewResult).findings;
-      const rendered = target.comments as InlineComment[];
-      const taken = new Set<number>();
-      const matched: StoredComment[] = [];
-      for (const c of posted) {
-        const i = rendered.findIndex((r, index) => !taken.has(index) && findings[index] !== undefined
-          && r.path === c.path && r.side === c.side && r.body === c.body);
-        if (i < 0) continue;
-        taken.add(i);
-        matched.push({ commentId: c.id, path: c.path, side: c.side, line: c.line, severity: findings[i]!.severity, quote: findings[i]!.quote });
-      }
+      const matched = matchPosted(target, posted);
       await recordComments(db, target.id, job.ref, matched);
       log({ event: 'readback', job: job.id, run: target.id, posted: posted.length, stored: matched.length });
     } catch (error) {
