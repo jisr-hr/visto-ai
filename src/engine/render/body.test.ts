@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { fitBody, inert, MAX_BODY_CHARS, renderReview } from './body.ts';
-import type { Finding, NotReviewed, RawFinding, ReviewResult, UnplacedFinding } from '../types.ts';
+import type { Discussed, Finding, NotReviewed, RawFinding, ReviewResult, ThreadVerdict, UnplacedFinding } from '../types.ts';
 import type { BlockScore, Category, FileLevelSource, FileScore, Span } from '../score/types.ts';
 
 const ZW = '\u200b';
@@ -605,4 +605,43 @@ test('an address keeps working: its @ is written %40, and a link in angle bracke
   const live = (text: string): boolean => /@[A-Za-z0-9]/.test(inert(text).replace(/[A-Za-z0-9]@/g, ''));
   for (const text of ['://@victim', 'x://@victim', 'https://@victim', '(https://example.test/)@victim', 'a://b\t@victim', '://x@@victim'])
     assert.equal(live(text), false, JSON.stringify(text));
+});
+
+const discussed = (over: Partial<Discussed> = {}): Discussed => ({
+  path: 'src/a.ts', side: 'RIGHT', line: 14, severity: 'major', body: 'The total is never checked.', commentId: '9001', resolved: false, settled: false, ...over,
+});
+const aThreadVerdict = (v: ThreadVerdict['verdict'], n: number): ThreadVerdict => ({ threadId: `PRRT_${n}`, commentId: String(9000 + n), verdict: v, reply: '', fileChanged: true });
+const withLink = { ...auto, commentUrl: (id: string) => `https://git.example.test/c/${id}` } as const;
+
+test('a finding an earlier thread raised is listed with a link to that thread, between the unplaced findings and what lies beyond the diff', () => {
+  const r = result({ unplaced: [unplaced()], beyondDiff: [beyond()], alreadyDiscussed: [discussed()] });
+  const b = renderReview(r, withLink).body;
+  assert.ok(b.includes('## Already discussed\n\nThese were raised in an earlier review. They are not posted again.\n\n- **\\[major]** `src/a.ts:14`'));
+  assert.ok(b.includes(' ([earlier thread](https://git.example.test/c/9001))'));
+  const order = ['## Findings not placed on the diff', '## Already discussed', '## Beyond the diff', '## Overall'].map((h) => b.indexOf(h + '\n'));
+  assert.ok(order.every((i) => i >= 0));
+  assert.deepEqual(order, [...order].sort((x, y) => x - y));
+  const bare = renderReview(result({ alreadyDiscussed: [discussed()] }), withLink).body;
+  assert.ok(bare.indexOf('## Already discussed') < bare.indexOf('## Overall'));
+});
+test('without a link builder the entry is written with no link', () => {
+  const b = renderReview(result({ alreadyDiscussed: [discussed()] }), auto).body;
+  assert.ok(b.includes('- **\\[major]** `src/a.ts:14` \u2014 The total is never checked.\n'));
+  assert.equal(b.includes('earlier thread'), false);
+  assert.equal(renderReview(result({ alreadyDiscussed: [discussed()] }), { ...auto, commentUrl: null }).body.includes('earlier thread'), false);
+});
+test('Overall counts the earlier threads, and says "No new findings." when the only ones were already discussed', () => {
+  const three = result({ threadsDue: 3, threadVerdicts: [aThreadVerdict('fixed', 1), aThreadVerdict('answered', 2), aThreadVerdict('open', 3)] });
+  assert.ok(renderReview(three, auto).body.endsWith('Earlier threads: 2 cleared, 1 still open. Human review: not needed (highest score 0%).'));
+  const part = result({ threadsDue: 3, threadVerdicts: [aThreadVerdict('fixed', 1)] });
+  assert.ok(renderReview(part, auto).body.endsWith('Earlier threads: 1 cleared, 0 still open. 2 could not be judged. Human review: not needed (highest score 0%).'));
+  assert.ok(renderReview(result({ alreadyDiscussed: [discussed()] }), auto).body.endsWith('No new findings. Human review: not needed (highest score 0%).'));
+  assert.ok(renderReview(result(), auto).body.includes('No findings.'));
+});
+test('a result stored before threads were read renders as it did', () => {
+  const old = result({ findings: [finding()] });
+  const empty = renderReview({ ...old, threadVerdicts: [], threadsDue: 0, alreadyDiscussed: [] }, auto).body;
+  assert.equal(renderReview(old, auto).body, empty);
+  assert.equal(empty.includes('Already discussed'), false);
+  assert.equal(empty.includes('Earlier threads'), false);
 });

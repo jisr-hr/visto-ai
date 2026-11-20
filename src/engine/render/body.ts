@@ -1,4 +1,4 @@
-import type { Finding, NotReviewed, RawFinding, ReviewResult, Side, UnplacedFinding } from '../types.ts';
+import type { Discussed, Finding, NotReviewed, ReviewResult, Side, UnplacedFinding } from '../types.ts';
 import type { BlockScore, FileLevelSource, FileScore, ScoreEntry, Span } from '../score/types.ts';
 
 export interface InlineComment { path: string; side: Side; line: number; body: string }
@@ -19,6 +19,8 @@ type Meta = {
   lineUrl: ((file: FileRef, span: Span) => string) | null;
   // true: each finding is an inline comment; false: its whole text is written in the body.
   inline: boolean;
+  // Builds a link to a comment by its id; absent or null when the service has no such link.
+  commentUrl?: ((commentId: string) => string) | null;
 };
 
 const WHOLE_FILE_TEXT: Record<Exclude<FileLevelSource, 'whole_file' | 'team_file_invalid'>, string> = {
@@ -152,7 +154,7 @@ function inertText(text: string, fences: boolean): string {
 }
 
 // Text that follows the service's own words on one line: no fence can open in it, and nothing is appended.
-const inertInline = (text: string): string => inertText(text, false);
+export const inertInline = (text: string): string => inertText(text, false);
 
 /** Text the model wrote, made safe to post. Outside a fence a zero-width space follows every `@` that starts a mention, every `<` that starts raw HTML and every `&` that starts a character reference. Fence lines are moved to the first column, and a fence left open is closed. */
 export function inert(text: string): string {
@@ -164,7 +166,7 @@ function bullets(items: string[], cap: boolean = true): string[] {
   return items.length > shown.length ? [...shown, `- \u2026and ${items.length - shown.length} more.`] : shown;
 }
 
-const located = (f: Finding | RawFinding): string =>
+const located = (f: Pick<Finding, 'path' | 'line' | 'severity' | 'body'>): string =>
   `- **\\[${f.severity}]** ${codeSpan(`${f.path}:${f.line}`)} \u2014 ${inertInline(firstLine(f.body))}`;
 const unplacedLine = (f: UnplacedFinding): string =>
   `- ${codeSpan(`${f.path}:${f.line}`)}${f.side === 'LEFT' ? ' (old file)' : ''} \u2014 ${inertInline(firstLine(f.body))}`;
@@ -174,6 +176,10 @@ const locatedWhole = (f: Finding): string => {
   const text = [note, noHeading(inert(f.body))].filter((t) => t !== '').join('\n\n').split('\n').map((l) => (l === '' ? l : `  ${l}`)).join('\n');
   return `${located(f)}\n\n${text}`;
 };
+const DISCUSSED_HEADING = '## Already discussed';
+const DISCUSSED_NOTE = 'These were raised in an earlier review. They are not posted again.';
+const discussedLine = (d: Discussed, commentUrl: Meta['commentUrl']): string =>
+  `${located(d)}${commentUrl == null ? '' : ` ([earlier thread](${commentUrl(d.commentId)}))`}`;
 const notReviewedLine = (n: NotReviewed): string => `- ${codeSpan(n.path)}: ${n.reason}`;
 
 const movedNote = (f: Finding): string =>
@@ -241,17 +247,26 @@ function humanReviewSection(result: ReviewResult, lineUrl: Meta['lineUrl']): str
 }
 
 function overallLine(result: ReviewResult): string {
+  const discussed = result.alreadyDiscussed?.length ?? 0;
+  const kept = result.threadVerdicts ?? [];
+  const due = result.threadsDue ?? 0;
   const placed = result.findings;
   const count = (s: Finding['severity']) => placed.filter((f) => f.severity === s).length;
   const u = result.unplaced.length;
   const k = result.coverage.notReviewed.length;
   const parts: string[] = [];
-  if (placed.length === 0 && u === 0) parts.push('No findings.');
+  if (placed.length === 0 && u === 0) parts.push(discussed > 0 ? 'No new findings.' : 'No findings.');
   else {
     parts.push(`${count('blocker')} blocker, ${count('major')} major, ${count('minor')} minor.`);
     if (u > 0) parts.push(`${u} could not be placed on the diff.`);
   }
   if (k > 0) parts.push(`${k} files were not reviewed.`);
+  if (due > 0) {
+    const cleared = kept.filter((v) => v.verdict !== 'open').length;
+    const open = kept.length - cleared;
+    const unjudged = due - kept.length;
+    parts.push(`Earlier threads: ${cleared} cleared, ${open} still open.${unjudged > 0 ? ` ${unjudged} could not be judged.` : ''}`);
+  }
   const { needsHuman, highest } = result.verdict;
   parts.push(`Human review: ${needsHuman ? 'needed' : 'not needed'} (highest score ${highest}%).`);
   return parts.join(' ');
@@ -260,7 +275,7 @@ function overallLine(result: ReviewResult): string {
 const NUL = String.fromCharCode(0);
 
 // Text that storing leaves as it is: every NUL becomes U+FFFD, as CommonMark reads it, and a lone surrogate becomes U+FFFD too. Lengths do not change.
-const asRead = (text: string): string => text.replaceAll(NUL, '\ufffd').toWellFormed();
+export const asRead = (text: string): string => text.replaceAll(NUL, '\ufffd').toWellFormed();
 
 /** The review's body and inline comments, as they are posted and as they are stored: storing them changes nothing. */
 export function renderReview(result: ReviewResult, meta: Meta): { body: string; comments: InlineComment[] } {
@@ -290,6 +305,10 @@ function rendered(result: ReviewResult, meta: Meta): { body: string; comments: I
   const rest = result.unplaced.length > 0 ? tail : head;
   if (result.unplaced.length > 0) {
     tail.push([UNPLACED_HEADING, '', UNPLACED_NOTE, '', ...bullets(result.unplaced.map(unplacedLine))].join('\n'));
+  }
+  const discussed = result.alreadyDiscussed ?? [];
+  if (discussed.length > 0) {
+    rest.push([DISCUSSED_HEADING, '', DISCUSSED_NOTE, '', ...bullets(discussed.map((d) => discussedLine(d, meta.commentUrl)))].join('\n'));
   }
   if (result.beyondDiff.length > 0) rest.push(['## Beyond the diff', '', ...bullets(result.beyondDiff.map(located))].join('\n'));
   if (result.coverage.notReviewed.length > 0) {
