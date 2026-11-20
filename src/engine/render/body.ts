@@ -211,7 +211,11 @@ function blockLine(file: FileScore, block: BlockScore, entry: ScoreEntry, lineUr
   const range = span.first === span.last ? `line ${span.first}` : `lines ${span.first}-${span.last}`;
   const label = `${span.side === 'LEFT' ? 'old ' : ''}${range}`;
   const shown = lineUrl === null ? label : `[${label}](${lineUrl(file, span)})`;
-  return `- ${shown}, ${entry.score}% ${scoreTail(entry)}`;
+  const base = `- ${shown}, ${entry.score}% ${scoreTail(entry)}`;
+  if (typeof block.raisedFrom === 'number') return `${base} _(${block.raisedFrom}% was given; a block this file lost had scored ${entry.score}%)_`;
+  if (block.origin === 'earlier_run') return `${base} _(kept from an earlier review)_`;
+  if (block.origin === 'other_pull_request') return `${base} _(scored on another pull request)_`;
+  return base;
 }
 
 // The lines a person should read, grouped by file; a file's heading is not an entry.

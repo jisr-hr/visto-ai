@@ -267,6 +267,23 @@ const verdictOf = (scores: FileScore[], threshold = 70) => {
 };
 const scored = (scores: FileScore[], threshold = 70): ReviewResult => result({ scores, verdict: verdictOf(scores, threshold) });
 const section = (body: string): string => /## Human review\n\n([\s\S]*?)(?=\n\n## |$)/.exec(body)![1]!;
+const noted = (over: Partial<BlockScore>): string =>
+  section(renderReview(scored([file('src/a.ts', { blocks: [{ ...block('B1', span(5, 6), 85, 'calculation', 'Changes tax.'), ...over }] })]), withUrl).body).split('\n').pop()!;
+test('a block kept from an earlier review says so', () => {
+  assert.equal(noted({ origin: 'earlier_run' }), '- [lines 5-6](u:src/a.ts:5), 85% `calculation` \u2014 Changes tax. _(kept from an earlier review)_');
+});
+test('a block scored on another pull request says so', () => {
+  assert.equal(noted({ origin: 'other_pull_request' }), '- [lines 5-6](u:src/a.ts:5), 85% `calculation` \u2014 Changes tax. _(scored on another pull request)_');
+});
+test('a raised block says what was given and what a lost block had scored', () => {
+  assert.equal(noted({ raisedFrom: 60 }), '- [lines 5-6](u:src/a.ts:5), 85% `calculation` \u2014 Changes tax. _(60% was given; a block this file lost had scored 85%)_');
+});
+test('a kept block that was raised gets the raised note only', () => {
+  assert.equal(noted({ origin: 'earlier_run', raisedFrom: 60 }), '- [lines 5-6](u:src/a.ts:5), 85% `calculation` \u2014 Changes tax. _(60% was given; a block this file lost had scored 85%)_');
+});
+test('a block with none of the fields is written as before', () => {
+  assert.equal(noted({}), '- [lines 5-6](u:src/a.ts:5), 85% `calculation` \u2014 Changes tax.');
+});
 
 test('nothing at or above the threshold is one line', () => {
   const r = scored([file('src/a.ts', { blocks: [block('B1', span(1, 2), 45)] })]);
