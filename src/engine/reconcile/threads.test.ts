@@ -98,6 +98,16 @@ test("another bot's reply can be accepted, an open verdict needs no reason, and 
   assert.equal(plain.length, 600);
   assert.ok(!plain.includes('\n'));
 });
+test('a reason that holds only characters nobody can see is no reason', () => {
+  for (const hidden of ['\u200b', '\u2060', '\u202e', '\u0000']) {
+    for (const verdict of ['fixed', 'answered']) {
+      const out = reconcileVerdicts([answer([{ thread_id: 'T1', verdict, reply: ` ${hidden} ${hidden}` }])], [shown()], [ctxB], 'h2');
+      assert.deepEqual([out.verdicts, out.audit.map((a) => a.reason)], [[], ['no_reason']], `${verdict} ${hidden.charCodeAt(0).toString(16)}`);
+    }
+  }
+  const kept = reconcileVerdicts([answer([{ thread_id: 'T1', verdict: 'fixed', reply: `Line\u200b 14 now\u202e checks it.` }])], [shown()], [ctxB], 'h2');
+  assert.deepEqual(kept.verdicts.map((v) => v.reply), ['Line 14 now checks it.']);
+});
 
 const finding = (over = {}) => ({ path: 'src/a.ts', side: 'RIGHT' as const, line: 14, severity: 'major' as const, quote: 'total = a +  b', body: 'x', ...over });
 test('a finding that quotes the code of an earlier thread, or sits within 3 lines of one of its class, is a duplicate', () => {

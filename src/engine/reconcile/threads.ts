@@ -1,4 +1,5 @@
 import type { FileContext } from '../context/build.ts';
+import { stripControl } from '../context/untrusted.ts';
 import type { ShownThread } from '../context/threads.ts';
 import type { SubmitReviewArgs } from '../model/submit-review.ts';
 import { fileDiffHash } from '../score/blocks.ts';
@@ -38,7 +39,8 @@ export function reconcileVerdicts(
         drop('unknown_thread');
         continue;
       }
-      const reply = cut(oneLine(raw.reply ?? ''), MAX_REPLY_CHARS);
+      // Characters nobody can see are taken out first, so a reason made only of them is empty.
+      const reply = cut(oneLine(stripControl(raw.reply ?? '').text), MAX_REPLY_CHARS);
       let reason: string | null = null;
       if (!seen.has(s.key)) reason = 'not_shown';
       else if (!s.due) reason = 'not_due';
