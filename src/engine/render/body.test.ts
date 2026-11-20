@@ -662,3 +662,99 @@ test('a result stored before threads were read renders as it did', () => {
   assert.equal(empty.includes('Already discussed'), false);
   assert.equal(empty.includes('Earlier threads'), false);
 });
+
+const manual = { trigger: 'manual', requestedBy: 'octo-dev', lineUrl: null, inline: true } as const;
+const manualNoLogin = { trigger: 'manual', requestedBy: null, lineUrl: null, inline: true } as const;
+const SINCE = '0123456789abcdef0123456789abcdef01234567';
+const RECHECK_TAIL = 'code that was reviewed before was not reviewed again.';
+const firstOf = (r: ReviewResult, m: Parameters<typeof renderReview>[1]): string => renderReview(r, m).body.split('\n')[0]!;
+
+test('the first line of an incremental review and of a re-check', () => {
+  const inc = result({ mode: 'incremental', since: SINCE });
+  assert.equal(firstOf(inc, auto), '**Incremental review** of the changes since `0123456789ab`.');
+  assert.equal(firstOf(inc, manual), '**Incremental review** requested by @octo-dev, of the changes since `0123456789ab`.');
+  assert.equal(firstOf(inc, manualNoLogin), '**Incremental review** requested, of the changes since `0123456789ab`.');
+  const re = result({ mode: 'recheck', threadsDue: 2 });
+  assert.equal(firstOf(re, manual), `**Re-check** requested by @octo-dev. The earlier threads were judged again; ${RECHECK_TAIL}`);
+  assert.equal(firstOf(re, manualNoLogin), `**Re-check** requested. The earlier threads were judged again; ${RECHECK_TAIL}`);
+  assert.equal(firstOf(result({ mode: 'recheck' }), manual), `**Re-check** requested by @octo-dev. No earlier thread was waiting for a verdict; ${RECHECK_TAIL}`);
+  assert.equal(firstOf(result({ mode: 'recheck', threadsDue: 0 }), manualNoLogin), `**Re-check** requested. No earlier thread was waiting for a verdict; ${RECHECK_TAIL}`);
+  assert.equal(firstOf(result({ mode: 'full' }), manual), '**Full review** requested by @octo-dev.');
+});
+test('without a usable since the first line leaves out the changes it names', () => {
+  assert.equal(firstOf(result({ mode: 'incremental' }), auto), '**Incremental review**.');
+  assert.equal(firstOf(result({ mode: 'incremental' }), manual), '**Incremental review** requested by @octo-dev.');
+  for (const since of ['abc123', 'A'.repeat(12), '0123456789ab`x', `${'a'.repeat(65)}`, '', '0123456789ab\n## x']) {
+    const line = renderReview(result({ mode: 'incremental', since }), manualNoLogin).body.split('\n\n')[0]!;
+    assert.equal(line, '**Incremental review** requested.');
+  }
+  assert.equal(firstOf(result({ mode: 'incremental', since: 'abcdef0' }), auto), '**Incremental review** of the changes since `abcdef0`.');
+  assert.equal(firstOf(result({ mode: 'incremental', since: 5 as unknown as string }), auto), '**Incremental review**.');
+});
+test('a mode that is not one of the three reads as full', () => {
+  const odd = result({ mode: 'weird' as unknown as 'full' });
+  assert.equal(renderReview(odd, auto).body, renderReview(result(), auto).body);
+  assert.equal(firstOf(odd, manual), '**Full review** requested by @octo-dev.');
+  const gone = { ...result() } as Partial<ReviewResult>;
+  delete gone.mode;
+  assert.equal(renderReview(gone as ReviewResult, auto).body, renderReview(result(), auto).body);
+});
+test('a failed incremental review keeps the first line of its mode', () => {
+  const failed = result({ status: 'failed', failure: { stage: 'model', code: 'no_credit' }, mode: 'incremental', since: SINCE });
+  assert.equal(renderReview(failed, auto).body, '**Incremental review** of the changes since `0123456789ab`.\n\n## Overall\n\nThe review could not be completed (model: no_credit).\n\nHuman review: needed, because the review did not finish.');
+});
+test('the section for code unchanged since the last review stands between the unplaced and the discussed ones', () => {
+  const longBody = 'The total is never checked.\n\nSecond paragraph.\n\n## Not a heading';
+  const r = result({
+    mode: 'incremental', since: SINCE, unplaced: [unplaced()], alreadyDiscussed: [discussed()],
+    unchanged: [finding({ line: 21, body: longBody })],
+  });
+  const b = renderReview(r, auto).body;
+  const heading = '## On code unchanged since the last review';
+  const order = ['## Findings not placed on the diff', heading, '## Already discussed', '## Overall'].map((h) => b.indexOf(`${h}\n`));
+  assert.deepEqual(order, [...order].sort((x, y) => x - y));
+  assert.ok(order.every((i) => i >= 0));
+  assert.ok(b.includes(`${heading}\n\nThese are on lines that have not changed since the reviewer last read their file. They are not posted as comments and do not hold a merge.\n\n- **\\[major]** \`src/a.ts:21\` \u2014 The total is never checked.\n\n  The total is never checked.\n\n  Second paragraph.\n\n  \\## Not a heading\n\n## Already discussed`));
+  // whole text, whatever meta.inline says
+  assert.equal(renderReview(r, { ...auto, inline: false }).body, b);
+  assert.deepEqual(renderReview(r, auto).comments, []);
+});
+test('the section stands before the discussed ones when nothing is unplaced, and is absent when empty or missing', () => {
+  const r = result({ alreadyDiscussed: [discussed()], unchanged: [finding()], beyondDiff: [beyond()] });
+  const b = renderReview(r, auto).body;
+  assert.ok(b.indexOf('## On code unchanged') < b.indexOf('## Already discussed'));
+  assert.ok(b.indexOf('## Already discussed') < b.indexOf('## Beyond the diff'));
+  assert.equal(renderReview(result({ unchanged: [] }), auto).body, renderReview(result(), auto).body);
+});
+test('Overall opens with No findings, No new findings or the counts, and names the unchanged majors', () => {
+  const end = ' Human review: not needed (highest score 0%).';
+  assert.ok(renderReview(result(), auto).body.endsWith(`## Overall\n\nNo findings.${end}`));
+  assert.ok(renderReview(result({ alreadyDiscussed: [discussed()] }), auto).body.endsWith(`No new findings.${end}`));
+  const one = renderReview(result({ unchanged: [finding()] }), auto).body;
+  assert.ok(one.endsWith(`## Overall\n\nNo new findings. 1 major on code unchanged since the last review.${end}`));
+  const two = renderReview(result({ unchanged: [finding(), finding({ line: 2 })], coverage: { reviewed: [], notReviewed: notReviewed(1) } }), auto).body;
+  assert.ok(two.endsWith(`No new findings. 2 major on code unchanged since the last review. 1 files were not reviewed.${end}`));
+  const counts = renderReview(result({ findings: [finding()], unchanged: [finding()] }), auto).body;
+  assert.ok(counts.endsWith(`0 blocker, 1 major, 0 minor. 1 major on code unchanged since the last review.${end}`));
+});
+test('a review with no model call is written like any other', () => {
+  const sentence = 'No file was read in this review: every file that can be sent was read, as it is now, by an earlier review.';
+  const r = result({
+    mode: 'incremental', since: SINCE, nothingToDo: true, overview: sentence,
+    scores: [file('src/a.ts', { fileLevel: level(10, 'whole_file') })], verdict: { threshold: 70, needsHuman: false, highest: 10 },
+    coverage: { reviewed: [], notReviewed: [{ path: 'logo.png', reason: 'no_diff' }] },
+  });
+  const b = renderReview(r, auto).body;
+  assert.ok(b.startsWith('**Incremental review** of the changes since `0123456789ab`.\n\n'));
+  for (const h of ['## Summary', '## Human review', '## Coverage', '## Overall']) assert.ok(b.includes(`${h}\n`), h);
+  assert.ok(b.includes(`## Summary\n\n${sentence}\n\n`));
+  assert.equal(b.includes('## Findings'), false);
+  assert.ok(b.endsWith('No findings. 1 files were not reviewed. Human review: not needed (highest score 10%).'));
+});
+test('a result stored before the new fields renders as before', () => {
+  const old = result({ findings: [finding()], unplaced: [unplaced()] });
+  const added = { ...old, mode: 'full' as const, unchanged: [], blockingOnUnchanged: 0, nothingToDo: false };
+  assert.equal(renderReview(added, auto).body, renderReview(old, auto).body);
+  assert.equal(renderReview(old, auto).body.includes('unchanged'), false);
+  assert.equal(renderReview({ ...old, unchanged: null as unknown as Finding[] }, auto).body, renderReview(old, auto).body);
+});

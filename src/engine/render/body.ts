@@ -250,6 +250,26 @@ function humanReviewSection(result: ReviewResult, lineUrl: Meta['lineUrl']): str
   return out.join('\n\n');
 }
 
+const UNCHANGED_HEADING = '## On code unchanged since the last review';
+const UNCHANGED_NOTE = 'These are on lines that have not changed since the reviewer last read their file. They are not posted as comments and do not hold a merge.';
+const unchangedOf = (result: ReviewResult): Finding[] => (Array.isArray(result.unchanged) ? result.unchanged : []);
+
+// A stored result may hold a mode or a since that this code does not know: the first reads as full, the second as absent.
+function firstLineOf(result: ReviewResult, meta: Meta): string | null {
+  const since = typeof result.since === 'string' && /^[0-9a-f]{7,64}$/.test(result.since) ? result.since.slice(0, 12) : null;
+  const who = meta.requestedBy === null ? '' : ` by @${meta.requestedBy}`;
+  if (result.mode === 'incremental') {
+    const changes = since === null ? '' : `, of the changes since \`${since}\``;
+    if (meta.trigger === 'manual') return `**Incremental review** requested${who}${changes}.`;
+    return since === null ? '**Incremental review**.' : `**Incremental review** of the changes since \`${since}\`.`;
+  }
+  if (result.mode === 'recheck') {
+    const middle = (result.threadsDue ?? 0) > 0 ? 'The earlier threads were judged again' : 'No earlier thread was waiting for a verdict';
+    return `**Re-check** requested${who}. ${middle}; code that was reviewed before was not reviewed again.`;
+  }
+  return meta.trigger === 'manual' ? `**Full review** requested${who}.` : null;
+}
+
 function overallLine(result: ReviewResult): string {
   const discussed = result.alreadyDiscussed?.length ?? 0;
   const kept = result.threadVerdicts ?? [];
@@ -258,12 +278,14 @@ function overallLine(result: ReviewResult): string {
   const count = (s: Finding['severity']) => placed.filter((f) => f.severity === s).length;
   const u = result.unplaced.length;
   const k = result.coverage.notReviewed.length;
+  const unchanged = unchangedOf(result).length;
   const parts: string[] = [];
-  if (placed.length === 0 && u === 0) parts.push(discussed > 0 ? 'No new findings.' : 'No findings.');
+  if (placed.length === 0 && u === 0) parts.push(discussed > 0 || unchanged > 0 ? 'No new findings.' : 'No findings.');
   else {
     parts.push(`${count('blocker')} blocker, ${count('major')} major, ${count('minor')} minor.`);
     if (u > 0) parts.push(`${u} could not be placed on the diff.`);
   }
+  if (unchanged > 0) parts.push(`${unchanged} major on code unchanged since the last review.`);
   if (k > 0) parts.push(`${k} files were not reviewed.`);
   if (due > 0) {
     const cleared = kept.filter((v) => v.verdict !== 'open').length;
@@ -289,9 +311,8 @@ export function renderReview(result: ReviewResult, meta: Meta): { body: string; 
 
 function rendered(result: ReviewResult, meta: Meta): { body: string; comments: InlineComment[] } {
   const prefix: string[] = [];
-  if (meta.trigger === 'manual') {
-    prefix.push(meta.requestedBy === null ? '**Full review** requested.' : `**Full review** requested by @${meta.requestedBy}.`);
-  }
+  const opening = firstLineOf(result, meta);
+  if (opening !== null) prefix.push(opening);
   if (result.status === 'failed') {
     const failure = result.failure === null ? 'unknown' : `${result.failure.stage}: ${result.failure.code}`;
     return { body: [...prefix, `${OVERALL_HEADING}\n\nThe review could not be completed (${failure}).\n\nHuman review: needed, because the review did not finish.`].join('\n\n'), comments: [] };
@@ -309,6 +330,10 @@ function rendered(result: ReviewResult, meta: Meta): { body: string; comments: I
   const rest = result.unplaced.length > 0 ? tail : head;
   if (result.unplaced.length > 0) {
     tail.push([UNPLACED_HEADING, '', UNPLACED_NOTE, '', ...bullets(result.unplaced.map(unplacedLine))].join('\n'));
+  }
+  const unchanged = unchangedOf(result);
+  if (unchanged.length > 0) {
+    rest.push([UNCHANGED_HEADING, '', UNCHANGED_NOTE, '', ...bullets(unchanged.map(locatedWhole), false)].join('\n'));
   }
   const discussed = result.alreadyDiscussed ?? [];
   if (discussed.length > 0) {
