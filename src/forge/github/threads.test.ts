@@ -206,3 +206,10 @@ test('a reply, an edit and a resolve are each one mutation with their ids, sent 
     await assert.rejects(call(denied.writer), { message: 'github_forbidden' });
   }
 });
+test('a mutation answered without an object data is a bad response, and was sent once', async () => {
+  for (const answer of [json({}), json({ data: null }), json([]), new Response('not json')]) {
+    const { writer, seen } = github({ resolveReviewThread: [answer] });
+    await assert.rejects(writer.resolveThread('99', 'PRRT_1'), { message: 'github_bad_response' });
+    assert.equal(seen.length, 1);
+  }
+});
