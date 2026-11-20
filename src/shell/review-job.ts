@@ -411,13 +411,13 @@ export async function runReviewJob(job: Job, deps: ReviewJobDeps): Promise<void>
     const usage = result === null ? NO_USAGE : result.usage;
     const run: RunRecord = resumed ?? (result === null
       ? {
-        ref: job.ref, job: job.id, trigger: job.trigger, mode: 'full', dryRun: deps.dryRun, headSha: live?.info.headSha ?? job.headSha, baseSha: null,
+        ref: job.ref, job: job.id, trigger: job.trigger, mode: 'full', dryRun: deps.dryRun, headSha: live?.info.headSha ?? job.headSha, baseSha: null, baseBranch: null,
         outcome: 'failed', failureStage: failure!.stage, failureCode: failure!.code, needsHuman: true, highestScore: 100,
         body: '', comments: [], result: {}, usage: NO_USAGE, startedAt: nowIso, finishedAt: deps.clock().toISOString(),
       }
       : {
         ref: job.ref, job: job.id, trigger: job.trigger, mode: 'full', dryRun: deps.dryRun,
-        headSha: live!.info.headSha, baseSha: live!.info.baseSha,
+        headSha: live!.info.headSha, baseSha: live!.info.baseSha, baseBranch: live!.info.baseBranch,
         outcome: result.status, failureStage: result.failure?.stage ?? null, failureCode: result.failure?.code ?? null,
         needsHuman: result.verdict.needsHuman, highestScore: result.verdict.highest,
         body, comments, result, usage: result.usage, startedAt: nowIso, finishedAt: deps.clock().toISOString(),

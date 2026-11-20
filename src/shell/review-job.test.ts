@@ -267,7 +267,7 @@ const recorded = (over: Partial<RunRecord> = {}): Promise<number> => {
   const result = (over.result as ReviewResult | undefined) ?? okResult();
   const text = renderReview(result, { trigger: 'automatic', requestedBy: null, lineUrl: () => 'https://git.example.test/x', inline: true });
   return recordRun(db, {
-    ref: REF, job: null, trigger: 'automatic', mode: 'full', dryRun: false, headSha: 'h1', baseSha: 'merge000', outcome: 'ok', failureStage: null, failureCode: null,
+    ref: REF, job: null, trigger: 'automatic', mode: 'full', dryRun: false, headSha: 'h1', baseSha: 'merge000', baseBranch: null, outcome: 'ok', failureStage: null, failureCode: null,
     needsHuman: false, highestScore: 35, body: text.body, comments: text.comments, result, usage: USAGE, startedAt: at(-3600), finishedAt: at(-3500), ...over,
   });
 };
