@@ -19,6 +19,7 @@ interface ReadBlock {
   entry: ScoreEntry | null;           // null: none, or one that could not be read
   unreadable: boolean;                // it had an entry that is not one
   raisedFrom: number | null;
+  raisedUnreadable: boolean;          // it had a `raisedFrom` that is not a score
   range: [number, number] | null;
   by: ScoredBy | null;                // null: a `by` that is neither
   origin: unknown;
@@ -42,6 +43,7 @@ function blockOf(value: unknown): ReadBlock | null {
     hash, hunkHash: typeof value['hunkHash'] === 'string' ? value['hunkHash'] : hash,
     entry, unreadable: entry === null && raw !== null && raw !== undefined,
     raisedFrom: isScore(value['raisedFrom']) ? value['raisedFrom'] : null,
+    raisedUnreadable: value['raisedFrom'] !== undefined && value['raisedFrom'] !== null && !isScore(value['raisedFrom']),
     range: rangeOf(value['range']),
     by: by === undefined || by === 'model' ? 'model' : by === 'scorer' ? 'scorer' : null,
     origin: value['origin'],
@@ -120,17 +122,21 @@ export function historyOf(args: { runs: StoredRun[]; last: StoredRun | null; by:
   }
   const files: FileHistory[] = [];
   for (const [path, acc] of accs) {
-    // A hunk does not stand below its own parts.
-    for (const [hunkHash, parts] of acc.partsOf) {
-      const whole = acc.blocks.get(hunkHash);
-      if (whole === undefined) continue;
-      let highest: Kept | undefined;
-      for (const p of parts) {
-        const kept = acc.blocks.get(p);
-        if (kept !== undefined && (highest === undefined || kept.entry.score > highest.entry.score)) highest = kept;
-      }
-      if (highest !== undefined && whole.entry.score < highest.entry.score) {
-        acc.blocks.set(hunkHash, { entry: highest.entry, raisedFrom: null, run: highest.run });
+    // A hunk does not stand below its own parts; repeated until nothing is raised, so the order hunks are met in does not matter.
+    for (let raised = true; raised;) {
+      raised = false;
+      for (const [hunkHash, parts] of acc.partsOf) {
+        const whole = acc.blocks.get(hunkHash);
+        if (whole === undefined) continue;
+        let highest: Kept | undefined;
+        for (const p of parts) {
+          const kept = acc.blocks.get(p);
+          if (kept !== undefined && (highest === undefined || kept.entry.score > highest.entry.score)) highest = kept;
+        }
+        if (highest !== undefined && whole.entry.score < highest.entry.score) {
+          acc.blocks.set(hunkHash, { entry: highest.entry, raisedFrom: null, run: highest.run });
+          raised = true;
+        }
       }
     }
     const blocks: StoredEntry[] = [...acc.blocks].map(([hash, k]) => ({ hash, entry: { ...k.entry }, raisedFrom: k.raisedFrom }));
@@ -166,7 +172,8 @@ export function scoresToStore(result: unknown): Array<{ path: string; hash: stri
   const out: Array<{ path: string; hash: string; score: number; category: string; reason: string }> = [];
   for (const file of filesOf(result)) {
     for (const b of file.blocks) {
-      if (b.entry === null || (b.origin !== undefined && b.origin !== null)) continue;
+      // A block whose given score cannot be read is not stored: the raised one must not be passed on as given.
+      if (b.entry === null || b.raisedUnreadable || (b.origin !== undefined && b.origin !== null)) continue;
       out.push({ path: file.path, hash: b.hash, score: b.raisedFrom ?? b.entry.score, category: b.entry.category, reason: b.entry.reason });
     }
   }

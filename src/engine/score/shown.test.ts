@@ -50,3 +50,32 @@ test('a result that cannot be read shows nothing', () => {
   const noCoverage = { verdict: { threshold: 70 }, scores: [] };
   assert.deepEqual([{}, null, 'x', noThreshold, noScores, noCoverage].map(shownOf), [null, null, null, null, null, null]);
 });
+test('a block at or above the threshold with another score shows another text', () => {
+  const scores = [fileOf('src/a.ts', 90, [blk('h1', 85), blk('h2', 20)]), fileOf('src/b.ts', 75, [blk('h3', 75), blk('h4', null)])];
+  assert.notEqual(shownOf(result({ scores })), shownOf(result()));
+});
+
+const withLevel = (fileLevel: unknown) => result({ scores: [{ ...fileOf('src/a.ts', 90, [blk('h1', 90)]), fileLevel }] });
+test('a whole-file score that crosses the threshold under a higher block shows another text', () => {
+  assert.notEqual(shownOf(withLevel({ score: 80, source: 'team_floor' })), shownOf(withLevel({ score: 60, source: 'team_floor' })));
+});
+test('a whole-file score from another source at the same score shows another text', () => {
+  assert.notEqual(shownOf(withLevel({ score: 80, source: 'team_floor' })), shownOf(withLevel({ score: 80, source: 'builtin_floor' })));
+});
+test('a whole-file score below the threshold that differs shows the same text', () => {
+  assert.equal(shownOf(withLevel({ score: 40, source: 'team_floor' })), shownOf(withLevel({ score: 50, source: 'builtin_floor' })));
+  assert.equal(shownOf(withLevel({ score: 40, source: 'team_floor' })), shownOf(withLevel(null)));
+});
+test('a whole-file score of another shape is skipped', () => {
+  for (const level of ['x', 12, { score: 'x', source: 'team_floor' }, { source: 'team_floor' }]) assert.equal(shownOf(withLevel(level)), shownOf(withLevel(null)));
+});
+test('another reason a file was not reviewed shows another text', () => {
+  assert.notEqual(shownOf(result({ notReviewed: [{ path: 'src/z.ts', reason: 'too_large' }] })), shownOf(result({ notReviewed: [{ path: 'src/z.ts', reason: 'over_batch_limit' }] })));
+});
+test('a file not reviewed of another shape is skipped, and one with no readable reason keeps its path', () => {
+  const one = [{ path: 'src/z.ts', reason: 'too_large' }];
+  assert.equal(shownOf(result({ notReviewed: [null, 3, { path: 5, reason: 'no_diff' }, ...one] })), shownOf(result({ notReviewed: one })));
+  assert.equal(shownOf(result({ notReviewed: [{ path: 'src/z.ts' }] })), shownOf(result({ notReviewed: [{ path: 'src/z.ts', reason: '' }] })));
+  assert.equal(shownOf(result({ notReviewed: [{ path: 'src/z.ts', reason: 7 }] })), shownOf(result({ notReviewed: [{ path: 'src/z.ts', reason: '' }] })));
+  assert.notEqual(shownOf(result({ notReviewed: [{ path: 'src/z.ts' }] })), shownOf(result({ notReviewed: [] })));
+});

@@ -173,3 +173,54 @@ test('a score stored for others carries its path, category and reason', () => {
   assert.deepEqual(scoresToStore({ scores: [file('src/a.ts', [blk('h1', 40)])] }), [{ path: 'src/a.ts', hash: 'h1', score: 40, category: 'feature', reason: 'reason 40' }]);
   assert.deepEqual(scoresToStore(null), []);
 });
+test('runs passed out of order are read in the order of their ids', () => {
+  const r1 = run(1, { scores: [file('src/a.ts', [blk('p1', 15, { hunkHash: 'H', range: [0, 19] }), blk('p2', 20, { hunkHash: 'H', range: [20, 39] })], { wholeFile: entry(60, 'old') })], coverage: reviewed('src/a.ts') }, published);
+  const r2 = run(2, { scores: [file('src/a.ts', [blk('q1', 15, { hunkHash: 'H', range: [0, 9] }), blk('q2', 80, { hunkHash: 'H', range: [10, 39] })], { wholeFile: entry(60, 'new') })], coverage: reviewed('src/a.ts') }, published);
+  const h = of([r2, r1]);
+  const f = h.files[0]!;
+  assert.equal(f.wholeFile?.reason, 'new');
+  assert.equal(f.readAt?.head, 'h2');
+  assert.deepEqual(f.splits.map((s) => s.parts.map((p) => p.hash)), [['q1', 'q2']]);
+  assert.equal(h.shown, shownOf(r2.result));
+  assert.notEqual(shownOf(r1.result), shownOf(r2.result));
+});
+test('within one run the first of two blocks with the same hash and score gives the entry', () => {
+  const h = of([run(1, { scores: [file('src/a.ts', [blk('h1', 50, { entry: entry(50, 'first') }), blk('h1', 50, { entry: entry(50, 'second') })])] })]);
+  assert.equal(h.files[0]!.blocks[0]!.entry.reason, 'first');
+});
+test('a whole-file score takes the newest run on a tie', () => {
+  const h = of([run(1, { scores: [file('src/a.ts', [], { wholeFile: entry(60, 'old') })] }), run(2, { scores: [file('src/a.ts', [], { wholeFile: entry(60, 'new') })] })]);
+  assert.equal(h.files[0]!.wholeFile?.reason, 'new');
+});
+test('a split whose part was given by the other scorer is no split', () => {
+  const parts = [blk('p1', 15, { hunkHash: 'H', range: [0, 19] }), blk('p2', 92, { hunkHash: 'H', range: [20, 39], by: 'scorer' })];
+  assert.deepEqual(of([run(1, { scores: [file('src/a.ts', parts)] })]).files[0]!.splits, []);
+});
+test('a block whose entry cannot be read is not stood for', () => {
+  const bad = { ...blk('h1', 0), entry: { score: 150, category: 'feature', reason: '' } };
+  const f = of([run(1, { scores: [{ ...file('src/a.ts', [], { wholeFile: entry(60), covered: true }), blocks: [bad, blkNoEntry('h2')] }] })]).files[0]!;
+  assert.deepEqual(f.stoodFor, ['h2']);
+});
+test('an entry with a category that is not one is skipped', () => {
+  const odd = { ...blk('h1', 0), entry: { score: 50, category: 'nope', reason: '' } };
+  assert.deepEqual(of([run(1, { scores: [{ ...file('src/a.ts', []), blocks: [odd, blk('h2', 10)] }] })]).files[0]!.blocks.map((b) => b.hash), ['h2']);
+});
+test("a newer run whose hunk has a remainder does not erase an older run's complete split", () => {
+  const whole = [blk('p1', 15, { hunkHash: 'H', range: [0, 19] }), blk('p2', 92, { hunkHash: 'H', range: [20, 39] })];
+  const rest = [blk('q1', 15, { hunkHash: 'H', range: [0, 9] }), blkNoEntry('r', { hunkHash: 'H' })];
+  assert.deepEqual(of([run(1, { scores: [file('src/a.ts', whole)] }), run(2, { scores: [file('src/a.ts', rest)] })]).files[0]!.splits,
+    [{ hunkHash: 'H', parts: [{ hash: 'p1', range: [0, 19] }, { hash: 'p2', range: [20, 39] }] }]);
+});
+test('a hunk is raised to its highest part whatever order the hunks are met in', () => {
+  const h = of([
+    run(1, { scores: [file('src/a.ts', [blk('H2', 40), blk('H', 30)])] }),
+    run(2, { scores: [file('src/a.ts', [blk('H', 30, { hunkHash: 'H2' })])] }),
+    run(3, { scores: [file('src/a.ts', [blk('p', 90, { hunkHash: 'H' })])] }),
+  ]);
+  assert.deepEqual(h.files[0]!.blocks.map((b) => [b.hash, b.entry.score]), [['H2', 90], ['H', 90], ['p', 90]]);
+});
+test('a score whose given score cannot be read is not stored for others', () => {
+  const odd = { ...blk('h1', 90), raisedFrom: 12.5 };
+  assert.deepEqual(scoresToStore({ scores: [{ ...file('src/a.ts', []), blocks: [odd, blk('h2', 40)] }] }).map((s) => [s.hash, s.score]), [['h2', 40]]);
+  assert.deepEqual(scoresToStore({ scores: [{ ...file('src/a.ts', []), blocks: [{ ...blk('h3', 90), raisedFrom: 'x' }] }] }), []);
+});
