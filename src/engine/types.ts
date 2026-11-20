@@ -1,6 +1,6 @@
 // src/engine/types.ts
 import type { ChangedFile, PullRequestInfo, Side, Source } from '../forge/types.ts';
-import type { FileScore, Verdict } from './score/types.ts';
+import type { FileScore, ScoreHistory, Verdict } from './score/types.ts';
 
 export type Severity = 'blocker' | 'major' | 'minor';
 export interface AuditEntry { stage: string; action: string; subject: string; reason: string }
@@ -50,6 +50,8 @@ export interface ReviewInput {
   limits: Limits;
   asOf: Date;
   earlier: EarlierState | null; // what the last published review left on the pull request; null for a first review
+  history?: ScoreHistory | null;   // the scores of the pull request's earlier runs; absent reads as none
+  mode?: 'full' | 'incremental' | 'recheck';   // absent reads as 'full'
 }
 export interface ScoreRequest { text: string; blocks: string[] } // blocks: ids to score, in diff order; never empty
 export interface ScoredItem { score: number; category: string; reason: string }
