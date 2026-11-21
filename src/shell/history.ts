@@ -6,7 +6,8 @@ import type { Category, FileHistory, ScoredBy, ScoreEntry, ScoreHistory, StoredE
 const asArray = (value: unknown): unknown[] => (Array.isArray(value) ? value : []);
 const isObject = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null;
 const isScore = (value: unknown): value is number => typeof value === 'number' && Number.isInteger(value) && value >= 0 && value <= 100;
-const CATEGORY_NAMES: readonly unknown[] = CATEGORIES;
+/** The names of the categories, for checking a stored one. */
+export const CATEGORY_NAMES: readonly unknown[] = CATEGORIES;
 
 /** An entry of a stored result, or null when it is not one. An absent reason reads as ''. */
 function entryOf(value: unknown): ScoreEntry | null {
@@ -100,14 +101,18 @@ export function historyOf(args: { runs: StoredRun[]; last: StoredRun | null; by:
         hunks.set(b.hunkHash, [...(hunks.get(b.hunkHash) ?? []), b]);
         if (b.entry === null || b.by !== by) continue;
         const kept = acc.blocks.get(b.hash);
-        if (kept === undefined || b.entry.score > kept.entry.score || (b.entry.score === kept.entry.score && run.id > kept.run)) {
+        // On a tie an entry that was not raised wins over one that was; then the newer run.
+        const tie = kept !== undefined && b.entry.score === kept.entry.score
+          && ((kept.raisedFrom !== null && b.raisedFrom === null) || ((kept.raisedFrom === null) === (b.raisedFrom === null) && run.id > kept.run));
+        if (kept === undefined || b.entry.score > kept.entry.score || tie) {
           acc.blocks.set(b.hash, { entry: b.entry, raisedFrom: b.raisedFrom, run: run.id });
         }
         if (b.hunkHash !== b.hash) acc.partsOf.set(b.hunkHash, (acc.partsOf.get(b.hunkHash) ?? new Set()).add(b.hash));
       }
       for (const [hunkHash, blocks] of hunks) {
         if (blocks.every((b) => b.range !== null && b.entry !== null && b.by === by)) {
-          acc.splits.set(hunkHash, { hunkHash, parts: blocks.map((b) => ({ hash: b.hash, range: b.range! })) });
+          // In line order, as the parts are fitted to the hunk: the model may have listed them in another.
+          acc.splits.set(hunkHash, { hunkHash, parts: blocks.map((b) => ({ hash: b.hash, range: b.range! })).sort((x, y) => x.range[0] - y.range[0]) });
         }
       }
       if (by === 'model' && file.covered && file.wholeFile !== null) {

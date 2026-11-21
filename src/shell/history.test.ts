@@ -3,6 +3,9 @@ import assert from 'node:assert/strict';
 import type { StoredRun } from '../db/review-runs.ts';
 import type { BlockScore, FileScore, ScoredBy, ScoreEntry } from '../engine/score/types.ts';
 import { shownOf } from '../engine/score/shown.ts';
+import { review } from '../engine/review.ts';
+import { SUBMIT_REVIEW } from '../engine/model/submit-review.ts';
+import type { ChangedFile, ModelRequest, ReviewDeps, ReviewInput, ReviewResult } from '../engine/types.ts';
 import { historyOf, lastReviewOf, scoresToStore } from './history.ts';
 
 const REF = { service: 'github', owner: 'acme', repo: 'shop', number: 7 } as const;
@@ -42,6 +45,13 @@ test('on a tie the newest run gives the entry', () => {
   const h = of([run(1, { scores: [file('src/a.ts', [blk('h1', 50, { entry: entry(50, 'old') })])] }), run(2, { scores: [file('src/a.ts', [blk('h1', 50, { entry: entry(50, 'new') })])] })]);
   assert.equal(h.files[0]!.blocks[0]!.entry.reason, 'new');
 });
+test('on a tie an entry that was not raised wins over one that was, whichever run is newer', () => {
+  const given = run(1, { scores: [file('src/a.ts', [blk('h1', 92, { entry: entry(92, 'given') })])] });
+  const raised = run(2, { scores: [file('src/a.ts', [blk('h1', 92, { entry: entry(92, 'raised'), raisedFrom: 2 })])] });
+  assert.deepEqual(of([given, raised]).files[0]!.blocks.map((b) => [b.entry.reason, b.raisedFrom]), [['given', null]]);
+  const later = run(3, { scores: [file('src/a.ts', [blk('h1', 92, { entry: entry(92, 'given later') })])] });
+  assert.deepEqual(of([raised, later]).files[0]!.blocks.map((b) => [b.entry.reason, b.raisedFrom]), [['given later', null]]);
+});
 test('a score that was raised keeps what was given beside it', () => {
   const h = of([run(1, { scores: [file('src/a.ts', [blk('h1', 85, { raisedFrom: 30 }), blk('h2', 40)])] })]);
   assert.deepEqual(h.files[0]!.blocks.map((b) => [b.hash, b.entry.score, b.raisedFrom]), [['h1', 85, 30], ['h2', 40, null]]);
@@ -69,6 +79,10 @@ test("the scorer's scores and the review model's are separate histories", () => 
 });
 test('a hunk that was split is remembered with its parts only when they covered it', () => {
   const parts = [blk('p1', 15, { hunkHash: 'H', range: [0, 19] }), blk('p2', 92, { hunkHash: 'H', range: [20, 39] })];
+  assert.deepEqual(of([run(1, { scores: [file('src/a.ts', parts)] })]).files[0]!.splits, [{ hunkHash: 'H', parts: [{ hash: 'p1', range: [0, 19] }, { hash: 'p2', range: [20, 39] }] }]);
+});
+test('a split is remembered in line order, whatever order its parts were listed in', () => {
+  const parts = [blk('p2', 92, { hunkHash: 'H', range: [20, 39] }), blk('p1', 15, { hunkHash: 'H', range: [0, 19] })];
   assert.deepEqual(of([run(1, { scores: [file('src/a.ts', parts)] })]).files[0]!.splits, [{ hunkHash: 'H', parts: [{ hash: 'p1', range: [0, 19] }, { hash: 'p2', range: [20, 39] }] }]);
 });
 test('a split that left a remainder is not remembered', () => {
@@ -223,4 +237,45 @@ test('a score whose given score cannot be read is not stored for others', () => 
   const odd = { ...blk('h1', 90), raisedFrom: 12.5 };
   assert.deepEqual(scoresToStore({ scores: [{ ...file('src/a.ts', []), blocks: [odd, blk('h2', 40)] }] }).map((s) => [s.hash, s.score]), [['h2', 40]]);
   assert.deepEqual(scoresToStore({ scores: [{ ...file('src/a.ts', []), blocks: [{ ...blk('h3', 90), raisedFrom: 'x' }] }] }), []);
+});
+
+// The engine run twice, with the history read between the two as the job reads it.
+const fortyAdded: ChangedFile = {
+  path: 'src/t.ts', previousPath: null, status: 'added', additions: 40, deletions: 0,
+  patch: ['@@ -0,0 +1,40 @@', ...Array.from({ length: 40 }, (_, i) => `+const row${i} = ${i * 31};`)].join('\n'),
+};
+const PR = {
+  ref: REF, title: 'Add rows', description: 'Adds rows.', author: 'octo-dev', baseBranch: 'feature', headBranch: 'topic',
+  baseSha: 'b'.repeat(40), headSha: 'h'.repeat(40), draft: false,
+};
+const INPUT: ReviewInput = {
+  pullRequest: PR, trigger: 'automatic', repoConfig: { primaryBranches: ['main'], scoreThreshold: 70 },
+  limits: { inputTokensPerCall: 200_000, batchesPerReview: 6, modelTimeoutSeconds: 30 }, asOf: new Date(0), earlier: null,
+};
+function engine(answers: unknown[]): ReviewDeps & { requests: ModelRequest[] } {
+  const requests: ModelRequest[] = [];
+  return {
+    requests, contract: 'You review pull requests.', clock: () => new Date(0), token: () => 'abcdef0123456789', log: () => {},
+    source: { listFiles: () => Promise.resolve([fortyAdded]), getFileContent: () => Promise.resolve(null), getDefaultBranchFile: () => Promise.resolve(null) },
+    model: {
+      complete: (request) => {
+        requests.push(request);
+        const answer = answers[requests.length - 1];
+        if (answer === undefined) return Promise.reject(new Error('stub model exhausted'));
+        return Promise.resolve({ toolName: SUBMIT_REVIEW, toolArguments: JSON.stringify(answer), text: null, model: 'm', provider: null, usage: USAGE });
+      },
+    },
+  };
+}
+test('a split the model listed second part first is kept at the next review', async () => {
+  const listed = { overview: 'src/t.ts adds rows.', findings: [], files: [{ path: 'src/t.ts', change_summary: 'Adds rows.', blocks: [{ id: 'B1', parts: [
+    { first: 'R21', last: 'R40', score: 92, category: 'data_model', reason: 'Adds a table.' }, { first: 'R1', last: 'R20', score: 15, category: 'test' },
+  ] }] }] };
+  const first: ReviewResult = await review(INPUT, engine([listed]));
+  assert.deepEqual(first.scores[0]!.blocks.map((b) => [b.range, b.entry?.score]), [[[20, 39], 92], [[0, 19], 15]]);
+  const stored = run(1, {}, { ...published, headSha: 'h'.repeat(40), result: JSON.parse(JSON.stringify(first)) as unknown });
+  const again = engine([{ overview: 'src/t.ts adds rows.', findings: [], files: [] }]);
+  const second = await review({ ...INPUT, mode: 'full', history: historyOf({ runs: [stored], last: stored, by: 'model' }) }, again);
+  assert.deepEqual(again.requests[0]!.messages[2]!.content.match(/### Block B\d \([^)]*\)/g), ['### Block B1 (40 changed lines, scored)']);
+  assert.deepEqual(second.scores[0]!.blocks.map((b) => [b.range, b.entry?.score, b.origin, b.raisedFrom]), [[[0, 19], 15, 'earlier_run', undefined], [[20, 39], 92, 'earlier_run', undefined]]);
 });

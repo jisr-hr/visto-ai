@@ -1276,3 +1276,51 @@ test('the review entry says the mode, the count and whether nothing was new', as
   await runReviewJob(nothing.job, nothing.deps);
   assert.equal(nothing.logged.find((e) => e.event === 'review')!.nothing_new, true);
 });
+test('a review with nothing new whose text cannot be rendered still ends as nothing new', async () => {
+  await published({ head: 'h0' });
+  const h = await live({ own: OWN_401, renderThrows: true, result: { ...flaggedResult(), nothingToDo: true, mode: 'incremental' } });
+  await runReviewJob(h.job, h.deps);
+  assert.equal((await getJob(db, h.job.id))?.outcome, 'nothing_new');
+  assert.equal(h.logged.some((e) => e.event === 'render_failed'), true);
+  assert.equal(h.writes.some((w) => w[0] === 'publishReview'), false);
+});
+test('a review adopted late is the last review the mode is worked out from', async () => {
+  await recorded({ headSha: 'h0', result: EARLIER_RESULT, baseBranch: 'main' });
+  const h = await live({ own: [[{ id: '401', commit: 'h0' }]], threads: [[THREAD]] });
+  await runReviewJob(h.job, h.deps);
+  assert.deepEqual([h.inputs[0]!.mode, h.inputs[0]!.history?.lastReview?.head], ['incremental', 'h0']);
+});
+test('a write tried again that finds the job finished stores no scores under the run that was rolled back', async () => {
+  await published({ head: 'h0' });
+  const h = await live({ own: OWN_401, result: scoredResult({ nothingToDo: true, mode: 'incremental' }) });
+  const inner = h.deps.db;
+  let first = true;
+  h.deps.db = {
+    ...inner,
+    transaction: async (work) => {
+      let recordedRun = false;
+      try {
+        return await inner.transaction(async (tx) => {
+          const out = await work({ ...tx, query: (text, params) => { if (text.includes('insert into visto_ai.review_runs')) recordedRun = true; return tx.query(text, params); } });
+          if (first && recordedRun) throw new Error('db_down');
+          return out;
+        });
+      } catch (error) {
+        // Rolled back; before the write is tried again another start finishes the job.
+        if (first && recordedRun) { first = false; await finishJob(db, h.job.id, 'done', 'nothing_new', at(0)); }
+        throw error;
+      }
+    },
+  };
+  await runReviewJob(h.job, h.deps);
+  assert.equal(first, false);
+  assert.deepEqual(await blockRows(), []);
+  assert.equal(h.logged.some((e) => e.event === 'scores_store_failed'), false);
+});
+test('the review entry says nothing was new only when the job ended so', async () => {
+  await published({ head: 'h0' });
+  const h = await manualJob({ own: OWN_401, result: okResult({ nothingToDo: true, mode: 'incremental' }) });
+  await runReviewJob(h.job, h.deps);
+  assert.equal((await getJob(db, h.job.id))?.outcome, 'published');
+  assert.equal(h.logged.find((e) => e.event === 'review')!.nothing_new, false);
+});

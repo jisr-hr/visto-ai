@@ -272,8 +272,16 @@ const noted = (over: Partial<BlockScore>): string =>
 test('a block kept from an earlier review says so', () => {
   assert.equal(noted({ origin: 'earlier_run' }), '- [lines 5-6](u:src/a.ts:5), 85% `calculation` \u2014 Changes tax. _(kept from an earlier review)_');
 });
-test('a block scored on another pull request says so', () => {
-  assert.equal(noted({ origin: 'other_pull_request' }), '- [lines 5-6](u:src/a.ts:5), 85% `calculation` \u2014 Changes tax. _(scored on another pull request)_');
+test('a block scored on another pull request says so, with its category and without its reason', () => {
+  assert.equal(noted({ origin: 'other_pull_request' }), '- [lines 5-6](u:src/a.ts:5), 85% `calculation` _(scored on another pull request)_');
+});
+test('a reason written on another pull request, links and all, is not shown', () => {
+  const linked = { ...block('B1', span(5, 6), 85, 'calculation', 'See [the docs](https://example.com/x) and ![x](https://example.com/i.png).'), origin: 'other_pull_request' as const };
+  const body = renderReview(scored([file('src/a.ts', { blocks: [linked] })]), withUrl).body;
+  assert.ok(!body.includes('example.com'));
+  assert.ok(!body.includes('the docs'));
+  const kept = renderReview(scored([file('src/a.ts', { blocks: [{ ...linked, origin: 'earlier_run' }] })]), withUrl).body;
+  assert.ok(kept.includes('See [the docs]'));
 });
 test('a raised block says what was given and what a lost block had scored', () => {
   assert.equal(noted({ raisedFrom: 60 }), '- [lines 5-6](u:src/a.ts:5), 85% `calculation` \u2014 Changes tax. _(60% was given; a block this file lost had scored 85%)_');
@@ -674,12 +682,18 @@ test('the first line of an incremental review and of a re-check', () => {
   assert.equal(firstOf(inc, auto), '**Incremental review** of the changes since `0123456789ab`.');
   assert.equal(firstOf(inc, manual), '**Incremental review** requested by @octo-dev, of the changes since `0123456789ab`.');
   assert.equal(firstOf(inc, manualNoLogin), '**Incremental review** requested, of the changes since `0123456789ab`.');
-  const re = result({ mode: 'recheck', threadsDue: 2 });
+  const re = result({ mode: 'recheck', threadsDue: 2, threadVerdicts: [aThreadVerdict('open', 1)] });
   assert.equal(firstOf(re, manual), `**Re-check** requested by @octo-dev. The earlier threads were judged again; ${RECHECK_TAIL}`);
   assert.equal(firstOf(re, manualNoLogin), `**Re-check** requested. The earlier threads were judged again; ${RECHECK_TAIL}`);
   assert.equal(firstOf(result({ mode: 'recheck' }), manual), `**Re-check** requested by @octo-dev. No earlier thread was waiting for a verdict; ${RECHECK_TAIL}`);
   assert.equal(firstOf(result({ mode: 'recheck', threadsDue: 0 }), manualNoLogin), `**Re-check** requested. No earlier thread was waiting for a verdict; ${RECHECK_TAIL}`);
   assert.equal(firstOf(result({ mode: 'full' }), manual), '**Full review** requested by @octo-dev.');
+});
+test('a re-check that owed verdicts and kept none says no earlier thread could be judged', () => {
+  const none = result({ mode: 'recheck', threadsDue: 2, threadVerdicts: [] });
+  assert.equal(firstOf(none, manual), `**Re-check** requested by @octo-dev. No earlier thread could be judged; ${RECHECK_TAIL}`);
+  assert.equal(firstOf(none, manualNoLogin), `**Re-check** requested. No earlier thread could be judged; ${RECHECK_TAIL}`);
+  assert.equal(firstOf({ ...none, threadVerdicts: undefined as unknown as [] }, manualNoLogin), `**Re-check** requested. No earlier thread could be judged; ${RECHECK_TAIL}`);
 });
 test('without a usable since the first line leaves out the changes it names', () => {
   assert.equal(firstOf(result({ mode: 'incremental' }), auto), '**Incremental review**.');
@@ -774,6 +788,15 @@ test('a damaged list of unchanged findings is skipped', () => {
   assert.equal((mixed.match(/^- \*\*/gm) ?? []).length, 1);
   assert.ok(mixed.includes('1 major on code unchanged since the last review.'));
 });
+test('an unchanged finding whose requested line is absent or not a number has no note of where it refers to', () => {
+  for (const requestedLine of [undefined, 'x', 2.5, null]) {
+    const damaged = { path: 'src/a.ts', side: 'RIGHT', line: 21, severity: 'major', body: 'The total is never checked here.', quote: '', requestedLine };
+    const b = renderReview(result({ unchanged: [damaged as unknown as Finding] }), auto).body;
+    assert.ok(b.includes('`src/a.ts:21`'), String(requestedLine));
+    assert.ok(!b.includes('Refers to'), String(requestedLine));
+  }
+  assert.ok(renderReview(result({ unchanged: [finding({ line: 21, requestedLine: 23 })] }), auto).body.includes('_(Refers to line 23, just outside the diff.)_'));
+});
 test('a long unchanged section is cut in the head and never pushes Overall out', () => {
   const many = Array.from({ length: 4000 }, (_, i) => finding({ line: i + 1, body: 'The total is never checked here.' }));
   const b = renderReview(result({ unchanged: many, unplaced: [unplaced()] }), auto).body;
@@ -789,6 +812,6 @@ test('a raised note is written only for a whole number from 0 to 100', () => {
   for (const raisedFrom of [NaN, -5, 0.5, 101, 'x']) assert.equal(rf({ raisedFrom: raisedFrom as unknown as number }), plain);
   assert.equal(rf({ raisedFrom: NaN, origin: 'earlier_run' }), `${plain} _(kept from an earlier review)_`);
   assert.equal(rf({ raisedFrom: 0 }), `${plain} _(0% was given; a block this file lost had scored 85%)_`);
-  assert.equal(rf({ raisedFrom: 60, origin: 'other_pull_request' }), `${plain} _(60% was given; a block this file lost had scored 85%)_`);
+  assert.equal(rf({ raisedFrom: 60, origin: 'other_pull_request' }), '- [lines 5-6](u:src/a.ts:5), 85% `calculation` _(60% was given; a block this file lost had scored 85%)_');
   assert.equal(rf({ origin: 'elsewhere' as unknown as 'earlier_run' }), plain);
 });

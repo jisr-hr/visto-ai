@@ -2,11 +2,12 @@ import { buildFileContexts } from './context/build.ts';
 import type { FileContext } from './context/build.ts';
 import { packBatches } from './context/batches.ts';
 import type { Batch } from './context/batches.ts';
-import { changedLines, isChanged, leftBlocksOf } from './context/increment.ts';
+import { changedLines, leftBlocksOf } from './context/increment.ts';
 import type { Changed } from './context/increment.ts';
 import { renderAnchoredDiff } from './context/diff.ts';
 import { orderByPriority } from './context/priority.ts';
 import { attachThreads, isDue } from './context/threads.ts';
+import { stripControl } from './context/untrusted.ts';
 import type { ShownThread } from './context/threads.ts';
 import { buildMessages, fixedTokens, headerStripCounts } from './context/prompt.ts';
 import { callBatch } from './model/call.ts';
@@ -16,7 +17,7 @@ import { NOTHING_READ, filesToSend } from './plan.ts';
 import { inPool } from './pool.ts';
 import type { Control } from './pool.ts';
 import { reconcile } from './reconcile/index.ts';
-import { reconcileMode } from './reconcile/mode.ts';
+import { onChangedLine, reconcileMode } from './reconcile/mode.ts';
 import { normalizePath } from './reconcile/placement.ts';
 import { reconcileScores, verdictOf } from './reconcile/scores.ts';
 import { dropDuplicates, reconcileVerdicts } from './reconcile/threads.ts';
@@ -233,8 +234,9 @@ async function keepScores(contexts: FileContext[], history: ScoreHistory | null,
       reused.push({ path, hash, entry: entry as ScoreEntry });
     }
   }
+  const diffPaths = new Set(contexts.flatMap((c) => [c.file.path, ...(c.file.previousPath === null ? [] : [c.file.previousPath])]));
   for (const context of contexts) {
-    const kept = keptScores(context, history, reused.filter((r) => r.path === context.file.path));
+    const kept = keptScores(context, history, reused.filter((r) => r.path === context.file.path), diffPaths);
     if (kept === null) continue;
     context.kept = kept;
     if (kept.scoredHunks.size > 0) context.diffText = renderAnchoredDiff(context.hunks, kept.scoredHunks);
@@ -281,7 +283,8 @@ async function countUnchanged(findings: Finding[], contexts: FileContext[], head
   }
   return blocking.filter((f) => {
     const one = known.get(f.path);
-    return one !== undefined && !isChanged(one.changed, one.blocks, f.side, f.line);
+    // The same test as an incremental review's: the line it was placed on, or the line the model named.
+    return one !== undefined && !onChangedLine(f, one.changed, one.blocks);
   }).length;
 }
 
@@ -296,7 +299,8 @@ export async function review(input: ReviewInput, deps: ReviewDeps): Promise<Revi
   // A stored history may be old: a last review whose head or overview is not text reads as none.
   const last = mode === 'full' ? null : (input.history?.lastReview ?? null);
   const said: Said = typeof last?.head === 'string' ? { mode, since: last.head } : { mode };
-  const lastText = typeof last?.overview === 'string' ? last.overview.trim() : '';
+  // An overview with nothing left once the characters nobody can see are stripped is not shown.
+  const lastText = typeof last?.overview === 'string' ? stripControl(last.overview).text.trim() : '';
   const lastOverview = lastText !== '' && lastText !== NOTHING_READ ? last!.overview : undefined;
   try {
     // Every thread the run owes a verdict, whether or not its file is shown.
@@ -340,9 +344,9 @@ export async function review(input: ReviewInput, deps: ReviewDeps): Promise<Revi
     const attached = attachThreads(built.contexts, input.earlier);
     // What an earlier review covers is not sent: it is not a file that was not reviewed, and it is scored from what it keeps.
     const plan = filesToSend(attached.contexts, mode);
-    const covered = new Set<string>();
+    const leftOutPaths = new Set<string>();
     const leaveOut = (c: FileContext): AuditEntry[] => {
-      covered.add(c.file.path);
+      leftOutPaths.add(c.file.path);
       return [
         { stage: 'context', action: 'not_sent', subject: c.file.path, reason: 'covered' },
         ...(c.threads ?? []).map((t): AuditEntry => ({ stage: 'context', action: 'thread_not_shown', subject: t.key, reason: 'file_covered' })),
@@ -353,7 +357,7 @@ export async function review(input: ReviewInput, deps: ReviewDeps): Promise<Revi
     if (mode !== 'full') {
       for (const c of plan.send) if (c.plan.kind === 'model') c.changed = await changedSince(c, pr.headSha, built.content);
     }
-    let shown: ShownThread[] = attached.shown.filter((s) => !covered.has(s.file));
+    let shown: ShownThread[] = attached.shown.filter((s) => !leftOutPaths.has(s.file));
     const withThreads = shown.length > 0;
     if (withThreads) {
       budget = input.limits.inputTokensPerCall - fixedTokens(deps.contract, pr, true, lastOverview);
@@ -364,8 +368,8 @@ export async function review(input: ReviewInput, deps: ReviewDeps): Promise<Revi
     // A covered file that found no room was read, as it is, by an earlier review: it is left out too.
     const roomless = plan.send.filter((c) => c.kept?.covered === true && packed.notReviewed.some((n) => n.path === c.file.path && n.reason === 'over_batch_limit'));
     audit.push(...roomless.flatMap(leaveOut));
-    const notSent: NotReviewed[] = packed.notReviewed.filter((n) => !covered.has(n.path));
-    shown = shown.filter((s) => !covered.has(s.file));
+    const notSent: NotReviewed[] = packed.notReviewed.filter((n) => !leftOutPaths.has(n.path));
+    shown = shown.filter((s) => !leftOutPaths.has(s.file));
     if (packed.batches.length === 0) {
       for (const s of shown) {
         if (notSent.some((n) => n.path === s.file)) audit.push({ stage: 'context', action: 'thread_not_shown', subject: s.key, reason: 'file_not_reviewed' });

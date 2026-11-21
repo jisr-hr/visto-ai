@@ -7,7 +7,7 @@ import { ProviderError } from './model/errors.ts';
 import { SUBMIT_REVIEW, submitReviewTool, submitReviewWithThreadsTool } from './model/submit-review.ts';
 import { NOTHING_READ } from './plan.ts';
 import { chooseEffort, review } from './review.ts';
-import { blocksOf } from './score/blocks.ts';
+import { blocksOf, fileDiffHash } from './score/blocks.ts';
 import { shownOf } from './score/shown.ts';
 import type { BlockScore, ScoreHistory } from './score/types.ts';
 import type {
@@ -788,11 +788,12 @@ const twoHunkPatch = [
 ].join('\n');
 const fileTwo: ChangedFile = { path: 'src/t.ts', previousPath: null, status: 'modified', additions: 2, deletions: 2, patch: twoHunkPatch };
 const [hashB1, hashB2] = blocksOf(hunksOf(twoHunkPatch).hunks).map((b) => b.hash);
-const historyOf = (blocks: Array<[string, number]>): ScoreHistory => ({
+// `covered`: a published review read the file with the diff of fileTwo.
+const historyOf = (blocks: Array<[string, number]>, covered = false): ScoreHistory => ({
   by: 'model', lastReview: null, shown: null,
   files: [{
     path: 'src/t.ts', blocks: blocks.map(([hash, score]) => ({ hash, entry: { score, category: 'fix', reason: '' }, raisedFrom: null })),
-    splits: [], stoodFor: [], wholeFile: null, coveredAt: [], readAt: null,
+    splits: [], stoodFor: [], wholeFile: null, coveredAt: covered ? [fileDiffHash(hunksOf(twoHunkPatch).hunks)!] : [], readAt: null,
   }],
 });
 const answerOnT = { overview: 'src/t.ts reviewed.', findings: [], files: [] };
@@ -804,9 +805,9 @@ test('a later review asks the model only for the blocks that have no score', asy
   assert.equal(r.status, 'ok');
   assert.deepEqual(headersOf(d), ['### Block B1 (2 changed lines, scored)', '### Block B2 (2 changed lines, not scored)']);
   assert.ok(d.model.requests[0]!.messages[2]!.content.includes('whole-file score: allowed'));
-  // Every block scored: the file is told it takes no whole-file score.
+  // Every block scored and the file read as it is: the file is told it takes no whole-file score.
   const all = deps({ files: [fileTwo], answers: [answerOnT] });
-  await review({ ...input, history: historyOf([[hashB1!, 40], [hashB2!, 10]]) }, all);
+  await review({ ...input, history: historyOf([[hashB1!, 40], [hashB2!, 10]], true) }, all);
   assert.deepEqual(headersOf(all), ['### Block B1 (2 changed lines, scored)', '### Block B2 (2 changed lines, scored)']);
   assert.ok(all.model.requests[0]!.messages[2]!.content.includes('whole-file score: not allowed. Every block of this file already has its score.'));
 });
@@ -877,6 +878,7 @@ test('with no history and no lookup the request is the one a first review sends 
 // and each hunk the run cut wholly into scored parts with their places.
 // `covered`: the first review was published, so each file it read is covered at the diff it had.
 // `readAt`: the head of the published run that read each file the first review read, with the hashes it had then.
+// A block with no score of its own is stood for by the whole-file score of a file the first review left covered.
 function historyFrom(first: ReviewResult, extra: {
   covered?: boolean; lastReview?: ScoreHistory['lastReview']; shown?: string | null; readAt?: string;
 } = {}): ScoreHistory {
@@ -895,7 +897,8 @@ function historyFrom(first: ReviewResult, extra: {
         blocks: f.blocks.filter((one) => one.entry !== null).map((one) => ({ hash: one.hash, entry: one.entry!, raisedFrom: one.raisedFrom ?? null })),
         splits: [...hunks].filter(([, parts]) => parts.every((p) => p.range !== undefined && p.entry !== null))
           .map(([hunkHash, parts]) => ({ hunkHash, parts: parts.map((p) => ({ hash: p.hash, range: p.range! })) })),
-        stoodFor: [], wholeFile: f.wholeFile, coveredAt: read.has(f.path) && f.diffHash !== null ? [f.diffHash] : [], readAt: readAtOf(f),
+        stoodFor: f.covered && f.wholeFile !== null ? f.blocks.filter((one) => one.entry === null).map((one) => one.hash) : [],
+        wholeFile: f.wholeFile, coveredAt: read.has(f.path) && f.diffHash !== null ? [f.diffHash] : [], readAt: readAtOf(f),
       };
     }),
   };
@@ -1056,6 +1059,30 @@ test('a last review whose overview is empty passes on no overview', async () => 
   const d = deps({ files: [fileA], answers: [answerOnA] });
   await review({ ...input, mode: 'recheck', history: { by: 'model', lastReview: { head: HEAD0, overview: ' \n ' }, shown: null, files: [] } }, d);
   assert.equal(d.model.requests[0]!.messages[1]!.content, plain.model.requests[0]!.messages[1]!.content);
+});
+
+test('an overview made only of characters nobody can see is not shown', async () => {
+  const plain = deps({ files: [fileA], answers: [answerOnA] });
+  await review(input, plain);
+  const d = deps({ files: [fileA], answers: [answerOnA] });
+  await review({ ...input, mode: 'incremental', history: { by: 'model', lastReview: { head: HEAD0, overview: '\u200b\u202e \u2066' }, shown: null, files: [] } }, d);
+  assert.equal(d.model.requests[0]!.messages[1]!.content, plain.model.requests[0]!.messages[1]!.content);
+});
+
+test('the room the last review overview takes is counted, with threads and without', async (t) => {
+  const overview = `Changes the retry delay. ${'Each try waits longer. '.repeat(40)}`;
+  const history: ScoreHistory = { by: 'model', lastReview: { head: HEAD0, overview }, shown: null, files: [] };
+  await t.test('without threads', async () => {
+    const limits = { ...input.limits, inputTokensPerCall: fixedTokens(CONTRACT, input.pullRequest, false, overview) };
+    const r = await review({ ...input, limits, mode: 'incremental', history }, deps({ files: [fileA], answers: [answerOnA] }));
+    assert.deepEqual([r.status, r.failure], ['failed', { stage: 'context', code: 'budget_too_small' }]);
+  });
+  await t.test('with threads', async () => {
+    const limits = { ...input.limits, inputTokensPerCall: fixedTokens(CONTRACT, input.pullRequest, true, overview) };
+    const earlier = { head: HEAD0, threads: [earlierThread({ resolved: false })] };
+    const r = await review({ ...input, limits, mode: 'incremental', history, earlier }, deps({ files: [fileA], answers: [answerOnA] }));
+    assert.deepEqual([r.status, r.failure], ['failed', { stage: 'context', code: 'budget_too_small' }]);
+  });
 });
 
 test('a full review shows no last review overview', async () => {
@@ -1226,6 +1253,8 @@ test('a covered file that finds no room is scored from what it keeps and not lis
     assert.deepEqual([d.model.requests.length, named(d, 'src/c.ts'), r.coverage.notReviewed], [1, 0, []]);
     assert.deepEqual(r.audit.filter((e) => e.action === 'thread_not_shown'), [{ stage: 'context', action: 'thread_not_shown', subject: 'T1', reason: 'file_covered' }]);
     assert.deepEqual(r.threadVerdicts, []);
+    // The thread left the list of those shown: a verdict for it is for a thread the run does not know.
+    assert.deepEqual(r.audit.filter((e) => e.action === 'verdict_dropped').map((e) => [e.subject, e.reason]), [['T1', 'unknown_thread']]);
   });
 });
 
@@ -1465,6 +1494,15 @@ test('a major the model raised on a changed line outside the diff is not hidden 
   });
 });
 
+test('in a full review a major placed on an unchanged line is not counted when the line the model named changed', async () => {
+  const first = await firstOf([sixFile(5)], onLines());
+  const d = deps({ files: [sixFile(5)], answers: [onLines(['major', 9])] });
+  contents(d, { [`${HEAD0}:src/t.ts`]: `${sixLines(5)}l7\nl8\nprChanged9\n`, [`${NOW}:src/t.ts`]: `${sixLines(5)}l7\nl8\nbase9\n` });
+  const r = await review({ ...input, mode: 'full', history: historyFrom(first, { lastReview: LAST, readAt: HEAD0 }) }, d);
+  assert.deepEqual(r.findings.map((f) => [f.severity, f.line, f.requestedLine]), [['major', 6, 9]]);
+  assert.equal(r.blockingOnUnchanged, 0);
+});
+
 test('a file whose present content cannot be read counts as changed throughout', async () => {
   const first = await firstOf([sixFile(2)], onLines());
   const d = deps({ files: [sixFile(5)], answers: [onLines()] });
@@ -1511,4 +1549,83 @@ test('a full review with a history and no last review has no count', async () =>
   contents(d, { [`${HEAD0}:src/t.ts`]: sixLines(2), [`${NOW}:src/t.ts`]: sixLines(5) });
   const r = await review({ ...input, mode: 'full', history: historyFrom(first, { readAt: HEAD0 }) }, d);
   assert.deepEqual([r.status, linesOf(r.findings), 'blockingOnUnchanged' in r], ['ok', [['blocker', 2]], false]);
+});
+
+// A file is settled only where a published review of this pull request read it as it is.
+const WHOLE = 'whole-file score: allowed';
+const NOT_ALLOWED = 'whole-file score: not allowed';
+const twoAndWhole = (blocks: Record<string, number>, whole?: number) => ({
+  overview: 'src/t.ts reviewed.', findings: [],
+  files: [{
+    path: 'src/t.ts', change_summary: 'Changes the delay and the tries.',
+    blocks: Object.entries(blocks).map(([id, score]) => ({ id, score, category: 'fix', reason: '' })),
+    ...(whole === undefined ? {} : { score: whole, category: 'business_rule', reason: 'The two changes together decide how long a refund waits.' }),
+  }],
+});
+const lookupOf = (first: ReviewResult) => (blocks: Array<{ path: string; hash: string }>) => Promise.resolve(blocks.flatMap((w) => first.scores
+  .filter((f) => f.path === w.path).flatMap((f) => f.blocks.filter((one) => one.hash === w.hash && one.entry !== null))
+  .map((one) => ({ path: w.path, hash: w.hash, entry: one.entry! }))));
+
+test('the same change opened as another pull request may still take its whole-file score', async () => {
+  const first = await firstOf([fileTwo], twoAndWhole({ B1: 20, B2: 20 }, 90));
+  assert.equal(first.scores[0]!.finalScore, 90);
+  const d = deps({ files: [fileTwo], answers: [twoAndWhole({}, 95)] });
+  d.reusableScores = lookupOf(first);
+  const r = await review(input, d);
+  assert.deepEqual(headersOf(d), ['### Block B1 (2 changed lines, scored)', '### Block B2 (2 changed lines, scored)']);
+  assert.ok(sentText(d).includes(`\n${WHOLE}\n`));
+  assert.ok(!sentText(d).includes(NOT_ALLOWED));
+  assert.deepEqual(r.scores[0]!.blocks.map((one) => [one.entry?.score, one.origin]), [[20, 'other_pull_request'], [20, 'other_pull_request']]);
+  assert.deepEqual([r.scores[0]!.fileLevel, r.scores[0]!.finalScore], [{ score: 95, source: 'whole_file' }, 95]);
+});
+
+test('a push that adds a block another pull request scored leaves the file open to a whole-file score', async () => {
+  const first = await firstOf([delayFile(2)], onT({ blocks: [{ id: 'B1', score: 20, category: 'fix', reason: '' }] }));
+  const elsewhere = await firstOf([fileTwo], twoAndWhole({ B1: 20, B2: 15 }));
+  const d = deps({ files: [fileTwo], answers: [twoAndWhole({}, 90)] });
+  d.reusableScores = lookupOf(elsewhere);
+  const r = await review({ ...input, mode: 'full', history: historyFrom(first, { covered: true, lastReview: LAST }) }, d);
+  assert.deepEqual(headersOf(d), ['### Block B1 (2 changed lines, scored)', '### Block B2 (2 changed lines, scored)']);
+  assert.ok(sentText(d).includes(`\n${WHOLE}\n`));
+  assert.deepEqual(r.scores[0]!.blocks.map((one) => [one.entry?.score, one.origin]), [[20, 'earlier_run'], [15, 'other_pull_request']]);
+  assert.deepEqual([r.scores[0]!.fileLevel, r.scores[0]!.finalScore], [{ score: 90, source: 'whole_file' }, 90]);
+});
+
+test('a reviewed file moved to another directory with the same change is read once where it now stands', async () => {
+  const before: ChangedFile = { path: 'src/util/x.ts', previousPath: null, status: 'modified', additions: 1, deletions: 1, patch: delayPatch(2) };
+  const after: ChangedFile = { path: 'app/api/x.ts', previousPath: 'src/util/x.ts', status: 'renamed', additions: 1, deletions: 1, patch: delayPatch(2) };
+  const onX = (path: string, file: Record<string, unknown>) => ({ overview: `${path} reviewed.`, findings: [], files: [{ path, change_summary: 'Moves the file.', blocks: [], ...file }] });
+  const first = await firstOf([before], onX('src/util/x.ts', { blocks: [{ id: 'B1', score: 20, category: 'fix', reason: '' }] }));
+  const d = deps({ files: [after], answers: [onX('app/api/x.ts', { score: 95, category: 'security', reason: 'The code is now served on a public route.' })] });
+  const second = await review({ ...input, mode: 'incremental', history: historyFrom(first, { covered: true, lastReview: LAST, readAt: HEAD0 }) }, d);
+  assert.equal(d.model.requests.length, 1);
+  assert.deepEqual(headersOf(d), ['### Block B1 (2 changed lines, scored)']);
+  assert.ok(sentText(d).includes(`\n${WHOLE}\n`));
+  assert.deepEqual([second.scores[0]!.blocks[0]!.entry?.score, second.scores[0]!.finalScore], [20, 95]);
+  const third = deps({ files: [after] });
+  const r = await review({ ...input, mode: 'incremental', history: historyFrom(second, { covered: true, lastReview: LAST, readAt: NOW }) }, third);
+  assert.equal(third.model.requests.length, 0);
+  assert.deepEqual(notSent(r), [['app/api/x.ts', 'covered']]);
+  assert.equal(r.scores[0]!.finalScore, 95);
+});
+
+test('a new file a later push renames keeps its scores', async () => {
+  const billing = (path: string): ChangedFile => ({ path, previousPath: null, status: 'added', additions: 1, deletions: 1, patch: delayPatch(2) });
+  const onBilling = (path: string, score: number) => ({ overview: `${path} reviewed.`, findings: [], files: [{ path, change_summary: 'Adds billing.', blocks: [{ id: 'B1', score, category: 'business_rule', reason: 'Charges the card.' }] }] });
+  const first = await firstOf([billing('src/billing.ts')], onBilling('src/billing.ts', 92));
+  const d = deps({ files: [billing('src/billing2.ts')], answers: [onBilling('src/billing2.ts', 10)] });
+  const r = await review({ ...input, mode: 'full', history: historyFrom(first, { covered: true, lastReview: LAST }) }, d);
+  assert.deepEqual(headersOf(d), ['### Block B1 (2 changed lines, scored)']);
+  assert.deepEqual(r.scores[0]!.blocks.map((one) => [one.entry?.score, one.origin]), [[92, 'earlier_run']]);
+  assert.equal(r.scores[0]!.finalScore, 92);
+});
+
+test('a block the whole-file score stood for is still stood for at the next review', async () => {
+  const first = await firstOf([fileTwo], twoAndWhole({}, 60));
+  assert.deepEqual([first.scores[0]!.blocks.map((one) => one.entry), first.scores[0]!.finalScore, first.scores[0]!.covered], [[null, null], 60, true]);
+  const d = deps({ files: [fileTwo] });
+  const r = await review({ ...input, mode: 'incremental', history: historyFrom(first, { covered: true, lastReview: LAST }) }, d);
+  assert.equal(d.model.requests.length, 0);
+  assert.deepEqual(notSent(r), [['src/t.ts', 'covered']]);
+  assert.deepEqual([r.scores[0]!.blocks.map((one) => one.entry), r.scores[0]!.fileLevel, r.scores[0]!.finalScore], [[null, null], { score: 60, source: 'whole_file' }, 60]);
 });

@@ -211,7 +211,8 @@ function blockLine(file: FileScore, block: BlockScore, entry: ScoreEntry, lineUr
   const range = span.first === span.last ? `line ${span.first}` : `lines ${span.first}-${span.last}`;
   const label = `${span.side === 'LEFT' ? 'old ' : ''}${range}`;
   const shown = lineUrl === null ? label : `[${label}](${lineUrl(file, span)})`;
-  const base = `- ${shown}, ${entry.score}% ${scoreTail(entry)}`;
+  // A reason written on another pull request is not shown here: only its category.
+  const base = `- ${shown}, ${entry.score}% ${block.origin === 'other_pull_request' ? codeSpan(entry.category) : scoreTail(entry)}`;
   if (Number.isInteger(block.raisedFrom) && block.raisedFrom! >= 0 && block.raisedFrom! <= 100) return `${base} _(${block.raisedFrom}% was given; a block this file lost had scored ${entry.score}%)_`;
   if (block.origin === 'earlier_run') return `${base} _(kept from an earlier review)_`;
   if (block.origin === 'other_pull_request') return `${base} _(scored on another pull request)_`;
@@ -253,14 +254,14 @@ function humanReviewSection(result: ReviewResult, lineUrl: Meta['lineUrl']): str
 const UNCHANGED_HEADING = '## On code unchanged since the last review';
 const UNCHANGED_NOTE = 'These are on lines that have not changed since the reviewer last read their file. They are not posted as comments and do not hold a merge.';
 const SEVERITIES: readonly unknown[] = ['blocker', 'major', 'minor'];
-// A stored list may be damaged: only an item with every field this code reads, of the right kind, is kept.
+// A stored list may be damaged: only an item with every field this code reads, of the right kind, is kept; a requested line that is not a line reads as none.
 const unchangedOf = (result: ReviewResult): Finding[] => {
   if (!Array.isArray(result.unchanged)) return [];
   return (result.unchanged as unknown[]).filter((x): x is Finding => {
     if (typeof x !== 'object' || x === null) return false;
     const f = x as Record<string, unknown>;
     return typeof f.path === 'string' && typeof f.body === 'string' && SEVERITIES.includes(f.severity) && Number.isInteger(f.line);
-  });
+  }).map((f) => ({ ...f, requestedLine: Number.isInteger(f.requestedLine) ? f.requestedLine : null }));
 };
 
 // A stored result may hold a mode or a since that this code does not know: the first reads as full, the second as absent.
@@ -273,7 +274,9 @@ function firstLineOf(result: ReviewResult, meta: Meta): string | null {
     return since === null ? '**Incremental review**.' : `**Incremental review** of the changes since \`${since}\`.`;
   }
   if (result.mode === 'recheck') {
-    const middle = (result.threadsDue ?? 0) > 0 ? 'The earlier threads were judged again' : 'No earlier thread was waiting for a verdict';
+    const judged = Array.isArray(result.threadVerdicts) && result.threadVerdicts.length > 0;
+    const middle = (result.threadsDue ?? 0) === 0 ? 'No earlier thread was waiting for a verdict'
+      : judged ? 'The earlier threads were judged again' : 'No earlier thread could be judged';
     return `**Re-check** requested${who}. ${middle}; code that was reviewed before was not reviewed again.`;
   }
   return meta.trigger === 'manual' ? `**Full review** requested${who}.` : null;

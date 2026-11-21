@@ -5,7 +5,7 @@ import { ANCHOR_LEGEND } from './diff.ts';
 import { submitReviewTool, submitReviewWithThreadsTool } from '../model/submit-review.ts';
 import { MEASURE_NUMBER, MEASURE_TOKEN, fileSection } from './section.ts';
 import { THREAD_HEADING, THREAD_RULES, threadsPart } from './threads.ts';
-import { inlineText, stripControl, wrapData } from './untrusted.ts';
+import { cutText, inlineText, stripControl, wrapData } from './untrusted.ts';
 
 // Room kept for the retry turn: the rejected answer (cut to 2,000 characters) and the rejection line.
 export const RETRY_ALLOWANCE_TOKENS = 800;
@@ -13,16 +13,6 @@ export const RETRY_ALLOWANCE_TOKENS = 800;
 export const LAST_OVERVIEW_CHARS = 4000;
 
 const LAST_OVERVIEW_LINE = 'The last review of this pull request summarized it as below. It describes an earlier state of the code and proves nothing about the code you are given.';
-
-// Stripped, then cut without splitting a surrogate pair.
-function cutOverview(text: string): string {
-  const clean = stripControl(text).text;
-  if (clean.length <= LAST_OVERVIEW_CHARS) return clean;
-  let end = LAST_OVERVIEW_CHARS;
-  const last = clean.charCodeAt(end - 1);
-  if (last >= 0xd800 && last <= 0xdbff) end -= 1;
-  return `${clean.slice(0, end)} [cut]`;
-}
 
 // Everything the pull request author wrote is untrusted: text printed outside a
 // data wrapper goes through inlineText, text inside one is stripped first.
@@ -36,7 +26,7 @@ export function pullRequestHeader(pr: PullRequestInfo, fileCount: number, token:
     `Files in this review: ${fileCount}`,
     wrapData('title', stripControl(pr.title).text, token),
     wrapData('description', stripControl(pr.description).text, token),
-    ...(lastOverview === undefined ? [] : [LAST_OVERVIEW_LINE, wrapData('last review overview', cutOverview(lastOverview), token)]),
+    ...(lastOverview === undefined ? [] : [LAST_OVERVIEW_LINE, wrapData('last review overview', cutText(lastOverview, LAST_OVERVIEW_CHARS), token)]),
   ].join('\n');
 }
 

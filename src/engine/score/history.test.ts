@@ -62,6 +62,7 @@ test('a hunk an earlier run split keeps its parts when they still cover it', () 
   const k = keptScores(forty, H([hist({
     blocks: [stored(P1, 15), stored(P2, 92)],
     splits: [split([{ hash: P1, range: [0, 19] }, { hash: P2, range: [20, 39] }])],
+    coveredAt: [fileDiffHash(forty.hunks)!],
   })]), [])!;
   assert.deepEqual(k.blocks.map((b) => [b.id, b.hunk, b.hash]), [['B1.1', 'B1', P1], ['B1.2', 'B1', P2]]);
   assert.deepEqual([...k.entries].map(([id, v]) => [id, v.entry.score, v.origin, v.range]), [
@@ -102,12 +103,26 @@ test('a split that no longer fits does not keep the hunk', () => {
   assert.equal(keptScores(forty, H([low]), [])!.floor, 92);
 });
 
+test('a split is used only for the hunk it was made of, and only with the parts it named', () => {
+  // The same ranges and stored parts under another hunk's hash: not this hunk's split.
+  const other = keptScores(forty, H([hist({
+    blocks: [stored(P1, 15), stored(P2, 92)], splits: [{ hunkHash: GONE, parts: [{ hash: P1, range: [0, 19] }, { hash: P2, range: [20, 39] }] }],
+  })]), [])!;
+  assert.deepEqual([other.blocks.map((b) => b.id), other.entries.size, other.scoredHunks.size], [['B1'], 0, 0]);
+  // A part whose lines now hash otherwise does not fit, even when the present lines' hash has a stored score.
+  const moved = keptScores(forty, H([hist({
+    blocks: [stored(P1, 15), stored(P2, 92), stored(GONE, 92)], splits: [split([{ hash: P1, range: [0, 19] }, { hash: GONE, range: [20, 39] }])],
+  })]), [])!;
+  assert.deepEqual([moved.blocks.map((b) => b.id), moved.entries.size, moved.scoredHunks.size], [['B1'], 0, 0]);
+});
+
 test('a part that has become a hunk of its own keeps its score, and that score is not in the floor', () => {
   const second = ctx('src/a.ts', newFile(21, 20));
   assert.equal(second.blocks[0]!.hash, P2);
   const k = keptScores(second, H([hist({
     blocks: [stored(P1, 15), stored(P2, 92)],
     splits: [split([{ hash: P1, range: [0, 19] }, { hash: P2, range: [20, 39] }])],
+    coveredAt: [fileDiffHash(second.hunks)!],
   })]), [])!;
   assert.deepEqual([...k.entries].map(([id, v]) => [id, v.entry.score, v.origin, v.range]), [['B1', 92, 'earlier_run', null]]);
   assert.deepEqual(k.blocks.map((b) => b.id), ['B1']);
@@ -116,7 +131,7 @@ test('a part that has become a hunk of its own keeps its score, and that score i
 
 test('a block the file score stood for stays covered by it while the file keeps that score', () => {
   const c = ctx('src/a.ts', hunkAt(10, 'first'));
-  const k = keptScores(c, H([hist({ stoodFor: [c.blocks[0]!.hash], wholeFile: entry(60) })]), [])!;
+  const k = keptScores(c, H([hist({ stoodFor: [c.blocks[0]!.hash], wholeFile: entry(60), coveredAt: [fileDiffHash(c.hunks)!] })]), [])!;
   assert.deepEqual([[...k.stoodFor], [...k.scoredHunks], k.entries.size, k.wholeFile?.score, k.settled], [['B1'], ['B1'], 0, 60, true]);
   const none = keptScores(c, H([hist({ stoodFor: [c.blocks[0]!.hash], wholeFile: null })]), [])!;
   assert.deepEqual([[...none.stoodFor], [...none.scoredHunks], none.entries.size, none.wholeFile, none.settled], [[], [], 0, null, false]);
@@ -135,7 +150,10 @@ test('a score another pull request stored is used only for a block the history d
 
   const both = keptScores(c, H([hist({ blocks: [stored(b1, 70)] })]), [{ hash: b1, entry: entry(99) }, { hash: b2, entry: entry(30) }])!;
   assert.deepEqual([...both.entries].map(([id, v]) => [id, v.entry.score, v.origin]), [['B1', 70, 'earlier_run'], ['B2', 30, 'other_pull_request']]);
-  assert.equal(both.settled, true);
+  // Every block has a score, but no published review of this pull request read the file at this diff.
+  assert.equal(both.settled, false);
+  const read = keptScores(c, H([hist({ blocks: [stored(b1, 70)], coveredAt: [fileDiffHash(c.hunks)!] })]), [{ hash: b2, entry: entry(30) }])!;
+  assert.equal(read.settled, true);
 });
 
 test('the floor is the highest score of a block the file lost', () => {
@@ -145,12 +163,12 @@ test('the floor is the highest score of a block the file lost', () => {
   assert.equal(keptScores(c, H([hist({ blocks: [stored(b1, 40), stored(c.blocks[1]!.hash, 95)] })]), [])!.floor, 0);
 });
 
-test('a file is settled when nothing is left to ask, and covered when a published run read it as it is', () => {
+test('a file is settled and covered when nothing is left to ask and a published run read it as it is', () => {
   const c = ctx('src/a.ts', PATCH_TWO_HUNKS);
   const diff = fileDiffHash(c.hunks)!;
   const blocks = [stored(c.blocks[0]!.hash, 20), stored(c.blocks[1]!.hash, 30)];
   const read = keptScores(c, H([hist({ blocks })]), [])!;
-  assert.deepEqual([read.settled, read.covered], [true, false]);
+  assert.deepEqual([read.settled, read.covered], [false, false]);
   const seen = keptScores(c, H([hist({ blocks, coveredAt: ['f'.repeat(64), diff] })]), [])!;
   assert.deepEqual([seen.settled, seen.covered], [true, true]);
   const half = keptScores(c, H([hist({ blocks: blocks.slice(0, 1), coveredAt: [diff] })]), [])!;
@@ -191,10 +209,24 @@ test('a renamed file answers to the history of both its names', () => {
   assert.equal(own.readAt?.head, 'c'.repeat(40));
 });
 
-test('a renamed file with the same change is covered by the review that read it under its old name', () => {
+test('a renamed file with the same change is not covered by the review that read it under its old name, and keeps its blocks', () => {
   const c = ctx('src/a.ts', hunkAt(10, 'first'), 'old/a.ts');
   const k = keptScores(c, H([hist({ path: 'old/a.ts', blocks: [stored(c.blocks[0]!.hash, 25)], coveredAt: [fileDiffHash(c.hunks)!] })]), [])!;
-  assert.deepEqual([k.settled, k.covered], [true, true]);
+  assert.deepEqual([k.settled, k.covered], [false, false]);
+  assert.deepEqual([...k.entries].map(([id, v]) => [id, v.entry.score, v.origin]), [['B1', 25, 'earlier_run']]);
+  assert.deepEqual([...k.scoredHunks], ['B1']);
+});
+
+test('a file whose every block is kept is not settled while no published review read it at this diff', () => {
+  const c = ctx('src/a.ts', PATCH_TWO_HUNKS);
+  const k = keptScores(c, H([hist({ blocks: [stored(c.blocks[0]!.hash, 20), stored(c.blocks[1]!.hash, 30)], coveredAt: ['f'.repeat(64)] })]), [])!;
+  assert.deepEqual([k.settled, k.covered, [...k.scoredHunks]], [false, false, ['B1', 'B2']]);
+});
+
+test('a file whose every block is kept by a score another pull request stored is not settled', () => {
+  const c = ctx('src/a.ts', PATCH_TWO_HUNKS);
+  const k = keptScores(c, null, [{ hash: c.blocks[0]!.hash, entry: entry(20) }, { hash: c.blocks[1]!.hash, entry: entry(30) }])!;
+  assert.deepEqual([k.settled, k.covered, [...k.scoredHunks]], [false, false, ['B1', 'B2']]);
 });
 
 test('a file with no history and no reused score, or one scored by rule, keeps nothing', () => {
@@ -228,4 +260,56 @@ test('the lookup asks only for blocks the history does not settle', () => {
   // A hunk kept by its parts is not looked up.
   const parts = H([hist({ blocks: [stored(P1, 15), stored(P2, 92)], splits: [split([{ hash: P1, range: [0, 19] }, { hash: P2, range: [20, 39] }])] })]);
   assert.deepEqual(blocksToLookUp([forty], parts), []);
+});
+
+// A file the pull request adds, and a later push renames, is shown as added under its new name.
+function added(path: string, patch: string): FileContext {
+  const c = ctx(path, patch);
+  return { ...c, file: { ...c.file, status: 'added' } };
+}
+const NEW_PATHS: ReadonlySet<string> = new Set(['src/new.ts']);
+
+test('a file the pull request adds, with no history of its own, answers to the history of a path that left the diff', () => {
+  const c = added('src/new.ts', hunkAt(10, 'first'));
+  const history = H([hist({ path: 'old/a.ts', blocks: [stored(c.blocks[0]!.hash, 92)], coveredAt: [fileDiffHash(c.hunks)!] })]);
+  const k = keptScores(c, history, [], NEW_PATHS)!;
+  assert.deepEqual([...k.entries].map(([id, v]) => [id, v.entry.score, v.origin]), [['B1', 92, 'earlier_run']]);
+  assert.deepEqual([[...k.scoredHunks], k.settled, k.covered], [['B1'], false, false]);
+  // The lookup does not ask for it.
+  assert.deepEqual(blocksToLookUp([c], history), []);
+  // A file that is not added does not.
+  assert.equal(keptScores(ctx('src/new.ts', hunkAt(10, 'first')), history, [], NEW_PATHS), null);
+});
+
+test('a path still in the diff is not answered to', () => {
+  const c = added('src/new.ts', hunkAt(10, 'first'));
+  const history = H([hist({ path: 'old/a.ts', blocks: [stored(c.blocks[0]!.hash, 92)] })]);
+  assert.equal(keptScores(c, history, [], new Set(['src/new.ts', 'old/a.ts'])), null);
+  // Nor the earlier name of a file in the diff.
+  assert.equal(keptScores(c, history, [], new Set(['src/new.ts', 'lib/a.ts', 'old/a.ts'])), null);
+});
+
+test('a path that left the diff and holds none of the file\'s blocks is not answered to', () => {
+  const c = added('src/new.ts', hunkAt(10, 'first'));
+  assert.equal(keptScores(c, H([hist({ path: 'old/a.ts', blocks: [stored(GONE, 92)] })]), [], NEW_PATHS), null);
+});
+
+test('a new block of such a file is held to the floor of the path it answers to', () => {
+  const c = added('src/new.ts', PATCH_TWO_HUNKS);
+  const k = keptScores(c, H([hist({ path: 'old/a.ts', blocks: [stored(c.blocks[0]!.hash, 40), stored(GONE, 85)] })]), [], NEW_PATHS)!;
+  assert.deepEqual([...k.entries].map(([id, v]) => [id, v.entry.score]), [['B1', 40]]);
+  assert.equal(k.floor, 85);
+});
+
+test('a split of the path it answers to keeps its parts when they fit', () => {
+  const c = added('src/new.ts', newFile(1, 40));
+  const k = keptScores(c, H([hist({
+    path: 'old/a.ts', blocks: [stored(P1, 15), stored(P2, 92)], splits: [split([{ hash: P1, range: [0, 19] }, { hash: P2, range: [20, 39] }])],
+  })]), [], NEW_PATHS)!;
+  assert.deepEqual([...k.entries].map(([id, v]) => [id, v.entry.score, v.range]), [['B1.1', 15, [0, 19]], ['B1.2', 92, [20, 39]]]);
+});
+
+test('without the paths of the diff a file answers to its own history only', () => {
+  const c = added('src/new.ts', hunkAt(10, 'first'));
+  assert.equal(keptScores(c, H([hist({ path: 'old/a.ts', blocks: [stored(c.blocks[0]!.hash, 92)] })]), []), null);
 });

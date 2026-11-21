@@ -11,7 +11,6 @@ import type { Db } from '../db/types.ts';
 import { renderReview } from '../engine/render/body.ts';
 import type { InlineComment } from '../engine/render/body.ts';
 import type { Category, ScoredBy, Span } from '../engine/score/types.ts';
-import { CATEGORIES } from '../engine/types.ts';
 import type { EarlierState, Limits, ReviewDeps, ReviewInput, ReviewResult, ThreadVerdict, Usage } from '../engine/types.ts';
 import type { ForgeAccess, ForgeWriter, LivePullRequest, PullRequestInfo, PullRequestRef, ReviewThread, Source } from '../forge/types.ts';
 import { PAUSE_MS } from './model-health.ts';
@@ -22,7 +21,7 @@ import { earlierOf, missedComments } from './earlier.ts';
 import { matchPosted } from './posted.ts';
 import { publishRun } from './publish.ts';
 import type { PublishOutcome } from './publish.ts';
-import { historyOf, lastReviewOf, scoresToStore } from './history.ts';
+import { CATEGORY_NAMES, historyOf, lastReviewOf, scoresToStore } from './history.ts';
 import { followUp, planFollowUp } from './thread-followup.ts';
 import { QUIET_SECONDS, skipReason } from './triggers.ts';
 
@@ -99,8 +98,6 @@ function blockingOnUnchangedOf(result: unknown): number | null {
 function nothingNewOf(result: unknown): boolean {
   return (result as { nothingToDo?: unknown } | null | undefined)?.nothingToDo === true;
 }
-
-const CATEGORY_NAMES: readonly string[] = CATEGORIES;
 
 /** How many findings an engine result, or a stored one, dropped as already discussed; 0 when it does not say. */
 function duplicatesOf(result: unknown): number {
@@ -486,6 +483,8 @@ export async function runReviewJob(job: Job, deps: ReviewJobDeps): Promise<void>
 
     let written: boolean;
     let requeued = false;
+    /** The job was ended as nothing new by this start. */
+    let endedNothingNew = false;
     /** The recorded run to publish; only ever set when not in dry run. */
     let toPublish: StoredRun | null = resumed;
     if (resumed !== null) {
@@ -507,13 +506,17 @@ export async function runReviewJob(job: Job, deps: ReviewJobDeps): Promise<void>
       // Nothing new: no review is posted. The run is kept with no body, so that no later start takes it for a review waiting to be published.
       let runId: number | null = null;
       written = await tried(() => db.transaction(async (tx) => {
+        // Each try starts afresh: an id from a try that was rolled back is no row's.
+        runId = null;
         if (await finishJob(tx, job.id, 'done', 'nothing_new', nowIso)) runId = await recordRun(tx, { ...run, body: '', comments: [] });
       }));
+      endedNothingNew = written && runId !== null;
       if (written && runId !== null) await keepScores(runId, run.finishedAt);
     } else if (run.body === '') {
       // A review whose text could not be rendered is never posted.
       let runId: number | null = null;
       written = await tried(() => db.transaction(async (tx) => {
+        runId = null;
         if (await finishJob(tx, job.id, 'done', 'render_failed', nowIso)) runId = await recordRun(tx, run);
       }));
       if (written) {
@@ -590,7 +593,7 @@ export async function runReviewJob(job: Job, deps: ReviewJobDeps): Promise<void>
       publish: publish?.kind ?? null, publish_code: publish?.kind === 'failed' ? publish.code : null,
       resumed: resumed !== null, adopted: publish?.kind === 'published' && publish.adopted,
       threads_due: threadsDueOf(result ?? resumed?.result), verdicts: verdictsOf(result ?? resumed?.result).length, duplicates: duplicatesOf(result ?? resumed?.result),
-      blocking_on_unchanged: blockingOnUnchangedOf(result ?? resumed?.result), nothing_new: nothingNewOf(result ?? resumed?.result),
+      blocking_on_unchanged: blockingOnUnchangedOf(result ?? resumed?.result), nothing_new: endedNothingNew,
     });
   } catch (error) {
     if (result !== null) {

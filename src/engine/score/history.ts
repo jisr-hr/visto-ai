@@ -9,8 +9,8 @@ export interface KeptScores {
   stoodFor: Set<string>;            // ids of blocks with no entry that the kept whole-file score stands for
   wholeFile: ScoreEntry | null;     // the whole-file score the file keeps
   floor: number;                    // the highest stored score whose hash no present block has; 0 when none
-  settled: boolean;                 // every block has a kept entry or is stood for (a moved file: it keeps a whole-file score): nothing is left to ask
-  covered: boolean;                 // settled, and a published run read the file with the diff it has now (a moved file: settled)
+  settled: boolean;                 // every block has a kept entry or is stood for, and a published run read the file under this path with the diff it has now (a moved file: it keeps a whole-file score)
+  covered: boolean;                 // the same as settled
   scoredHunks: Set<string>;         // ids of hunks whose header says `scored`
   readAt: { head: string; hashes: Set<string> } | null;
 }
@@ -21,7 +21,7 @@ interface Joined {
   splits: StoredSplit[];              // the path's own first
   stoodFor: Set<string>;
   wholeFile: ScoreEntry | null;
-  coveredAt: Set<string>;
+  coveredAt: Set<string>;            // the path's own only
   readAt: FileHistory['readAt'];
 }
 
@@ -29,11 +29,19 @@ const list = <T>(value: T[] | undefined | null): T[] => (Array.isArray(value) ? 
 const higher = (a: ScoreEntry | null, b: ScoreEntry | null): ScoreEntry | null => (b !== null && (a === null || b.score > a.score) ? b : a);
 
 // Null when neither name has a history. A stored result may be old: an absent field reads as empty.
-function joined(context: FileContext, history: ScoreHistory | null): Joined | null {
+// `diffPaths`: every path and earlier name in the present diff; absent, a file answers to its own names only.
+function joined(context: FileContext, history: ScoreHistory | null, diffPaths?: ReadonlySet<string>): Joined | null {
   if (history === null) return null;
   const files = list(history.files);
   const names = [context.file.path, ...(context.file.previousPath === null ? [] : [context.file.previousPath])];
-  const found = names.map((name) => files.find((f) => f.path === name)).filter((f): f is FileHistory => f !== undefined);
+  let found = names.map((name) => files.find((f) => f.path === name)).filter((f): f is FileHistory => f !== undefined);
+  const own = files.some((f) => f.path === context.file.path);
+  if (!own && diffPaths !== undefined && context.file.status === 'added' && context.file.previousPath === null && context.plan.kind === 'model') {
+    // A file the pull request added and a later push renamed is shown as added again: it answers to every path that left the diff and held one of its blocks.
+    const hashes = new Set(context.blocks.map((b) => b.hash));
+    found = files.filter((f) => !diffPaths.has(f.path)
+      && (list(f.blocks).some((s) => hashes.has(s.hash)) || list(f.splits).some((s) => hashes.has(s.hunkHash))));
+  }
   if (found.length === 0) return null;
   const out: Joined = { entries: new Map(), splits: [], stoodFor: new Set(), wholeFile: null, coveredAt: new Set(), readAt: null };
   for (const file of found) {
@@ -44,7 +52,8 @@ function joined(context: FileContext, history: ScoreHistory | null): Joined | nu
     out.splits.push(...list(file.splits));
     for (const hash of list(file.stoodFor)) out.stoodFor.add(hash);
     out.wholeFile = higher(out.wholeFile, file.wholeFile ?? null);
-    for (const hash of list(file.coveredAt)) out.coveredAt.add(hash);
+    // A file is covered only where it now stands.
+    if (file.path === context.file.path) for (const hash of list(file.coveredAt)) out.coveredAt.add(hash);
     if (out.readAt === null && file.readAt) out.readAt = file.readAt;
   }
   return out;
@@ -62,11 +71,16 @@ function floorOf(j: Joined | null, present: ReadonlySet<string>): number {
   return floor;
 }
 
-/** Works out, for one file, what its history already settles. `reused` are the scores other pull requests stored for its blocks. */
-export function keptScores(context: FileContext, history: ScoreHistory | null, reused: Array<{ hash: string; entry: ScoreEntry }>): KeptScores | null {
+/**
+ * Works out, for one file, what its history already settles. `reused` are the scores other pull requests stored for its blocks;
+ * `diffPaths` every path and earlier name in the present diff.
+ */
+export function keptScores(
+  context: FileContext, history: ScoreHistory | null, reused: Array<{ hash: string; entry: ScoreEntry }>, diffPaths?: ReadonlySet<string>,
+): KeptScores | null {
   const kind = context.plan.kind;
   if (kind === 'rule' || kind === 'none') return null;
-  const j = joined(context, history);
+  const j = joined(context, history, diffPaths);
   if (j === null && reused.length === 0) return null;
 
   if (kind === 'model_whole') {
@@ -137,19 +151,20 @@ export function keptScores(context: FileContext, history: ScoreHistory | null, r
     scoredHunks.add(block.hunk);
   }
 
-  const settled = blocks.every((b) => entries.has(b.id) || stoodFor.has(b.id));
+  // Nothing is left to ask only of a file a published review of this pull request read under this path, with this diff.
   const diffHash = fileDiffHash(context.hunks);
-  const covered = settled && diffHash !== null && (j?.coveredAt.has(diffHash) ?? false);
-  return { blocks, entries, stoodFor, wholeFile, floor, settled, covered, scoredHunks, readAt: readAtOf(j) };
+  const settled = blocks.every((b) => entries.has(b.id) || stoodFor.has(b.id)) && diffHash !== null && (j?.coveredAt.has(diffHash) ?? false);
+  return { blocks, entries, stoodFor, wholeFile, floor, settled, covered: settled, scoredHunks, readAt: readAtOf(j) };
 }
 
 /** The blocks of these files that the history does not settle, for the lookup across pull requests. */
 export function blocksToLookUp(contexts: FileContext[], history: ScoreHistory | null): Array<{ path: string; hash: string }> {
   const out: Array<{ path: string; hash: string }> = [];
   const seen = new Set<string>();
+  const diffPaths = new Set(contexts.flatMap((c) => [c.file.path, ...(c.file.previousPath === null ? [] : [c.file.previousPath])]));
   for (const context of contexts) {
     if (context.plan.kind !== 'model') continue;
-    const kept = keptScores(context, history, []);
+    const kept = keptScores(context, history, [], diffPaths);
     const open = kept === null ? context.blocks : kept.blocks.filter((b) => !kept.scoredHunks.has(b.hunk));
     for (const block of open) {
       const key = `${context.file.path}\n${block.hash}`;

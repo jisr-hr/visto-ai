@@ -218,14 +218,15 @@ function scoreFile(
   const settled = kept?.settled === true;
   const lost = kept?.floor ?? 0; // the highest score of a block this file had and lost
   const fileBlocks = kept?.blocks ?? context.blocks;
+  // Every block has a kept entry or is stood for: the file can be scored with no answer, settled or not.
+  const keepsAll = kept !== undefined && fileBlocks.every((b) => kept.entries.has(b.id) || kept.stoodFor.has(b.id));
 
   // An unusable whole-file score may have been the model's warning about the file: the file is not scored.
   let given: ScoreEntry | null = null;
   let wholeFileInvalid = false;
   if (settled) {
-    for (const entry of entries) {
-      if (entry.score !== undefined) audit.push({ stage: 'reconcile', action: 'whole_file_settled', subject: path, reason: 'ignored' });
-    }
+    // Named once, however many entries gave one.
+    if (entries.some((entry) => entry.score !== undefined)) audit.push({ stage: 'reconcile', action: 'whole_file_settled', subject: path, reason: 'ignored' });
   } else {
     ({ entry: given, invalid: wholeFileInvalid } = wholeFileOf(entries, path, audit));
   }
@@ -293,7 +294,7 @@ function scoreFile(
     wholeFileInvalid ||
     strayItem ||
     notRead.has(path) ||
-    (plan.kind !== 'rule' && !answered && !settled) ||
+    (plan.kind !== 'rule' && !answered && !keepsAll) ||
     (plan.kind === 'model_whole' && wholeFile === null) ||
     (plan.kind === 'model' && unscored);
 

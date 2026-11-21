@@ -544,6 +544,26 @@ test('a whole-file score never falls', async (t) => {
   });
 });
 
+test('the kept whole-file score wins a tie with the one the model gives', () => {
+  const k = kept({ entries: new Map([['B1', keptEntry(10)]]), scoredHunks: new Set(['B1']), wholeFile: { score: 60, category: 'refactor', reason: 'Kept.' } });
+  const out = answer(whole(file('src/a.ts', [b('B2', 10)]), 60, 'fix', 'Given.'), k);
+  assert.deepEqual(out.scores[0]!.wholeFile, { score: 60, category: 'refactor', reason: 'Kept.' });
+  assert.deepEqual(out.audit, []);
+});
+
+test('a file with a hidden character on a changed line counts as 100 whatever it keeps', () => {
+  const k = kept({ entries: new Map([['B1', keptEntry(70)], ['B2', keptEntry(40)]]), scoredHunks: new Set(['B1', 'B2']), settled: true, covered: true });
+  const [s] = answer(null, k, { c: { ...ctx('src/a.ts', twoHunks), hidden: true } }).scores;
+  assert.deepEqual([s!.fileLevel, s!.finalScore, s!.covered], [{ score: 100, source: 'hidden_characters' }, 100, false]);
+});
+
+test('a settled file answered in two batches names the whole-file score it ignores once', () => {
+  const c = withKept(kept({ entries: new Map([['B1', keptEntry(70)], ['B2', keptEntry(40)]]), scoredHunks: new Set(['B1', 'B2']), settled: true, covered: true }));
+  const value = (score: number): SubmitReviewArgs => ({ overview: 'o', findings: [], files: [whole(file('src/a.ts', []), score)] });
+  const out = reconcileScores([{ value: value(10), files: ['src/a.ts'] }, { value: value(20), files: ['src/a.ts'] }], [c], new Set(), parseRepoFile(null));
+  assert.deepEqual(out.audit.filter((e) => e.action === 'whole_file_settled'), [{ stage: 'reconcile', action: 'whole_file_settled', subject: 'src/a.ts', reason: 'ignored' }]);
+});
+
 test('a kept whole-file score does not stand for a new block', () => {
   const k = kept({ wholeFile: { score: 40, category: 'refactor', reason: 'Kept.' }, stoodFor: new Set(['B1']), scoredHunks: new Set(['B1']) });
   const out = answer(file('src/a.ts', []), k);
@@ -604,6 +624,21 @@ test('a file that was not sent is scored from what it keeps', () => {
   const [s] = answer(null, k).scores;
   assert.equal(s!.fileLevel, null);
   assert.deepEqual([s!.finalScore, s!.covered], [70, true]);
+});
+
+test('a file that is not settled but keeps a score for every block is scored from what it keeps, and may take a whole-file score', async (t) => {
+  const k = () => kept({ entries: new Map([['B1', keptEntry(70)], ['B2', keptEntry(40)]]), scoredHunks: new Set(['B1', 'B2']) });
+  await t.test('answered with nothing', () => {
+    const [s] = answer(null, k()).scores;
+    assert.equal(s!.fileLevel, null);
+    assert.deepEqual([s!.finalScore, s!.covered], [70, true]);
+  });
+  await t.test('answered with a whole-file score', () => {
+    const out = answer(whole(file('src/a.ts', []), 90, 'business_rule', 'The two blocks together change who may refund.'), k());
+    assert.deepEqual(out.scores[0]!.fileLevel, { score: 90, source: 'whole_file' });
+    assert.deepEqual([out.scores[0]!.finalScore, out.scores[0]!.covered], [90, true]);
+    assert.deepEqual(out.audit, []);
+  });
 });
 
 test('a file that could not be read counts as 100 whatever it keeps', () => {

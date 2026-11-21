@@ -58,6 +58,22 @@ test('owner and repository are matched whatever their case', async () => {
   assert.deepEqual(await db.query('select owner, repo from visto_ai.block_scores'), [{ owner: 'acme', repo: 'shop' }]);
   await db.close();
 });
+test('the asking side is matched whatever the case of its owner and repository', async () => {
+  const db = await testDb();
+  await recordBlockScores(db, 1, REF, 'model', [A], at(0));
+  assert.deepEqual(await reusableScores(db, { service: 'github', owner: 'ACME', repo: 'Shop', number: 8 }, 'model', ASK, at(-60)), [A]);
+  // Its own pull request is still left out.
+  assert.deepEqual(await reusableScores(db, { service: 'github', owner: 'ACME', repo: 'Shop', number: 7 }, 'model', ASK, at(-60)), []);
+  await db.close();
+});
+test('on a tie the score stored last in time wins, not the row stored last', async () => {
+  const db = await testDb();
+  await recordBlockScores(db, 1, REF, 'model', [{ ...A, score: 80, reason: 'Newest.' }], at(20));
+  await recordBlockScores(db, 2, OTHER, 'model', [{ ...A, score: 80, reason: 'Older.' }], at(0));
+  const asker = { service: 'github', owner: 'acme', repo: 'shop', number: 50 } as const;
+  assert.deepEqual(await reusableScores(db, asker, 'model', ASK, at(-60)), [{ ...A, score: 80, reason: 'Newest.' }]);
+  await db.close();
+});
 test('nothing asked, nothing stored: no statement is sent', async () => {
   const boom: Db = {
     query: () => { throw new Error('query_sent'); },
