@@ -92,7 +92,9 @@ repositories:
     # newHead: incremental
     # A changed block scored at or above this (1 to 100) is listed for a human reviewer.
     # It is 70 when not written, and must be written when a scorer is named.
-    # inlineNotes switches on a short comment in the diff for each block listed for a human reviewer; a note is an ordinary review thread.
+    # inlineNotes switches on a short comment in the diff for each block listed for a human reviewer: at most 50 a review,
+    # the highest scores first, none twice. A note is an ordinary review thread, so where a repository requires resolved
+    # conversations someone must resolve each one; the app never does. It can be set for all repositories and for one.
     # It is false when not written.
     # score:
     #   threshold: 70
