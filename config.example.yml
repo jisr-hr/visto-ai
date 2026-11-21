@@ -84,6 +84,9 @@ repositories:
     ignoredAuthors: ['dependabot[bot]']
     # Only pull requests that target one of these branches are reviewed; empty means every branch.
     baseBranches: []
+    # How a new head of a pull request that already has a review is reviewed: full reads every file again,
+    # incremental reads only what changed since that review. It is incremental when not written.
+    # newHead: incremental
     # A changed block scored at or above this (1 to 100) is listed for a human reviewer.
     # It is 70 when not written, and must be written when a scorer is named.
     # score:
