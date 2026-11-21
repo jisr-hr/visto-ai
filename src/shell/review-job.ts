@@ -539,7 +539,7 @@ export async function runReviewJob(job: Job, deps: ReviewJobDeps): Promise<void>
     const target = toPublish;
     if (!deps.dryRun && written && target !== null) {
       const out = await publishRun({ forge: deps.forge, writer: deps.writer, lineUrl: deps.lineUrl, commentUrl: deps.commentUrl },
-        { ref: job.ref, installation, run: target, trigger: job.trigger, requestedBy, known: knownOf(runs) });
+        { ref: job.ref, installation, run: target, trigger: job.trigger, requestedBy, known: knownOf(runs), resumed: false });
       publish = out;
       const finish = (outcome: string): Promise<boolean> => tried(async () => { await finishJob(db, job.id, 'done', outcome, nowIso); });
       if (out.kind === 'published') {
