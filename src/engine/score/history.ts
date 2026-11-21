@@ -29,18 +29,17 @@ const list = <T>(value: T[] | undefined | null): T[] => (Array.isArray(value) ? 
 const higher = (a: ScoreEntry | null, b: ScoreEntry | null): ScoreEntry | null => (b !== null && (a === null || b.score > a.score) ? b : a);
 
 // Null when neither name has a history. A stored result may be old: an absent field reads as empty.
-// `diffPaths`: every path and earlier name in the present diff; absent, a file answers to its own names only.
-function joined(context: FileContext, history: ScoreHistory | null, diffPaths?: ReadonlySet<string>): Joined | null {
+function joined(context: FileContext, history: ScoreHistory | null): Joined | null {
   if (history === null) return null;
   const files = list(history.files);
   const names = [context.file.path, ...(context.file.previousPath === null ? [] : [context.file.previousPath])];
   let found = names.map((name) => files.find((f) => f.path === name)).filter((f): f is FileHistory => f !== undefined);
   const own = files.some((f) => f.path === context.file.path);
-  if (!own && diffPaths !== undefined && context.file.status === 'added' && context.file.previousPath === null && context.plan.kind === 'model') {
-    // A file the pull request added and a later push renamed is shown as added again: it answers to every path that left the diff and held one of its blocks.
+  if (!own && context.file.status === 'added' && context.file.previousPath === null && context.plan.kind === 'model') {
+    // A file the pull request added and a later push renamed or copied is shown as added: it answers to every other path that held one of its blocks.
     const hashes = new Set(context.blocks.map((b) => b.hash));
-    found = files.filter((f) => !diffPaths.has(f.path)
-      && (list(f.blocks).some((s) => hashes.has(s.hash)) || list(f.splits).some((s) => hashes.has(s.hunkHash))));
+    found = files.filter((f) => list(f.blocks).some((s) => hashes.has(s.hash))
+      || list(f.stoodFor).some((h) => hashes.has(h)) || list(f.splits).some((s) => hashes.has(s.hunkHash)));
   }
   if (found.length === 0) return null;
   const out: Joined = { entries: new Map(), splits: [], stoodFor: new Set(), wholeFile: null, coveredAt: new Set(), readAt: null };
@@ -71,16 +70,11 @@ function floorOf(j: Joined | null, present: ReadonlySet<string>): number {
   return floor;
 }
 
-/**
- * Works out, for one file, what its history already settles. `reused` are the scores other pull requests stored for its blocks;
- * `diffPaths` every path and earlier name in the present diff.
- */
-export function keptScores(
-  context: FileContext, history: ScoreHistory | null, reused: Array<{ hash: string; entry: ScoreEntry }>, diffPaths?: ReadonlySet<string>,
-): KeptScores | null {
+/** Works out, for one file, what its history already settles. `reused` are the scores other pull requests stored for its blocks. */
+export function keptScores(context: FileContext, history: ScoreHistory | null, reused: Array<{ hash: string; entry: ScoreEntry }>): KeptScores | null {
   const kind = context.plan.kind;
   if (kind === 'rule' || kind === 'none') return null;
-  const j = joined(context, history, diffPaths);
+  const j = joined(context, history);
   if (j === null && reused.length === 0) return null;
 
   if (kind === 'model_whole') {
@@ -145,9 +139,11 @@ export function keptScores(
     let best: ScoreEntry | null = null;
     for (const r of reused) if (r.hash === block.hash) best = higher(best, r.entry);
     if (best === null) continue;
-    entries.set(block.id, best.score < floor
-      ? { entry: { ...best, score: floor }, origin: 'other_pull_request', raisedFrom: best.score, range: null }
-      : { entry: best, origin: 'other_pull_request', raisedFrom: null, range: null });
+    // The reason was written about another pull request: it is not taken with the score.
+    const taken: ScoreEntry = { ...best, reason: '' };
+    entries.set(block.id, taken.score < floor
+      ? { entry: { ...taken, score: floor }, origin: 'other_pull_request', raisedFrom: taken.score, range: null }
+      : { entry: taken, origin: 'other_pull_request', raisedFrom: null, range: null });
     scoredHunks.add(block.hunk);
   }
 
@@ -161,10 +157,9 @@ export function keptScores(
 export function blocksToLookUp(contexts: FileContext[], history: ScoreHistory | null): Array<{ path: string; hash: string }> {
   const out: Array<{ path: string; hash: string }> = [];
   const seen = new Set<string>();
-  const diffPaths = new Set(contexts.flatMap((c) => [c.file.path, ...(c.file.previousPath === null ? [] : [c.file.previousPath])]));
   for (const context of contexts) {
     if (context.plan.kind !== 'model') continue;
-    const kept = keptScores(context, history, [], diffPaths);
+    const kept = keptScores(context, history, []);
     const open = kept === null ? context.blocks : kept.blocks.filter((b) => !kept.scoredHunks.has(b.hunk));
     for (const block of open) {
       const key = `${context.file.path}\n${block.hash}`;

@@ -1629,3 +1629,40 @@ test('a block the whole-file score stood for is still stood for at the next revi
   assert.deepEqual(notSent(r), [['src/t.ts', 'covered']]);
   assert.deepEqual([r.scores[0]!.blocks.map((one) => one.entry), r.scores[0]!.fileLevel, r.scores[0]!.finalScore], [[null, null], { score: 60, source: 'whole_file' }, 60]);
 });
+
+test('a new file the model scored as a whole only keeps that score when a later push renames it', async () => {
+  const billing = (path: string): ChangedFile => ({ path, previousPath: null, status: 'added', additions: 1, deletions: 1, patch: delayPatch(2) });
+  const asWhole = (path: string, score: number) => ({ overview: `${path} reviewed.`, findings: [], files: [{ path, change_summary: 'Adds billing.', blocks: [], score, category: 'business_rule', reason: 'Charges the card.' }] });
+  const first = await firstOf([billing('src/billing.ts')], asWhole('src/billing.ts', 92));
+  const d = deps({ files: [billing('src/billing2.ts')], answers: [asWhole('src/billing2.ts', 10)] });
+  const r = await review({ ...input, mode: 'full', history: historyFrom(first, { covered: true, lastReview: LAST }) }, d);
+  assert.deepEqual(headersOf(d), ['### Block B1 (2 changed lines, scored)']);
+  assert.deepEqual([r.scores[0]!.blocks.map((one) => one.entry), r.scores[0]!.fileLevel, r.scores[0]!.finalScore], [[null], { score: 92, source: 'whole_file' }, 92]);
+});
+
+test('a copy of a new file keeps its scores, and keeps them once the original is gone', async () => {
+  const added = (path: string): ChangedFile => ({ path, previousPath: null, status: 'added', additions: 1, deletions: 1, patch: delayPatch(2) });
+  const onFile = (path: string, blocks: unknown[] = []) => ({ overview: `${path} reviewed.`, findings: [], files: [{ path, change_summary: 'Adds billing.', blocks }] });
+  const first = await firstOf([added('a.ts')], onFile('a.ts', [{ id: 'B1', score: 92, category: 'business_rule', reason: 'Charges the card.' }]));
+  const d = deps({ files: [added('a.ts'), added('b.ts')], answers: [onFile('b.ts', [{ id: 'B1', score: 10, category: 'fix', reason: '' }])] });
+  const second = await review({ ...input, mode: 'incremental', history: historyFrom(first, { covered: true, lastReview: LAST }) }, d);
+  assert.deepEqual([d.model.requests.length, named(d, 'b.ts'), headersOf(d)], [1, 1, ['### Block B1 (2 changed lines, scored)']]);
+  assert.deepEqual(finals(second), { 'a.ts': 92, 'b.ts': 92 });
+  const third = deps({ files: [added('b.ts')] });
+  const r = await review({ ...input, mode: 'incremental', history: historyFrom(second, { covered: true, lastReview: LAST }) }, third);
+  assert.equal(third.model.requests.length, 0);
+  assert.deepEqual(finals(r), { 'b.ts': 92 });
+});
+
+test('the reason of a score taken from another pull request is dropped where it is taken', async () => {
+  const d = deps({ files: [fileTwo], answers: [answerOnT] });
+  d.reusableScores = () => Promise.resolve([
+    { path: 'src/t.ts', hash: hashB1!, entry: { score: 30, category: 'fix', reason: 'See [the notes](https://example.test/x).' } },
+    { path: 'src/t.ts', hash: hashB2!, entry: { score: 20, category: 'fix', reason: 'See ![x](https://example.test/i.png).' } },
+  ]);
+  const taken = await review(input, d);
+  assert.deepEqual(taken.scores[0]!.blocks.map((one) => [one.entry?.score, one.entry?.reason, one.origin]), [[30, '', 'other_pull_request'], [20, '', 'other_pull_request']]);
+  const later = await review({ ...input, history: historyFrom(taken, { covered: true }) }, deps({ files: [fileTwo], answers: [answerOnT] }));
+  assert.deepEqual(later.scores[0]!.blocks.map((one) => one.origin), ['earlier_run', 'earlier_run']);
+  assert.ok(!JSON.stringify(later).includes('example.test'));
+});

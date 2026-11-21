@@ -234,9 +234,8 @@ async function keepScores(contexts: FileContext[], history: ScoreHistory | null,
       reused.push({ path, hash, entry: entry as ScoreEntry });
     }
   }
-  const diffPaths = new Set(contexts.flatMap((c) => [c.file.path, ...(c.file.previousPath === null ? [] : [c.file.previousPath])]));
   for (const context of contexts) {
-    const kept = keptScores(context, history, reused.filter((r) => r.path === context.file.path), diffPaths);
+    const kept = keptScores(context, history, reused.filter((r) => r.path === context.file.path));
     if (kept === null) continue;
     context.kept = kept;
     if (kept.scoredHunks.size > 0) context.diffText = renderAnchoredDiff(context.hunks, kept.scoredHunks);

@@ -276,9 +276,9 @@ test('a block scored on another pull request says so, with its category and with
   assert.equal(noted({ origin: 'other_pull_request' }), '- [lines 5-6](u:src/a.ts:5), 85% `calculation` _(scored on another pull request)_');
 });
 test('a reason written on another pull request, links and all, is not shown', () => {
-  const linked = { ...block('B1', span(5, 6), 85, 'calculation', 'See [the docs](https://example.com/x) and ![x](https://example.com/i.png).'), origin: 'other_pull_request' as const };
+  const linked = { ...block('B1', span(5, 6), 85, 'calculation', 'See [the docs](https://example.test/x) and ![x](https://example.test/i.png).'), origin: 'other_pull_request' as const };
   const body = renderReview(scored([file('src/a.ts', { blocks: [linked] })]), withUrl).body;
-  assert.ok(!body.includes('example.com'));
+  assert.ok(!body.includes('example.test'));
   assert.ok(!body.includes('the docs'));
   const kept = renderReview(scored([file('src/a.ts', { blocks: [{ ...linked, origin: 'earlier_run' }] })]), withUrl).body;
   assert.ok(kept.includes('See [the docs]'));

@@ -267,36 +267,39 @@ function added(path: string, patch: string): FileContext {
   const c = ctx(path, patch);
   return { ...c, file: { ...c.file, status: 'added' } };
 }
-const NEW_PATHS: ReadonlySet<string> = new Set(['src/new.ts']);
 
 test('a file the pull request adds, with no history of its own, answers to the history of a path that left the diff', () => {
   const c = added('src/new.ts', hunkAt(10, 'first'));
   const history = H([hist({ path: 'old/a.ts', blocks: [stored(c.blocks[0]!.hash, 92)], coveredAt: [fileDiffHash(c.hunks)!] })]);
-  const k = keptScores(c, history, [], NEW_PATHS)!;
+  const k = keptScores(c, history, [])!;
   assert.deepEqual([...k.entries].map(([id, v]) => [id, v.entry.score, v.origin]), [['B1', 92, 'earlier_run']]);
   assert.deepEqual([[...k.scoredHunks], k.settled, k.covered], [['B1'], false, false]);
   // The lookup does not ask for it.
   assert.deepEqual(blocksToLookUp([c], history), []);
   // A file that is not added does not.
-  assert.equal(keptScores(ctx('src/new.ts', hunkAt(10, 'first')), history, [], NEW_PATHS), null);
+  assert.equal(keptScores(ctx('src/new.ts', hunkAt(10, 'first')), history, []), null);
 });
 
-test('a path still in the diff is not answered to', () => {
+test('a path still in the diff is answered to as well: a copy keeps the scores of what it copies', () => {
   const c = added('src/new.ts', hunkAt(10, 'first'));
-  const history = H([hist({ path: 'old/a.ts', blocks: [stored(c.blocks[0]!.hash, 92)] })]);
-  assert.equal(keptScores(c, history, [], new Set(['src/new.ts', 'old/a.ts'])), null);
-  // Nor the earlier name of a file in the diff.
-  assert.equal(keptScores(c, history, [], new Set(['src/new.ts', 'lib/a.ts', 'old/a.ts'])), null);
+  const k = keptScores(c, H([hist({ path: 'old/a.ts', blocks: [stored(c.blocks[0]!.hash, 92)] })]), [])!;
+  assert.deepEqual([...k.entries].map(([id, v]) => [id, v.entry.score, v.origin]), [['B1', 92, 'earlier_run']]);
+});
+
+test('a path whose whole-file score stood for one of the blocks is answered to', () => {
+  const c = added('src/new.ts', hunkAt(10, 'first'));
+  const k = keptScores(c, H([hist({ path: 'old/a.ts', stoodFor: [c.blocks[0]!.hash], wholeFile: entry(92) })]), [])!;
+  assert.deepEqual([[...k.stoodFor], k.wholeFile?.score, [...k.scoredHunks], k.entries.size], [['B1'], 92, ['B1'], 0]);
 });
 
 test('a path that left the diff and holds none of the file\'s blocks is not answered to', () => {
   const c = added('src/new.ts', hunkAt(10, 'first'));
-  assert.equal(keptScores(c, H([hist({ path: 'old/a.ts', blocks: [stored(GONE, 92)] })]), [], NEW_PATHS), null);
+  assert.equal(keptScores(c, H([hist({ path: 'old/a.ts', blocks: [stored(GONE, 92)] })]), []), null);
 });
 
 test('a new block of such a file is held to the floor of the path it answers to', () => {
   const c = added('src/new.ts', PATCH_TWO_HUNKS);
-  const k = keptScores(c, H([hist({ path: 'old/a.ts', blocks: [stored(c.blocks[0]!.hash, 40), stored(GONE, 85)] })]), [], NEW_PATHS)!;
+  const k = keptScores(c, H([hist({ path: 'old/a.ts', blocks: [stored(c.blocks[0]!.hash, 40), stored(GONE, 85)] })]), [])!;
   assert.deepEqual([...k.entries].map(([id, v]) => [id, v.entry.score]), [['B1', 40]]);
   assert.equal(k.floor, 85);
 });
@@ -305,11 +308,12 @@ test('a split of the path it answers to keeps its parts when they fit', () => {
   const c = added('src/new.ts', newFile(1, 40));
   const k = keptScores(c, H([hist({
     path: 'old/a.ts', blocks: [stored(P1, 15), stored(P2, 92)], splits: [split([{ hash: P1, range: [0, 19] }, { hash: P2, range: [20, 39] }])],
-  })]), [], NEW_PATHS)!;
+  })]), [])!;
   assert.deepEqual([...k.entries].map(([id, v]) => [id, v.entry.score, v.range]), [['B1.1', 15, [0, 19]], ['B1.2', 92, [20, 39]]]);
 });
 
-test('without the paths of the diff a file answers to its own history only', () => {
+test('an added file with a history of its own answers to that history only', () => {
   const c = added('src/new.ts', hunkAt(10, 'first'));
-  assert.equal(keptScores(c, H([hist({ path: 'old/a.ts', blocks: [stored(c.blocks[0]!.hash, 92)] })]), []), null);
+  const k = keptScores(c, H([hist({ path: 'src/new.ts', blocks: [stored(GONE, 10)] }), hist({ path: 'old/a.ts', blocks: [stored(c.blocks[0]!.hash, 92)] })]), [])!;
+  assert.deepEqual([k.entries.size, k.floor], [0, 10]);
 });
