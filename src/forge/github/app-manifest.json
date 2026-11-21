@@ -1,0 +1,23 @@
+{
+  "name": "visto-ai",
+  "url": "https://github.com/visto-ai/visto-ai",
+  "description": "Reviews pull requests and scores how much each change needs a person to read it.",
+  "public": false,
+  "hook_attributes": {
+    "url": "https://example.invalid/webhooks/github",
+    "active": true
+  },
+  "default_permissions": {
+    "pull_requests": "write",
+    "contents": "read",
+    "issues": "write",
+    "metadata": "read"
+  },
+  "default_events": [
+    "pull_request",
+    "issue_comment",
+    "pull_request_review",
+    "pull_request_review_comment",
+    "pull_request_review_thread"
+  ]
+}
