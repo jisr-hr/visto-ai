@@ -40,11 +40,13 @@ function stubFetch(answers: Array<Response | Error>) {
 type Answer = { status: number; headers: Record<string, string>; body: string; exit: number | null };
 type Handler = (request: { method: string; url: string; host: string }) => Promise<Answer>;
 
-function world(opts: { reserve?: boolean; answers?: Array<Response | Error> } = {}) {
+function world(opts: { reserve?: boolean; answers?: Array<Response | Error>; fetch?: typeof fetch } = {}) {
   const lines: string[] = [];
   const stub = stubFetch(opts.answers ?? [answer(201)]);
+  if (opts.fetch !== undefined) stub.fetch = opts.fetch;
   const calls = { reserve: [] as string[], fill: [] as Array<[string, string]>, release: [] as string[], listen: 0, close: 0 };
   let handler: Handler | undefined;
+  let stop: (() => void) | undefined;
   let r = 0;
   const io: Io = {
     out: (line) => { lines.push(line); },
@@ -54,8 +56,9 @@ function world(opts: { reserve?: boolean; answers?: Array<Response | Error> } = 
     fill: (p, text) => { calls.fill.push([p, text]); },
     release: (p) => { calls.release.push(p); },
     listen: async (h) => { calls.listen += 1; handler = h; return { port: 4010, close: async () => { calls.close += 1; } }; },
+    onStop: (h) => { stop = h; },
   };
-  return { io, lines, calls, fetchCalls: stub.calls, handler: () => handler };
+  return { io, lines, calls, fetchCalls: stub.calls, handler: () => handler, stop: () => { if (stop === undefined) throw new Error('no stop handler'); stop(); } };
 }
 
 const ADDRESS = /http:\/\/127\.0\.0\.1:4010\/([0-9a-f]{32})/;
@@ -484,4 +487,146 @@ test('another method is refused', async () => {
   assert.equal(w.fetchCalls.length, 0);
   await s.ask('GET', `/created?code=${CODE}&state=${s.state}`);
   await s.running;
+});
+
+/** A fetch that waits until the test lets it answer. */
+function heldFetch() {
+  const calls: string[] = [];
+  let release: (res: Response) => void = () => {};
+  const fetch = ((url: string | URL | Request) => {
+    calls.push(String(url));
+    return new Promise<Response>((resolve) => { release = resolve; });
+  }) as typeof globalThis.fetch;
+  return { fetch, calls, answer: (res: Response) => release(res) };
+}
+
+test('stopped while waiting, the file is released and nothing else is printed', async () => {
+  const w = world();
+  const s = await start(ARGS, w);
+  const before = [...w.lines];
+  w.stop();
+  assert.deepEqual(w.calls.release, ['/keys/visto.env']);
+  assert.deepEqual(w.lines, before);
+  assert.equal(w.fetchCalls.length, 0);
+  assert.equal(s.ended(), undefined);
+});
+
+test('stopped after a valid way back and before the exchange answered, the file is released and the command says what to do', async () => {
+  const held = heldFetch();
+  const w = world({ fetch: held.fetch });
+  const s = await start(ARGS, w);
+  void s.ask('GET', `/created?code=${CODE}&state=${s.state}`);
+  await s.settle();
+  assert.equal(held.calls.length, 1);
+  w.stop();
+  assert.deepEqual(w.calls.release, ['/keys/visto.env']);
+  assert.deepEqual(w.calls.fill, []);
+  const text = visible(w.lines);
+  assert.match(text, /may now exist on GitHub with no private key/);
+  assert.ok(text.includes('https://github.com/settings/apps:'));
+  assert.match(text, /generate a private key and a webhook secret there, or delete the app/);
+  assert.ok(!text.includes(s.state) && !text.includes(`code=${CODE}`));
+});
+
+test('stopped after a valid way back for an organisation, the command points at its settings', async () => {
+  const held = heldFetch();
+  const w = world({ fetch: held.fetch });
+  const s = await start([...ARGS, '--org', 'acme'], w);
+  void s.ask('GET', `/created?code=${CODE}&state=${s.state}`);
+  await s.settle();
+  w.stop();
+  assert.deepEqual(w.calls.release, ['/keys/visto.env']);
+  assert.ok(visible(w.lines).includes('https://github.com/organizations/acme/settings/apps'));
+});
+
+test('stopped after the key was written, nothing is released', async () => {
+  const w = world();
+  const s = await start(ARGS, w);
+  await s.ask('GET', `/created?code=${CODE}&state=${s.state}`);
+  assert.equal(await s.running, 0);
+  const before = [...w.lines];
+  w.stop();
+  assert.deepEqual(w.calls.release, []);
+  assert.deepEqual(w.lines, before);
+});
+
+test('the stop handler is registered once the file is reserved, and not before', async () => {
+  const refused = world({ reserve: false });
+  assert.equal(await run(ARGS, refused.io), 2);
+  assert.throws(() => refused.stop(), /no stop handler/);
+  const w = world();
+  const s = await start(ARGS, w);
+  assert.doesNotThrow(() => w.stop());
+  void s;
+});
+
+const secretCases: Array<[string, string]> = [['a line break', 'x\nINJ=1'], ['a space', 'x y'], ['a non-ASCII character', 'x\u00e9']];
+for (const [what, secret] of secretCases) {
+  test(`a webhook secret with ${what} is refused as a bad response`, async () => {
+    await assert.rejects(convert(CODE, { fetch: stubFetch([answer(201, appBody({ webhook_secret: secret }))]).fetch }), { message: 'github_bad_response' });
+  });
+}
+
+test('a key with a NUL is refused as a bad response', async () => {
+  await assert.rejects(convert(CODE, { fetch: stubFetch([answer(201, appBody({ pem: PEM.replace('AAAA', 'AA\u0000A') }))]).fetch }), { message: 'github_bad_response' });
+});
+
+test('a key with another variable after a line break is still written on one line', async () => {
+  const pem = PEM.replace('AAAA\n', 'AAAA\nINJ=1\n');
+  const app = await convert(CODE, { fetch: stubFetch([answer(201, appBody({ pem }))]).fetch });
+  assert.deepEqual(envLines(app).split('\n'), [`APP_PRIVATE_KEY=${PEM_ONE_LINE.replace('AAAA\\n', 'AAAA\\nINJ=1\\n')}`, `WEBHOOK_SECRET=${SECRET}`, '']);
+});
+
+test('an ordinary key and secret still pass', async () => {
+  const secret = '!#$%&()*+,-./0123456789:;<=>?@AZ[]^_`az{|}~';
+  const app = await convert(CODE, { fetch: stubFetch([answer(201, appBody({ webhook_secret: secret }))]).fetch });
+  assert.deepEqual([app.pem, app.webhookSecret], [PEM, secret]);
+});
+
+test('a prefix of the right state is refused', async () => {
+  const w = world();
+  const s = await start(ARGS, w);
+  const back = await s.ask('GET', `/created?code=${CODE}&state=${s.state.slice(0, -1)}`);
+  assert.deepEqual([back.status, back.exit, w.fetchCalls.length], [400, null, 0]);
+  await s.ask('GET', `/created?code=${CODE}&state=${s.state}`);
+  await s.running;
+});
+
+test('the right host followed by more characters is refused', async () => {
+  const w = world();
+  const s = await start(ARGS, w);
+  assert.equal((await s.ask('GET', `/${s.token}`, '127.0.0.1:40100')).status, 400);
+  assert.equal((await s.ask('GET', `/${s.token}`, 'localhost:4010.example.test')).status, 400);
+  const back = await s.ask('GET', `/created?code=${CODE}&state=${s.state}`, '127.0.0.1:4010x');
+  assert.deepEqual([back.status, w.fetchCalls.length], [400, 0]);
+  await s.ask('GET', `/created?code=${CODE}&state=${s.state}`);
+  await s.running;
+});
+
+test("the owner's login is in the lines printed on success", async () => {
+  const w = world({ answers: [answer(201, appBody({ owner: { login: 'octo-org' } }))] });
+  const s = await start(ARGS, w);
+  await s.ask('GET', `/created?code=${CODE}&state=${s.state}`);
+  await s.running;
+  assert.ok(visible(w.lines).includes('octo-org'));
+});
+
+test('an empty webhook secret counts as none', async () => {
+  const app = await convert(CODE, { fetch: stubFetch([answer(201, appBody({ webhook_secret: '' }))]).fetch });
+  assert.equal(app.webhookSecret, null);
+  assert.equal(envLines(app), `APP_PRIVATE_KEY=${PEM_ONE_LINE}\n`);
+});
+
+test('a second way back while the first exchange is waiting is refused and starts no exchange', async () => {
+  const held = heldFetch();
+  const w = world({ fetch: held.fetch });
+  const s = await start(ARGS, w);
+  const first = s.ask('GET', `/created?code=${CODE}&state=${s.state}`);
+  await s.settle();
+  const again = await s.ask('GET', `/created?code=${CODE}&state=${s.state}`);
+  assert.deepEqual([again.status, again.exit], [409, null]);
+  assert.equal(held.calls.length, 1);
+  held.answer(answer(201));
+  assert.equal((await first).exit, 0);
+  assert.equal(await s.running, 0);
 });

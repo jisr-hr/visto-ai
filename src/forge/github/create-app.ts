@@ -45,6 +45,9 @@ export function formPage(manifest: Manifest, opts: { org: string | null; state: 
 export interface CreatedApp { id: number; slug: string; name: string; owner: string; htmlUrl: string; pem: string; webhookSecret: string | null }
 
 const filled = (v: unknown): v is string => typeof v === 'string' && v !== '';
+// What a key and a secret may hold, so that neither can add a line or a variable to the env file.
+const PEM_TEXT = /^[A-Za-z0-9+/= \r\n-]*$/;
+const SECRET_TEXT = /^[!-~]+$/;
 
 /** Exchanges the code GitHub sent back for the app it created. */
 export async function convert(code: string, deps: { fetch: typeof fetch; apiBase?: string }): Promise<CreatedApp> {
@@ -68,9 +71,9 @@ export async function convert(code: string, deps: { fetch: typeof fetch; apiBase
   if (!res.ok) throw new Error(`github_${res.status}`);
   const body = await jsonOf(res);
   if (!isObject(body) || !Number.isInteger(body.id) || !filled(body.slug) || !filled(body.name) || !isObject(body.owner) || !filled(body.owner.login)
-    || !filled(body.html_url) || typeof body.pem !== 'string' || !body.pem.startsWith('-----BEGIN')) throw new Error('github_bad_response');
+    || !filled(body.html_url) || typeof body.pem !== 'string' || !body.pem.startsWith('-----BEGIN') || !PEM_TEXT.test(body.pem)) throw new Error('github_bad_response');
   const secret = body.webhook_secret;
-  if (secret !== undefined && secret !== null && typeof secret !== 'string') throw new Error('github_bad_response');
+  if (secret !== undefined && secret !== null && (typeof secret !== 'string' || (secret !== '' && !SECRET_TEXT.test(secret)))) throw new Error('github_bad_response');
   return {
     id: body.id as number, slug: body.slug, name: body.name, owner: body.owner.login, htmlUrl: body.html_url, pem: body.pem,
     webhookSecret: filled(secret) ? secret : null,
@@ -113,6 +116,11 @@ const text = (status: number, body: string): Answer => ({ status, headers: { 'co
 const html = (body: string): Answer => ({ status: 200, headers: { 'content-type': 'text/html; charset=utf-8' }, body, exit: null });
 const DONE = '<!doctype html>\n<html><head><meta charset="utf-8"><title>Visto AI</title></head><body><p>Done here. Go back to the terminal.</p></body></html>\n';
 const CODE = /^[A-Za-z0-9_-]{1,200}$/;
+
+const noKeyLines = (org: string | null): string[] => [
+  'An app may now exist on GitHub with no private key in anyone\'s hands.',
+  `Its settings are at ${settingsBase(org)}: generate a private key and a webhook secret there, or delete the app.`,
+];
 const SHORT_CODE = /^github_[a-z0-9_]+$/;
 
 /** One request to the local page. `exit` is the command's exit code once it is decided, else null. */
@@ -156,8 +164,7 @@ export async function handle(request: Request, session: Session): Promise<Answer
     exit = 0;
   } catch (error) {
     session.out(`failed: ${(error as Error).message}`);
-    session.out('An app may now exist on GitHub with no private key in anyone\'s hands.');
-    session.out(`Its settings are at ${settingsBase(session.org)}: generate a private key and a webhook secret there, or delete the app.`);
+    for (const line of noKeyLines(session.org)) session.out(line);
     exit = 1;
   }
   return { status: 303, headers: { location: '/done', 'content-type': 'text/plain; charset=utf-8' }, body: 'see /done\n', exit };
@@ -169,6 +176,8 @@ export interface Io {
   reserve(path: string): boolean; fill(path: string, text: string): void; release(path: string): void;
   /** Starts listening on this machine only and answers with the port BEFORE any request is handled. */
   listen(handler: (request: Request) => Promise<Answer>): Promise<{ port: number; close(): Promise<void> }>;
+  /** Calls the handler when the command is stopped (Ctrl-C or a termination signal). */
+  onStop(handler: () => void): void;
 }
 
 const USAGE = 'usage: app:create --webhook-url <https url> --out <file> [--org <login>]';
@@ -203,10 +212,25 @@ export async function run(argv: string[], io: Io): Promise<number> {
     return 2;
   }
   let written = false;
+  let released = false;
+  let decided = false;               // the outcome is printed: a stop adds nothing to it
+  const release = (): void => {
+    if (written || released) return;
+    released = true;
+    io.release(out);
+  };
+  const held: { session?: Session } = {};
+  io.onStop(() => {
+    if (written) return;
+    if (held.session?.taken === true && !decided) {
+      io.out('stopped before the app\'s key was written');
+      for (const line of noKeyLines(org)) io.out(line);
+    }
+    release();
+  });
   try {
     const state = io.random();
     const token = io.random();
-    const held: { session?: Session } = {};
     let finish: (exit: number) => void = () => {};
     const finished = new Promise<number>((resolve) => { finish = resolve; });
     const server = await io.listen(async (request) => {
@@ -221,11 +245,12 @@ export async function run(argv: string[], io: Io): Promise<number> {
     };
     io.out(`Open this address in a browser on this machine: http://127.0.0.1:${server.port}/${token}`);
     const exit = await finished;
+    decided = true;
     if (exit === 0) io.out(`The app's secrets are in ${out}.`);
     await server.close();
     return exit;
   } finally {
-    if (!written) io.release(out);
+    release();
   }
 }
 
@@ -237,6 +262,11 @@ if (import.meta.main) {
     reserve: reserveFile,
     fill: (path, t) => { fs.writeFileSync(path, t, { mode: 0o600 }); },
     release: (path) => { fs.rmSync(path, { force: true }); },
+    onStop: (handler) => {
+      const stop = (): void => { handler(); process.exit(130); };
+      process.once('SIGINT', stop);
+      process.once('SIGTERM', stop);
+    },
     listen: (handler) => new Promise((resolve, reject) => {
       const server = http.createServer((req, res) => {
         const request = { method: req.method ?? '', url: req.url ?? '', host: req.headers.host ?? '' };
