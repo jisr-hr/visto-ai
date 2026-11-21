@@ -102,3 +102,15 @@ test('a posted comment the read-back missed is tied to its finding from the thre
   assert.deepEqual(missedComments({ runs: [run()], stored: [], threads: [thread({ comments: [{ ...ROOT, reviewId: '999' }] })] }), []);
   assert.deepEqual(missedComments({ runs: [run()], stored: [], threads: [thread({ comments: [{ ...ROOT, body: 'edited by hand' }] })] }), []);
 });
+
+const NOTE_ROOT: ThreadComment = { ...ROOT, id: '8002', node: 'N3', body: '**Human review:** lines 12-40, 85% `calculation`' };
+test('a note is not an earlier thread', () => {
+  const note = { commentId: '8002', path: 'src/a.ts', side: 'RIGHT' as const, line: 12, severity: 'note', quote: '', blockHash: 'h1', run: 1 };
+  const out = earlierOf({ last: run(), runs: [run()], stored: [STORED, note], threads: [thread(), thread({ id: 'PRRT_2', comments: [NOTE_ROOT] })] });
+  assert.deepEqual(out.threads.map((t) => t.id), ['PRRT_1']);
+});
+test('a note the database missed is repaired as a note', () => {
+  const withNote = run({ comments: [{ path: 'src/a.ts', side: 'RIGHT', line: 12, body: BODY }, { path: 'src/a.ts', side: 'RIGHT', line: 12, body: NOTE_ROOT.body, note: 'h1' }] });
+  assert.deepEqual(missedComments({ runs: [withNote], stored: [STORED], threads: [thread(), thread({ id: 'PRRT_2', comments: [NOTE_ROOT] })] }),
+    [{ commentId: '8002', path: 'src/a.ts', side: 'RIGHT', line: 12, severity: 'note', quote: '', blockHash: 'h1', run: 1 }]);
+});
