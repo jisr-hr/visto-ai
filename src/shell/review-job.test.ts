@@ -31,7 +31,7 @@ beforeEach(async () => { db = await testDb(); });
 afterEach(async () => { await db.close(); });
 
 const LIMITS = { inputTokensPerCall: 200_000, batchesPerReview: 6, modelTimeoutSeconds: 240 };
-const SETTINGS: RepoSettings = { primaryBranches: ['main'], scoreThreshold: 70, ignoredAuthors: ['dependabot[bot]'], baseBranches: [], newHead: null };
+const SETTINGS: RepoSettings = { primaryBranches: ['main'], scoreThreshold: 70, ignoredAuthors: ['dependabot[bot]'], baseBranches: [], newHead: null, inlineNotes: false };
 const LIVE: LivePullRequest = {
   info: { ref: REF, title: 'Add things', description: '', author: 'octo-dev', baseBranch: 'main', headBranch: 'feat', baseSha: 'merge000', headSha: 'h1', draft: false },
   state: 'open',
@@ -522,7 +522,7 @@ test('a finished review is recorded, posted, marked published, and its comments 
   assert.deepEqual([stored!.dryRun, stored!.outcome, stored!.published, stored!.reviewId, stored!.inlineDropped], [false, 'ok', true, '501', false]);
   const j = await getJob(db, h.job.id);
   assert.deepEqual([j?.status, j?.outcome], ['done', 'published']);
-  assert.deepEqual(await listComments(db, REF), [{ commentId: '9001', path: 'a.ts', side: 'RIGHT', line: 3, severity: 'minor', quote: 'x', run: stored!.id }]);
+  assert.deepEqual(await listComments(db, REF), [{ commentId: '9001', path: 'a.ts', side: 'RIGHT', line: 3, severity: 'minor', quote: 'x', blockHash: null, run: stored!.id }]);
   const entry = h.logged.find((e) => e.event === 'review')!;
   assert.deepEqual([entry.published, entry.review, entry.publish, entry.publish_code, entry.resumed, entry.adopted], [true, '501', 'published', null, false, false]);
   assert.deepEqual(h.logged.find((e) => e.event === 'readback'), { event: 'readback', job: h.job.id, run: stored!.id, posted: 1, stored: 1 });
@@ -953,7 +953,7 @@ test('a comment the read-back missed is stored from its thread before the review
   const run = await published({ comments: [] });
   const h = await live({ own: [[{ id: '401', commit: 'h0' }]], threads: [[THREAD]] });
   await runReviewJob(h.job, h.deps);
-  assert.deepEqual((await listComments(db, REF)).filter((c) => c.commentId === '8001'), [{ ...STORED_8001, run }]);
+  assert.deepEqual((await listComments(db, REF)).filter((c) => c.commentId === '8001'), [{ ...STORED_8001, blockHash: null, run }]);
   assert.equal(h.inputs[0]!.earlier?.threads.length, 1);
 });
 test('no verdict kept, no second read of the threads', async () => {

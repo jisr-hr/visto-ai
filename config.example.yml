@@ -92,8 +92,11 @@ repositories:
     # newHead: incremental
     # A changed block scored at or above this (1 to 100) is listed for a human reviewer.
     # It is 70 when not written, and must be written when a scorer is named.
+    # inlineNotes switches on a short comment in the diff for each block listed for a human reviewer; a note is an ordinary review thread.
+    # It is false when not written.
     # score:
     #   threshold: 70
+    #   inlineNotes: false
   # Per-repository changes, keyed by "owner/name"; each replaces only the keys it sets.
   overrides:
     acme/shop: { primaryBranches: [trunk], baseBranches: [trunk], score: { threshold: 60 } }

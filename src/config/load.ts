@@ -29,6 +29,8 @@ export interface RepoSettings extends RepoConfig {
   ignoredAuthors: string[]; baseBranches: string[];
   /** How a head after a review is reviewed; null when the file does not say, which reads as incremental. */
   newHead: 'full' | 'incremental' | null;
+  /** Whether a short note is posted in the diff for each block a person should read. */
+  inlineNotes: boolean;
 }
 
 export type ServiceConfig = DeploymentConfig & {
@@ -168,6 +170,7 @@ export function parseConfig(yamlText: string, env: Record<string, string | undef
       defaults: {
         primaryBranches: defaults.primaryBranches, scoreThreshold: defaults.score.threshold,
         ignoredAuthors: defaults.ignoredAuthors, baseBranches: defaults.baseBranches, newHead: defaults.newHead ?? null,
+        inlineNotes: defaults.score.inlineNotes,
       },
       overrides: Object.fromEntries(
         Object.entries(overrides).map(([name, o]) => [
@@ -175,6 +178,7 @@ export function parseConfig(yamlText: string, env: Record<string, string | undef
           {
             ...(o.primaryBranches === undefined ? {} : { primaryBranches: o.primaryBranches }),
             ...(o.score?.threshold === undefined ? {} : { scoreThreshold: o.score.threshold }),
+            ...(o.score?.inlineNotes === undefined ? {} : { inlineNotes: o.score.inlineNotes }),
             ...(o.ignoredAuthors === undefined ? {} : { ignoredAuthors: o.ignoredAuthors }),
             ...(o.baseBranches === undefined ? {} : { baseBranches: o.baseBranches }),
             ...(o.newHead === undefined ? {} : { newHead: o.newHead }),
