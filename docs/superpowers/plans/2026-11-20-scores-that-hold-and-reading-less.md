@@ -830,3 +830,9 @@ The scratch repository and the app of plan 6's trial are still there. Each of th
 6. A `/review` on a reviewed head: a re-check that judges the threads.
 7. A push that merges the base branch and changes nothing in the diff: no review, the job ends as `nothing_new`; then a `/review` on that head.
 8. A force-push that rebases the branch: the scores hold and the increment is only what changed.
+
+## What was built
+
+All ten tasks were built and reviewed, and corrected after a review of the whole branch; the rules above are the rules as built (calls 13 and 24 and Review Focus 17 to 19 came from that review). What was decided on the way, what the real run and a trial with a real app showed, and what was put off are in `2026-11-20-scores-that-hold-and-reading-less-notes.md`.
+
+Of "To verify with a real app": items 2, 3, 6 and 7 were seen. Item 4 was seen for the one block that had a stored score. Item 1 was seen in part: the model sent a score for a block marked `scored` once, which was ignored, and sent no whole-file score where none is taken. Item 5 was seen without a finding on an unchanged line. Item 8 was seen for a rebase that changed no content.
