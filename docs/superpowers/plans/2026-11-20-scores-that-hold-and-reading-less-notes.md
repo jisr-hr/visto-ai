@@ -90,8 +90,8 @@ On 2026-11-21 the final code was tried against a real GitHub App on a small priv
 - **Inline notes on the blocks listed for a person (D22) and the app manifest:** the next plan, before the gate.
 - **For the owner to decide:**
   - whether the key for reuse should also cover the lines around a block (call 19);
-  - whether a new file should be held to the scores of files that left the diff in the same push (call 24). Today a new file renamed and edited in one push is scored afresh; so is the lower of two identical new files when the higher is deleted;
   - the place of the section on unchanged code (call 23).
+- **Ruled by the owner on 2026-11-21:** a new file is not held to the scores of files that left the diff in the same push (call 24). A new file renamed and edited in one push is therefore scored afresh, and so is the lower of two identical new files when the higher is deleted.
 - **Known and left as they are:**
   - A file with an unsettled major or blocker thread is read at every push, changed or not (5.2). A thread on a file that left the diff makes every push post a review with no model call.
   - The increment compares a file's content at two heads. A line that enters the diff with its text unchanged (the base moved under it) counts as unchanged, and of two swapped lines one does; a major there is listed in the body and not posted. A moved file read once where it now stands is told that no line changed, so a major about the move is listed too; a blocker is posted.
