@@ -11,9 +11,10 @@ import type { RunRecord } from '../db/review-runs.ts';
 import { listComments, recordComments } from '../db/review-comments.ts';
 import type { StoredComment } from '../db/review-comments.ts';
 import type { RepoSettings } from '../config/load.ts';
-import type { ForgeWriter, LivePullRequest, PostedComment, ReviewThread, Source } from '../forge/types.ts';
+import type { ForgeWriter, LivePullRequest, PostedComment, ReviewDraft, ReviewThread, Source } from '../forge/types.ts';
 import { review } from '../engine/review.ts';
 import { renderReview } from '../engine/render/body.ts';
+import { renderNotes } from '../engine/render/notes.ts';
 import { shownOf } from '../engine/score/shown.ts';
 import type { BlockScore } from '../engine/score/types.ts';
 import { SUBMIT_REVIEW } from '../engine/model/submit-review.ts';
@@ -108,7 +109,12 @@ interface Options {
   canResolve?: boolean;
   /** replyToThread, editThreadComment and resolveThread reject. */
   threadWriteFails?: boolean;
+  /** listReviewComments answers the comments each review was posted with, each with an id of its own; `posted` is then not used. */
+  echo?: boolean;
 }
+
+/** The next id an echoed comment gets: never one another echoed comment had. */
+let echoedId = 9100;
 
 async function harness(options: Options = {}) {
   const ref = options.pullRequest === undefined ? REF : { ...REF, number: options.pullRequest };
@@ -155,11 +161,17 @@ async function harness(options: Options = {}) {
   const owns = [...(options.own ?? [])];
   const threadAnswers = [...(options.threads ?? [])];
   const threadWrite = (): void => { if (options.threadWriteFails === true) throw new Error('github_502'); };
+  /** Every draft publishReview was given, as it was given. */
+  const drafts: ReviewDraft[] = [];
+  /** With echo: the comments of each posted review, by its id. */
+  const echoes = new Map<string, PostedComment[]>();
   const writer: ForgeWriter = {
     publishReview: async (_ref, _installation, draft) => {
       writes.push(['publishReview', draft.commit, draft.body, draft.comments.length]);
+      drafts.push(structuredClone(draft));
       const next = posts.shift() ?? { id: '501' };
       if (next instanceof Error) throw next;
+      echoes.set(next.id, draft.comments.map((c) => ({ id: String(echoedId++), path: c.path, side: c.side, line: c.line, body: c.body })));
       return next;
     },
     listOwnReviews: async () => {
@@ -170,6 +182,7 @@ async function harness(options: Options = {}) {
     },
     listReviewComments: async (_ref, _installation, reviewId) => {
       writes.push(['listReviewComments', reviewId]);
+      if (options.echo === true) return echoes.get(reviewId) ?? [];
       const posted = options.posted === undefined ? POSTED : options.posted;
       if (posted instanceof Error) throw posted;
       return posted;
@@ -256,7 +269,7 @@ async function harness(options: Options = {}) {
     health: { reviewed: (code, when) => { healthCalls.push(code); healthTimes.push(when.toISOString()); } },
     spend: { noteRun: (usage) => { spendCalls.push(usage); } },
   };
-  return { job, deps, inputs, engines, healthCalls, healthTimes, spendCalls, slept, logged, writes, get reads() { return reads; } };
+  return { job, deps, inputs, engines, healthCalls, healthTimes, spendCalls, slept, logged, writes, drafts, get reads() { return reads; } };
 }
 const live = (options: Options = {}) => harness({ dryRun: false, ...options });
 /** A job a /review comment stored: by octo-lead, comment 31, through installation 99; out of dry run unless given. */
@@ -525,7 +538,7 @@ test('a finished review is recorded, posted, marked published, and its comments 
   assert.deepEqual(await listComments(db, REF), [{ commentId: '9001', path: 'a.ts', side: 'RIGHT', line: 3, severity: 'minor', quote: 'x', blockHash: null, run: stored!.id }]);
   const entry = h.logged.find((e) => e.event === 'review')!;
   assert.deepEqual([entry.published, entry.review, entry.publish, entry.publish_code, entry.resumed, entry.adopted], [true, '501', 'published', null, false, false]);
-  assert.deepEqual(h.logged.find((e) => e.event === 'readback'), { event: 'readback', job: h.job.id, run: stored!.id, posted: 1, stored: 1 });
+  assert.deepEqual(h.logged.find((e) => e.event === 'readback'), { event: 'readback', job: h.job.id, run: stored!.id, posted: 1, stored: 1, notes: 0, notes_missing: 0 });
 });
 test('in dry run nothing is ever written to the git service', async () => {
   const h = await harness();
@@ -1323,4 +1336,211 @@ test('the review entry says nothing was new only when the job ended so', async (
   await runReviewJob(h.job, h.deps);
   assert.equal((await getJob(db, h.job.id))?.outcome, 'published');
   assert.equal(h.logged.find((e) => e.event === 'review')!.nothing_new, false);
+});
+
+const NOTES_ON: RepoSettings = { ...SETTINGS, inlineNotes: true };
+/** A finished review, with okResult's finding, whose file a.ts has one block for each [hash, score, line] given. */
+const blocksResult = (blocks: Array<[string, number, number]>, over: Partial<ReviewResult> = {}): ReviewResult => {
+  const highest = Math.max(...blocks.map(([, score]) => score));
+  return okResult({
+    scores: [{
+      path: 'a.ts', previousPath: null, diffHash: 'd', changeSummary: '', changedLines: blocks.length, wholeFile: null, fileLevel: null, finalScore: highest, covered: true,
+      blocks: blocks.map(([hash, score, line], i): BlockScore => ({
+        id: `B${i + 1}`, hunk: `B${i + 1}`, hunkHash: hash, hash, changedLines: 1, span: { side: 'RIGHT', first: line, last: line },
+        lines: { old: [], new: [] } as unknown as BlockScore['lines'], entry: { score, category: 'calculation', reason: 'Totals.' },
+      })),
+    }],
+    verdict: { threshold: 70, needsHuman: highest >= 70, highest },
+    ...over,
+  });
+};
+/** The entries of a list of comments, posted or recorded, that are notes. */
+const notesIn = (comments: unknown): Array<Record<string, unknown>> =>
+  (Array.isArray(comments) ? comments as unknown[] : []).filter((c): c is Record<string, unknown> => typeof (c as { note?: unknown } | null)?.note === 'string');
+/** The hashes of the blocks the notes among these comments are for. */
+const notedBlocks = (comments: unknown): unknown[] => notesIn(comments).map((c) => c.note);
+/** A stored note for the block `hash` of a.ts. */
+const noteRow = (hash: string, commentId = '8100'): StoredComment => ({ commentId, path: 'a.ts', side: 'RIGHT', line: 10, severity: 'note', quote: '', blockHash: hash });
+/** The rendered finding's comments and notes of a result, as a run records them. */
+const recordedComments = (result: ReviewResult): unknown[] => [
+  ...renderReview(result, { trigger: 'automatic', requestedBy: null, lineUrl: () => 'https://git.example.test/x', inline: true }).comments,
+  ...renderNotes(result, new Set()),
+];
+/** The threads a review's draft opened on the pull request, one for each of its comments, their ids from `firstId` on. */
+const threadsOf = (draft: ReviewDraft, reviewId: string, firstId: number): ReviewThread[] => draft.comments.map((c, i) => ({
+  id: `PRRT_${firstId + i}`, path: c.path, side: c.side, line: c.line, resolved: false, resolvedByApp: false,
+  comments: [{ id: String(firstId + i), node: `PRRC_${firstId + i}`, author: 'visto-test[bot]', authorIsBot: true, byApp: true, reviewId, body: c.body, at: at(-100) }],
+}));
+const noteRows = async (number = 7): Promise<Array<[string, string | null | undefined, number]>> =>
+  (await listComments(db, { ...REF, number })).filter((c) => c.severity === 'note').map((c) => [c.path, c.blockHash, c.run]);
+
+test('with inline notes on, a review is posted with a note for each flagged block', async () => {
+  const result = blocksResult([['hA', 85, 10], ['hB', 30, 20]]);
+  const h = await live({ settings: NOTES_ON, result, echo: true });
+  await runReviewJob(h.job, h.deps);
+  const [draft] = h.drafts;
+  assert.equal(draft!.comments.length, result.findings.length + 1);
+  const note = draft!.comments.at(-1)!;
+  assert.ok(note.body.startsWith('**Human review:**'));
+  assert.deepEqual(notedBlocks(draft!.comments), ['hA']);
+  const [run] = await listRuns(db, REF);
+  assert.deepEqual((run!.comments as unknown[]).at(-1), renderNotes(result, new Set())[0]);
+  assert.equal(((run!.comments as unknown[]).at(-1) as { body: string }).body, note.body);
+});
+test('with inline notes on, the read-back stores the note with its block', async () => {
+  const h = await live({ settings: NOTES_ON, result: blocksResult([['hA', 85, 10], ['hB', 30, 20]]), echo: true });
+  await runReviewJob(h.job, h.deps);
+  const [run] = await listRuns(db, REF);
+  assert.deepEqual(await noteRows(), [['a.ts', 'hA', run!.id]]);
+});
+test('with inline notes off nothing is noted', async () => {
+  const result = blocksResult([['hA', 85, 10]]);
+  const expected = renderReview(result, { trigger: 'automatic', requestedBy: null, lineUrl: () => 'https://git.example.test/x', inline: true }).comments;
+  const h = await live({ result, echo: true });
+  await runReviewJob(h.job, h.deps);
+  assert.deepEqual(h.drafts.map((d) => d.comments), [expected]);
+  assert.deepEqual((await listRuns(db, REF))[0]!.comments, expected);
+  assert.deepEqual((await listComments(db, REF)).map((c) => c.severity), ['minor']);
+});
+test('a block that has its note is not noted again at the next review', async () => {
+  await published({ comments: [STORED_8001, noteRow('hA')] });
+  const h = await live({ settings: NOTES_ON, result: blocksResult([['hA', 85, 10], ['hB', 90, 20]]), echo: true });
+  await runReviewJob(h.job, h.deps);
+  assert.deepEqual(notedBlocks(h.drafts[0]!.comments), ['hB']);
+});
+test('notes GitHub refused are stored as no note, and the log says they were dropped', async () => {
+  const first = await live({ settings: NOTES_ON, result: blocksResult([['hA', 85, 10]]), echo: true, posts: [new Error('review_rejected'), { id: '501' }] });
+  await runReviewJob(first.job, first.deps);
+  assert.deepEqual(first.drafts.map((d) => notedBlocks(d.comments)), [['hA'], []]);
+  assert.deepEqual(await noteRows(), []);
+  assert.equal(first.logged.find((e) => e.event === 'review')!.notes_dropped, true);
+});
+test('notes GitHub refused are given at the next review', async () => {
+  const result = blocksResult([['hA', 85, 10]]);
+  const first = await live({ settings: NOTES_ON, result, echo: true, posts: [new Error('review_rejected'), { id: '501' }] });
+  await runReviewJob(first.job, first.deps);
+  const next = await live({ head: 'h2', settings: NOTES_ON, result, echo: true, posts: [{ id: '502' }] });
+  await runReviewJob(next.job, next.deps);
+  assert.deepEqual(notedBlocks(next.drafts[0]!.comments), ['hA']);
+});
+test('in dry run the notes are recorded and nothing is posted', async () => {
+  const h = await harness({ settings: NOTES_ON, result: blocksResult([['hA', 85, 10]]) });
+  await runReviewJob(h.job, h.deps);
+  assert.deepEqual(h.writes, []);
+  const [run] = await listRuns(db, REF);
+  assert.deepEqual([run!.dryRun, run!.published, notedBlocks(run!.comments)], [true, false, ['hA']]);
+});
+test('a failed review records no note', async () => {
+  const flagged = blocksResult([['hA', 85, 10]]);
+  const h = await live({ settings: NOTES_ON, result: { ...flagged, status: 'failed', failure: { stage: 'model', code: 'timeout' }, dependencies: { model: 'error' } } });
+  await runReviewJob(h.job, h.deps);
+  assert.deepEqual((await listRuns(db, REF))[0]!.comments, []);
+  assert.equal(h.logged.find((e) => e.event === 'review')!.notes, 0);
+});
+test('a push that tells nothing new records no note', async () => {
+  await published({ head: 'h0' });
+  const h = await live({ own: OWN_401, settings: NOTES_ON, result: blocksResult([['hA', 85, 10]], { nothingToDo: true, mode: 'incremental' }) });
+  await runReviewJob(h.job, h.deps);
+  assert.equal((await getJob(db, h.job.id))?.outcome, 'nothing_new');
+  assert.deepEqual((await listRuns(db, REF)).at(-1)!.comments, []);
+  assert.equal(h.logged.find((e) => e.event === 'review')!.notes, 0);
+});
+test('the review entry counts the notes', async () => {
+  const result = blocksResult([['hA', 85, 10]]);
+  const on = await live({ settings: NOTES_ON, result, echo: true });
+  await runReviewJob(on.job, on.deps);
+  const onEntry = on.logged.find((e) => e.event === 'review')!;
+  assert.deepEqual([onEntry.notes, onEntry.notes_dropped], [1, false]);
+  const off = await live({ pullRequest: 8, result, echo: true });
+  await runReviewJob(off.job, off.deps);
+  const offEntry = off.logged.find((e) => e.event === 'review')!;
+  assert.deepEqual([offEntry.notes, offEntry.notes_dropped], [0, false]);
+});
+test('the review entry has no notes_dropped when nothing was published', async () => {
+  const h = await harness({ settings: NOTES_ON, result: blocksResult([['hA', 85, 10]]) });
+  await runReviewJob(h.job, h.deps);
+  const entry = h.logged.find((e) => e.event === 'review')!;
+  assert.deepEqual([entry.notes, entry.notes_dropped], [1, null]);
+});
+test('the read-back line counts the notes stored and none missing', async () => {
+  const h = await live({ settings: NOTES_ON, result: blocksResult([['hA', 85, 10]]), echo: true });
+  await runReviewJob(h.job, h.deps);
+  const [run] = await listRuns(db, REF);
+  assert.deepEqual(h.logged.find((e) => e.event === 'readback'), { event: 'readback', job: h.job.id, run: run!.id, posted: 2, stored: 2, notes: 1, notes_missing: 0 });
+});
+test('the read-back line counts a note GitHub gave back changed as missing', async () => {
+  const changed: PostedComment = { id: '9301', path: 'a.ts', side: 'RIGHT', line: 10, body: '**Human review:** line 10, changed' };
+  const h = await live({ settings: NOTES_ON, result: blocksResult([['hA', 85, 10]]), posted: [...POSTED, changed] });
+  await runReviewJob(h.job, h.deps);
+  const [run] = await listRuns(db, REF);
+  assert.deepEqual(h.logged.find((e) => e.event === 'readback'), { event: 'readback', job: h.job.id, run: run!.id, posted: 2, stored: 1, notes: 0, notes_missing: 1 });
+});
+test('a note whose read-back failed is known from its thread and is not posted again', async () => {
+  const first = await live({ settings: NOTES_ON, result: blocksResult([['hA', 85, 10]]), posted: null, posts: [{ id: '501' }] });
+  await runReviewJob(first.job, first.deps);
+  assert.deepEqual(await listComments(db, REF), []);
+  const [run] = await listRuns(db, REF);
+  const next = await live({
+    head: 'h2', settings: NOTES_ON, result: blocksResult([['hA', 85, 10], ['hB', 90, 20]]), threads: [threadsOf(first.drafts[0]!, '501', 7000)], echo: true, posts: [{ id: '502' }],
+  });
+  await runReviewJob(next.job, next.deps);
+  assert.deepEqual(notedBlocks(next.drafts[0]!.comments), ['hB']);
+  assert.deepEqual((await noteRows()).filter(([, , r]) => r === run!.id), [['a.ts', 'hA', run!.id]]);
+});
+test('a note whose read-back failed is known from its thread when recording the repair throws too', async () => {
+  const first = await live({ settings: NOTES_ON, result: blocksResult([['hA', 85, 10]]), posted: null, posts: [{ id: '501' }] });
+  await runReviewJob(first.job, first.deps);
+  const next = await live({
+    head: 'h2', settings: NOTES_ON, result: blocksResult([['hA', 85, 10], ['hB', 90, 20]]), threads: [threadsOf(first.drafts[0]!, '501', 7000)], echo: true, posts: [{ id: '502' }],
+    failQuery: 'insert into visto_ai.review_comments',
+  });
+  await runReviewJob(next.job, next.deps);
+  assert.equal(next.logged.some((e) => e.event === 'repair_failed'), true);
+  assert.deepEqual(notedBlocks(next.drafts[0]!.comments), ['hB']);
+});
+test('an adopted review has its notes read back', async () => {
+  const result = blocksResult([['hA', 85, 10]]);
+  const comments = recordedComments(result) as Array<{ path: string; side: 'LEFT' | 'RIGHT'; line: number; body: string }>;
+  const runId = await recorded({ result, comments });
+  const posted = comments.map((c, i) => ({ id: String(9201 + i), path: c.path, side: c.side, line: c.line, body: c.body }));
+  const h = await live({ settings: NOTES_ON, own: [[{ id: '502', commit: 'h1' }]], posted });
+  await runReviewJob(h.job, h.deps);
+  assert.equal(h.writes.some((w) => w[0] === 'publishReview'), false);
+  assert.deepEqual((await listComments(db, REF)).map((c) => [c.commentId, c.severity, c.blockHash, c.run]), [['9201', 'minor', null, runId], ['9202', 'note', 'hA', runId]]);
+  const line = h.logged.find((e) => e.event === 'readback')!;
+  assert.deepEqual([line.stored, line.notes, line.notes_missing], [2, 1, 0]);
+});
+test('a review a later start publishes is posted without its notes', async () => {
+  const result = blocksResult([['hA', 85, 10]]);
+  await recorded({ result, comments: recordedComments(result) });
+  const h = await live({ settings: NOTES_ON, echo: true });
+  await runReviewJob(h.job, h.deps);
+  assert.deepEqual(h.drafts.map((d) => d.comments), [renderReview(result, { trigger: 'automatic', requestedBy: null, lineUrl: () => 'https://git.example.test/x', inline: true }).comments]);
+  const entry = h.logged.find((e) => e.event === 'review')!;
+  assert.deepEqual([entry.resumed, entry.notes, entry.notes_dropped], [true, 1, true]);
+});
+test('the note a later start did not post is given at the next review', async () => {
+  const result = blocksResult([['hA', 85, 10]]);
+  await recorded({ result, comments: recordedComments(result) });
+  const h = await live({ settings: NOTES_ON, echo: true });
+  await runReviewJob(h.job, h.deps);
+  const next = await live({ head: 'h2', settings: NOTES_ON, result, echo: true, posts: [{ id: '502' }] });
+  await runReviewJob(next.job, next.deps);
+  assert.deepEqual(notedBlocks(next.drafts[0]!.comments), ['hA']);
+});
+test('a review whose text could not be rendered records no note', async () => {
+  const h = await live({ settings: NOTES_ON, renderThrows: true });
+  await runReviewJob(h.job, h.deps);
+  assert.equal((await getJob(db, h.job.id))?.outcome, 'render_failed');
+  assert.deepEqual((await listRuns(db, REF))[0]!.comments, []);
+  assert.equal(h.logged.find((e) => e.event === 'review')!.notes, 0);
+});
+test('notes switched off and on again are not repeated', async () => {
+  await published({ comments: [STORED_8001, noteRow('hA')] });
+  const off = await live({ result: blocksResult([['hA', 85, 10]]), echo: true });
+  await runReviewJob(off.job, off.deps);
+  assert.deepEqual(notedBlocks(off.drafts[0]!.comments), []);
+  const on = await live({ head: 'h2', settings: NOTES_ON, result: blocksResult([['hA', 85, 10], ['hB', 90, 20]]), echo: true, posts: [{ id: '502' }] });
+  await runReviewJob(on.job, on.deps);
+  assert.deepEqual(notedBlocks(on.drafts[0]!.comments), ['hB']);
 });
