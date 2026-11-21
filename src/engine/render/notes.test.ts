@@ -128,8 +128,13 @@ test('a damaged block is skipped', () => {
     bad({ entry: { score: '90', category: 'calculation', reason: '' } }), bad({ entry: { score: 90, category: 7, reason: '' } }),
     bad({ entry: { score: 90, category: 'calculation', reason: 4 } }), bad({ entry: undefined }),
     null as unknown as BlockScore, 'x' as unknown as BlockScore,
+    bad({ span: { side: 'RIGHT', first: 0, last: 2 } }), bad({ span: { side: 'RIGHT', first: -3, last: 2 } }),
+    bad({ span: { side: 'RIGHT', first: 1e300, last: 1e300 } }), bad({ span: { side: 'RIGHT', first: 5, last: 4 } }),
+    bad({ span: { side: 'LEFT', first: 2, last: 1e300 } }), bad({ span: { side: 'left', first: 1, last: 2 } }),
+    bad({ hash: '' }),
   ];
   for (const c of cases) assert.deepEqual(renderNotes(result([file('src/a.ts', [c])]), new Set()), []);
+  for (const c of cases) assert.deepEqual(renderNotes(result([file('src/a.ts', [c, good])]), new Set()).map((n) => n.note), ['good']);
   const mixed = renderNotes(result([file('src/a.ts', [...cases, good])]), new Set());
   assert.deepEqual(mixed.map((n) => n.note), ['good']);
 });

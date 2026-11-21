@@ -22,9 +22,9 @@ export function renderNotes(result: ReviewResult, noted: ReadonlySet<string>): N
     if (!isObject(file) || typeof file.path !== 'string' || !Array.isArray(file.blocks)) return;
     const path = file.path;
     (file.blocks as unknown[]).forEach((block, blockIndex) => {
-      if (!isObject(block) || typeof block.hash !== 'string' || !isObject(block.span) || !isObject(block.entry)) return;
+      if (!isObject(block) || typeof block.hash !== 'string' || block.hash === '' || !isObject(block.span) || !isObject(block.entry)) return;
       const { span, entry } = block;
-      if ((span.side !== 'LEFT' && span.side !== 'RIGHT') || !Number.isInteger(span.first) || !Number.isInteger(span.last)) return;
+      if ((span.side !== 'LEFT' && span.side !== 'RIGHT') || !Number.isSafeInteger(span.first) || !Number.isSafeInteger(span.last) || (span.first as number) < 1 || (span.last as number) < (span.first as number)) return;
       if (!isScore(entry.score) || typeof entry.category !== 'string' || typeof entry.reason !== 'string') return;
       if (entry.score < threshold) return;
       const key = noteKey(path, block.hash);
