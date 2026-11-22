@@ -86,6 +86,7 @@ Calls 1 to 10 are the session lead's, restated with their cost, and so are 45 to
 49. **A read or a write of GitHub that fails leaves the check GitHub already shows.** That can be a green one that no longer holds: a thread unresolved while the check cannot be written, or a review asked for on a green head. Fail closed bounds what the service writes, not what GitHub keeps. Cost: during an outage of the checks API, or once a job has given up, a merge can pass on a stale check; `gate_check_failed` is the only sign, and the next event or start tries again.
 50. **Every call to GitHub has a time limit of 60 seconds,** read as `github_network`. Found while this plan was built: the adapters were handed the platform's `fetch` as it is, whose own limits are minutes long and bound no call as a whole, so a call that hung would hold a commit's lock and a place of the gate's runner. The limit is set where the adapters are wired, so it holds for the review lane too: a call that hangs now fails after a minute and is tried again by the rules that exist. Cost: a slow answer of GitHub that would have come after a minute is now a failure.
 51. **A review posted without its inline comments whose stored result cannot be read blocks.** The count of findings GitHub refused cannot be made, so it is not read as none (call 45).
+52. **A check that failed is asked for again at the next start, and a pull request found closed is not.** Found by the review of the last task: the sweep at start (call 38) left a pull request whose newest recorded evaluation is `failed` alone, so a check the service had given up on stayed red until an event; and a `sync` that could not write at all recorded nothing. Now a `sync` that gives up records a `failed` row with its code, and the sweep asks again for `failed`. And a `sync` that finds the live pull request closed or gone records that (`closed`, `not_found`), so that a pull request the database still holds as open is not asked for at every start. Cost: a pull request whose check can never be written (the app was removed from the repository) is tried three times at each start, with one alert for each code.
 
 ## The predecessor's known gaps
 
@@ -1344,7 +1345,7 @@ test('when reviews are paused a waiting review\'s check says why, and says Revie
   /* Review Focus 8: a /done whose review waits; the daily limit is reached: the check 'Review waiting: reviews are paused (spend_limit)'; the next UTC day: 'Reviewing' and then the review runs */
 });
 test('a /done that joined the review of an older head is answered by a review of the new one', async () => {
-  /* Review Focus 1: /done at h1 starts a review that is held; a push makes the head h2 and its check waits for /done; a second /done joins the running review (eyes, no new job);
+  /* Review Focus 1: /done at h1 starts a review that is held; a push makes the head h2 and its check says 'Reviewing', since a review of the pull request is under way whatever its head (calls 12 and 43); a second /done joins the running review (eyes, no new job);
      the review ends as head_moved and starts over as done_retry: h2 is reviewed and its check decided, with no third /done; nothing was written on h1 after the push */
 });
 test('a whole round on a gated pull request', async () => {
