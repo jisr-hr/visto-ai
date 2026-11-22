@@ -241,14 +241,15 @@ test('an adopted review whose comment list was cut short drops nothing', async (
   assert.equal(postCount(h.calls), 0);
 });
 test('a comment list that is not a list is posted as the body alone', async () => {
-  const h = harness({ run: { ...run, comments: 'x' } });
+  const h = harness({ run: { ...run, comments: { 0: FINDING } } });
   assert.deepEqual(await publishRun(h.deps, h.args), { kind: 'published', reviewId: '501', body: run.body, inlineDropped: false, notesDropped: false, adopted: false });
   assert.equal(postCount(h.calls), 1);
   assert.deepEqual(h.drafts[0]?.comments, []);
 });
 test('an entry of the comment list that is not an object is dropped', async () => {
   const h = harness({ run: { ...run, comments: [FINDING, 'x', null, 7] } });
-  await publishRun(h.deps, h.args);
+  assert.deepEqual(await publishRun(h.deps, h.args), { kind: 'published', reviewId: '501', body: run.body, inlineDropped: false, notesDropped: false, adopted: false });
+  assert.equal(postCount(h.calls), 1);
   assert.deepEqual(h.drafts[0]?.comments, [FINDING]);
 });
 test('a review a later start publishes goes without its notes', async () => {
@@ -268,4 +269,24 @@ test('a review a later start publishes that GitHub already holds is adopted', as
     posted: [{ id: '9001', path: 'a.ts', side: 'RIGHT', line: 3, body: 'x' }, { id: '9002', path: 'a.ts', side: 'RIGHT', line: 5, body: NOTE.body }] });
   assert.deepEqual(await publishRun(h.deps, h.args), { kind: 'published', reviewId: '480', body: run.body, inlineDropped: false, notesDropped: false, adopted: true });
   assert.equal(postCount(h.calls), 0);
+});
+
+const REASON_NOTE = { path: 'a.ts', side: 'RIGHT', line: 5, body: '**Human review:** line 5, 80% `calculation` \u2014 Totals are rounded twice.', note: 'hash5' } as const;
+const withReasonNote: StoredRun = { ...run, comments: [FINDING, REASON_NOTE] };
+test('at adoption a note GitHub gave back with its reason changed is a note GitHub holds', async () => {
+  const b = REASON_NOTE.body;
+  for (const body of [b.replace('twice', 'twicE'), b.replace('twice', 'twce'), b.slice(0, -10), b.replace('\u2014', '-')]) {
+    const h = harness({ run: withReasonNote, own: [{ id: '480', commit: 'h1' }],
+      posted: [{ id: '9001', path: 'a.ts', side: 'RIGHT', line: 3, body: 'x' }, { id: '9002', path: 'a.ts', side: 'RIGHT', line: 5, body }] });
+    assert.deepEqual(await publishRun(h.deps, h.args), { kind: 'published', reviewId: '480', body: run.body, inlineDropped: false, notesDropped: false, adopted: true }, body);
+    assert.equal(postCount(h.calls), 0);
+  }
+});
+test('at adoption a comment that only begins as a note does, with another label, is no note of the run', async () => {
+  for (const body of ['**Human review:** line 6, 80% `calculation` \u2014 Totals are rounded twice.', '**Human review:** line 5, 81% `calculation`', '**Human review:**']) {
+    const h = harness({ run: withReasonNote, own: [{ id: '480', commit: 'h1' }],
+      posted: [{ id: '9001', path: 'a.ts', side: 'RIGHT', line: 3, body: 'x' }, { id: '9002', path: 'a.ts', side: 'RIGHT', line: 5, body }] });
+    const out = await publishRun(h.deps, h.args);
+    assert.equal(out.kind === 'published' && out.notesDropped, true, body);
+  }
 });

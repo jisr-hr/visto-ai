@@ -111,6 +111,8 @@ interface Options {
   threadWriteFails?: boolean;
   /** listReviewComments answers the comments each review was posted with, each with an id of its own; `posted` is then not used. */
   echo?: boolean;
+  /** With echo: the text GitHub gives back for each posted comment, from the text it was posted with. */
+  echoText?: (body: string) => string;
 }
 
 /** The next id an echoed comment gets: never one another echoed comment had. */
@@ -171,7 +173,7 @@ async function harness(options: Options = {}) {
       drafts.push(structuredClone(draft));
       const next = posts.shift() ?? { id: '501' };
       if (next instanceof Error) throw next;
-      echoes.set(next.id, draft.comments.map((c) => ({ id: String(echoedId++), path: c.path, side: c.side, line: c.line, body: c.body })));
+      echoes.set(next.id, draft.comments.map((c) => ({ id: String(echoedId++), path: c.path, side: c.side, line: c.line, body: options.echoText?.(c.body) ?? c.body })));
       return next;
     },
     listOwnReviews: async () => {
@@ -1414,6 +1416,8 @@ test('notes GitHub refused are stored as no note, and the log says they were dro
   assert.deepEqual(first.drafts.map((d) => notedBlocks(d.comments)), [['hA'], []]);
   assert.deepEqual(await noteRows(), []);
   assert.equal(first.logged.find((e) => e.event === 'review')!.notes_dropped, true);
+  const line = first.logged.find((e) => e.event === 'readback')!;
+  assert.deepEqual([line.notes, line.notes_missing], [0, 0]);
 });
 test('notes GitHub refused are given at the next review', async () => {
   const result = blocksResult([['hA', 85, 10]]);
@@ -1543,4 +1547,49 @@ test('notes switched off and on again are not repeated', async () => {
   const on = await live({ head: 'h2', settings: NOTES_ON, result: blocksResult([['hA', 85, 10], ['hB', 90, 20]]), echo: true, posts: [{ id: '502' }] });
   await runReviewJob(on.job, on.deps);
   assert.deepEqual(notedBlocks(on.drafts[0]!.comments), ['hB']);
+});
+test('a note GitHub gives back with its reason changed is posted once, over three reviews', async () => {
+  const result = blocksResult([['hA', 85, 10]]);
+  const echoText = (body: string): string => body.replace('Totals.', 'Totals, changed.');
+  const heads: Array<[string, string]> = [['h1', '501'], ['h2', '502'], ['h3', '503']];
+  const posted: unknown[][] = [];
+  for (const [head, id] of heads) {
+    const h = await live({ head, settings: NOTES_ON, result, echo: true, echoText, posts: [{ id }] });
+    await runReviewJob(h.job, h.deps);
+    posted.push(notedBlocks(h.drafts[0]!.comments));
+    assert.equal(h.logged.find((e) => e.event === 'readback')!.notes_missing, 0, head);
+  }
+  assert.deepEqual(posted, [['hA'], [], []]);
+  assert.deepEqual((await noteRows()).map(([path, hash]) => [path, hash]), [['a.ts', 'hA']]);
+});
+
+/** A result with one flagged block whose hash cannot be read while notes are rendered: anything else reads it as hA. */
+const notesThrowResult = (over: Partial<ReviewResult> = {}): ReviewResult => {
+  const result = blocksResult([['hA', 85, 10]], over);
+  Object.defineProperty(result.scores[0]!.blocks[0]!, 'hash', {
+    enumerable: true,
+    get: () => { if (new Error().stack?.includes('renderNotes') === true) throw new Error('Something private'); return 'hA'; },
+  });
+  return result;
+};
+test('notes that cannot be rendered are logged, with no text, and the review goes without them', async () => {
+  const h = await live({ settings: NOTES_ON, result: notesThrowResult(), echo: true });
+  await runReviewJob(h.job, h.deps);
+  assert.deepEqual(h.logged.filter((e) => e.event === 'notes_failed'), [{ event: 'notes_failed', job: h.job.id }]);
+  assert.deepEqual(notedBlocks(h.drafts[0]!.comments), []);
+  assert.equal(h.drafts[0]!.comments.length, 1);
+  assert.equal((await getJob(db, h.job.id))?.outcome, 'published');
+  assert.ok(!JSON.stringify(h.logged).includes('Something private'));
+});
+test('a result whose status is not ok is given no note by the job: notes are not even rendered for it', async () => {
+  const result = blocksResult([['hA', 85, 10]], { failure: { stage: 'model', code: 'timeout' }, dependencies: { model: 'error' } });
+  // Its status cannot be read while notes are rendered: anything else reads it as failed.
+  Object.defineProperty(result, 'status', {
+    enumerable: true,
+    get: () => { if (new Error().stack?.includes('renderNotes') === true) throw new Error('Something private'); return 'failed'; },
+  });
+  const h = await live({ settings: NOTES_ON, result });
+  await runReviewJob(h.job, h.deps);
+  assert.deepEqual(h.logged.filter((e) => e.event === 'notes_failed'), []);
+  assert.deepEqual((await listRuns(db, REF))[0]!.comments, []);
 });

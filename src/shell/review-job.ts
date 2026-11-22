@@ -467,7 +467,8 @@ export async function runReviewJob(job: Job, deps: ReviewJobDeps): Promise<void>
         try {
           comments = [...comments, ...renderNotes(result, noted)];
         } catch {
-          // notes that cannot be rendered are none: the review goes without them
+          // Notes that cannot be rendered are none: the review goes without them.
+          log({ event: 'notes_failed', job: job.id });
         }
       }
       try {

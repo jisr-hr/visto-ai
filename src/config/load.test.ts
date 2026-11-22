@@ -430,8 +430,21 @@ test('a value for inlineNotes that is not true or false is refused', () => {
     () => parseConfig(`${SERVICE_YAML}repositories:\n  overrides:\n    acme/shop: { score: { inlineNotes: 1 } }\n`, ENV),
     (e: unknown) => e instanceof ConfigError && e.issues.some((i) => i.includes('inlineNotes')),
   );
+  for (const yaml of [`${SERVICE_YAML}repositories:\n  defaults: { score: { inlineNotes: null } }\n`, `${SERVICE_YAML}repositories:\n  overrides:\n    acme/shop: { score: { inlineNotes: null } }\n`]) {
+    assert.throws(() => parseConfig(yaml, ENV), (e: unknown) => e instanceof ConfigError && e.issues.some((i) => i.includes('inlineNotes')), yaml);
+  }
+});
+test('an unknown key beside inlineNotes is refused', () => {
+  for (const yaml of [`${SERVICE_YAML}repositories:\n  defaults: { score: { inlineNotes: true, inlineNote: true } }\n`, `${SERVICE_YAML}repositories:\n  overrides:\n    acme/shop: { score: { inlineNotes: true, notes: 1 } }\n`]) {
+    assert.throws(() => parseConfig(yaml, ENV), (e: unknown) => e instanceof ConfigError && e.issues.some((i) => i.includes('score')), yaml);
+  }
+});
+test('an override that writes only a threshold keeps the notes of the defaults', () => {
+  const c = parseConfig(`${SERVICE_YAML}repositories:\n  defaults: { score: { inlineNotes: true } }\n  overrides:\n    acme/shop: { score: { threshold: 50 } }\n`, ENV);
+  assert.deepEqual([repoSettingsFor(c, 'acme/shop').inlineNotes, repoSettingsFor(c, 'acme/shop').scoreThreshold], [true, 50]);
 });
 test('the example with its score block switched on turns inline notes off, as written', () => {
   const c = parseConfig(uncomment(example(), '    # score:'), exampleEnv);
   assert.equal(c.repositories.defaults.inlineNotes, false);
+  assert.match(example(), /^ {4}# {3}inlineNotes: false$/m);
 });

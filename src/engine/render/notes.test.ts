@@ -1,9 +1,20 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { MAX_NOTES, noteKey, renderNotes } from './notes.ts';
+import { MAX_NOTES, noteHead, noteKey, renderNotes as render } from './notes.ts';
 import { asRead } from './body.ts';
 import type { ReviewResult } from '../types.ts';
+import { CATEGORIES } from '../score/types.ts';
 import type { BlockScore, Category, FileScore, Span } from '../score/types.ts';
+
+/** renderNotes, with each note it makes checked: its head is a prefix of its text. */
+const renderNotes: typeof render = (result, noted) => {
+  const notes = render(result, noted);
+  for (const n of notes) {
+    const head = noteHead(n.body);
+    assert.ok(head !== null && n.body.startsWith(head), n.body);
+  }
+  return notes;
+};
 
 const usage = { calls: 0, inputTokens: 0, outputTokens: 0, cachedTokens: 0, cost: 0 };
 const span = (first: number, last: number, side: Span['side'] = 'RIGHT'): Span => ({ side, first, last });
@@ -147,4 +158,55 @@ test('a damaged result gives none and never throws', () => {
     { ...ok, scores: [null, 'x', { path: 'a' }, { path: 5, blocks: [] }, { path: 'a', blocks: 'x' }] },
   ];
   for (const d of damaged) assert.deepEqual(renderNotes(d as ReviewResult, new Set()), []);
+});
+
+test('the head of a note is what the service wrote: its label, its score and its category', () => {
+  const spans: Array<[Span, string]> = [[span(7, 7), 'line 7'], [span(12, 40), 'lines 12-40'], [span(3, 3, 'LEFT'), 'old line 3'], [span(3, 5, 'LEFT'), 'old lines 3-5']];
+  for (const category of CATEGORIES) {
+    for (const [s, label] of spans) {
+      for (const reason of ['', 'Totals \u2014 with a <b>tag</b> and `code`.']) {
+        const [note] = renderNotes(result([file('src/a.ts', [blk('B1', 85, { span: s }, category, reason)])]), new Set());
+        const head = noteHead(note!.body);
+        assert.equal(head, `**Human review:** ${label}, 85% \`${category}\``);
+        assert.ok(/^[\x20-\x7e]*$/.test(head!), head!);
+      }
+    }
+  }
+});
+
+test('a text that is not a note has no head', () => {
+  for (const text of ['', '**[major]** Wrong.', '**\\[major]** Wrong.', '**Human review:**', '**Human review:** lines 1-2, 85%', '**Human review:** lines 1-2, 85% calculation',
+    '**Human review:** lines 1-2, 85% `calculation', '**Human review:** line 10, changed', 'x **Human review:** line 1, 85% `calculation`', '**Human review:** rows 1-2, 85% `calculation`']) {
+    assert.equal(noteHead(text), null, text);
+  }
+});
+
+test('a category that needs a code span of another shape still gives a head, or none, and nothing throws', () => {
+  const odd = ['a`b', '`', 'a``b`', 'two\nlines', ''] as unknown as Category[];
+  for (const category of odd) {
+    for (const reason of ['', 'Why `this` matters.']) {
+      const [note] = render(result([file('src/a.ts', [blk('B1', 85, {}, category, reason)])]), new Set());
+      const head = noteHead(note!.body);
+      if ((category as string) === '') assert.equal(head, null);
+      else assert.ok(head !== null && note!.body.startsWith(head), note!.body);
+    }
+  }
+  assert.equal(noteHead(renderNotes(result([file('src/a.ts', [blk('B1', 85, {}, 'a`b' as Category, '')])]), new Set())[0]!.body), '**Human review:** lines 1-2, 85% `` a`b ``');
+});
+
+test('no note begins as a finding does', () => {
+  const [note] = renderNotes(result([file('src/a.ts', [blk('B1', 85)])]), new Set());
+  assert.ok(!note!.body.startsWith('**\\['));
+});
+
+test('of two blocks with the same lines, the higher gets the note; with a tie, the first in the diff', () => {
+  const low = blk('B1', 85, { hash: 'h1', span: span(4, 4) });
+  const high = blk('B2', 95, { hash: 'h1', span: span(9, 9) });
+  for (const blocks of [[low, high], [high, low]]) {
+    const notes = renderNotes(result([file('src/a.ts', blocks)]), new Set());
+    assert.equal(notes.length, 1);
+    assert.deepEqual([notes[0]!.line, notes[0]!.body.includes(', 95% ')], [9, true]);
+  }
+  const tie = renderNotes(result([file('src/a.ts', [blk('B1', 85, { hash: 'h1', span: span(9, 9) }), blk('B2', 85, { hash: 'h1', span: span(4, 4) })])]), new Set());
+  assert.deepEqual(tie.map((n) => n.line), [9]);
 });

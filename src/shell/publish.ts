@@ -4,6 +4,7 @@ import type { Span } from '../engine/score/types.ts';
 import type { ReviewResult } from '../engine/types.ts';
 import type { ForgeAccess, ForgeWriter, LivePullRequest, PullRequestInfo, PullRequestRef } from '../forge/types.ts';
 import { codeOf } from './codes.ts';
+import { isNoteText } from './posted.ts';
 
 export type PublishOutcome =
   | { kind: 'published'; reviewId: string; body: string; inlineDropped: boolean; notesDropped: boolean; adopted: boolean }
@@ -58,8 +59,9 @@ export async function publishRun(deps: PublishDeps, args: {
       if (recorded.length > 0) {
         const posted = await deps.writer.listReviewComments(ref, installation, same.id);
         if (posted !== null) {
-          const noteBodies = new Set(notes.map((c) => c.body).filter((b) => typeof b === 'string'));
-          const heldNotes = posted.filter((c) => noteBodies.has(c.body)).length;
+          // A note GitHub holds is told by the part of its text the service wrote, as the read-back tells it.
+          const noteBodies = notes.map((c) => c.body).filter((b): b is string => typeof b === 'string');
+          const heldNotes = posted.filter((c) => typeof c.body === 'string' && noteBodies.some((b) => isNoteText(b, c.body))).length;
           notesDropped = hadNotes && heldNotes === 0;
           inlineDropped = findings.length > 0 && posted.length - heldNotes === 0;
         }

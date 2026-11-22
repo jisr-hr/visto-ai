@@ -72,6 +72,8 @@ test('a run recorded before notes existed is read as before', () => {
 });
 test('a comment list that is not a list holds no note', () => {
   assert.deepEqual(matchPosted({ result: { findings: [] }, comments: 'x' }, [postedNote]), []);
+});
+test('a result with no findings still has its notes read', () => {
   assert.deepEqual(matchPosted({ result: null, comments: [NOTE_COMMENT] }, [postedNote]).map((c) => c.severity), ['note']);
 });
 test('entries that are not objects, or have odd fields, match nothing and nothing throws', () => {
@@ -83,6 +85,50 @@ test('the blocks that have a note are known by path and hash', () => {
     { commentId: '1', path: 'src/a.ts', side: 'RIGHT' as const, line: 1, severity: 'note', quote: '', blockHash: 'h1' },
     { commentId: '2', path: 'src/a.ts', side: 'RIGHT' as const, line: 2, severity: 'note', quote: '', blockHash: null },
     { commentId: '3', path: 'src/a.ts', side: 'RIGHT' as const, line: 3, severity: 'major', quote: 'q', blockHash: 'h9' },
+    { commentId: '4', path: 'src/a.ts', side: 'RIGHT' as const, line: 4, severity: 'note', quote: '', blockHash: '' },
   ];
   assert.deepEqual([...notedOf(stored)], [noteKey('src/a.ts', 'h1')]);
+});
+test('a note on another path or side is not matched', () => {
+  assert.deepEqual(matchPosted(RUN, [{ ...postedNote, side: 'LEFT' }]), []);
+  assert.deepEqual(matchPosted(RUN, [{ ...postedNote, path: 'src/b.ts' }]), []);
+});
+test('a finding the stored result holds damaged is no finding, and nothing throws', () => {
+  for (const bad of [null, 7, 'x', {}, { severity: 'major' }, { severity: 3, quote: 'q' }]) {
+    const run = { result: { findings: [bad] }, comments: [FINDING_COMMENT, NOTE_COMMENT] };
+    assert.deepEqual(matchPosted(run, [postedFinding, postedNote]).map((c) => [c.commentId, c.severity]), [['602', 'note']], JSON.stringify(bad));
+  }
+});
+
+// A note as renderNotes writes it: the service's words, then the model's reason.
+const REASON_NOTE = '**Human review:** lines 12-40, 85% `calculation` \u2014 Totals are rounded twice.';
+const REASON_RUN = { result: { findings: [{ severity: 'major', quote: 'x()' }] }, comments: [FINDING_COMMENT, { ...NOTE_COMMENT, body: REASON_NOTE }] };
+test('a note whose reason GitHub gave back changed is still that note', () => {
+  const changed = [
+    REASON_NOTE.replace('twice', 'twicE'), REASON_NOTE.replace('twice', 'twce'), REASON_NOTE.slice(0, -10),
+    REASON_NOTE.replace('\u2014', '-'), REASON_NOTE.replace(' \u2014 Totals are rounded twice.', ''),
+  ];
+  for (const body of changed) {
+    const out = matchPosted(REASON_RUN, [postedFinding, { ...postedNote, body }]);
+    assert.deepEqual(out.map((c) => [c.commentId, c.severity, c.blockHash ?? null]), [['601', 'major', null], ['602', 'note', 'h1']], body);
+  }
+});
+test('a finding is still matched by its whole text', () => {
+  assert.deepEqual(matchPosted(REASON_RUN, [{ ...postedFinding, body: '**[major]** Wrong!' }]), []);
+});
+test('two notes of one review are told apart by their heads', () => {
+  const other = '**Human review:** line 50, 90% `calculation` \u2014 Totals.';
+  const run = { result: { findings: [] }, comments: [{ ...NOTE_COMMENT, body: REASON_NOTE }, { ...NOTE_COMMENT, line: 50, body: other, note: 'h2' }] };
+  const out = matchPosted(run, [{ ...postedNote, id: '702', line: 50, body: other.replace('Totals', 'Sums') }, { ...postedNote, id: '701', body: REASON_NOTE.replace('twice', 'thrice') }]);
+  assert.deepEqual(out.map((c) => [c.commentId, c.blockHash]), [['702', 'h2'], ['701', 'h1']]);
+});
+test('a comment that only begins as a note does, with another label, is no note of the run', () => {
+  for (const body of ['**Human review:** line 12, 85% `calculation` \u2014 Totals are rounded twice.', '**Human review:** lines 12-40, 86% `calculation`', '**Human review:** lines 12-40, 85% `billing`', '**Human review:**']) {
+    assert.deepEqual(matchPosted(REASON_RUN, [{ ...postedNote, body }]), [], body);
+  }
+});
+test('a recorded note that has no head is matched by its whole text', () => {
+  const run = { result: { findings: [] }, comments: [{ ...NOTE_COMMENT, body: '**Human review:** something else' }] };
+  assert.deepEqual(matchPosted(run, [{ ...postedNote, body: '**Human review:** something else' }]).map((c) => c.severity), ['note']);
+  assert.deepEqual(matchPosted(run, [{ ...postedNote, body: '**Human review:** something else!' }]), []);
 });

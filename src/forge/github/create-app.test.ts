@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import manifest from './app-manifest.json' with { type: 'json' };
-import { convert, envLines, formPage, manifestFor, reserveFile, run } from './create-app.ts';
+import { convert as exchange, envLines, fillFile, formPage, manifestFor, releaseFile, reserveFile, run } from './create-app.ts';
 import type { Io } from './create-app.ts';
 
 const PEM = '-----BEGIN RSA PRIVATE KEY-----\nAAAA\nBBBB\n-----END RSA PRIVATE KEY-----\n';
@@ -13,7 +13,12 @@ const SECRET = 'hook-secret-value';
 const CLIENT_SECRET = 'client-secret-value';
 const CODE = 'abc';
 const RANDOMS = ['0123456789abcdef0123456789abcdef', 'fedcba9876543210fedcba9876543210'];
-const ARGS = ['--webhook-url', 'https://reviews.example.test/webhooks/github', '--out', '/keys/visto.env'];
+const NAME = 'Visto AI Acme';
+const ARGS = ['--webhook-url', 'https://reviews.example.test/webhooks/github', '--out', '/keys/visto.env', '--name', NAME];
+/** The second try's wait, which no test really waits. */
+const noWait = async (): Promise<void> => {};
+/** The exchange with no real wait before its second try. */
+const convert = (code: string, deps: { fetch: typeof fetch; apiBase?: string }) => exchange(code, { sleep: noWait, ...deps });
 
 const appBody = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
   id: 123, slug: 'visto-ai-acme', name: 'Visto AI Acme', owner: { login: 'acme' }, html_url: 'https://github.com/apps/visto-ai-acme',
@@ -40,11 +45,15 @@ function stubFetch(answers: Array<Response | Error>) {
 type Answer = { status: number; headers: Record<string, string>; body: string; exit: number | null };
 type Handler = (request: { method: string; url: string; host: string }) => Promise<Answer>;
 
+const FD = 7;
+
 function world(opts: { reserve?: boolean; answers?: Array<Response | Error>; fetch?: typeof fetch } = {}) {
   const lines: string[] = [];
   const stub = stubFetch(opts.answers ?? [answer(201)]);
   if (opts.fetch !== undefined) stub.fetch = opts.fetch;
-  const calls = { reserve: [] as string[], fill: [] as Array<[string, string]>, release: [] as string[], listen: 0, close: 0 };
+  const calls = { reserve: [] as string[], fill: [] as Array<[string, string]>, release: [] as string[], listen: 0, close: 0, sleep: [] as number[], fds: [] as Array<number | null> };
+  /** The path each descriptor the fake reserved was opened for. */
+  const opened = new Map<number, string>();
   let handler: Handler | undefined;
   let stop: (() => void) | undefined;
   let r = 0;
@@ -52,9 +61,10 @@ function world(opts: { reserve?: boolean; answers?: Array<Response | Error>; fet
     out: (line) => { lines.push(line); },
     fetch: stub.fetch,
     random: () => RANDOMS[r++ % 2] ?? '',
-    reserve: (p) => { calls.reserve.push(p); return opts.reserve ?? true; },
-    fill: (p, text) => { calls.fill.push([p, text]); },
-    release: (p) => { calls.release.push(p); },
+    reserve: (p) => { calls.reserve.push(p); if (opts.reserve === false) return null; opened.set(FD, p); return FD; },
+    fill: (fd, text) => { calls.fds.push(fd); calls.fill.push([opened.get(fd) ?? '?', text]); },
+    release: (fd, p) => { calls.fds.push(fd); calls.release.push(p); },
+    sleep: async (ms) => { calls.sleep.push(ms); },
     listen: async (h) => { calls.listen += 1; handler = h; return { port: 4010, close: async () => { calls.close += 1; } }; },
     onStop: (h) => { stop = h; },
   };
@@ -83,10 +93,11 @@ async function start(argv: string[], w: ReturnType<typeof world>) {
 const visible = (lines: string[]): string => lines.join('\n');
 
 test('the manifest carries the webhook address and the way back', () => {
-  const m = manifestFor('https://reviews.example.test/webhooks/github', 'http://127.0.0.1:4010/created');
+  const m = manifestFor('https://reviews.example.test/webhooks/github', 'http://127.0.0.1:4010/created', NAME);
   assert.deepEqual(m.hook_attributes, { url: 'https://reviews.example.test/webhooks/github', active: true });
   assert.equal(m.redirect_url, 'http://127.0.0.1:4010/created');
-  assert.deepEqual([m.name, m.url, m.description, m.public], [manifest.name, manifest.url, manifest.description, false]);
+  assert.deepEqual([m.name, m.url, m.description, m.public], [NAME, manifest.url, manifest.description, false]);
+  assert.equal(manifest.name, 'visto-ai');
   assert.deepEqual(m.default_permissions, manifest.default_permissions);
   assert.deepEqual(m.default_events, manifest.default_events);
   assert.equal(manifest.hook_attributes.url, 'https://example.invalid/webhooks/github');
@@ -94,7 +105,7 @@ test('the manifest carries the webhook address and the way back', () => {
 });
 
 test('the page posts the manifest to the account', () => {
-  const m = manifestFor('https://reviews.example.test/webhooks/github', 'http://127.0.0.1:4010/created');
+  const m = manifestFor('https://reviews.example.test/webhooks/github', 'http://127.0.0.1:4010/created', NAME);
   const page = formPage(m, { org: null, state: RANDOMS[0] ?? '' });
   assert.equal(actionOf(page), `https://github.com/settings/apps/new?state=${RANDOMS[0]}`);
   assert.match(page, /<form method="post" action="/);
@@ -106,14 +117,14 @@ test('the page posts the manifest to the account', () => {
 });
 
 test('the page posts the manifest to the organisation', () => {
-  const m = manifestFor('https://reviews.example.test/webhooks/github', 'http://127.0.0.1:4010/created');
+  const m = manifestFor('https://reviews.example.test/webhooks/github', 'http://127.0.0.1:4010/created', NAME);
   const page = formPage(m, { org: 'acme', state: RANDOMS[0] ?? '' });
   assert.equal(actionOf(page), `https://github.com/organizations/acme/settings/apps/new?state=${RANDOMS[0]}`);
   assert.deepEqual(fieldOf(page), m);
 });
 
 test('the manifest in the page is escaped for an attribute', () => {
-  const m = { ...manifestFor('https://reviews.example.test/webhooks/github', 'http://127.0.0.1:4010/created'), description: 'Says "hi" <b>&</b>' };
+  const m = { ...manifestFor('https://reviews.example.test/webhooks/github', 'http://127.0.0.1:4010/created', NAME), description: 'Says "hi" <b>&</b>' };
   const page = formPage(m, { org: null, state: RANDOMS[0] ?? '' });
   const raw = /name="manifest" value="([^"]*)"/.exec(page)?.[1] ?? '';
   assert.ok(!raw.includes('<') && !raw.includes('>') && !raw.includes('"'));
@@ -122,7 +133,7 @@ test('the manifest in the page is escaped for an attribute', () => {
 });
 
 test('the page has no script', () => {
-  const m = manifestFor('https://reviews.example.test/webhooks/github', 'http://127.0.0.1:4010/created');
+  const m = manifestFor('https://reviews.example.test/webhooks/github', 'http://127.0.0.1:4010/created', NAME);
   assert.ok(!/<script/i.test(formPage(m, { org: 'acme', state: RANDOMS[0] ?? '' })));
 });
 
@@ -211,14 +222,16 @@ test('a reserved file is empty, for this user only, and is not reserved twice', 
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'visto-create-app-'));
   try {
     const file = path.join(dir, 'app.env');
-    assert.equal(reserveFile(file), true);
+    const fd = reserveFile(file);
+    assert.equal(typeof fd, 'number');
+    fs.closeSync(fd!);
     const stat = fs.statSync(file);
     assert.equal(stat.mode & 0o777, 0o600);
     assert.equal(stat.size, 0);
     fs.writeFileSync(file, 'kept');
-    assert.equal(reserveFile(file), false);
+    assert.equal(reserveFile(file), null);
     assert.equal(fs.readFileSync(file, 'utf8'), 'kept');
-    assert.equal(reserveFile(path.join(dir, 'missing', 'app.env')), false);
+    assert.equal(reserveFile(path.join(dir, 'missing', 'app.env')), null);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -431,6 +444,14 @@ test('bad arguments stop the command before anything is created', async () => {
     ['--webhook-url', 'https://reviews.example.test/webhooks/github'],
     [...ARGS, '--other', 'x'],
     [...ARGS, 'extra'],
+    ARGS.slice(0, 4),
+    [...ARGS.slice(0, 4), '--name', ''],
+    [...ARGS.slice(0, 4), '--name', '   '],
+    [...ARGS.slice(0, 4), '--name', 'a'.repeat(35)],
+    [...ARGS.slice(0, 4), '--name', 'acme/visto'],
+    [...ARGS.slice(0, 4), '--name', 'Visto\nAI'],
+    [...ARGS.slice(0, 4), '--name', 'Visto \u00e9'],
+    [...ARGS.slice(0, 4), '--name', 'Visto:AI'],
   ];
   for (const argv of cases) {
     const w = world();
@@ -492,12 +513,13 @@ test('another method is refused', async () => {
 /** A fetch that waits until the test lets it answer. */
 function heldFetch() {
   const calls: string[] = [];
-  let release: (res: Response) => void = () => {};
+  const waiting: Array<(res: Response) => void> = [];
   const fetch = ((url: string | URL | Request) => {
     calls.push(String(url));
-    return new Promise<Response>((resolve) => { release = resolve; });
+    return new Promise<Response>((resolve) => { waiting.push(resolve); });
   }) as typeof globalThis.fetch;
-  return { fetch, calls, answer: (res: Response) => release(res) };
+  /** Answers every call still waiting, each with a response of its own made by `res`. */
+  return { fetch, calls, answer: (res: () => Response) => { for (const resolve of waiting.splice(0)) resolve(res()); } };
 }
 
 test('stopped while waiting, the file is released and nothing else is printed', async () => {
@@ -623,10 +645,199 @@ test('a second way back while the first exchange is waiting is refused and start
   const s = await start(ARGS, w);
   const first = s.ask('GET', `/created?code=${CODE}&state=${s.state}`);
   await s.settle();
-  const again = await s.ask('GET', `/created?code=${CODE}&state=${s.state}`);
-  assert.deepEqual([again.status, again.exit], [409, null]);
-  assert.equal(held.calls.length, 1);
-  held.answer(answer(201));
+  // The first exchange is held until the end: a second way back that started an exchange of its own would wait on it too.
+  let again: Answer | undefined;
+  void s.ask('GET', `/created?code=${CODE}&state=${s.state}`).then((a) => { again = a; });
+  await s.settle();
+  try {
+    assert.deepEqual([again?.status, again?.exit], [409, null]);
+    assert.equal(held.calls.length, 1);
+  } finally {
+    held.answer(() => answer(201));
+  }
   assert.equal((await first).exit, 0);
   assert.equal(await s.running, 0);
+});
+
+test('the name given is the app name the manifest asks for, at its longest too', async () => {
+  for (const name of [NAME, 'a'.repeat(34), 'visto_ai.acme-2', ' x ']) {
+    const w = world();
+    const s = await start([...ARGS.slice(0, 4), '--name', name], w);
+    assert.equal((fieldOf(s.page) as { name: string }).name, name);
+    await s.ask('GET', `/created?code=${CODE}&state=${s.state}`);
+    assert.equal(await s.running, 0);
+  }
+});
+
+test('the key is written through the descriptor the reservation opened, and nothing is opened by its path again', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'visto-create-app-'));
+  try {
+    const file = path.join(dir, 'app.env');
+    const fd = reserveFile(file);
+    assert.equal(typeof fd, 'number');
+    fs.chmodSync(file, 0o644);
+    const other = path.join(dir, 'other.env');
+    fs.writeFileSync(other, '');
+    fs.chmodSync(other, 0o640);
+    const before = fs.statSync(other);
+    fs.renameSync(other, file);
+    fillFile(fd!, 'APP_PRIVATE_KEY=x\n');
+    const after = fs.statSync(file);
+    assert.equal(fs.readFileSync(file, 'utf8'), '');
+    assert.deepEqual([after.ino, after.size, after.mode & 0o777, after.mtimeMs], [before.ino, 0, 0o640, before.mtimeMs]);
+    assert.throws(() => fs.fstatSync(fd!), /EBADF/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a reserved file is written whole through its descriptor, and a released one is closed and gone', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'visto-create-app-'));
+  try {
+    const file = path.join(dir, 'app.env');
+    const fd = reserveFile(file)!;
+    fillFile(fd, envLines({ pem: PEM, webhookSecret: SECRET }));
+    assert.equal(fs.readFileSync(file, 'utf8'), envLines({ pem: PEM, webhookSecret: SECRET }));
+    assert.equal(fs.statSync(file).mode & 0o777, 0o600);
+    const gone = path.join(dir, 'gone.env');
+    const fd2 = reserveFile(gone)!;
+    releaseFile(fd2, gone);
+    assert.equal(fs.existsSync(gone), false);
+    assert.throws(() => fs.fstatSync(fd2), /EBADF/);
+    assert.equal(reserveFile(file), null);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('the reservation is handed through to the fill, and a fill after a release writes nothing', async () => {
+  const w = world();
+  const s = await start(ARGS, w);
+  await s.ask('GET', `/created?code=${CODE}&state=${s.state}`);
+  assert.equal(await s.running, 0);
+  assert.deepEqual(w.calls.fds, [FD]);
+  const held = heldFetch();
+  const late = world({ fetch: held.fetch });
+  const t = await start(ARGS, late);
+  void t.ask('GET', `/created?code=${CODE}&state=${t.state}`);
+  await t.settle();
+  late.stop();
+  held.answer(() => answer(201));
+  await t.settle();
+  assert.deepEqual(late.calls.fill, []);
+  assert.deepEqual(late.calls.release, ['/keys/visto.env']);
+  assert.ok(!visible(late.lines).includes('Created the app'));
+});
+
+test('what GitHub sent is printed with every character outside printable ASCII replaced', async () => {
+  const w = world({ answers: [answer(201, appBody({
+    name: 'Visto\u001b[31m AI\nInjected: yes', owner: { login: 'acme\r' }, slug: 'visto-\u00e9', html_url: 'https://github.com/apps/visto\u0007',
+  }))] });
+  const s = await start(ARGS, w);
+  await s.ask('GET', `/created?code=${CODE}&state=${s.state}`);
+  assert.equal(await s.running, 0);
+  assert.ok(w.lines.every((l) => /^[ -~]*$/.test(l)), JSON.stringify(w.lines));
+  const text = visible(w.lines);
+  for (const part of ['Visto?[31m AI?Injected: yes', 'acme?', 'visto-?', 'https://github.com/apps/visto?/installations/new']) assert.ok(text.includes(part), part);
+});
+
+test('with --org, an app another account owns is said, and the command still ends with 0', async () => {
+  const w = world({ answers: [answer(201, appBody({ owner: { login: 'octo-dev' } }))] });
+  const s = await start([...ARGS, '--org', 'acme'], w);
+  await s.ask('GET', `/created?code=${CODE}&state=${s.state}`);
+  assert.equal(await s.running, 0);
+  const said = w.lines.filter((l) => l.includes('not the organisation'));
+  assert.equal(said.length, 1);
+  assert.ok(said[0]!.includes('octo-dev') && said[0]!.includes('acme'));
+  for (const [org, owner] of [['acme', 'acme'], ['Acme', 'aCME']] as const) {
+    const same = world({ answers: [answer(201, appBody({ owner: { login: owner } }))] });
+    const t = await start([...ARGS, '--org', org], same);
+    await t.ask('GET', `/created?code=${CODE}&state=${t.state}`);
+    assert.equal(await t.running, 0);
+    assert.ok(!visible(same.lines).includes('not the organisation'), org);
+  }
+  const none = world({ answers: [answer(201, appBody({ owner: { login: 'octo-dev' } }))] });
+  const u = await start(ARGS, none);
+  await u.ask('GET', `/created?code=${CODE}&state=${u.state}`);
+  assert.equal(await u.running, 0);
+  assert.ok(!visible(none.lines).includes('not the organisation'));
+});
+
+/** A fetch that never answers, but rejects as soon as the signal it is given is aborted. */
+function silentFetch() {
+  const signals: Array<AbortSignal | null | undefined> = [];
+  const fetch = ((_url: string | URL | Request, init?: RequestInit) => {
+    const signal = init?.signal;
+    signals.push(signal);
+    return new Promise<Response>((_resolve, reject) => {
+      if (signal === null || signal === undefined) { reject(new Error('no signal')); return; }
+      if (signal.aborted) reject(signal.reason as Error);
+      else signal.addEventListener('abort', () => reject(signal.reason as Error), { once: true });
+    });
+  }) as typeof globalThis.fetch;
+  return { fetch, signals };
+}
+
+test('each try of the exchange has 20 seconds, and an exchange that never answers ends as github_network after two', async () => {
+  const silent = silentFetch();
+  const limits: number[] = [];
+  const waits: number[] = [];
+  const timeout = (ms: number): AbortSignal => { limits.push(ms); return AbortSignal.abort(new DOMException('timed out', 'TimeoutError')); };
+  await assert.rejects(exchange(CODE, { fetch: silent.fetch, sleep: async (ms) => { waits.push(ms); }, timeout }), { message: 'github_network' });
+  assert.equal(silent.signals.length, 2);
+  assert.ok(silent.signals.every((sig) => sig instanceof AbortSignal));
+  assert.deepEqual([limits, waits], [[20_000, 20_000], [2000]]);
+});
+
+test('without a time limit given, each try is given a signal of its own', async () => {
+  const signals: Array<AbortSignal | null | undefined> = [];
+  const fetch = (async (_url: string | URL | Request, init?: RequestInit) => { signals.push(init?.signal); return signals.length === 1 ? answer(502, 'bad') : answer(201); }) as typeof globalThis.fetch;
+  assert.equal((await exchange(CODE, { fetch, sleep: noWait })).id, 123);
+  assert.equal(signals.length, 2);
+  assert.ok(signals.every((sig) => sig instanceof AbortSignal && !sig.aborted));
+  assert.notEqual(signals[0], signals[1]);
+});
+
+test('the second try starts after a wait of two seconds, asked for once; a first try that answers waits for nothing', async () => {
+  for (const first of [new Error('down'), answer(502, 'bad gateway')]) {
+    const waits: number[] = [];
+    const order: string[] = [];
+    const stub = stubFetch([first, answer(201)]);
+    const fetch = ((url: string, init?: RequestInit) => { order.push('fetch'); return stub.fetch(url, init); }) as typeof globalThis.fetch;
+    assert.equal((await exchange(CODE, { fetch, sleep: async (ms) => { order.push('sleep'); waits.push(ms); } })).id, 123);
+    assert.deepEqual([waits, order], [[2000], ['fetch', 'sleep', 'fetch']]);
+  }
+  const waits: number[] = [];
+  await exchange(CODE, { fetch: stubFetch([answer(201)]).fetch, sleep: async (ms) => { waits.push(ms); } });
+  await assert.rejects(exchange(CODE, { fetch: stubFetch([answer(422, { message: 'nope' })]).fetch, sleep: async (ms) => { waits.push(ms); } }));
+  assert.deepEqual(waits, []);
+});
+
+test('the command waits through its own sleep before the second try', async () => {
+  const w = world({ answers: [new Error('down'), answer(201)] });
+  const s = await start(ARGS, w);
+  await s.ask('GET', `/created?code=${CODE}&state=${s.state}`);
+  assert.equal(await s.running, 0);
+  assert.deepEqual(w.calls.sleep, [2000]);
+});
+
+test('a key with a lone carriage return is refused as a bad response; CRLF keys still pass', async () => {
+  for (const pem of [PEM.replace('AAAA\n', 'AAAA\r'), PEM.replace('AAAA', 'AA\rAA'), PEM.replace('\n-----END', '\r\r\n-----END')]) {
+    await assert.rejects(convert(CODE, { fetch: stubFetch([answer(201, appBody({ pem }))]).fetch }), { message: 'github_bad_response' }, JSON.stringify(pem));
+  }
+  const crlf = PEM.replaceAll('\n', '\r\n');
+  assert.equal((await convert(CODE, { fetch: stubFetch([answer(201, appBody({ pem: crlf }))]).fetch })).pem, crlf);
+});
+
+test('a failure that is not the listener\'s is internal_error, and one of the listener is listen_failed', async () => {
+  const broken = world();
+  broken.io.random = () => { throw new Error('Something private'); };
+  assert.equal(await run(ARGS, broken.io), 1);
+  assert.deepEqual(broken.lines, ['failed: internal_error']);
+  assert.deepEqual(broken.calls.release, ['/keys/visto.env']);
+  const deaf = world();
+  deaf.io.listen = async () => { throw new Error('listen EADDRINUSE 127.0.0.1'); };
+  assert.equal(await run(ARGS, deaf.io), 1);
+  assert.deepEqual(deaf.lines, ['failed: listen_failed']);
+  assert.deepEqual(deaf.calls.release, ['/keys/visto.env']);
 });
