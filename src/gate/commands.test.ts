@@ -147,6 +147,35 @@ test('/done joins a review that is running or was asked for, and takes the place
     [['done', 'review_queued'], [['running', 'command'], ['pending', 'done']]]);
 });
 
+test('a command joins a push\'s review where pull requests are reviewed on a push: in shadow, and on a branch outside the gate\'s list', async () => {
+  const shadow = await harness({ reason: 'done', settings: withGate({ mode: 'shadow' }) });
+  await reviewJob(shadow.db, 'automatic', true);
+  await shadow.run();
+  assert.deepEqual([await statusOf(shadow), (await reviewJobs(shadow.db)).map((j) => [j.status, j.trigger]), answers(shadow)],
+    [['done', 'coalesced'], [['running', 'automatic']], [['react', '31', 'eyes']]]);
+
+  const waiting = await harness({ reason: 'done', settings: withGate({ mode: 'shadow' }) });
+  await reviewJob(waiting.db, 'automatic');
+  await waiting.run();
+  assert.deepEqual([await statusOf(waiting), (await reviewJobs(waiting.db)).map((j) => [j.status, j.trigger])], [['done', 'coalesced'], [['pending', 'automatic']]]);
+
+  const outside = await harness({ reason: 'done', live: liveOf({ baseBranch: 'feature/x' }) });
+  await reviewJob(outside.db, 'automatic', true);
+  await outside.run();
+  assert.deepEqual([await statusOf(outside), (await reviewJobs(outside.db)).length], [['done', 'coalesced'], 1]);
+
+  const rerun = await harness({ reason: 'rerun', settings: withGate({ mode: 'shadow' }), requestedBy: null, commentId: null, association: null });
+  await reviewJob(rerun.db, 'automatic', true);
+  await rerun.run();
+  assert.deepEqual([await statusOf(rerun), (await reviewJobs(rerun.db)).length], [['done', 'coalesced'], 1]);
+
+  // Enforced: a push's waiting job is about to be dropped as gated, so it is not joined.
+  const enforced = await harness({ reason: 'done' });
+  await reviewJob(enforced.db, 'automatic');
+  await enforced.run();
+  assert.deepEqual([await statusOf(enforced), (await reviewJobs(enforced.db)).map((j) => [j.status, j.trigger])], [['done', 'review_queued'], [['pending', 'manual']]]);
+});
+
 /** Stores a manual review job of the pull request with this association and reason: pending, or claimed. */
 async function manualJob(db: Db, association: string | null, reason: string, claim = false): Promise<void> {
   const id = await enqueueJob(db, {

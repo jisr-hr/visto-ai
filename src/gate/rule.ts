@@ -75,13 +75,13 @@ export function reviewedRun(runs: StoredRun[], head: string, base: string): Stor
   return best;
 }
 
-/** How many major and blocker findings the newest published review of this head and base that was posted without its inline comments had placed on the diff; 0 when there is no such review. */
+/** How many major and blocker findings the newest published review of this head and base that was posted without its inline comments had placed on the diff; 0 when there is no such review. A stored result that cannot be read (not an object, or its `findings` not a list) counts as 1: it is not read as none (call 51). */
 export function refusedInline(runs: StoredRun[], head: string, base: string): number {
   let best: { id: number; count: number } | null = null;
   for (const run of runs) {
     if (!isReviewOf(run, head, base) || !run.inlineDropped) continue;
-    const findings = asArray(isObject(run.result) ? run.result['findings'] : undefined);
-    const count = findings.filter((f) => isObject(f) && GATING.includes(f['severity'])).length;
+    const findings = isObject(run.result) ? run.result['findings'] : undefined;
+    const count = Array.isArray(findings) ? findings.filter((f) => isObject(f) && GATING.includes(f['severity'])).length : 1;
     if (count > 0 && (best === null || run.id > best.id)) best = { id: run.id, count };
   }
   return best === null ? 0 : best.count;

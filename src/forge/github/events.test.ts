@@ -184,6 +184,12 @@ test('a re-run of a check names its pull request by the number the check carries
   assert.deepEqual(eventOf('check_run', checkRun({ external_id: '12345678901' })), rerun(9));
   assert.deepEqual(eventOf('check_run', checkRun({ external_id: undefined })), rerun(9));
   assert.deepEqual(eventOf('check_run', checkRun({ external_id: '7' }, { installation: undefined })), { ...rerun(7), installation: null });
+  // A leading zero still reads as the number; a trailing newline is not a number the check carries.
+  assert.deepEqual(eventOf('check_run', checkRun({ external_id: '07' })), rerun(7));
+  assert.deepEqual(eventOf('check_run', checkRun({ external_id: '7\n' })), rerun(9));
+  assert.deepEqual(eventOf('check_run', checkRun({ external_id: '7', pull_requests: { number: 9 } })), rerun(7));
+  assert.deepEqual(eventOf('check_run', checkRun({ external_id: 'build-41', pull_requests: { number: 9 } })), { kind: 'ignored', reason: 'not_a_pull_request' });
+  assert.deepEqual(eventOf('check_run', checkRun({ external_id: 'build-41', pull_requests: 'x' })), { kind: 'ignored', reason: 'not_a_pull_request' });
 });
 test('a re-run that names no pull request is not one, and another action of a check run is unknown', () => {
   assert.deepEqual(eventOf('check_run', checkRun({ external_id: 'build-41', pull_requests: undefined })), { kind: 'ignored', reason: 'not_a_pull_request' });
@@ -199,6 +205,10 @@ test('a check run with no name, no app or no head is malformed', () => {
   }
   assert.deepEqual(eventOf('check_run', checkRun({}, { sender: undefined })), malformed);
   assert.deepEqual(eventOf('check_run', checkRun({}, { repository: undefined })), malformed);
+  for (const field of ['name', 'head_sha']) {
+    assert.deepEqual(eventOf('check_run', checkRun({ [field]: 'x'.repeat(MAX_ID_CHARS + 1) })), malformed, field);
+    assert.notDeepEqual(eventOf('check_run', checkRun({ [field]: 'x'.repeat(MAX_ID_CHARS) })), malformed, field);
+  }
 });
 test('a re-run of a check suite is not taken in', () => {
   assert.deepEqual(eventOf('check_suite', { action: 'rerequested', repository: repo(), check_suite: { head_sha: 'abc123', pull_requests: [{ number: 7 }] } }), { kind: 'ignored', reason: 'unknown_event' });

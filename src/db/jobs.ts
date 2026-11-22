@@ -8,7 +8,9 @@ export type JobKind = 'review' | 'gate';
 export interface Job {
   id: number; ref: PullRequestRef;      // owner and repo in lower case
   kind: JobKind;
-  reason: string;                       // opened, reopened, ready_for_review, synchronize, retargeted, command or command_retry
+  // review lane: opened, reopened, ready_for_review, synchronize, retargeted, command, done, rerun, or command_retry,
+  // done_retry, rerun_retry; gate lane: sync, done, skip, rerun
+  reason: string;
   headSha: string;                      // the head the event named; '' for a manual job, which reviews the live head
   trigger: 'automatic' | 'manual';
   requestedBy: string | null;           // who commented /review

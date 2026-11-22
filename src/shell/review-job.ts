@@ -196,13 +196,13 @@ export async function runReviewJob(job: Job, deps: ReviewJobDeps): Promise<void>
   /** Finishes the job as refused, with `also` in the same transaction, then says so; nothing is said when it could not be finished. true when it was. */
   const refuse = async (installation: string, reason: string, also?: (tx: Db) => Promise<void>): Promise<boolean> => {
     let finished = false;
-    const done = await tried(() => db.transaction(async (tx) => {
+    const stored = await tried(() => db.transaction(async (tx) => {
       finished = await finishJob(tx, job.id, 'done', 'refused', nowIso);
       if (finished && also !== undefined) await also(tx);
     }));
-    log({ event: 'job', job: job.id, repo, number: job.ref.number, outcome: done ? 'refused' : 'refuse_failed', reason });
-    if (done && finished) await answer(installation, refusalText(job.requestedBy, reason));
-    return done;
+    log({ event: 'job', job: job.id, repo, number: job.ref.number, outcome: stored ? 'refused' : 'refuse_failed', reason });
+    if (stored && finished) await answer(installation, refusalText(job.requestedBy, reason));
+    return stored;
   };
   /** Says that the command failed; the job has already been given its outcome. */
   const fail = (installation: string, code: string): Promise<void> =>

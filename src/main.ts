@@ -24,6 +24,35 @@ import type { RequestLike, ResponseLike } from './shell/http.ts';
 export const REQUEST_TIMEOUT_MS = 30_000;
 export const HEADERS_TIMEOUT_MS = 10_000;
 
+/** The time limit of one call to GitHub, its body included (call 50). */
+export const GITHUB_CALL_MS = 60_000;
+
+const NULL_BODY = new Set([101, 103, 204, 205, 304]);
+
+/**
+ * A fetch whose every call ends within `limitMs`, its body included: the answer is read whole inside the limit, so a
+ * call that hangs rejects, which the adapters read as `github_network`. A signal the caller passes still aborts it.
+ */
+export function boundedFetch(inner: typeof fetch, limitMs: number = GITHUB_CALL_MS): typeof fetch {
+  return async (input, init) => {
+    const limit = AbortSignal.timeout(limitMs);
+    const signal = init?.signal ? AbortSignal.any([init.signal, limit]) : limit;
+    let stop!: (reason: unknown) => void;
+    const aborted = new Promise<never>((_resolve, reject) => { stop = reject; });
+    aborted.catch(() => { /* raced below */ });
+    const onAbort = (): void => { stop(signal.reason); };
+    if (signal.aborted) onAbort();
+    else signal.addEventListener('abort', onAbort, { once: true });
+    try {
+      const res = await Promise.race([inner(input, { ...init, signal }), aborted]);
+      const body = await Promise.race([res.arrayBuffer(), aborted]);
+      return new Response(NULL_BODY.has(res.status) ? null : body, { status: res.status, statusText: res.statusText, headers: res.headers });
+    } finally {
+      signal.removeEventListener('abort', onAbort);
+    }
+  };
+}
+
 class UsageError extends Error {}
 
 export function createServer(listener: (req: RequestLike, res: ResponseLike) => void): Server {
@@ -116,11 +145,13 @@ export async function main(argv: string[], env: Record<string, string | undefine
   const code = await runUntilSignal(async () => {
     try {
       const { fetch } = globalThis;
+      // Every GitHub adapter is given the fetch with a time limit; the model, the scorer and the alerts keep their own.
+      const github = boundedFetch(fetch);
       const clock = (): Date => new Date();
       const sleep = (ms: number): Promise<void> => new Promise((done) => { setTimeout(done, ms); });
       // A key that cannot be read throws here and fails the start.
-      const auth = createAppAuth({ appId: config.app.id, privateKey: config.app.privateKey, fetch, clock });
-      const info = createAppInfo({ auth, fetch });
+      const auth = createAppAuth({ appId: config.app.id, privateKey: config.app.privateKey, fetch: github, clock });
+      const info = createAppInfo({ auth, fetch: github });
       const engine = {
         model: createModelClient(config.model, { fetch, sleep }),
         contract: readFileSync(join(import.meta.dirname, '..', 'contract', contractFile(config)), 'utf8'),
@@ -138,11 +169,11 @@ export async function main(argv: string[], env: Record<string, string | undefine
           log({ event: 'instance_lock_lost' });
           process.exit(1);
         }),
-        forge: createGithubAccess({ auth, fetch }),
-        hooks: createGithubHookDeliveries({ auth, fetch }),
+        forge: createGithubAccess({ auth, fetch: github }),
+        hooks: createGithubHookDeliveries({ auth, fetch: github }),
         appInfo: info,
-        writer: createGithubWriter({ auth, info, fetch }),
-        checks: createGithubChecks({ auth, appId: config.app.id, fetch }),
+        writer: createGithubWriter({ auth, info, fetch: github }),
+        checks: createGithubChecks({ auth, appId: config.app.id, fetch: github }),
         fetch,
         sleep,
         every: (ms, work) => {

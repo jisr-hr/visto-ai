@@ -12,9 +12,9 @@ import { recordRun } from './db/review-runs.ts';
 import type { RunRecord } from './db/review-runs.ts';
 import { beat, readHeartbeat } from './db/heartbeat.ts';
 import { serviceConfig, parseConfig } from './config/load.ts';
-import type { AppIdentity, FeatureOff, ForgeEvent, HookDelivery, LivePullRequest, OwnCheck, PostedComment, PullRequestAction, PullRequestFacts, ReviewThread, Source } from './forge/types.ts';
+import type { AppIdentity, FeatureOff, ForgeChecks, ForgeEvent, ForgeWriter, HookDelivery, LivePullRequest, OwnCheck, PostedComment, PullRequestAction, PullRequestFacts, ReviewThread, Source } from './forge/types.ts';
 import type { ReviewDeps, ReviewInput, ReviewResult } from './engine/types.ts';
-import { BEAT_MS, CLOSE_WAIT_MS, DRAIN_WAIT_MS, startService, STOP_WAIT_MS, TICK_MS, UPKEEP_MS } from './service.ts';
+import { BEAT_MS, CLOSE_WAIT_MS, DRAIN_WAIT_MS, gateForge, startService, STOP_WAIT_MS, TICK_MS, UPKEEP_MS } from './service.ts';
 import type { Listening } from './service.ts';
 import type { RequestLike, ResponseLike } from './shell/http.ts';
 import { checkText } from './gate/check.ts';
@@ -697,6 +697,58 @@ test('in dry run a stored gate job is dropped, and neither the checks nor the wr
   await h.until(async () => (await jobOf(h.db, sync)).status === 'dropped');
   assert.equal((await jobOf(h.db, sync)).outcome, 'dry_run');
   assert.deepEqual([h.checked, h.writes], [[], []]);
+});
+test('in dry run the gate is given checks and a writer that refuse every call, and out of it the ones the service was given', async () => {
+  const calls: string[] = [];
+  const checks: ForgeChecks = {
+    findCheck: async () => { calls.push('findCheck'); return null; }, writeCheck: async () => { calls.push('writeCheck'); return { id: '1' }; },
+    greenChecks: async () => { calls.push('greenChecks'); return []; }, isTeamMember: async () => { calls.push('isTeamMember'); return true; },
+  };
+  const writer = { listThreads: async () => { calls.push('listThreads'); return []; } } as unknown as ForgeWriter;
+  const dry = gateForge(true, checks, writer);
+  for (const call of [
+    () => dry.checks.findCheck(REF, '99', 'h1', 'AI Review'), () => dry.checks.writeCheck(REF, '99', { id: null, commit: 'h1', name: 'AI Review', status: 'queued', conclusion: null, title: 't', summary: 's' }),
+    () => dry.checks.greenChecks(REF, '99', 'h1', ['build']), () => dry.checks.isTeamMember('99', 'acme/release-managers', 'octo-lead'),
+    () => dry.writer.listThreads(REF, '99'), () => dry.writer.react(REF, '99', '31', 'eyes'), () => dry.writer.comment(REF, '99', 'x'),
+  ]) await assert.rejects(call(), /dry_run/);
+  assert.deepEqual(calls, []);
+  const live = gateForge(false, checks, writer);
+  assert.equal(live.checks, checks);
+  assert.equal(live.writer, writer);
+});
+test('a gate job the runner drops as too old raises the alert', async () => {
+  const h = await harness({ gate: true });
+  await migrate(h.db, loadMigrations(MIGRATIONS_DIR));
+  await savePullRequest(h.db, facts());
+  const old = (await askGate(h.db, REF, at(-90_000)))!;
+  await (await h.start()).settled;
+  await h.until(async () => (await jobOf(h.db, old)).status === 'dropped');
+  await h.flush();
+  assert.equal((await jobOf(h.db, old)).outcome, 'too_old');
+  assert.deepEqual(h.logged.filter((e) => e.event === 'alert' && e.code === 'gate_check_failed'), [{ event: 'alert', code: 'gate_check_failed', reason: 'too_old' }]);
+  assert.deepEqual(h.checked, []);
+});
+test('with the gate off a review job that leaves the runner reads nothing for the gate', async () => {
+  const off = await harness({ dryRun: false });
+  await migrate(off.db, loadMigrations(MIGRATIONS_DIR));
+  await savePullRequest(off.db, facts());
+  const id = (await enqueueJob(off.db, manual()))!;
+  await (await off.start()).settled;
+  await off.published();
+  await off.until(async () => (await jobOf(off.db, id)).status === 'done');
+  await off.flush();
+  assert.deepEqual(off.queries.filter((q) => q.includes('from visto_ai.pull_requests') || q.includes("'gate'")), []);
+  // With the gate on the same review is followed by a read of the stored pull request and a request for the check.
+  const on = await harness({ gate: true, threads: [] });
+  await migrate(on.db, loadMigrations(MIGRATIONS_DIR));
+  await savePullRequest(on.db, facts());
+  await recordedWaiting(on.db);
+  const onId = (await enqueueJob(on.db, manual()))!;
+  await (await on.start()).settled;
+  on.queries.length = 0;
+  await on.published();
+  await on.until(async () => (await jobOf(on.db, onId)).status === 'done' && (await on.gateJobs()).length === 1);
+  assert.ok(on.queries.some((q) => q.includes('from visto_ai.pull_requests')));
 });
 test('when a review job has left the runner the check is asked for and decided', async () => {
   // Published: one gate job ran after it and wrote the check from the review.

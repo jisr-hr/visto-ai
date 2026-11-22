@@ -2,6 +2,7 @@ import test, { afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { GATE_OFF } from '../config/load.ts';
 import { recordEvaluation, recordSkip, NO_COUNTS } from '../db/gate.ts';
+import type { GateState } from '../db/gate.ts';
 import { askGate, claimJob, enqueueJob, getJob } from '../db/jobs.ts';
 import type { Db } from '../db/types.ts';
 import type { CheckWrite, OwnCheck } from '../forge/types.ts';
@@ -391,6 +392,92 @@ test('a job of a reason the gate does not know ends and asks for the check', asy
   assert.deepEqual(pending.map((p) => p.reason), ['sync']);
   assert.equal(h.queued(), 1);
   assert.equal(h.calls.length, 0);
+});
+
+test('a request for the check that fails after a job of an unknown reason ended leaves the end as it was', async () => {
+  const h = await harness({ reason: 'other', failQuery: "'gate', 'sync', '', 'pending'" });
+  await h.run();
+  assert.deepEqual(await statusOf(h), ['done', 'unknown_reason']);
+  assert.equal(gateLogs(h)[0]!['outcome'], 'unknown_reason');
+  assert.equal(h.queued(), 0);
+});
+
+test('the log says a check was not written only once it was compared, and an outcome only once the job was finished', async () => {
+  const unread = await harness({ check: new Error('github_502') });
+  await unread.run();
+  assert.deepEqual([gateLogs(unread)[0]!['wrote'], gateLogs(unread)[0]!['outcome']], [null, 'put_back']);
+  assert.equal(writes(unread).length, 0);
+  assert.equal((await rows(unread.db)).length, 0);
+  assert.deepEqual((await getJob(unread.db, unread.job.id))!.runAt, at(10));
+
+  const taken = await harness({ dryRun: true });
+  await taken.db.query("update visto_ai.jobs set status = 'done', outcome = 'other' where id = $1", [taken.job.id]);
+  await taken.run();
+  assert.equal(gateLogs(taken)[0]!['outcome'], null);
+  assert.deepEqual(await statusOf(taken), ['done', 'other']);
+
+  const given = await harness({ threads: [new Error('github_502')], starts: 3 });
+  await given.db.query("update visto_ai.jobs set status = 'done', outcome = 'other' where id = $1", [given.job.id]);
+  await given.run();
+  assert.equal(gateLogs(given)[0]!['outcome'], null);
+  assert.deepEqual(given.alerts, []);
+});
+
+test('a thread list that is not a list fails the check', async () => {
+  const { h } = await blockedHarness({ threads: ['nothing' as unknown as []] });
+  await h.run();
+  assert.deepEqual(writes(h).map((w) => [w.conclusion, w.title]), [['failure', 'Could not evaluate (internal_error): comment /done to retry']]);
+  assert.equal((await rows(h.db))[0]!.state, 'failed');
+});
+
+test('a sync that fails while another waits is dropped as superseded and hands it its starts', async () => {
+  const { h } = await blockedHarness({ threads: [new Error('github_502')] });
+  await askGate(h.db, REF, at(1));
+  await h.run();
+  assert.deepEqual(await statusOf(h), ['dropped', 'superseded']);
+  assert.deepEqual([gateLogs(h)[0]!['outcome'], gateLogs(h)[0]!['requeued']], ['superseded', false]);
+  const waiting = await h.db.query<{ starts: number }>("select starts from visto_ai.jobs where kind = 'gate' and status = 'pending'");
+  assert.deepEqual(waiting.map((w) => w.starts), [1]);
+  assert.deepEqual(h.alerts, []);
+});
+
+test('a write that fails on the first start and on the second is put back after 10 and then 60 seconds', async () => {
+  const h = await harness({ writeFailures: [new Error('github_500'), new Error('github_500')] });
+  await h.run();
+  assert.deepEqual(await statusOf(h), ['pending', null]);
+  assert.equal((await getJob(h.db, h.job.id))!.runAt, at(10));
+  const second = (await h.claimNext(at(10)))!;
+  await h.run(second);
+  assert.equal((await getJob(h.db, h.job.id))!.runAt, at(70));
+  assert.deepEqual(gateLogs(h).map((e) => [e['wrote'], e['outcome']]), [[false, 'put_back'], [false, 'put_back']]);
+  const third = (await h.claimNext(at(70)))!;
+  await h.run(third);
+  assert.deepEqual(await statusOf(h), ['done', 'synced']);
+  assert.equal(writes(h).length, 3);
+  assert.deepEqual(h.alerts, []);
+});
+
+test('the end of a job that cannot be stored is logged as error and the job is left for the next start', async () => {
+  const h = await harness({ failQuery: 'set status = $2, outcome = $3' });
+  await h.run();
+  assert.equal(gateLogs(h)[0]!['outcome'], 'error');
+  assert.deepEqual(await statusOf(h), ['running', null]);
+});
+
+test('a look that needs no write is recorded when the newest record has another head, another state or another code', async () => {
+  const cases: Array<[string, { headSha: string; state: GateState; code: string | null }]> = [
+    ['another head', { headSha: 'h0', state: 'waiting', code: null }],
+    ['another state', { headSha: 'h1', state: 'reviewing', code: null }],
+    ['another code', { headSha: 'h1', state: 'waiting', code: 'github_502' }],
+    ['the same', { headSha: 'h1', state: 'waiting', code: null }],
+  ];
+  for (const [name, record] of cases) {
+    const h = await harness({ check: WAITING_CHECK });
+    await recordEvaluation(h.db, { ref: REF, at: at(0), mode: 'enforce', run: null, counts: NO_COUNTS, ...record });
+    await h.run();
+    assert.equal(writes(h).length, 0, name);
+    assert.equal((await rows(h.db)).length, name === 'the same' ? 1 : 2, name);
+  }
 });
 
 test('the log holds ids, states, codes and counts only', async () => {

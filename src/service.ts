@@ -85,6 +85,11 @@ async function within(ms: number, work: Promise<unknown>): Promise<'done' | 'tim
   }
 }
 
+/** What the gate is given to reach GitHub: in dry run, checks and a writer whose every call rejects; else the ones given. */
+export function gateForge(dryRun: boolean, checks: ForgeChecks, writer: ForgeWriter): { checks: ForgeChecks; writer: ForgeWriter } {
+  return dryRun ? { checks: dryChecks(), writer: dryWriter() } : { checks, writer };
+}
+
 /**
  * Takes the lock, migrates, recovers, then listens; the work that follows listening is not waited for.
  * `settled` resolves when the work that follows listening has had its first try: the key check, the app check, the redelivery attempt and, when that worked, the first beat.
@@ -152,7 +157,7 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps): Pr
     onLeft: reviewLeft,
   });
   const gateDeps: GateJobDeps = {
-    db, forge: deps.forge, checks: config.dryRun ? dryChecks() : deps.checks, writer: config.dryRun ? dryWriter() : deps.writer,
+    db, forge: deps.forge, ...gateForge(config.dryRun, deps.checks, deps.writer),
     clock, log: say, settingsFor, dryRun: config.dryRun,
     paused: pauseCode,
     reviewing: (ref) => runner.holds(ref),

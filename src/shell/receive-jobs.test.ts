@@ -175,10 +175,56 @@ const rerun = (over = {}): ForgeEvent => ({
 });
 
 test('a push to a gated pull request stores no review job and asks for its check', async () => {
-  assert.deepEqual(await deliver(pr('synchronize'), 'd1', { settings: GATED }), { status: 202, body: 'accepted' });
-  assert.deepEqual(await reviewJobs(), []);
-  assert.deepEqual((await gateJobs()).map((j) => [j.reason, j.trigger, j.runAt, j.status]), [['sync', 'automatic', at(0), 'pending']]);
-  assert.deepEqual([logged.at(-1)!.skip, logged.at(-1)!.job, logged.at(-1)!.gate, queued], ['gated', null, true, 1]);
+  for (const action of ['opened', 'synchronize', 'reopened', 'ready_for_review', 'retargeted'] as const) {
+    const other = await testDb();
+    queued = 0;
+    try {
+      assert.deepEqual(await deliver(pr(action), `d-${action}`, { database: other, settings: GATED }), { status: 202, body: 'accepted' }, action);
+      assert.deepEqual(await reviewJobs(other), [], action);
+      assert.deepEqual((await gateJobs(other)).map((j) => [j.reason, j.trigger, j.runAt, j.status]), [['sync', 'automatic', at(0), 'pending']], action);
+      assert.deepEqual([logged.at(-1)!.skip, logged.at(-1)!.job, logged.at(-1)!.gate, queued], ['gated', null, true, 1], action);
+    } finally { await other.close(); }
+  }
+});
+test('a push in shadow is reviewed and asks for its check; one in bypass is skipped as gated and asks for its check', async () => {
+  const SHADOW: RepoSettings = { ...GATED, gate: { ...GATED.gate, mode: 'shadow' } };
+  await deliver(pr('synchronize'), 'd1', { settings: SHADOW });
+  assert.deepEqual((await unfinishedJobs(db)).map((j) => [j.kind, j.reason]).sort(), [['gate', 'sync'], ['review', 'synchronize']]);
+  assert.deepEqual([logged.at(-1)!.skip, logged.at(-1)!.job, logged.at(-1)!.gate], [null, 'delayed', true]);
+  const other = await testDb();
+  try {
+    const BYPASS: RepoSettings = { ...GATED, gate: { ...GATED.gate, mode: 'bypass' } };
+    await deliver(pr('synchronize'), 'd2', { database: other, settings: BYPASS });
+    assert.deepEqual((await unfinishedJobs(other)).map((j) => [j.kind, j.reason]), [['gate', 'sync']]);
+    assert.deepEqual([logged.at(-1)!.skip, logged.at(-1)!.job, logged.at(-1)!.gate], ['gated', null, true]);
+  } finally { await other.close(); }
+});
+test('the base of the event decides whether a push asks for the check, when the stored one differs', async () => {
+  await deliver(pr('other', { baseBranch: 'feature/x', updatedAt: at(5) }), 'd1', { settings: GATED });
+  await deliver(pr('synchronize', { baseBranch: 'main', updatedAt: at(0) }), 'd2', { settings: GATED });
+  assert.equal((await getPullRequest(db, REF))!.baseBranch, 'feature/x');
+  assert.deepEqual((await gateJobs()).map((j) => j.reason), ['sync']);
+  const other = await testDb();
+  try {
+    await deliver(pr('other', { baseBranch: 'main', updatedAt: at(5) }), 'd3', { database: other, settings: GATED });
+    await deliver(pr('synchronize', { baseBranch: 'feature/x', updatedAt: at(0) }), 'd4', { database: other, settings: GATED });
+    assert.equal((await getPullRequest(other, REF))!.baseBranch, 'main');
+    assert.deepEqual(await gateJobs(other), []);
+  } finally { await other.close(); }
+});
+test('a gate job that cannot be stored answers 503 and stores nothing of the delivery', async () => {
+  const failing: Db = { ...db, transaction: (work) => db.transaction((tx) => work({
+    ...tx, query: (text, params) => (text.includes("'gate', 'sync'") ? Promise.reject(new Error('refused')) : tx.query(text, params)),
+  })) };
+  assert.deepEqual(await deliver(pr('synchronize'), 'd1', { database: failing, settings: GATED }), { status: 503, body: 'storage_unavailable' });
+  assert.deepEqual(await db.query('select id from visto_ai.deliveries'), []);
+  assert.equal(await getPullRequest(db, REF), null);
+  assert.deepEqual([await unfinishedJobs(db), queued], [[], 0]);
+});
+test('with the gate off a re-run of a check is handled, stores nothing and queues no job', async () => {
+  assert.deepEqual(await deliver(rerun(), 'k1'), { status: 202, body: 'accepted' });
+  assert.deepEqual(await db.query('select id, outcome from visto_ai.deliveries'), [{ id: 'k1', outcome: 'handled' }]);
+  assert.deepEqual([await unfinishedJobs(db), await getPullRequest(db, REF), (await listActivity(db, REF)).length, queued], [[], null, 0, 0]);
 });
 test('with the gate off, and in dry run, a pull request event stores what it stored before', async () => {
   await deliver(pr('opened'), 'd1');

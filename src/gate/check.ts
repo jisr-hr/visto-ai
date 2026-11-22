@@ -1,7 +1,6 @@
 import type { GateCounts } from '../db/gate.ts';
 import { NO_COUNTS } from '../db/gate.ts';
 import type { StoredRun } from '../db/review-runs.ts';
-import { inertInline } from '../engine/render/body.ts';
 import type { CheckWrite, OwnCheck } from '../forge/types.ts';
 import { isShortCode } from '../shell/codes.ts';
 import { head12 } from './answers.ts';
@@ -59,8 +58,10 @@ export function planAfter(verdict: GateVerdict, reviewed: StoredRun, refused: nu
   const unplaced = Array.isArray(result['unplaced']) ? (result['unplaced'] as unknown[]) : [];
   const unchanged = Array.isArray(result['unchanged']) ? (result['unchanged'] as unknown[]) : [];
   const withoutThread = unplaced.filter((e) => isObject(e) && (e['severity'] === 'major' || e['severity'] === 'blocker')).length + unchanged.length;
-  const blocked = verdict.blocking.length > 0 || refused > 0;
-  return { state: blocked ? 'blocked' : 'passed', verdict, notReviewed, withoutThread, refused };
+  // A count that is not a whole number at or above 0 cannot be read: it blocks, as one refused finding.
+  const counted = Number.isInteger(refused) && refused >= 0 ? refused : 1;
+  const blocked = verdict.blocking.length > 0 || counted > 0;
+  return { state: blocked ? 'blocked' : 'passed', verdict, notReviewed, withoutThread, refused: counted };
 }
 
 export interface CheckMeta {
@@ -78,9 +79,10 @@ const SKIP_LINE = 'The team that may skip can comment `/ai-review-skip <reason>`
 
 const shownCode = (code: string): string => (isShortCode(code) ? code : 'internal_error');
 
-/** A path as it may be shown inside a code span: printable ASCII only, a backtick and everything else as `?`. */
+/** A path as it may be shown inside a code span: printable ASCII only, a backtick and everything else as `?`; `?` when nothing is left. */
 function shownPath(path: string): string {
-  return path.replace(/[^\x20-\x7E]|`/g, '?').slice(0, 200);
+  const shown = path.replace(/[^\x20-\x7E]|`/g, '?').slice(0, 200);
+  return shown === '' ? '?' : shown;
 }
 
 function listLine(b: GateVerdict['blocking'][number], meta: CheckMeta): string {
@@ -121,9 +123,14 @@ function extras(plan: Counted): string[] {
   return out;
 }
 
+// Control characters, and the characters that change the direction of text.
+const UNSHOWN = /[\u0000-\u001F\u007F-\u009F\u200E\u200F\u202A-\u202E\u2066-\u2069]/g;
+
+/** The skip's reason as one code span: white space collapsed, control and direction characters removed, each backtick an apostrophe, at most 300 code points; `?` when nothing is left. Nothing in it is live. */
 function skipReasonShown(reason: string): string {
-  const flat = reason.replace(/\s+/g, ' ').trim();
-  return inertInline(Array.from(flat).slice(0, 300).join(''));
+  const flat = reason.replace(/\s+/g, ' ').replace(UNSHOWN, '').replace(/\s+/g, ' ').trim().replace(/`/g, "'");
+  const cut = Array.from(flat).slice(0, 300).join('').trim();
+  return `\`${cut === '' ? '?' : cut}\``;
 }
 
 function make(status: CheckText['status'], conclusion: CheckText['conclusion'], title: string, paragraphs: string[]): CheckText {

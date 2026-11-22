@@ -77,6 +77,8 @@ export async function planNow(deps: GateJobDeps, args: {
   if (reviewed === null) return { plan: { state: 'failed', code: 'internal_error', evaluated: true }, run: null };
   try {
     const threads = await deps.writer.listThreads(args.ref, args.installation);
+    // An answer that is not a list is no answer: never read as no thread.
+    if (!Array.isArray(threads)) throw new Error('internal_error');
     let stored = await listComments(db, args.ref);
     try {
       stored = [...stored, ...missedComments({ runs, stored, threads })];
@@ -144,16 +146,21 @@ export async function runGateJob(job: Job, deps: GateJobDeps): Promise<void> {
   try {
     if (end.kind === 'finish') {
       const finished = await finishJob(deps.db, job.id, end.status, end.outcome, now());
-      entry.outcome = end.outcome;
+      // An outcome is this job's only when its finish was stored.
+      if (finished) entry.outcome = end.outcome;
       if (finished && end.ask === true) {
-        await askGate(deps.db, job.ref, now());
-        try { deps.onQueued(); } catch { /* the runners look at their next tick */ }
+        try {
+          await askGate(deps.db, job.ref, now());
+          try { deps.onQueued(); } catch { /* the runners look at their next tick */ }
+        } catch {
+          // The job is finished: the request for the check is lost, and the next event or start asks again.
+        }
       }
     } else if (job.starts >= MAX_STARTS) {
       // Nothing else is written: the check keeps what GitHub shows.
       entry.requeued = false;
-      entry.outcome = 'failed';
       if (await finishJob(deps.db, job.id, 'done', 'failed', now())) {
+        entry.outcome = 'failed';
         try { deps.alert('gate_check_failed', { reason: end.code }); } catch { /* an alert that throws changes nothing */ }
       }
     } else {
@@ -195,7 +202,6 @@ async function work(job: Job, deps: GateJobDeps, entry: Entry, log: (e: Record<s
   const key = `${ref.owner.toLowerCase()}/${ref.repo.toLowerCase()}@${head.toLowerCase()}`;
 
   const plan = await deps.lock.run(key, async (): Promise<CheckPlan> => {
-    entry.wrote = false;
     const current = await deps.checks.findCheck(ref, installation, head, name);
     const { plan, run } = await planNow(deps, { ref, installation, settings, gating, live });
     const counts: GateCounts = countsOf(plan);
@@ -211,6 +217,8 @@ async function work(job: Job, deps: GateJobDeps, entry: Entry, log: (e: Record<s
       retrying: job.starts < MAX_STARTS, threadUrl: (id) => deps.commentUrl(ref, id),
     });
     const wrote = !sameCheck(current, text);
+    // false only from here on: the check GitHub holds was read and compared.
+    entry.wrote = false;
     if (wrote) {
       await deps.checks.writeCheck(ref, installation, { id: current?.id ?? null, commit: head, name, ...text });
       entry.wrote = true;

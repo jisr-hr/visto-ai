@@ -102,6 +102,8 @@ function checkRunEvent(p: Record<string, unknown>): ForgeEvent {
   const run = obj(p.check_run);
   const check = str(run.name);
   const headSha = str(run.head_sha);
+  short(check);
+  short(headSha);
   const appId = obj(run.app).id;
   if (typeof appId !== 'number' && typeof appId !== 'string') throw bad();
   const app = str(String(appId));

@@ -30,6 +30,7 @@ test('the work of one key runs one at a time, in order, and other keys do not wa
   const q1 = lock.run('acme/shop@h2', b1.work);
   await turn();
   assert.deepEqual(seen, ['start a1', 'start b1']);
+  assert.equal(lock.keys(), 2);
   a2.release();
   a3.release();
   await turn();
@@ -41,6 +42,8 @@ test('the work of one key runs one at a time, in order, and other keys do not wa
   assert.deepEqual(seen, ['start a1', 'start b1', 'end a1', 'start a2', 'end a2', 'start a3', 'end a3']);
   b1.release();
   assert.equal(await q1, 'b1');
+  await turn();
+  assert.equal(lock.keys(), 0, 'a key nothing waits on is forgotten');
   // The key was forgotten: a new work of it starts at once.
   const a4 = gated('a4', seen);
   const p4 = lock.run('acme/shop@h1', a4.work);
@@ -60,4 +63,6 @@ test('a work that rejects does not hold the next, and its rejection reaches its 
   await assert.rejects(thrown, { message: 'internal_error' });
   assert.equal(await next, 7);
   assert.deepEqual(seen, ['first', 'thrown', 'next']);
+  await turn();
+  assert.equal(lock.keys(), 0, 'a key whose last work rejected is forgotten too');
 });

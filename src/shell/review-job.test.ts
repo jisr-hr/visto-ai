@@ -1834,6 +1834,13 @@ test('a /done review and a re-run start over once when the head moved, with the 
   assert.deepEqual((await pendingOf(8)).map((j) => [j.trigger, j.reason, j.headSha]), [['automatic', 'synchronize', 'h3']]);
   assert.equal(third.logged.some((e) => e.event === 'answer_failed'), false);
 });
+test('a push\'s job already waiting when a /done review ends head_moved is replaced by the done_retry', async () => {
+  const done = await manualJob({ reason: 'done', settings: GATED, liveAfter: MOVED });
+  const push = (await enqueueJob(db, { ref: REF, reason: 'synchronize', headSha: 'h2', runAt: at(180), now: at(1), delivery: 'd9', replace: true, ...AUTOMATIC }))!;
+  await runReviewJob(done.job, done.deps);
+  assert.equal((await getJob(db, done.job.id))?.outcome, 'head_moved');
+  assert.deepEqual((await pendingOf(7)).map((j) => [j.id, j.trigger, j.reason, j.headSha, j.requestedBy, j.runAt]), [[push, 'manual', 'done_retry', '', 'octo-lead', at(0)]]);
+});
 test('a re-run and its retry are not asked who commented, get no reaction and no sentence, and the review names who asked', async () => {
   for (const [reason, number] of [['rerun', 7], ['rerun_retry', 8]] as const) {
     const h = await manualJob({ reason, settings: GATED, pullRequest: number, requestedBy: 'octo-dev', commentId: null, association: null });

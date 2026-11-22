@@ -3,7 +3,7 @@ import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { createServer, describeFailure, HEADERS_TIMEOUT_MS, main, REQUEST_TIMEOUT_MS, runUntilSignal } from './main.ts';
+import { boundedFetch, createServer, describeFailure, GITHUB_CALL_MS, HEADERS_TIMEOUT_MS, main, REQUEST_TIMEOUT_MS, runUntilSignal } from './main.ts';
 
 async function run(argv: string[], env: Record<string, string | undefined> = {}): Promise<{ code: number; lines: string[] }> {
   const lines: string[] = [];
@@ -91,4 +91,35 @@ test('a start that fails is logged with its reason and the code is 1', async () 
   const logged: Array<Record<string, unknown>> = [];
   const code = await runUntilSignal(() => Promise.reject(new Error('another_instance_running')), signalsFake(), () => {}, (e) => { logged.push(e); });
   assert.deepEqual([code, logged], [1, [{ event: 'start_failed', error: 'Error', code: null, reason: 'another_instance_running' }]]);
+});
+
+test('every call to GitHub has a time limit of a minute, for its answer and its body, and a caller\'s own signal still aborts it', async () => {
+  assert.equal(GITHUB_CALL_MS, 60_000);
+  const never: typeof fetch = () => new Promise<Response>(() => {});
+  const started = Date.now();
+  await assert.rejects(boundedFetch(never, 20)('https://api.example.test/x'));
+  assert.ok(Date.now() - started < 5_000);
+
+  // An answer whose body never ends is cut by the same limit.
+  const stalled: typeof fetch = async () => new Response(new ReadableStream({ start() { /* never sends */ } }), { status: 200 });
+  await assert.rejects(boundedFetch(stalled, 20)('https://api.example.test/x'));
+
+  const own = new AbortController();
+  const waiting = boundedFetch(never, 60_000)('https://api.example.test/x', { signal: own.signal });
+  own.abort();
+  await assert.rejects(waiting);
+
+  // The signal given to the inner fetch carries the limit too, and an answer in time passes through with its status, headers and body.
+  let given: AbortSignal | null | undefined;
+  const quick: typeof fetch = async (_input, init) => {
+    given = init?.signal;
+    return new Response('{"a":1}', { status: 201, headers: { 'x-thing': 'y' } });
+  };
+  const res = await boundedFetch(quick, 60_000)('https://api.example.test/x', { method: 'POST', headers: { Accept: 'a' } });
+  assert.deepEqual([res.status, res.ok, res.headers.get('x-thing'), await res.json()], [201, true, 'y', { a: 1 }]);
+  assert.ok(given instanceof AbortSignal);
+  const empty = await boundedFetch(async () => new Response(null, { status: 204 }), 60_000)('https://api.example.test/x');
+  assert.equal(empty.status, 204);
+  const failing: typeof fetch = async () => { throw new TypeError('fetch failed'); };
+  await assert.rejects(boundedFetch(failing, 60_000)('https://api.example.test/x'), TypeError);
 });

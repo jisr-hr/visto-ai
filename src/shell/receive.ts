@@ -17,7 +17,8 @@ export interface HttpAnswer { status: number; body: string }
 export interface ReceiveDeps {
   db: Db; reader: WebhookReader; clock: () => Date; log: (entry: Record<string, unknown>) => void;
   settingsFor: (fullName: string) => RepoSettings;   // "owner/name"
-  onQueued: () => void;                              // called after the commit, once per delivery that stored or replaced a job
+  /** Called after the commit, once per delivery that stored or replaced a review job, or stored a gate job or moved a waiting one's time; also when the delivery itself is recorded as ignored. */
+  onQueued: () => void;
   /** In dry run no gate job is stored: /done is a /review, the skip and a re-run are nothing. */
   dryRun: boolean;
   /** The service's own app id: a re-run of any other app's check is not ours. */

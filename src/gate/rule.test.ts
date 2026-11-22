@@ -228,12 +228,22 @@ test('a review posted without its inline comments counts its major and blocker f
   assert.equal(refusedInline([refused(1, { baseSha: 'b0' })], 'h1', 'b1'), 0);
   assert.equal(refusedInline([refused(1, { published: false })], 'h1', 'b1'), 0);
   assert.equal(refusedInline([refused(1, { dryRun: true })], 'h1', 'b1'), 0);
-  assert.equal(refusedInline([refused(1, {}, 'x')], 'h1', 'b1'), 0);
-  assert.equal(refusedInline([refused(1, { result: 'x' })], 'h1', 'b1'), 0);
   assert.equal(refusedInline([], 'h1', 'b1'), 0);
   assert.equal(refusedInline([refused(1), refused(3, {}, [f('blocker')]), refused(2, {}, [f('minor')])], 'h1', 'b1'), 1);
   assert.equal(refusedInline([refused(1), refused(2, {}, [f('minor')])], 'h1', 'b1'), 2);
   assert.equal(refusedInline([refused(1, {}, [f('major'), 5, null, { severity: 'critical' }])], 'h1', 'b1'), 1);
+});
+
+test('a review posted without its inline comments whose stored result cannot be read counts as refused', () => {
+  const dropped = (id: number, over: Partial<StoredRun> = {}) => run(id, { inlineDropped: true, ...over });
+  assert.equal(refusedInline([dropped(1, { result: 'x' })], 'h1', 'b1'), 1);
+  assert.equal(refusedInline([dropped(1, { result: null })], 'h1', 'b1'), 1);
+  assert.equal(refusedInline([dropped(1, { result: [1, 2] })], 'h1', 'b1'), 1);
+  assert.equal(refusedInline([dropped(1, { result: { findings: 'x' } })], 'h1', 'b1'), 1);
+  assert.equal(refusedInline([dropped(1, { result: {} })], 'h1', 'b1'), 1);
+  assert.equal(refusedInline([dropped(1, { result: 'x', inlineDropped: false })], 'h1', 'b1'), 0);
+  assert.equal(refusedInline([dropped(1, { result: 'x', headSha: 'h0' })], 'h1', 'b1'), 0);
+  assert.equal(refusedInline([dropped(1, { result: { findings: [] } })], 'h1', 'b1'), 0);
 });
 
 test('the counts of a mixed pull request', () => {

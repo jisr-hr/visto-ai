@@ -81,6 +81,15 @@ test('after the threads the check is passed or blocked, and counts what the revi
   assert.deepEqual(planAfter(verdict([]), bad, 0), { state: 'passed', verdict: verdict([]), notReviewed: 0, withoutThread: 0, refused: 0 });
 });
 
+test('a count of refused findings that is not a whole number at or above 0 reads as blocked', () => {
+  for (const refused of [-1, 0.5, Number.NaN, Number.POSITIVE_INFINITY, -0.1]) {
+    const p = planAfter(verdict([]), run(1), refused);
+    assert.equal(p.state, 'blocked', String(refused));
+    assert.equal(p.state === 'blocked' && p.refused, 1, String(refused));
+  }
+  assert.equal(planAfter(verdict([]), run(1), 0).state, 'passed');
+});
+
 test('each state has its status, its conclusion and its words', () => {
   const WAITING = 'Comment `/done` on this pull request when it is ready to be reviewed. The review then decides this check: a finding marked major or blocker has to be fixed or answered before the merge.';
   assert.deepEqual(checkText({ state: 'waiting' }, meta({ canSkip: true })), { status: 'queued', conclusion: null, title: 'Waiting for /done', summary: WAITING });
@@ -125,7 +134,7 @@ test('each state has its status, its conclusion and its words', () => {
 
   assert.deepEqual(checkText({ state: 'skipped', actor: 'octo-lead', reason: 'hotfix,   checked\tby hand ' }, meta({ canSkip: true })), {
     status: 'completed', conclusion: 'success', title: 'Skipped by @octo-lead',
-    summary: 'The review was skipped for commit `abcdef012345` by `octo-lead`.\n\nReason: hotfix, checked by hand\n\nA new commit ends the skip: its check waits for `/done` again.',
+    summary: 'The review was skipped for commit `abcdef012345` by `octo-lead`.\n\nReason: `hotfix, checked by hand`\n\nA new commit ends the skip: its check waits for `/done` again.',
   });
   assert.deepEqual(checkText({ state: 'bypassed' }, meta({ canSkip: true })), {
     status: 'completed', conclusion: 'success', title: 'Gate bypassed',
@@ -232,13 +241,28 @@ test('nothing a person or a file name wrote can leave its place in the summary, 
   const long = checkText(plan('blocked', verdict([blocking({ path: 'p'.repeat(300), line: 4 })])), meta());
   assert.ok(long.summary.includes(`[\`${'p'.repeat(200)}:4\`]`));
   const skipped = checkText({ state: 'skipped', actor: 'octo-lead', reason: '@octo-dev <b>x</b>\n# T' }, meta());
-  assert.equal(skipped.summary.split('\n\n')[1], 'Reason: @\u200Bocto-dev <\u200Bb>x<\u200B/b> # T');
+  assert.equal(skipped.summary.split('\n\n')[1], 'Reason: `@octo-dev <b>x</b> # T`');
   const reason = skipped.summary.split('\n\n')[1]!;
   assert.ok(!reason.includes('\n'));
-  assert.ok(!/@octo-dev/.test(reason));
-  assert.ok(!/<b>/.test(reason));
   const cut = checkText({ state: 'skipped', actor: 'octo-lead', reason: 'x'.repeat(400) }, meta());
-  assert.equal(cut.summary.split('\n\n')[1], `Reason: ${'x'.repeat(300)}`);
+  assert.equal(cut.summary.split('\n\n')[1], `Reason: \`${'x'.repeat(300)}\``);
+  // Everything a person typed stays inside one code span: no link, bold, mention, tag, backtick, line break or change of direction is live.
+  const live = '[click](https://evil.example.test) **bold** @octo-dev <img src=x> `code` line\nnext \u202Eevil\u2066x\u2069 \u0000\u0007\u007F\u0085\u200E\u200F\u202A\u202B\u202C\u202D';
+  const shown = checkText({ state: 'skipped', actor: 'octo-lead', reason: live }, meta()).summary.split('\n\n')[1]!;
+  assert.equal(shown, "Reason: `[click](https://evil.example.test) **bold** @octo-dev <img src=x> 'code' line next evilx`");
+  assert.ok(!/[\u0000-\u001F\u007F-\u009F\u200E\u200F\u202A-\u202E\u2066-\u2069]/.test(shown));
+  assert.equal(shown.split('`').length, 3);
+  const spaced = checkText({ state: 'skipped', actor: 'octo-lead', reason: 'a\u0001 \u0002b\tc' }, meta()).summary.split('\n\n')[1];
+  assert.equal(spaced, 'Reason: `a b c`');
+  const wide = checkText({ state: 'skipped', actor: 'octo-lead', reason: '\u{1F600}'.repeat(301) }, meta()).summary.split('\n\n')[1];
+  assert.equal(wide, `Reason: \`${'\u{1F600}'.repeat(300)}\``);
+  const empty = checkText({ state: 'skipped', actor: 'octo-lead', reason: '\u202E\u0001 ' }, meta()).summary.split('\n\n')[1];
+  assert.equal(empty, 'Reason: `?`');
+  // A path that is empty after its treatment is shown as `?`.
+  const bare = checkText(plan('blocked', verdict([blocking({ path: '', line: null })])), meta());
+  assert.ok(bare.summary.includes('[`?`](https://git.example.test/c/8001)'));
+  const bareLine = checkText(plan('blocked', verdict([blocking({ path: '', line: 3 })])), meta());
+  assert.ok(bareLine.summary.includes('[`?:3`](https://git.example.test/c/8001)'));
   const stranger = checkText({ state: 'skipped', actor: 'x y', reason: 'ok' }, meta());
   assert.equal(stranger.title, 'Skipped by a team member');
   assert.equal(stranger.summary.split('\n\n')[0], 'The review was skipped for commit `abcdef012345` by a team member.');
