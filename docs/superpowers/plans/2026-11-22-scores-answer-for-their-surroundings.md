@@ -8,7 +8,7 @@
 
 **Tech Stack:** TypeScript on Node 26 (type stripping, `.ts` import suffixes), `node:test`, PGlite through `testDb()`. No new dependency.
 
-**Spec:** `docs/superpowers/specs/2026-11-13-visto-ai-design.md`, section 6 under "Scores across reviews of one pull request (D17)" and "Across pull requests". The rule is the paragraph that begins "A stored score answers for a block only among the same lines". This plan closes call 19 of `2026-11-20-scores-that-hold-and-reading-less.md`, which the owner ruled on 2026-11-22.
+**Spec:** `docs/superpowers/specs/2026-11-13-visto-ai-design.md`, section 6 under "Scores across reviews of one pull request (D17)" and "Across pull requests". The rule is the paragraph that begins "A stored score spares the model only among the same lines". This plan closes call 19 of `2026-11-20-scores-that-hold-and-reading-less.md`, which the owner ruled on 2026-11-22.
 
 **Notes:** `docs/superpowers/plans/2026-11-22-scores-answer-for-their-surroundings-notes.md` is written when the build ends.
 
@@ -64,7 +64,7 @@ export interface StoredEntry { hash: string; arounds: string[]; entry: ScoreEntr
 //   one for each hash, as before this plan: the highest score stored for these changed lines.
 //   arounds: the surroundings among which a score was stored for them; empty when none was stored with surroundings
 export interface StoredSplit { hunkHash: string; around: string | null; parts: Array<{ hash: string; range: [number, number] }> }
-export interface FileHistory { /* as today, but: */ blocks: StoredEntry[]; /* one for each hash */ stoodFor: Array<{ hash: string; around: string | null }> /* less those whose hash has an entry */ }
+export interface FileHistory { /* as today, but: */ blocks: StoredEntry[]; /* one for each hash */ stoodFor: Array<{ hash: string; around: string | null }> /* every stood-for pair, also of a hash that has an entry */ }
 
 // src/engine/types.ts
 reusableScores?: (blocks: Array<{ path: string; hash: string; around: string }>) => Promise<Array<{ path: string; hash: string; around: string; entry: ScoreEntry }>>;
@@ -87,19 +87,17 @@ export function scoresToStore(result: unknown): Array<{ path: string; hash: stri
 **Rules:**
 
 1. **`around`.** For a hunk, sha256 over each of its lines that is not a `meta` line, in order: `+`, `-` or a space for its kind, then its text and a line feed. `blocksOf` computes it. `splitBlock` and `partsAt` give each part, and the rest, the `around` of the block they cut. `hash`, `hunkHash` and `fileDiffHash` are computed as today.
-2. **Two questions, two keys** (call 6). Whether the model is asked for a block is decided by the pair: the model is spared only when a score was stored for the block's `hash` among its `around`. What score a block keeps, or is held to, is decided by its `hash` alone: the highest score stored for it, wherever the lines stood. A stored entry with no surroundings spares the model for no block and holds its block.
-3. **`keptScores`**:
-   - a block is kept from an earlier run, and not asked for, when a stored entry has its `hash` and the block's `around` is one of the entry's `arounds`. It keeps the entry's score, which is the highest stored for the `hash`;
-   - a split is kept when a stored split has the hunk's `hunkHash` and `around`, and each part's `hash` has a stored entry whose `arounds` hold the hunk's `around`;
-   - a block is stood for by the kept whole-file score when a stored stood-for pair is the block's pair;
-   - a score another pull request stored is taken when its `hash` and `around` are the block's;
-   - the floor is computed as before this plan, by `hash`: the highest stored score whose `hash` no present block has;
-   - **`held`.** A block that is left open (not kept, no split kept for it, not stood for) and whose `hash` has a stored entry is held: `held` has, under its id, that entry's score. A score taken from another pull request for a held block is raised to the higher of the floor and its hold, as it is raised to the floor today.
-   Where the histories of a path and of its earlier name are joined, the higher entry is kept for each `hash`, with the `arounds` of both. The search that lets a file shown as added answer to the other paths that held one of its blocks goes by `hash`, as today.
+2. **Two questions, two keys** (call 6). Whether the model is asked for a block is decided by the pair. What score a block keeps, or is held to, is decided by its `hash` alone: the highest score stored for it, wherever the lines stood. A stored entry, split or stood-for pair with no surroundings spares the model for no block; a stored entry holds its block all the same.
+3. **`keptScores`.** The model **was asked for a block among its lines** when one of these is stored: an entry of the block's `hash` with the block's `around` among its `arounds`; a stood-for pair that is the block's pair; a split with the block's `hunkHash` and `around`. Then, for each block:
+   - asked before, and its `hash` has an entry: it is kept whole at that entry's score and not asked for, also when a split is stored for it;
+   - asked before, no entry, and a split is stored for its pair: the split is kept when each part's `hash` has an entry whose `arounds` hold the hunk's `around`; a split that does not fit leaves the block open;
+   - asked before, no entry, a stood-for pair: it is stood for by the kept whole-file score, as today;
+   - otherwise the block is open: it is asked for, and when its `hash` has an entry it is held (`held`, under its id) at that entry's score. A score taken from another pull request (its `hash` and `around` are the block's) for a held block is raised to the higher of the floor and its hold, as it is raised to the floor today.
+   The floor is computed as before this plan, by `hash`: the highest stored score whose `hash` no present block has. Where the histories of a path and of its earlier name are joined, the higher entry is kept for each `hash`, with the `arounds` of both. The search that lets a file shown as added answer to the other paths that held one of its blocks goes by `hash`, as today.
 4. **`blocksToLookUp`** returns the `around` of each block it asks for; two blocks with the same path, `hash` and `around` are asked once.
 5. **`keepScores` in `review.ts`** asks with the three values, and takes from the answer only a row whose `path`, `hash` and `around` are strings and are one of those asked. Any other row is skipped, as a row with an unknown hash is today.
 6. **`reconcile/scores.ts`.** `blockScore` writes the block's `around` on every `BlockScore` it builds, kept or given in this run. In `scoreFile`, where a score given in this run for a block is raised to the file's floor (`atFloor`, and the whole-file score that stands in place of a block score), the bound is the higher of the file's floor and the block's hold; the given score is kept in `raisedFrom` as today. The parts the model cuts a held block into are each held.
-7. **`historyOf` in `src/shell/history.ts`** reads `around` from each stored block: a string that is not empty, else null. The entries are kept as before this plan, one for each `hash`, the highest, with the same rule on a tie; each also gets `arounds`: every `around`, null left out, among which a block of that `hash` had an entry given by `by` in any earlier run, whatever its score. The rule that a hunk does not stand below its own parts goes by `hunkHash`, as before. The blocks of a stored file are grouped into hunks by the hunk's pair (`hunkHash`, `around`), so that two hunks with the same changed lines among different lines are two groups, and there is one split for each hunk pair, with its `around`. The stood-for blocks are pairs, less those whose `hash` has an entry. `coveredAt` and `readAt` are built as today. The existing test of `src/shell/history.test.ts` "two blocks of one run with the same changed lines both stand at the higher score" keeps what it asserted before this plan. The test helper `historyFrom` in `src/engine/review.test.ts` mirrors `historyOf`: it is brought up the same way, so that the end-to-end tests go on testing the real shape.
+7. **`historyOf` in `src/shell/history.ts`** reads `around` from each stored block: a string that is not empty, else null. The entries are kept as before this plan, one for each `hash`, the highest, with the same rule on a tie; each also gets `arounds`: every `around`, null left out, among which a block of that `hash` had an entry given by `by` in any earlier run, whatever its score. The rule that a hunk does not stand below its own parts goes by `hunkHash`, as before. The blocks of a stored file are grouped into hunks by the hunk's pair (`hunkHash`, `around`), so that two hunks with the same changed lines among different lines are two groups, and there is one split for each hunk pair, with its `around`. The stood-for blocks are pairs, every one of them: a pair whose `hash` also has an entry tells that the model was asked among those lines. `coveredAt` and `readAt` are built as today. The existing test of `src/shell/history.test.ts` "two blocks of one run with the same changed lines both stand at the higher score" keeps what it asserted before this plan. The test helper `historyFrom` in `src/engine/review.test.ts` mirrors `historyOf`: it is brought up the same way, so that the end-to-end tests go on testing the real shape.
 8. **`scoresToStore`** adds each block's `around`, or null.
 9. **The database.** `0007_score_surroundings.sql` is `alter table visto_ai.block_scores add column around text;`. `recordBlockScores` writes it. `reusableScores` joins on `path`, `hash` and `around`, answers the highest score for each of the three, and returns `around`. A row whose `around` is null matches no pair.
 10. **`review-job.ts`** passes `around` both ways between the engine's lookup and `reusableScores`.
@@ -126,7 +124,8 @@ test('the lookup asks with the surroundings, once for each path, hash and surrou
 test('of a path and its earlier name the higher entry is kept for each hash, with the surroundings of both', () => { /* a renamed file */ });
 test('a block back among lines it was scored among keeps the highest score its changed lines had, and is not asked for', () => { /* stored 20 among A1, then 60 among A2: among A1 again it is kept at 60, hunk in scoredHunks */ });
 test('of two hunks with the same changed lines, each among known lines, both stand at the higher score', () => { /* 85 and 10: both kept at 85; with the 85 one gone from the diff the other still stands at 85 */ });
-test('a block that stood under the whole-file score and has a score of its own stored elsewhere is asked for again and held', () => { /* stood for among A1 at whole-file 30, scored 55 among A2: among A1 it is open and held at 55 */ });
+test('a block the model left to the whole-file score among these lines, whose changed lines have a score, is kept at that score and not asked for', () => { /* scored 20 among A1; among A2 the model gave the file 50 and the block nothing: among A2 again it is kept at 20 as earlier_run, the file is settled once its diff was read, and nothing is held; with the two stored under a path and its earlier name it is the same */ });
+test('a hunk split among these lines and scored whole among others is kept whole at its score', () => { /* parts 10 and 20 among A1, whole 70 among A2: among A1 again it is one block kept at 70, not the parts */ });
 test('a hunk scored whole, then split among other lines, does not stand below its highest part when it is back', () => { /* whole 10 among A1, parts up to 90 among A2: among A1 it is kept at 90 */ });
 test('a hunk whose stored split is found but no longer fits is held to the score stored for its changed lines', () => { /* the implementer\'s first gap */ });
 
@@ -136,7 +135,7 @@ test('a held block scored below its hold is raised to it, and no other block of 
 
 // src/engine/review.test.ts
 test('lines scored in one place and moved to another are scored again and cannot score lower', async () => { /* Review Focus 1: a first review's result, read back through the same shape a stored result has, is the history of a second review of the same changed lines between other unchanged lines; the model is sent the hunk without `scored`; it answers lower: the stored score stands with raisedFrom; it answers higher: the higher stands; a second, new block of the same file that the model scores low keeps its low score */ });
-test('no score falls: a block whose neighbours change and change back, and two hunks with the same changed lines of which the higher is edited', async () => { /* the two sequences of the whole-branch review, each through three reviews with the history read back each time: 20, 60, then 60 with the model not asked; and 85 and 10, then the first edited and scored 15: the file still stands at 85 */ });
+test('no score falls: a block whose neighbours change and change back, and two hunks with the same changed lines of which the higher is edited', async () => { /* the two sequences of the whole-branch review, each through three reviews with the history read back each time: 20, 60, then 60 with the model not asked; and 85 and 10, then the first edited and scored 15: the file still stands at 85; and the two of the re-review: a block the model leaves to a whole-file score is not asked for at the review after, and a hunk split 10 and 20, scored 70 as one among other lines, is at 70 when it is back */ });
 test('a result stored with no surroundings: every block is asked for again and each is held to its own stored score', async () => { /* Review Focus 2: a file of two blocks stored at 80 and 10 with no around; the file is sent, both hunks shown without `scored`; answers of 5 and 5 end as 80 and 10 */ });
 test('an answer of the lookup with other surroundings, or none, gives no score', async () => { /* Review Focus 5 */ });
 
@@ -180,3 +179,9 @@ Needs the owner's go-ahead, which he gave for this plan on 2026-11-22.
 1. On the trial's database, whose stored results have no surroundings: the first review after the upgrade asks the model for every block again and no score falls.
 2. A second review of the same head asks for nothing.
 3. A push that moves a scored block to another place in its file: the block is asked for again.
+
+## What was built
+
+Task 1 was built and reviewed, and corrected in one fix wave after the review of the whole branch; the rules above are the rules as built (calls 3 and 6 came from the two reviews). What was decided on the way, what the run on a real Postgres and a trial with a real app and real models showed, and what is left are in `2026-11-22-scores-answer-for-their-surroundings-notes.md`.
+
+Of "To verify with a real model": items 2 and 3 were seen, with a second scorer in force. Item 1 was not: with a scorer newly named, the trial's stored scores were not the scorer's, so nothing of them was at stake.
