@@ -463,7 +463,7 @@ const one = () => ctx('src/a.ts', patch(10));
 function kept(over: Partial<KeptScores> = {}): KeptScores {
   return {
     blocks: ctx('src/a.ts', twoHunks).blocks, entries: new Map(), stoodFor: new Set(), wholeFile: null, floor: 0,
-    settled: false, covered: false, scoredHunks: new Set(), readAt: null, ...over,
+    settled: false, covered: false, scoredHunks: new Set(), readAt: null, held: new Map(), ...over,
   };
 }
 const keptEntry = (score: number, over: Partial<KeptEntry> = {}): KeptEntry =>
@@ -742,8 +742,8 @@ test('a file with nothing kept is scored as before, but for the range of its par
     scores: [{
       path: 'src/a.ts', previousPath: null, diffHash: fileDiffHash(c.hunks), changeSummary: 'Summary.', changedLines: 5,
       blocks: [
-        { id: 'B1', hunk: 'B1', hunkHash: h1!.hash, hash: h1!.hash, changedLines: 3, span: { side: 'RIGHT', first: 11, last: 12 }, lines: { RIGHT: [[10, 14]], LEFT: [[10, 13]] }, entry: { score: 20, category: 'rename', reason: '' } },
-        { id: 'B2', hunk: 'B2', hunkHash: h2!.hash, hash: h2!.hash, changedLines: 2, span: { side: 'RIGHT', first: 52, last: 52 }, lines: { RIGHT: [[51, 53]], LEFT: [[50, 52]] }, entry: { score: 75, category: 'business_rule', reason: 'Changes who may refund.' } },
+        { id: 'B1', hunk: 'B1', hunkHash: h1!.hash, hash: h1!.hash, changedLines: 3, span: { side: 'RIGHT', first: 11, last: 12 }, lines: { RIGHT: [[10, 14]], LEFT: [[10, 13]] }, entry: { score: 20, category: 'rename', reason: '' }, around: h1!.around },
+        { id: 'B2', hunk: 'B2', hunkHash: h2!.hash, hash: h2!.hash, changedLines: 2, span: { side: 'RIGHT', first: 52, last: 52 }, lines: { RIGHT: [[51, 53]], LEFT: [[50, 52]] }, entry: { score: 75, category: 'business_rule', reason: 'Changes who may refund.' }, around: h2!.around },
       ],
       wholeFile: null, fileLevel: null, finalScore: 75, covered: true,
     }],
@@ -753,4 +753,33 @@ test('a file with nothing kept is scored as before, but for the range of its par
   assert.deepEqual(run(answered, [c]), expected);
   const value: SubmitReviewArgs = { overview: 'o', findings: [], files: answered };
   assert.deepEqual(reconcileScores([{ value, files: ['src/a.ts'] }], [ctx('src/a.ts', twoHunks)], new Set(), parseRepoFile(null), 'model'), expected);
+});
+
+test("a block's score carries its surroundings", () => {
+  const c = ctx('src/a.ts', twoHunks);
+  const [given] = run([file('src/a.ts', [b('B1', 20), b('B2', 30)])], [c]).scores;
+  assert.deepEqual(given!.blocks.map((x) => x.around), c.blocks.map((x) => x.around));
+  assert.notEqual(c.blocks[0]!.around, c.blocks[1]!.around);
+  const [keptOne] = answer(file('src/a.ts', [b('B2', 30)]), kept({ blocks: c.blocks, entries: new Map([['B1', keptEntry(70)]]), scoredHunks: new Set(['B1']) }), { c }).scores;
+  assert.deepEqual(keptOne!.blocks.map((x) => [x.id, x.origin, x.around]), [['B1', 'earlier_run', c.blocks[0]!.around], ['B2', undefined, c.blocks[1]!.around]]);
+});
+
+test('a held block scored below its hold is raised to it, and no other block of the file is', () => {
+  const c = ctx('src/a.ts', twoHunks);
+  const [s] = answer(file('src/a.ts', [b('B1', 5, 'fix', 'Small.'), b('B2', 5)]), kept({ blocks: c.blocks, held: new Map([['B1', 40]]) }), { c }).scores;
+  assert.deepEqual(s!.blocks.map((x) => [x.id, x.entry?.score, x.raisedFrom]), [['B1', 40, 5], ['B2', 5, undefined]]);
+  assert.deepEqual(s!.blocks[0]!.entry, { score: 40, category: 'fix', reason: 'Small.' });
+  assert.equal(s!.finalScore, 40);
+  // A whole-file score that stands in place of the held block's score is raised too.
+  const single = one();
+  const [w] = answer(whole(file('src/a.ts', []), 20, 'refactor', 'Reorders the checks.'), kept({ blocks: single.blocks, held: new Map([['B1', 40]]) }), { c: single }).scores;
+  assert.deepEqual([w!.blocks[0]!.entry, w!.blocks[0]!.raisedFrom], [{ score: 40, category: 'refactor', reason: 'Reorders the checks.' }, 20]);
+  // The bound is the higher of the floor and the hold.
+  const [f] = answer(file('src/a.ts', [b('B1', 5), b('B2', 5)]), kept({ blocks: c.blocks, held: new Map([['B1', 40]]), floor: 60 }), { c }).scores;
+  assert.deepEqual(f!.blocks.map((x) => [x.id, x.entry?.score, x.raisedFrom]), [['B1', 60, 5], ['B2', 60, 5]]);
+  // The parts the model cuts a held block into are each held.
+  const big = ctx('src/a.ts', fortyAdded, { additions: 40, deletions: 0 });
+  const [p] = answer(file('src/a.ts', [{ id: 'B1', parts: [part('R1', 'R20', 10, 'test'), part('R21', 'R40', 50, 'data_model', 'Adds a table.')] }]),
+    kept({ blocks: big.blocks, held: new Map([['B1', 40]]) }), { c: big }).scores;
+  assert.deepEqual(p!.blocks.map((x) => [x.id, x.entry?.score, x.raisedFrom]), [['B1.1', 40, 10], ['B1.2', 50, undefined]]);
 });

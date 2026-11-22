@@ -13,7 +13,7 @@ const PLANS: Record<'model' | 'model_whole' | 'rule', ScorePlan> = {
 };
 
 const keptWith = (covered: boolean): KeptScores => ({
-  blocks: [], entries: new Map(), stoodFor: new Set(), wholeFile: null, floor: 0, settled: covered, covered, scoredHunks: new Set(), readAt: null,
+  blocks: [], entries: new Map(), stoodFor: new Set(), wholeFile: null, floor: 0, settled: covered, covered, scoredHunks: new Set(), readAt: null, held: new Map(),
 });
 
 const threadOn = (path: string, due: boolean): ShownThread => ({

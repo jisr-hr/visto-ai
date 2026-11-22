@@ -166,7 +166,7 @@ test('one log entry per file asked, with no path in it', async () => {
 
 test('the scorer is asked only for hunks without a score, and not for a file that has none', async () => {
   const kept = (scored: string[], settled: boolean): KeptScores => ({
-    blocks: [], entries: new Map(), stoodFor: new Set(), wholeFile: null, floor: 0, settled, covered: false, scoredHunks: new Set(scored), readAt: null,
+    blocks: [], entries: new Map(), stoodFor: new Set(), wholeFile: null, floor: 0, settled, covered: false, scoredHunks: new Set(scored), readAt: null, held: new Map(),
   });
   const part = { ...ctx('src/a.ts', twoHunks), kept: kept(['B1'], false) };
   const done = { ...ctx('src/b.ts', twoHunks), kept: kept(['B1', 'B2'], true) };

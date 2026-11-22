@@ -155,3 +155,51 @@ test('a part knows its place among the changed lines of its hunk, and the hunk c
   assert.equal(partsAt(b!, [[0, 3.5], [4, 5]]), null); // not a place
   assert.equal(partsAt(b!, []), null);
 });
+
+test("a block's surroundings are every line of its hunk, the unchanged ones too", () => {
+  const [one] = blocksOf(parsePatch(patch(10)));
+  const [other] = blocksOf(parsePatch(patch(10).replace(' keep', ' kept')));
+  assert.equal(one!.hash, other!.hash);
+  assert.notEqual(one!.around, other!.around);
+  assert.match(one!.around, /^[0-9a-f]{64}$/);
+  // The changed lines count in the surroundings as well.
+  assert.notEqual(one!.around, blocksOf(parsePatch(patch(10).replace('+new two', '+new 2')))[0]!.around);
+});
+
+test('surroundings do not count line numbers, nor a line that says the file has no final line feed', () => {
+  const around = (p: string) => blocksOf(parsePatch(p))[0]!.around;
+  assert.equal(around(patch(10)), around(patch(40)));
+  const plain = ['@@ -1,2 +1,2 @@', ' keep', '-old', '+new'].join('\n');
+  const meta = ['@@ -1,2 +1,2 @@', ' keep', '-old', '\\ No newline at end of file', '+new', '\\ No newline at end of file'].join('\n');
+  assert.equal(around(plain), around(meta));
+});
+
+test('a part and the rest have the surroundings of the hunk they were cut from', () => {
+  const [b] = blocksOf(parsePatch(newFile(40)));
+  const cut = splitBlock(b!, [{ first: R(1), last: R(20) }]);
+  assert.equal(cut.parts[0]!.around, b!.around);
+  assert.equal(cut.rest!.around, b!.around);
+  const again = partsAt(b!, [[0, 19], [20, 39]])!;
+  assert.deepEqual(again.map((p) => p.around), [b!.around, b!.around]);
+  // A part's own lines would hash otherwise.
+  assert.notEqual(cut.parts[0]!.around, blocksOf(parsePatch(newFile(20)))[0]!.around);
+});
+
+test('the hash of a block, of its hunk and of a file diff are what they were', () => {
+  const text = [
+    '@@ -3,4 +3,5 @@', ' alpha', '-bravo', '+charlie', ' delta', '+echo', ' foxtrot',
+    '@@ -20,2 +21,2 @@', ' golf', '-hotel', '\\ No newline at end of file', '+india', '\\ No newline at end of file',
+  ].join('\n');
+  const hunks = parsePatch(text);
+  const [b, c] = blocksOf(hunks);
+  const cut = splitBlock(b!, [{ first: { side: 'LEFT', line: 4 }, last: R(4) }, { first: R(6), last: R(6) }]);
+  const H1 = 'f143451d14151c4138995e17b848621a0d0b61fd040b59f0be9cf53652fbb8d4';
+  assert.deepEqual([b!.hash, b!.hunkHash], [H1, H1]);
+  assert.deepEqual([c!.hash, c!.hunkHash], ['d9ceb034d9d9c9ba8fa4d23dd4af2ba47adc56a2b7597b522ecda8975f34022f', 'd9ceb034d9d9c9ba8fa4d23dd4af2ba47adc56a2b7597b522ecda8975f34022f']);
+  assert.equal(cut.rest, null);
+  assert.deepEqual(cut.parts.map((p) => [p!.hash, p!.hunkHash]), [
+    ['68709b9a0626e631146751b8b75dc1f645de9d5247fd952897ff12329322ff54', H1],
+    ['506e1776424a08a7adfe1299f6a3282f43ff314971dc8c0b9c85cda336a18123', H1],
+  ]);
+  assert.equal(fileDiffHash(hunks), '73bba8b16f078faf34f11f47607b2f4e14f3c8f1abd0f7175c0b41ec55c93fa6');
+});

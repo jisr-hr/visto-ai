@@ -9,7 +9,7 @@ import { NOTHING_READ } from './plan.ts';
 import { chooseEffort, review } from './review.ts';
 import { blocksOf, fileDiffHash } from './score/blocks.ts';
 import { shownOf } from './score/shown.ts';
-import type { BlockScore, ScoreHistory } from './score/types.ts';
+import type { BlockScore, ScoreEntry, ScoreHistory } from './score/types.ts';
 import type {
   ChangedFile, EarlierThread, ModelClient, ModelRequest, ModelResponse, PullRequestInfo, RepoConfig, ReviewDeps, ReviewInput, ReviewResult, ScoreAnswer, ScoreRequest, Scorer,
   Severity, Source, Usage,
@@ -788,11 +788,14 @@ const twoHunkPatch = [
 ].join('\n');
 const fileTwo: ChangedFile = { path: 'src/t.ts', previousPath: null, status: 'modified', additions: 2, deletions: 2, patch: twoHunkPatch };
 const [hashB1, hashB2] = blocksOf(hunksOf(twoHunkPatch).hunks).map((b) => b.hash);
+const [aroundB1, aroundB2] = blocksOf(hunksOf(twoHunkPatch).hunks).map((b) => b.around);
+// A score stored for a block of fileTwo is stored among that block's lines.
+const aroundOfHash = (hash: string): string | null => (hash === hashB1 ? aroundB1! : hash === hashB2 ? aroundB2! : null);
 // `covered`: a published review read the file with the diff of fileTwo.
 const historyOf = (blocks: Array<[string, number]>, covered = false): ScoreHistory => ({
   by: 'model', lastReview: null, shown: null,
   files: [{
-    path: 'src/t.ts', blocks: blocks.map(([hash, score]) => ({ hash, entry: { score, category: 'fix', reason: '' }, raisedFrom: null })),
+    path: 'src/t.ts', blocks: blocks.map(([hash, score]) => ({ hash, around: aroundOfHash(hash), entry: { score, category: 'fix', reason: '' }, raisedFrom: null })),
     splits: [], stoodFor: [], wholeFile: null, coveredAt: covered ? [fileDiffHash(hunksOf(twoHunkPatch).hunks)!] : [], readAt: null,
   }],
 });
@@ -822,11 +825,11 @@ test('a later review asks the second scorer only for the blocks that have no sco
 
 test('a failed lookup across pull requests is named in the audit and the review goes on', async () => {
   const d = deps({ files: [fileTwo], answers: [answerOnT] });
-  const asked: Array<Array<{ path: string; hash: string }>> = [];
+  const asked: Array<Array<{ path: string; hash: string; around: string }>> = [];
   d.reusableScores = (blocks) => { asked.push(blocks); return Promise.reject(new Error('db_down')); };
   const r = await review(input, d);
   assert.equal(r.status, 'ok');
-  assert.deepEqual(asked, [[{ path: 'src/t.ts', hash: hashB1 }, { path: 'src/t.ts', hash: hashB2 }]]);
+  assert.deepEqual(asked, [[{ path: 'src/t.ts', hash: hashB1, around: aroundB1 }, { path: 'src/t.ts', hash: hashB2, around: aroundB2 }]]);
   assert.deepEqual(r.audit.filter((e) => e.action === 'reuse_failed'), [{ stage: 'context', action: 'reuse_failed', subject: 'scores', reason: 'db_down' }]);
   assert.deepEqual(headersOf(d), ['### Block B1 (2 changed lines, not scored)', '### Block B2 (2 changed lines, not scored)']);
   // An error without a short code is named internal_error.
@@ -847,12 +850,12 @@ test('an answer of the lookup for a block that was not asked, or with a score th
   const fix = (score: number) => ({ score, category: 'fix' as const, reason: '' });
   const d = deps({ files: [fileTwo], answers: [answerOnT] });
   d.reusableScores = () => Promise.resolve([
-    { path: 'src/t.ts', hash: hashB1!, entry: fix(50.5) },
-    { path: 'src/t.ts', hash: hashB1!, entry: fix(101) },
-    { path: 'src/t.ts', hash: hashB1!, entry: fix(-1) },
-    { path: 'src/other.ts', hash: hashB1!, entry: fix(50) },
-    { path: 'src/t.ts', hash: 'f'.repeat(64), entry: fix(50) },
-    { path: 'src/t.ts', hash: hashB2!, entry: fix(20) },
+    { path: 'src/t.ts', hash: hashB1!, around: aroundB1!, entry: fix(50.5) },
+    { path: 'src/t.ts', hash: hashB1!, around: aroundB1!, entry: fix(101) },
+    { path: 'src/t.ts', hash: hashB1!, around: aroundB1!, entry: fix(-1) },
+    { path: 'src/other.ts', hash: hashB1!, around: aroundB1!, entry: fix(50) },
+    { path: 'src/t.ts', hash: 'f'.repeat(64), around: aroundB1!, entry: fix(50) },
+    { path: 'src/t.ts', hash: hashB2!, around: aroundB2!, entry: fix(20) },
   ]);
   const r = await review(input, d);
   assert.equal(r.status, 'ok');
@@ -887,17 +890,31 @@ function historyFrom(first: ReviewResult, extra: {
   const readAtOf = (f: ReviewResult['scores'][number]) => (extra.readAt !== undefined && stored.coverage.reviewed.includes(f.path)
     ? { head: extra.readAt, hashes: [...new Set(f.blocks.flatMap((one) => [one.hash, one.hunkHash]))] }
     : null);
+  // As the shell reads it: an `around` that is not a string that is not empty is none, and everything is keyed by the hash and its around.
+  const aroundOf = (one: BlockScore): string | null => (typeof one.around === 'string' && one.around !== '' ? one.around : null);
+  const keyOf = (hash: string, around: string | null): string => `${hash}\n${around ?? ''}`;
   return {
     by: 'model', lastReview: extra.lastReview ?? null, shown: extra.shown ?? null,
     files: stored.scores.map((f) => {
       const hunks = new Map<string, BlockScore[]>();
-      for (const one of f.blocks) hunks.set(one.hunkHash, [...(hunks.get(one.hunkHash) ?? []), one]);
+      for (const one of f.blocks) {
+        const key = keyOf(one.hunkHash, aroundOf(one));
+        hunks.set(key, [...(hunks.get(key) ?? []), one]);
+      }
+      const entries = new Map<string, { hash: string; around: string | null; entry: ScoreEntry; raisedFrom: number | null }>();
+      for (const one of f.blocks) {
+        if (one.entry === null) continue;
+        const key = keyOf(one.hash, aroundOf(one));
+        const known = entries.get(key);
+        if (known === undefined || one.entry.score > known.entry.score) entries.set(key, { hash: one.hash, around: aroundOf(one), entry: one.entry, raisedFrom: one.raisedFrom ?? null });
+      }
+      const stood = f.covered && f.wholeFile !== null ? f.blocks.filter((one) => one.entry === null) : [];
       return {
         path: f.path,
-        blocks: f.blocks.filter((one) => one.entry !== null).map((one) => ({ hash: one.hash, entry: one.entry!, raisedFrom: one.raisedFrom ?? null })),
-        splits: [...hunks].filter(([, parts]) => parts.every((p) => p.range !== undefined && p.entry !== null))
-          .map(([hunkHash, parts]) => ({ hunkHash, parts: parts.map((p) => ({ hash: p.hash, range: p.range! })) })),
-        stoodFor: f.covered && f.wholeFile !== null ? f.blocks.filter((one) => one.entry === null).map((one) => one.hash) : [],
+        blocks: [...entries.values()],
+        splits: [...hunks.values()].filter((parts) => parts.every((p) => p.range !== undefined && p.entry !== null))
+          .map((parts) => ({ hunkHash: parts[0]!.hunkHash, around: aroundOf(parts[0]!), parts: parts.map((p) => ({ hash: p.hash, range: p.range! })) })),
+        stoodFor: stood.filter((one) => !entries.has(keyOf(one.hash, aroundOf(one)))).map((one) => ({ hash: one.hash, around: aroundOf(one) })),
         wholeFile: f.wholeFile, coveredAt: read.has(f.path) && f.diffHash !== null ? [f.diffHash] : [], readAt: readAtOf(f),
       };
     }),
@@ -1562,9 +1579,9 @@ const twoAndWhole = (blocks: Record<string, number>, whole?: number) => ({
     ...(whole === undefined ? {} : { score: whole, category: 'business_rule', reason: 'The two changes together decide how long a refund waits.' }),
   }],
 });
-const lookupOf = (first: ReviewResult) => (blocks: Array<{ path: string; hash: string }>) => Promise.resolve(blocks.flatMap((w) => first.scores
-  .filter((f) => f.path === w.path).flatMap((f) => f.blocks.filter((one) => one.hash === w.hash && one.entry !== null))
-  .map((one) => ({ path: w.path, hash: w.hash, entry: one.entry! }))));
+const lookupOf = (first: ReviewResult) => (blocks: Array<{ path: string; hash: string; around: string }>) => Promise.resolve(blocks.flatMap((w) => first.scores
+  .filter((f) => f.path === w.path).flatMap((f) => f.blocks.filter((one) => one.hash === w.hash && one.around === w.around && one.entry !== null))
+  .map((one) => ({ path: w.path, hash: w.hash, around: w.around, entry: one.entry! }))));
 
 test('the same change opened as another pull request may still take its whole-file score', async () => {
   const first = await firstOf([fileTwo], twoAndWhole({ B1: 20, B2: 20 }, 90));
@@ -1657,12 +1674,62 @@ test('a copy of a new file keeps its scores, and keeps them once the original is
 test('the reason of a score taken from another pull request is dropped where it is taken', async () => {
   const d = deps({ files: [fileTwo], answers: [answerOnT] });
   d.reusableScores = () => Promise.resolve([
-    { path: 'src/t.ts', hash: hashB1!, entry: { score: 30, category: 'fix', reason: 'See [the notes](https://example.test/x).' } },
-    { path: 'src/t.ts', hash: hashB2!, entry: { score: 20, category: 'fix', reason: 'See ![x](https://example.test/i.png).' } },
+    { path: 'src/t.ts', hash: hashB1!, around: aroundB1!, entry: { score: 30, category: 'fix', reason: 'See [the notes](https://example.test/x).' } },
+    { path: 'src/t.ts', hash: hashB2!, around: aroundB2!, entry: { score: 20, category: 'fix', reason: 'See ![x](https://example.test/i.png).' } },
   ]);
   const taken = await review(input, d);
   assert.deepEqual(taken.scores[0]!.blocks.map((one) => [one.entry?.score, one.entry?.reason, one.origin]), [[30, '', 'other_pull_request'], [20, '', 'other_pull_request']]);
   const later = await review({ ...input, history: historyFrom(taken, { covered: true }) }, deps({ files: [fileTwo], answers: [answerOnT] }));
   assert.deepEqual(later.scores[0]!.blocks.map((one) => one.origin), ['earlier_run', 'earlier_run']);
   assert.ok(!JSON.stringify(later).includes('example.test'));
+});
+
+// The delay change of fileTwo between other unchanged lines, beside a new block.
+const movedPatch = [
+  '@@ -10,3 +10,3 @@', ' if (admin) {', '-const delay = 1;', '+const delay = 2;', ' }',
+  '@@ -50,3 +50,3 @@', ' keep', '-const tries = 1;', '+const tries = 3;', ' keep',
+].join('\n');
+const movedFile: ChangedFile = { ...fileTwo, patch: movedPatch };
+
+test('lines scored in one place and moved to another are scored again and cannot score lower', async () => {
+  const first = await firstOf([delayFile(2)], onT({ blocks: [{ id: 'B1', score: 80, category: 'calculation', reason: 'Changes the delay.' }] }));
+  const history = historyFrom(first, { covered: true, lastReview: LAST });
+  const lower = deps({ files: [movedFile], answers: [onT({ blocks: [
+    { id: 'B1', score: 5, category: 'fix', reason: 'Small.' }, { id: 'B2', score: 5, category: 'fix', reason: 'Small.' },
+  ] })] });
+  const r = await review({ ...input, mode: 'full', history }, lower);
+  assert.deepEqual(headersOf(lower), ['### Block B1 (2 changed lines, not scored)', '### Block B2 (2 changed lines, not scored)']);
+  assert.deepEqual(r.scores[0]!.blocks.map((one) => [one.id, one.entry?.score, one.raisedFrom, one.origin]), [['B1', 80, 5, undefined], ['B2', 5, undefined, undefined]]);
+  assert.equal(r.scores[0]!.finalScore, 80);
+  const higher = deps({ files: [movedFile], answers: [onT({ blocks: [
+    { id: 'B1', score: 90, category: 'calculation', reason: 'Only admins wait.' }, { id: 'B2', score: 5, category: 'fix', reason: '' },
+  ] })] });
+  const h = await review({ ...input, mode: 'full', history }, higher);
+  assert.deepEqual(h.scores[0]!.blocks.map((one) => [one.id, one.entry?.score, one.raisedFrom]), [['B1', 90, undefined], ['B2', 5, undefined]]);
+});
+
+test('a result stored with no surroundings: every block is asked for again and each is held to its own stored score', async () => {
+  const first = await firstOf([fileTwo], twoAndWhole({ B1: 80, B2: 10 }));
+  const old = JSON.parse(JSON.stringify(first)) as ReviewResult;
+  for (const f of old.scores) for (const one of f.blocks) delete one.around;
+  const d = deps({ files: [fileTwo], answers: [twoAndWhole({ B1: 5, B2: 5 })] });
+  const r = await review({ ...input, mode: 'full', history: historyFrom(old, { covered: true, lastReview: LAST }) }, d);
+  assert.equal(d.model.requests.length, 1);
+  assert.deepEqual(headersOf(d), ['### Block B1 (2 changed lines, not scored)', '### Block B2 (2 changed lines, not scored)']);
+  assert.deepEqual(r.scores[0]!.blocks.map((one) => [one.id, one.entry?.score, one.raisedFrom]), [['B1', 80, 5], ['B2', 10, 5]]);
+});
+
+test('an answer of the lookup with other surroundings, or none, gives no score', async () => {
+  const fix = (score: number) => ({ score, category: 'fix' as const, reason: '' });
+  const d = deps({ files: [fileTwo], answers: [answerOnT] });
+  d.reusableScores = () => Promise.resolve([
+    { path: 'src/t.ts', hash: hashB1!, around: aroundB2!, entry: fix(50) },
+    { path: 'src/t.ts', hash: hashB1!, entry: fix(50) },
+    { path: 'src/t.ts', hash: hashB1!, around: 5, entry: fix(50) },
+    { path: 'src/t.ts', hash: hashB1!, around: '', entry: fix(50) },
+    { path: 'src/t.ts', hash: hashB2!, around: aroundB2!, entry: fix(20) },
+  ] as unknown as Array<{ path: string; hash: string; around: string; entry: ScoreEntry }>);
+  const r = await review(input, d);
+  assert.equal(r.status, 'ok');
+  assert.deepEqual(headersOf(d), ['### Block B1 (2 changed lines, not scored)', '### Block B2 (2 changed lines, scored)']);
 });

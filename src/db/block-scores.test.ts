@@ -9,13 +9,13 @@ const REF = { service: 'github', owner: 'acme', repo: 'shop', number: 7 } as con
 const OTHER = { service: 'github', owner: 'acme', repo: 'shop', number: 8 } as const;
 const THIRD = { service: 'github', owner: 'acme', repo: 'shop', number: 9 } as const;
 const at = (seconds: number): string => new Date(Date.parse('2026-03-01T10:00:00.000Z') + seconds * 1000).toISOString();
-const A: StoredBlockScore = { path: 'src/a.ts', hash: 'h1', score: 70, category: 'calculation', reason: 'Totals.' };
-const ASK = [{ path: 'src/a.ts', hash: 'h1' }];
+const A: StoredBlockScore = { path: 'src/a.ts', hash: 'h1', around: 's1', score: 70, category: 'calculation', reason: 'Totals.' };
+const ASK = [{ path: 'src/a.ts', hash: 'h1', around: 's1' }];
 
 test('a score stored by one pull request is found by another, and never by itself', async () => {
   const db = await testDb();
   await recordBlockScores(db, 1, REF, 'model', [A], at(0));
-  assert.deepEqual(await reusableScores(db, OTHER, 'model', [{ path: 'src/a.ts', hash: 'h1' }, { path: 'src/a.ts', hash: 'h9' }], at(-60)), [A]);
+  assert.deepEqual(await reusableScores(db, OTHER, 'model', [{ path: 'src/a.ts', hash: 'h1', around: 's1' }, { path: 'src/a.ts', hash: 'h9', around: 's1' }], at(-60)), [A]);
   assert.deepEqual(await reusableScores(db, REF, 'model', ASK, at(-60)), []);
   await db.close();
 });
@@ -47,8 +47,8 @@ test('another repository, another path or another hash is another block', async 
   await recordBlockScores(db, 1, REF, 'model', [A], at(0));
   const elsewhere = { service: 'github', owner: 'acme', repo: 'blog', number: 8 } as const;
   assert.deepEqual(await reusableScores(db, elsewhere, 'model', ASK, at(-60)), []);
-  assert.deepEqual(await reusableScores(db, OTHER, 'model', [{ path: 'src/b.ts', hash: 'h1' }], at(-60)), []);
-  assert.deepEqual(await reusableScores(db, OTHER, 'model', [{ path: 'src/a.ts', hash: 'h2' }], at(-60)), []);
+  assert.deepEqual(await reusableScores(db, OTHER, 'model', [{ path: 'src/b.ts', hash: 'h1', around: 's1' }], at(-60)), []);
+  assert.deepEqual(await reusableScores(db, OTHER, 'model', [{ path: 'src/a.ts', hash: 'h2', around: 's1' }], at(-60)), []);
   await db.close();
 });
 test('owner and repository are matched whatever their case', async () => {
@@ -93,13 +93,35 @@ test('a score outside 0 to 100 cannot be stored', async () => {
 });
 test('more than 500 blocks are asked in several statements, and all are answered', async () => {
   const db = await testDb();
-  const scores: StoredBlockScore[] = Array.from({ length: 501 }, (_, i) => ({ path: `src/f${i}.ts`, hash: `h${i}`, score: i % 101, category: 'logic', reason: `Block ${i}.` }));
+  const scores: StoredBlockScore[] = Array.from({ length: 501 }, (_, i) => ({ path: `src/f${i}.ts`, hash: `h${i}`, around: `s${i}`, score: i % 101, category: 'logic', reason: `Block ${i}.` }));
   await recordBlockScores(db, 1, REF, 'model', scores, at(0));
   const seen: string[] = [];
   const spy: Db = { ...db, query: (text, params) => { seen.push(text); return db.query(text, params); } };
-  const answer = await reusableScores(spy, OTHER, 'model', scores.map((s) => ({ path: s.path, hash: s.hash })), at(-60));
+  const answer = await reusableScores(spy, OTHER, 'model', scores.map((s) => ({ path: s.path, hash: s.hash, around: s.around! })), at(-60));
   assert.equal(seen.length, 2);
   assert.equal(answer.length, 501);
   assert.deepEqual([...answer].sort((a, b) => a.path.localeCompare(b.path)), [...scores].sort((a, b) => a.path.localeCompare(b.path)));
+  await db.close();
+});
+test('a score is reused only for the same path, hash and surroundings', async () => {
+  const db = await testDb();
+  await recordBlockScores(db, 1, REF, 'model', [A, { ...A, around: 's2', score: 90, reason: 'Elsewhere.' }], at(0));
+  await recordBlockScores(db, 2, THIRD, 'model', [{ ...A, score: 75, reason: 'Higher.' }], at(10));
+  assert.deepEqual(await reusableScores(db, OTHER, 'model', [{ path: 'src/a.ts', hash: 'h1', around: 's3' }], at(-60)), []);
+  // The highest of two rows of one pair wins; the row among other lines is not one of them.
+  const asker = { service: 'github', owner: 'acme', repo: 'shop', number: 50 } as const;
+  assert.deepEqual(await reusableScores(db, asker, 'model', ASK, at(-60)), [{ ...A, score: 75, reason: 'Higher.' }]);
+  assert.deepEqual(await reusableScores(db, asker, 'model', [{ path: 'src/a.ts', hash: 'h1', around: 's2' }], at(-60)), [{ ...A, around: 's2', score: 90, reason: 'Elsewhere.' }]);
+  await db.close();
+});
+test('a row stored with no surroundings is reused by no one', async () => {
+  const db = await testDb();
+  await recordBlockScores(db, 1, REF, 'model', [{ ...A, around: null }], at(0));
+  // As a row stored before the column existed.
+  await db.query(`insert into visto_ai.block_scores (run, service, owner, repo, number, path, hash, score, category, reason, scored_by, scored_at)
+    values (2, 'github', 'acme', 'shop', 9, 'src/a.ts', 'h1', 95, 'billing', 'Old.', 'model', $1::timestamptz)`, [at(0)]);
+  assert.deepEqual(await db.query('select around from visto_ai.block_scores order by id'), [{ around: null }, { around: null }]);
+  assert.deepEqual(await reusableScores(db, OTHER, 'model', ASK, at(-60)), []);
+  assert.deepEqual(await reusableScores(db, OTHER, 'model', [{ path: 'src/a.ts', hash: 'h1', around: '' }], at(-60)), []);
   await db.close();
 });
