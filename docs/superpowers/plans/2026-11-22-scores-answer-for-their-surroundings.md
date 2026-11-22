@@ -90,7 +90,7 @@ export function scoresToStore(result: unknown): Array<{ path: string; hash: stri
 2. **Two questions, two keys** (call 6). Whether the model is asked for a block is decided by the pair. What score a block keeps, or is held to, is decided by its `hash` alone: the highest score stored for it, wherever the lines stood. A stored entry, split or stood-for pair with no surroundings spares the model for no block; a stored entry holds its block all the same.
 3. **`keptScores`.** The model **was asked for a block among its lines** when one of these is stored: an entry of the block's `hash` with the block's `around` among its `arounds`; a stood-for pair that is the block's pair; a split with the block's `hunkHash` and `around`. Then, for each block:
    - asked before, and its `hash` has an entry: it is kept whole at that entry's score and not asked for, also when a split is stored for it;
-   - asked before, no entry, and a split is stored for its pair: the split is kept when each part's `hash` has an entry whose `arounds` hold the hunk's `around`; a split that does not fit leaves the block open;
+   - asked before, no entry, and a split is stored for its pair: the split is kept when each part's `hash` has an entry whose `arounds` hold the hunk's `around`; a split that does not fit leaves the block to be asked for again as one block: it is not stood for, and it takes no score from another pull request;
    - asked before, no entry, a stood-for pair: it is stood for by the kept whole-file score, as today;
    - otherwise the block is open: it is asked for, and when its `hash` has an entry it is held (`held`, under its id) at that entry's score. A score taken from another pull request (its `hash` and `around` are the block's) for a held block is raised to the higher of the floor and its hold, as it is raised to the floor today.
    The floor is computed as before this plan, by `hash`: the highest stored score whose `hash` no present block has. Where the histories of a path and of its earlier name are joined, the higher entry is kept for each `hash`, with the `arounds` of both. The search that lets a file shown as added answer to the other paths that held one of its blocks goes by `hash`, as today.
@@ -127,7 +127,7 @@ test('of two hunks with the same changed lines, each among known lines, both sta
 test('a block the model left to the whole-file score among these lines, whose changed lines have a score, is kept at that score and not asked for', () => { /* scored 20 among A1; among A2 the model gave the file 50 and the block nothing: among A2 again it is kept at 20 as earlier_run, the file is settled once its diff was read, and nothing is held; with the two stored under a path and its earlier name it is the same */ });
 test('a hunk split among these lines and scored whole among others is kept whole at its score', () => { /* parts 10 and 20 among A1, whole 70 among A2: among A1 again it is one block kept at 70, not the parts */ });
 test('a hunk scored whole, then split among other lines, does not stand below its highest part when it is back', () => { /* whole 10 among A1, parts up to 90 among A2: among A1 it is kept at 90 */ });
-test('a hunk whose stored split is found but no longer fits is held to the score stored for its changed lines', () => { /* the implementer\'s first gap */ });
+test('a hunk with a split stored among its lines and a score for its changed lines is kept whole at that score', () => { /* whether or not the split fits; with no such score and a split that does not fit it is asked for again */ });
 
 // src/engine/reconcile/scores.test.ts
 test("a block's score carries its surroundings", () => { /* given in this run, and kept */ });
@@ -182,6 +182,6 @@ Needs the owner's go-ahead, which he gave for this plan on 2026-11-22.
 
 ## What was built
 
-Task 1 was built and reviewed, and corrected in one fix wave after the review of the whole branch; the rules above are the rules as built (calls 3 and 6 came from the two reviews). What was decided on the way, what the run on a real Postgres and a trial with a real app and real models showed, and what is left are in `2026-11-22-scores-answer-for-their-surroundings-notes.md`.
+Task 1 was built and reviewed, and corrected in two fix waves after the review of the whole branch; the rules above are the rules as built (calls 3 and 6 came from the reviews). What was decided on the way, what the run on a real Postgres and a trial with a real app and real models showed, and what is left are in `2026-11-22-scores-answer-for-their-surroundings-notes.md`.
 
 Of "To verify with a real model": items 2 and 3 were seen, with a second scorer in force. Item 1 was not: with a scorer newly named, the trial's stored scores were not the scorer's, so nothing of them was at stake.
