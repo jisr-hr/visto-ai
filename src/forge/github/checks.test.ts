@@ -109,7 +109,7 @@ const STATUS = '/repos/acme/shop/commits/head222/status?per_page=100';
 const RUNS = (page: number) => `/repos/acme/shop/commits/head222/check-runs?per_page=100&page=${page}`;
 test('a required check is green when every place that reports it says success', async () => {
   const { checks, seen } = github({
-    [`GET ${STATUS}`]: () => json({ statuses: [{ context: 'build', state: 'success' }, { context: 'lint', state: 'pending' }, { context: 'test', state: 'success' }] }),
+    [`GET ${STATUS}`]: () => json({ total_count: 3, statuses: [{ context: 'build', state: 'success' }, { context: 'lint', state: 'pending' }, { context: 'test', state: 'success' }] }),
     [`GET ${RUNS(1)}`]: () => json({ check_runs: [
       { id: 5, name: 'test', status: 'completed', conclusion: 'failure' }, { id: 9, name: 'test', status: 'completed', conclusion: 'success' },
       { id: 6, name: 'build', status: 'completed', conclusion: 'success' }, { id: 7, name: 'deploy', status: 'in_progress', conclusion: null },
@@ -118,7 +118,7 @@ test('a required check is green when every place that reports it says success', 
   assert.deepEqual(await checks.greenChecks(REF, '99', 'head222', ['build', 'test', 'lint', 'deploy', 'docs']), ['build', 'test']);
   // a status success with a failed check run of the same name is not green
   const mixed = github({
-    [`GET ${STATUS}`]: () => json({ statuses: [{ context: 'build', state: 'success' }] }),
+    [`GET ${STATUS}`]: () => json({ total_count: 1, statuses: [{ context: 'build', state: 'success' }] }),
     [`GET ${RUNS(1)}`]: () => json({ check_runs: [{ id: 6, name: 'build', status: 'completed', conclusion: 'failure' }] }),
   });
   assert.deepEqual(await mixed.checks.greenChecks(REF, '99', 'head222', ['build']), []);
@@ -131,13 +131,13 @@ test('a required check is green when every place that reports it says success', 
 test('the check runs of a commit are read page by page, to the cap', async () => {
   const full = (from: number) => Array.from({ length: 100 }, (_, i) => ({ id: from + i, name: 'x', status: 'completed', conclusion: 'success' }));
   const two = github({
-    [`GET ${STATUS}`]: () => json({ statuses: [] }),
+    [`GET ${STATUS}`]: () => json({ total_count: 0, statuses: [] }),
     [`GET ${RUNS(1)}`]: () => json({ check_runs: full(1) }),
     [`GET ${RUNS(2)}`]: () => json({ check_runs: [{ id: 500, name: 'y', status: 'completed', conclusion: 'success' }, { id: 501, name: 'z', status: 'completed', conclusion: 'success' }, { id: 502, name: 'w', status: 'queued', conclusion: null }] }),
   });
   assert.deepEqual(await two.checks.greenChecks(REF, '99', 'head222', ['y']), ['y']);
   assert.equal(two.seen.filter((s) => s.path.includes('check-runs')).length, 2);
-  const routes: Record<string, () => Response> = { [`GET ${STATUS}`]: () => json({ statuses: [] }) };
+  const routes: Record<string, () => Response> = { [`GET ${STATUS}`]: () => json({ total_count: 0, statuses: [] }) };
   for (let p = 1; p <= MAX_CHECK_PAGES; p += 1) routes[`GET ${RUNS(p)}`] = () => json({ check_runs: full(p * 1000) });
   const many = github(routes);
   await assert.rejects(many.checks.greenChecks(REF, '99', 'head222', ['x']), /^Error: github_too_many_pages$/);
@@ -177,4 +177,97 @@ test('odd names never reach a URL', async () => {
   const badApp = createGithubChecks({ auth, appId: 'x', fetch: (async () => { throw new Error('reached'); }) as typeof fetch });
   await assert.rejects(badApp.findCheck(REF, '99', 'head222', 'AI Review'), bad);
   assert.equal(seen.length, 0);
+});
+
+test('a list of statuses GitHub cut short is never read as green', async () => {
+  const runs = { check_runs: [{ id: 6, name: 'build', status: 'completed', conclusion: 'success' }] };
+  for (const total of [2, undefined, 'x']) {
+    const { checks } = github({
+      [`GET ${STATUS}`]: () => json({ total_count: total, statuses: [{ context: 'lint', state: 'success' }] }),
+      [`GET ${RUNS(1)}`]: () => json(runs),
+    });
+    await assert.rejects(checks.greenChecks(REF, '99', 'head222', ['build']), /^Error: github_bad_response$/);
+  }
+  const whole = github({
+    [`GET ${STATUS}`]: () => json({ total_count: 1, statuses: [{ context: 'build', state: 'success' }] }),
+    [`GET ${RUNS(1)}`]: () => json(runs),
+  });
+  assert.deepEqual(await whole.checks.greenChecks(REF, '99', 'head222', ['build']), ['build']);
+});
+test('the repository is checked before a token is asked for', async () => {
+  let asked = 0;
+  const counting: AppAuth = { appToken: () => 'jwt', installationToken: async () => { asked += 1; return 'tok'; } };
+  const checks = createGithubChecks({ auth: counting, appId: '12345', fetch: (async () => { throw new Error('reached'); }) as typeof fetch });
+  const odd = { ...REF, owner: 'ac/me' };
+  const write = { id: null, commit: 'head222', name: 'AI Review', status: 'queued', conclusion: null, title: 't', summary: 's' } as const;
+  const bad = /^Error: github_bad_path$/;
+  await assert.rejects(checks.findCheck(odd, '99', 'head222', 'AI Review'), bad);
+  await assert.rejects(checks.writeCheck(odd, '99', write), bad);
+  await assert.rejects(checks.greenChecks(odd, '99', 'head222', ['a']), bad);
+  await assert.rejects(checks.isTeamMember('99', 'acme/..', 'octo-lead'), bad);
+  await assert.rejects(checks.isTeamMember('99', 'a/..', 'octo-lead'), bad);
+  assert.equal(asked, 0);
+});
+test('ids that are not positive safe integers are refused', async () => {
+  const write = { id: null, commit: 'head222', name: 'AI Review', status: 'queued', conclusion: null, title: 't', summary: 's' } as const;
+  for (const id of [0, -1, 2 ** 53, 1.5]) {
+    const { checks } = github({ 'POST /repos/acme/shop/check-runs': () => json({ id, status: 'queued' }, 201) });
+    await assert.rejects(checks.writeCheck(REF, '99', write), /^Error: github_bad_response$/);
+  }
+  const { checks } = github({ [`GET ${FIND}`]: () => json({ check_runs: [run(0)] }) });
+  await assert.rejects(checks.findCheck(REF, '99', 'head222', 'AI Review'), /^Error: github_bad_response$/);
+});
+test('a rewrite answered with another check id is refused', async () => {
+  const { checks } = github({ 'PATCH /repos/acme/shop/check-runs/71': () => json({ id: 72, status: 'queued' }) });
+  const write = { id: '71', commit: 'head222', name: 'AI Review', status: 'queued', conclusion: null, title: 't', summary: 's' } as const;
+  await assert.rejects(checks.writeCheck(REF, '99', write), /^Error: github_bad_response$/);
+});
+test('the newest run decides, wherever it is listed', async () => {
+  const { checks } = github({
+    [`GET ${STATUS}`]: () => json({ total_count: 0, statuses: [] }),
+    [`GET ${RUNS(1)}`]: () => json({ check_runs: [{ id: 9, name: 'test', status: 'completed', conclusion: 'failure' }, { id: 5, name: 'test', status: 'completed', conclusion: 'success' }] }),
+  });
+  assert.deepEqual(await checks.greenChecks(REF, '99', 'head222', ['test']), []);
+});
+test('a write answered with a redirect is an error and is not followed', async () => {
+  const { checks, seen } = github({ 'POST /repos/acme/shop/check-runs': () => new Response(null, { status: 302, headers: { Location: 'https://example.test/x' } }) });
+  const write = { id: null, commit: 'head222', name: 'AI Review', status: 'queued', conclusion: null, title: 't', summary: 's' } as const;
+  await assert.rejects(checks.writeCheck(REF, '99', write), /^Error: github_302$/);
+  assert.equal(seen.length, 1);
+});
+test('statuses and check runs of the wrong shape are refused', async () => {
+  const runs = () => json({ check_runs: [] });
+  for (const statuses of ['x', null, [1]]) {
+    const { checks } = github({ [`GET ${STATUS}`]: () => json({ total_count: 1, statuses }), [`GET ${RUNS(1)}`]: runs });
+    await assert.rejects(checks.greenChecks(REF, '99', 'head222', ['a']), /^Error: github_bad_response$/);
+  }
+  const entry = github({ [`GET ${STATUS}`]: () => json({ total_count: 1, statuses: ['x'] }), [`GET ${RUNS(1)}`]: runs });
+  await assert.rejects(entry.checks.greenChecks(REF, '99', 'head222', ['a']), /^Error: github_bad_response$/);
+  const run1 = github({ [`GET ${STATUS}`]: () => json({ total_count: 0, statuses: [] }), [`GET ${RUNS(1)}`]: () => json({ check_runs: ['x'] }) });
+  await assert.rejects(run1.checks.greenChecks(REF, '99', 'head222', ['a']), /^Error: github_bad_response$/);
+});
+test('a membership answer that is no object, or has no state, is not a membership', async () => {
+  const PATH = '/orgs/acme/teams/release-managers/memberships/octo-lead';
+  const odd = github({ [`GET ${PATH}`]: () => json([]) });
+  await assert.rejects(odd.checks.isTeamMember('99', 'acme/release-managers', 'octo-lead'), /^Error: github_bad_response$/);
+  const none = github({ [`GET ${PATH}`]: () => json({}) });
+  assert.equal(await none.checks.isTeamMember('99', 'acme/release-managers', 'octo-lead'), false);
+});
+test("a check whose app id comes as text is the app's", async () => {
+  const { checks } = github({ [`GET ${FIND}`]: () => json({ check_runs: [run(70, { app: { id: '12345' } })] }) });
+  assert.equal((await checks.findCheck(REF, '99', 'head222', 'AI Review'))?.id, '70');
+});
+test('a required name reported by one place only is green when that place says success', async () => {
+  const status = (state: string) => json({ total_count: 1, statuses: [{ context: 'build', state }] });
+  const nothing = () => json({ check_runs: [] });
+  const asRun = (conclusion: string) => () => json({ check_runs: [{ id: 3, name: 'build', status: 'completed', conclusion }] });
+  const cases: Array<[Record<string, () => Response>, string[]]> = [
+    [{ [`GET ${STATUS}`]: () => status('success'), [`GET ${RUNS(1)}`]: nothing }, ['build']],
+    [{ [`GET ${STATUS}`]: () => status('failure'), [`GET ${RUNS(1)}`]: nothing }, []],
+    [{ [`GET ${STATUS}`]: () => json({ total_count: 0, statuses: [] }), [`GET ${RUNS(1)}`]: asRun('success') }, ['build']],
+    [{ [`GET ${STATUS}`]: () => json({ total_count: 0, statuses: [] }), [`GET ${RUNS(1)}`]: asRun('neutral') }, []],
+  ];
+  for (const [routes, want] of cases) {
+    assert.deepEqual(await github(routes).checks.greenChecks(REF, '99', 'head222', ['build']), want);
+  }
 });

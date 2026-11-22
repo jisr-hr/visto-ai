@@ -133,7 +133,11 @@ test('requeueJob treats a unique violation on its first statement as superseded'
     return [];
   } } as unknown as Db;
   assert.equal(await requeueJob(fake, 1, at(0), at(0), false), 'superseded');
-  assert.match(texts[1]!, /'dropped'/);
+  assert.equal(texts.length, 3);
+  assert.match(texts[1]!, /j\.kind = 'gate'/);
+  assert.match(texts[1]!, /j\.trigger = 'manual'/);
+  assert.match(texts[2]!, /update visto_ai\.jobs set status = 'dropped', outcome = 'superseded'/);
+  assert.match(texts[2]!, /where id = \$1 and status = 'running'/);
 });
 test('deleteFinishedJobs removes finished jobs older than the time given and no others', async () => {
   const db = await testDb();

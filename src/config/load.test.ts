@@ -501,6 +501,14 @@ test('what of the gate is in use is read from every repository', () => {
   assert.deepEqual(gateUseOf(all), { check: true, statuses: false, members: true, bypass: true });
   const off = parseConfig(`${SERVICE_YAML}repositories:\n  defaults: { gate: { skipTeam: acme/release-managers } }\n`, ENV);
   assert.equal(gateUseOf(off).members, false);
+  const idle = parseConfig(`${SERVICE_YAML}repositories:\n  defaults: { gate: { enabled: false, branches: [main], mode: bypass, skipTeam: acme/release-managers, requiredChecks: [build] } }\n`, ENV);
+  assert.deepEqual(gateUseOf(idle), { check: false, statuses: false, members: false, bypass: false });
+});
+test('bad gate defaults are reported once, even when an override sets only the mode', () => {
+  assert.throws(
+    () => parseConfig(`${SERVICE_YAML}repositories:\n  defaults: { gate: { enabled: true } }\n  overrides:\n    acme/shop: { gate: { mode: shadow } }\n`, ENV),
+    (e: ConfigError) => e.issues.length === 1 && e.issues[0]!.includes('defaults'),
+  );
 });
 test('the example with its gate block switched on parses to a gate on main', () => {
   const c = parseConfig(uncomment(example(), '    # gate:'), exampleEnv);

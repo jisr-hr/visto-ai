@@ -12,7 +12,7 @@ const STATUSES = new Set<string>(['queued', 'in_progress', 'completed']);
 
 const bad = (): Error => new Error('github_bad_response');
 const badPath = (): Error => new Error('github_bad_path');
-const wholeNumber = (v: unknown): v is number => typeof v === 'number' && Number.isInteger(v);
+const wholeNumber = (v: unknown): v is number => typeof v === 'number' && Number.isSafeInteger(v) && v > 0;
 
 function digits(value: string): string {
   if (!/^[0-9]+$/.test(value)) throw badPath();
@@ -30,7 +30,10 @@ export function createGithubChecks(opts: { auth: AppAuth; appId: string; fetch: 
   const apiBase = (opts.apiBase ?? 'https://api.github.com').replace(/\/+$/, '');
   const webBase = (opts.webBase ?? 'https://github.com').replace(/\/+$/, '');
 
-  async function httpFor(installation: string) {
+  // The repository's name is checked before a token is asked for.
+  const probe = createGithubHttp({ token: '', fetch: opts.fetch, apiBase });
+  async function httpFor(installation: string, ref?: PullRequestRef) {
+    if (ref !== undefined) probe.repoUrl(ref);
     const token = await opts.auth.installationToken(installation);
     return { token, http: createGithubHttp({ token, fetch: opts.fetch, apiBase }) };
   }
@@ -66,7 +69,7 @@ export function createGithubChecks(opts: { auth: AppAuth; appId: string; fetch: 
       digits(installation);
       const appId = digits(opts.appId);
       commitOf(commit);
-      const { http } = await httpFor(installation);
+      const { http } = await httpFor(installation, ref);
       const url = `${http.repoUrl(ref)}/commits/${commit}/check-runs?check_name=${encodeURIComponent(name)}&app_id=${appId}&per_page=100`;
       const body = await getJson(http, url);
       if (!isObject(body) || !Array.isArray(body.check_runs)) throw bad();
@@ -95,7 +98,7 @@ export function createGithubChecks(opts: { auth: AppAuth; appId: string; fetch: 
       digits(installation);
       commitOf(check.commit);
       if (check.id !== null) digits(check.id);
-      const { token, http } = await httpFor(installation);
+      const { token, http } = await httpFor(installation, ref);
       const repo = http.repoUrl(ref);
       const body: Record<string, unknown> = {
         name: check.name,
@@ -112,6 +115,7 @@ export function createGithubChecks(opts: { auth: AppAuth; appId: string; fetch: 
       if (!res.ok) throw new Error(`github_${res.status}`);
       const answer = await jsonOf(res);
       if (!isObject(answer) || !wholeNumber(answer.id)) throw bad();
+      if (check.id !== null && String(answer.id) !== check.id) throw bad();
       if (answer.status !== check.status) throw new Error('check_not_rewritten');
       return { id: String(answer.id) };
     },
@@ -120,11 +124,13 @@ export function createGithubChecks(opts: { auth: AppAuth; appId: string; fetch: 
       digits(installation);
       commitOf(commit);
       if (names.length === 0) return [];
-      const { http } = await httpFor(installation);
+      const { http } = await httpFor(installation, ref);
       const repo = http.repoUrl(ref);
 
       const statusBody = await getJson(http, `${repo}/commits/${commit}/status?per_page=100`);
       if (!isObject(statusBody) || !Array.isArray(statusBody.statuses)) throw bad();
+      // Only the first page is read: a list cut short could hide a failing status, so it is never accepted.
+      if (typeof statusBody.total_count !== 'number' || statusBody.total_count > statusBody.statuses.length) throw bad();
       const states = new Map<string, string>();
       for (const item of statusBody.statuses as unknown[]) {
         if (!isObject(item) || typeof item.context !== 'string' || typeof item.state !== 'string') throw bad();
