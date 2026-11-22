@@ -284,7 +284,7 @@ Where the strict rule leaves a thread not closed, the merge is not held. The bot
 
 The service writes the review body from the structured result. The model does not write markdown headings, so there is nothing to reject for missing sections.
 
-Sections, each present only when it has content: a one-line prefix for incremental, recheck or manually requested runs; `Summary`; `Human review`; `Acceptance criteria`; `Findings`; `Findings not placed on the diff`; `On code unchanged since the last review`; `Already discussed`; `Beyond the diff`; `Coverage`; `Overall`.
+Sections, each present only when it has content: a one-line prefix for incremental, recheck or manually requested runs; `Summary`; `Human review`; `Acceptance criteria`; `Findings`; `On code unchanged since the last review`; `Findings not placed on the diff`; `Already discussed`; `Beyond the diff`; `Coverage`; `Overall`.
 
 `Overall` is computed from the findings and the score. When batches ran, overviews are joined, findings are concatenated, and acceptance rows are merged by rule: an item is met when a batch shows it met and none shows it not met.
 
@@ -859,11 +859,13 @@ The five points of the first draft are settled: the name (O14), coverage (O15), 
 
 The five points raised by the review against the predecessor's production record are settled too, each as this document recommended: the build order (O19), later rounds on a gated pull request (D4), approval only where stale approvals are dismissed (D12), inline notes off unless switched on (D22), and no access check on a reply that clears a gate thread (O18).
 
-Still open:
+The three points that were left open after that were settled by the owner on 2026-11-22:
 
-1. **How O15 was read.** "Goes to human review" is implemented as: the bot does not approve, the files are listed for a person, and the gate's check does not fail for that reason alone (section 9). In a repository that does not require an approving review, nothing makes the human look happen. The alternative is a check that stays red until a person other than the author approves.
-2. **Where 70% sits** (section 6.1). As placed, a local behaviour change that follows an existing pattern is approvable by default.
-3. **Copyright holder.** The licence notice needs a name. Sign-off is settled (O2).
+1. **How O15 was read.** It stands as implemented: "goes to human review" means that the bot does not approve, the files are listed for a person, and the gate's check does not fail for that reason alone (section 9). In a repository that does not require an approving review, nothing makes the human look happen; a team that wants it enforced uses the git service's own rule that requires an approving review. A check that stays red until a person other than the author approves was not chosen.
+2. **Where 70% sits** (section 6.1). It stands: a local behaviour change that follows an existing pattern is approvable by default. Each repository can set its own threshold.
+3. **Copyright holder.** The notice names "The Visto AI authors" (the `NOTICE` file). Sign-off is settled (O2).
+
+Nothing is open.
 
 ## 22. Left to the builder
 

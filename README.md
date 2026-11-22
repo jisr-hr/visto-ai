@@ -13,7 +13,7 @@ Code used to be written by people and reviewed by people. Now AI writes much of 
 Visto AI reviews a pull request and answers two questions:
 
 1. **What is wrong with this change?** Findings the reviewer can demonstrate, each with a concrete failure scenario. No style comments.
-2. **Which parts of the change need a human reviewer, and why?** Every changed block of code gets a score from 0% to 100%. Blocks at or above a threshold (70% by default) are listed for a person, with the lines to read. If nothing reaches the threshold, and the team has switched this on, the bot approves the pull request.
+2. **Which parts of the change need a human reviewer, and why?** Every changed block of code gets a score from 0% to 100%. Blocks at or above a threshold (70% by default) are listed for a person, with the lines to read. If nothing reaches the threshold, and the team has switched this on, the bot is to approve the pull request; automatic approval is planned and not built yet (see [Status](#status)).
 
 The aim is to reduce what people must review, and to be able to show the numbers that justify it.
 
@@ -352,4 +352,4 @@ A file that cannot be used (invalid YAML, an unknown key, a refused pattern, con
 
 ## Licence
 
-[Apache-2.0](LICENSE).
+[Apache-2.0](LICENSE). Copyright 2026 The Visto AI authors; see [NOTICE](NOTICE).

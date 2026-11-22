@@ -99,6 +99,8 @@ What the run could not show: any of this plan's own steps in the job. Offline, a
 
 **For the owner**
 
+Ruled on 2026-11-22. The first is left as it is, to be settled with the gate, which is what makes such a thread count. The second stands: mentions are inert, links and images are left. The third was corrected: the README now says that automatic approval is planned and not built.
+
 - A thread that a person resolved with a click and no reply, and that is then judged open, has its confirmation rewritten to "Open again." and stays resolved, so the finding sits in a collapsed thread. Nothing asks the app to unresolve.
 - Links, images and references in the model's reason stay live in a thread reply, as everywhere else in a review. What is new is who can steer that text: anyone who may comment in the thread.
 - The README's "Why" still says the bot approves a pull request; automatic approval is not built, as its Status table says.
