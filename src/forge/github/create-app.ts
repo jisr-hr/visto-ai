@@ -118,10 +118,21 @@ export function reserveFile(path: string): number | null {
   return fd;
 }
 
-/** Writes the text through the descriptor the reservation opened, then closes it; nothing is opened by the path again. */
-export function fillFile(fd: number, text: string): void {
+/**
+ * Writes the text through the descriptor the reservation opened, then closes it; nothing is opened by the path again.
+ * Throws `file_moved` when the path no longer names that file (deleted or replaced meanwhile): the text is then in no file a name leads to.
+ */
+export function fillFile(fd: number, path: string, text: string): void {
   try {
     fs.writeFileSync(fd, text);
+    const held = fs.fstatSync(fd);
+    let named: fs.Stats | null;
+    try {
+      named = fs.statSync(path);
+    } catch {
+      named = null;
+    }
+    if (named === null || named.dev !== held.dev || named.ino !== held.ino) throw new Error('file_moved');
   } finally {
     fs.closeSync(fd);
   }
@@ -218,8 +229,8 @@ export interface Io {
   random(): string;                                   // 32 hex characters of fresh randomness
   /** Creates the file and answers its open descriptor, or null. */
   reserve(path: string): number | null;
-  /** Writes through the descriptor and closes it, whatever happens. */
-  fill(fd: number, text: string): void;
+  /** Writes through the descriptor and closes it, whatever happens; throws `file_moved` when the path no longer names that file. */
+  fill(fd: number, path: string, text: string): void;
   /** Closes the descriptor when it is not null, and removes the file. */
   release(fd: number | null, path: string): void;
   /** Starts listening on this machine only and answers with the port BEFORE any request is handled. */
@@ -279,7 +290,13 @@ export async function run(argv: string[], io: Io): Promise<number> {
   const fill = (t: string): void => {
     if (released || !open) throw new Error('released');
     open = false;
-    io.fill(fd, t);
+    try {
+      io.fill(fd, out, t);
+    } catch (error) {
+      // The path names another file, or none: it is not ours to remove.
+      if (error instanceof Error && error.message === 'file_moved') released = true;
+      throw error;
+    }
     written = true;
   };
   let listenFailed = false;

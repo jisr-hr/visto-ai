@@ -62,7 +62,7 @@ function world(opts: { reserve?: boolean; answers?: Array<Response | Error>; fet
     fetch: stub.fetch,
     random: () => RANDOMS[r++ % 2] ?? '',
     reserve: (p) => { calls.reserve.push(p); if (opts.reserve === false) return null; opened.set(FD, p); return FD; },
-    fill: (fd, text) => { calls.fds.push(fd); calls.fill.push([opened.get(fd) ?? '?', text]); },
+    fill: (fd, p, text) => { calls.fds.push(fd); calls.fill.push([opened.get(fd) === p ? p : '?', text]); },
     release: (fd, p) => { calls.fds.push(fd); calls.release.push(p); },
     sleep: async (ms) => { calls.sleep.push(ms); },
     listen: async (h) => { calls.listen += 1; handler = h; return { port: 4010, close: async () => { calls.close += 1; } }; },
@@ -681,7 +681,7 @@ test('the key is written through the descriptor the reservation opened, and noth
     fs.chmodSync(other, 0o640);
     const before = fs.statSync(other);
     fs.renameSync(other, file);
-    fillFile(fd!, 'APP_PRIVATE_KEY=x\n');
+    assert.throws(() => fillFile(fd!, file, 'APP_PRIVATE_KEY=x\n'), { message: 'file_moved' });
     const after = fs.statSync(file);
     assert.equal(fs.readFileSync(file, 'utf8'), '');
     assert.deepEqual([after.ino, after.size, after.mode & 0o777, after.mtimeMs], [before.ino, 0, 0o640, before.mtimeMs]);
@@ -696,7 +696,7 @@ test('a reserved file is written whole through its descriptor, and a released on
   try {
     const file = path.join(dir, 'app.env');
     const fd = reserveFile(file)!;
-    fillFile(fd, envLines({ pem: PEM, webhookSecret: SECRET }));
+    fillFile(fd, file, envLines({ pem: PEM, webhookSecret: SECRET }));
     assert.equal(fs.readFileSync(file, 'utf8'), envLines({ pem: PEM, webhookSecret: SECRET }));
     assert.equal(fs.statSync(file).mode & 0o777, 0o600);
     const gone = path.join(dir, 'gone.env');
@@ -840,4 +840,71 @@ test('a failure that is not the listener\'s is internal_error, and one of the li
   assert.equal(await run(ARGS, deaf.io), 1);
   assert.deepEqual(deaf.lines, ['failed: listen_failed']);
   assert.deepEqual(deaf.calls.release, ['/keys/visto.env']);
+});
+
+test('a reserved file deleted before the fill is no fill: nothing is said to be written', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'visto-create-app-'));
+  try {
+    const file = path.join(dir, 'app.env');
+    const fd = reserveFile(file)!;
+    fs.rmSync(file);
+    assert.throws(() => fillFile(fd, file, 'APP_PRIVATE_KEY=x\n'), { message: 'file_moved' });
+    assert.equal(fs.existsSync(file), false);
+    assert.throws(() => fs.fstatSync(fd), /EBADF/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+/** The command on a real file in a fresh temporary folder; `meddle` acts on the folder while the command waits for the browser. */
+async function onDisk(meddle: (file: string, dir: string) => void) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'visto-create-app-'));
+  const file = path.join(dir, 'app.env');
+  const w = world();
+  w.io.reserve = reserveFile;
+  w.io.fill = fillFile;
+  w.io.release = releaseFile;
+  try {
+    const s = await start(['--webhook-url', 'https://reviews.example.test/webhooks/github', '--out', file, '--name', NAME], w);
+    meddle(file, dir);
+    await s.ask('GET', `/created?code=${CODE}&state=${s.state}`);
+    const exit = await s.running;
+    const content = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : null;
+    return { exit, text: visible(w.lines), content, dir };
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test('the reserved file deleted while the command waits ends as write_failed, with the advice and no success line', async () => {
+  const r = await onDisk((file) => { fs.rmSync(file); });
+  assert.equal(r.exit, 1);
+  assert.match(r.text, /failed: write_failed/);
+  assert.match(r.text, /may now exist on GitHub with no private key/);
+  assert.ok(r.text.includes('https://github.com/settings/apps'));
+  assert.ok(!r.text.includes('Created the app') && !r.text.includes('secrets are in'));
+  assert.equal(r.content, null);
+});
+
+test('the reserved file replaced while the command waits ends as write_failed, and the other file stays untouched', async () => {
+  let before: fs.Stats | undefined;
+  const r = await onDisk((file, dir) => {
+    const other = path.join(dir, 'other.env');
+    fs.writeFileSync(other, 'KEPT=1\n');
+    before = fs.statSync(other);
+    fs.renameSync(other, file);
+  });
+  assert.equal(r.exit, 1);
+  assert.match(r.text, /failed: write_failed/);
+  assert.match(r.text, /may now exist on GitHub with no private key/);
+  assert.ok(!r.text.includes('Created the app') && !r.text.includes('secrets are in'));
+  assert.equal(r.content, 'KEPT=1\n');
+  assert.ok(before !== undefined);
+});
+
+test('an untouched reserved file gets the secrets and the command ends with 0', async () => {
+  const r = await onDisk(() => {});
+  assert.equal(r.exit, 0);
+  assert.equal(r.content, envLines({ pem: PEM, webhookSecret: SECRET }));
+  assert.ok(r.text.includes('Created the app') && !r.text.includes('failed:'));
 });

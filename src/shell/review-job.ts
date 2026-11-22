@@ -606,7 +606,10 @@ export async function runReviewJob(job: Job, deps: ReviewJobDeps): Promise<void>
         written = await finish('publish_rejected');
         if (written) await fail(installation, 'publish_rejected');
       } else {
-        written = await tried(async () => { requeued = (await requeueJob(db, job.id, later(retryWait), nowIso, false)) === 'requeued'; });
+        // After a network or server error GitHub may hold the review all the same: the later start, which adopts it, waits the longer time.
+        const unsettled = out.code === 'github_network' || /^github_5[0-9]{2}$/.test(out.code);
+        const wait = unsettled ? RETRY_WAITS_MS[1]! : retryWait;
+        written = await tried(async () => { requeued = (await requeueJob(db, job.id, later(wait), nowIso, false)) === 'requeued'; });
         if (written && !requeued) await fail(installation, 'superseded');
       }
     }

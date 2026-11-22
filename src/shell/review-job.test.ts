@@ -564,9 +564,34 @@ test('when the post cannot be made the review stays stored and the job is put ba
   await runReviewJob(h.job, h.deps);
   const [stored] = await listRuns(db, REF);
   const j = await getJob(db, h.job.id);
-  assert.deepEqual([stored!.outcome, stored!.published, j?.status, j?.runAt, j?.starts], ['ok', false, 'pending', at(60), 1]);
+  assert.deepEqual([stored!.outcome, stored!.published, j?.status, j?.runAt, j?.starts], ['ok', false, 'pending', at(900), 1]);
   const entry = h.logged.find((e) => e.event === 'review')!;
   assert.deepEqual([entry.publish, entry.publish_code, entry.requeued], ['failed', 'github_502', true]);
+});
+test('a publication that ended with a network error or a server error waits 15 minutes, since GitHub may hold the review', async () => {
+  for (const [code, number] of [['github_502', 8], ['github_500', 9], ['github_network', 10]] as const) {
+    const h = await live({ pullRequest: number, posts: [new Error(code)] });
+    await runReviewJob(h.job, h.deps);
+    const j = await getJob(db, h.job.id);
+    assert.deepEqual([j?.status, j?.runAt, j?.starts], ['pending', at(900), 1], code);
+  }
+});
+test('a publication that ended with another error waits a minute, as before', async () => {
+  for (const [code, number] of [['github_403', 8], ['github_5023', 9], ['internal_error', 10]] as const) {
+    const h = await live({ pullRequest: number, posts: [new Error(code)] });
+    await runReviewJob(h.job, h.deps);
+    const j = await getJob(db, h.job.id);
+    assert.deepEqual([j?.status, j?.runAt, j?.starts], ['pending', at(60), 1], code);
+  }
+});
+test('after a server error, the next start adopts the review GitHub holds and posts nothing', async () => {
+  const before = await live({ posts: [new Error('github_502')] });
+  await runReviewJob(before.job, before.deps);
+  const again = await live({ reuseJob: before.job.id, own: [[{ id: '501', commit: 'h1' }]] });
+  await runReviewJob(again.job, again.deps);
+  const [stored] = await listRuns(db, REF);
+  assert.deepEqual([stored!.published, stored!.reviewId, again.inputs.length, again.writes.filter((w) => w[0] === 'publishReview').length], [true, '501', 0, 0]);
+  assert.equal(again.logged.find((e) => e.event === 'review')!.adopted, true);
 });
 test('the next start publishes the stored review without calling the model, and tells no guard', async () => {
   const before = await live({ posts: [new Error('github_502')] });
