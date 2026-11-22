@@ -91,8 +91,7 @@ On 2026-11-21 and 22 the branch was tried against the real GitHub App and the pr
 
 - **The gate** (stage 5) is next. What is stored here lets it tell a note from a finding.
 - **A note's replies counted as labels for the score:** stage 8.
-- **For the owner to decide:**
-  - whether notes that were refused should be remembered, so that one note GitHub never accepts stops costing the others (call 10).
+- **Ruled by the owner, after the merge:** notes that were refused are not remembered (call 10 stands). GitHub does not say which comment it refused, so remembering would give up every note of that try and not the bad one alone; and no refusal has been seen. To be looked at again when one is. Nothing of this plan waits for the owner any more.
 - **Known and left as they are:**
   - An edited block, a merged or split hunk and a renamed file's blocks get new notes, and the old threads stay (calls 5 and 11).
   - A note is never rewritten when its block's score changes later.
