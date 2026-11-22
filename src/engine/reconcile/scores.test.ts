@@ -779,7 +779,7 @@ test('a held block scored below its hold is raised to it, and no other block of 
   assert.deepEqual(f!.blocks.map((x) => [x.id, x.entry?.score, x.raisedFrom]), [['B1', 60, 5], ['B2', 60, 5]]);
   // The parts the model cuts a held block into are each held.
   const big = ctx('src/a.ts', fortyAdded, { additions: 40, deletions: 0 });
-  const [p] = answer(file('src/a.ts', [{ id: 'B1', parts: [part('R1', 'R20', 10, 'test'), part('R21', 'R40', 50, 'data_model', 'Adds a table.')] }]),
+  const [p] = answer(file('src/a.ts', [{ id: 'B1', parts: [part('R1', 'R20', 5, 'test'), part('R21', 'R40', 7, 'data_model')] }]),
     kept({ blocks: big.blocks, held: new Map([['B1', 40]]) }), { c: big }).scores;
-  assert.deepEqual(p!.blocks.map((x) => [x.id, x.entry?.score, x.raisedFrom]), [['B1.1', 40, 10], ['B1.2', 50, undefined]]);
+  assert.deepEqual(p!.blocks.map((x) => [x.id, x.entry?.score, x.raisedFrom]), [['B1.1', 40, 5], ['B1.2', 40, 7]]);
 });

@@ -26,11 +26,10 @@ function hashOf(lines: HunkLine[]): string {
   return hash.digest('hex');
 }
 
-// Every line of a hunk that is not a meta line, the unchanged ones included, with its kind and without its number.
+// Every line of a hunk, the unchanged ones included, with its kind and without its number. `blocksOf` leaves meta lines out before this.
 function aroundOf(lines: HunkLine[]): string {
   const hash = createHash('sha256');
   for (const line of lines) {
-    if (line.kind === 'meta') continue;
     hash.update(`${line.kind === 'add' ? '+' : line.kind === 'del' ? '-' : ' '}${line.text}\n`);
   }
   return hash.digest('hex');

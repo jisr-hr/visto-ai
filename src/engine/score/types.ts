@@ -59,15 +59,18 @@ export interface FileScore {
 
 export interface Verdict { threshold: number; needsHuman: boolean; highest: number }
 
-/** The highest score a block or a part with this hash and these surroundings had of its own at the end of an earlier run. `around` null: stored before surroundings were kept; it answers for no block. */
-export interface StoredEntry { hash: string; around: string | null; entry: ScoreEntry; raisedFrom: number | null }
+/**
+ * The highest score a block or a part with this hash had of its own at the end of an earlier run, wherever it stood.
+ * `arounds`: the surroundings among which a score was stored for it; empty when none was stored with surroundings.
+ */
+export interface StoredEntry { hash: string; arounds: string[]; entry: ScoreEntry; raisedFrom: number | null }
 /** A hunk an earlier run split into parts that covered all its changed lines. `around` is the hunk's, null as in StoredEntry. */
 export interface StoredSplit { hunkHash: string; around: string | null; parts: Array<{ hash: string; range: [number, number] }> }
 export interface FileHistory {
   path: string;
-  blocks: StoredEntry[];            // one for each hash and around
+  blocks: StoredEntry[];            // one for each hash
   splits: StoredSplit[];            // one for each hunk hash and around: the newest run's parts
-  stoodFor: Array<{ hash: string; around: string | null }>;   // blocks a covered run left with no entry of their own, under the file's whole-file score
+  stoodFor: Array<{ hash: string; around: string | null }>;   // blocks a covered run left with no entry of their own, under the file's whole-file score, less those whose hash has an entry
   wholeFile: ScoreEntry | null;     // the highest whole-file score an earlier run left the path with
   coveredAt: string[];              // the diff hashes at which a published run read the file
   readAt: { head: string; hashes: string[] } | null;   // the newest published run that read the file: its head, and every block, part and hunk hash the file had in it

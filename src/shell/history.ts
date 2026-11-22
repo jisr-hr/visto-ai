@@ -77,10 +77,11 @@ function reviewedOf(result: unknown): Set<string> {
 // A hash and its surroundings, as one key; '' stands for none.
 const keyOf = (hash: string, around: string | null): string => `${hash}\n${around ?? ''}`;
 
-interface Kept { hash: string; around: string | null; entry: ScoreEntry; raisedFrom: number | null; run: number }
+interface Kept { entry: ScoreEntry; raisedFrom: number | null; run: number }
 interface Acc {
-  blocks: Map<string, Kept>;          // by the key of hash and around
-  partsOf: Map<string, Set<string>>;  // key of the hunk's hash and around -> keys of its parts that had an entry given by `by`
+  blocks: Map<string, Kept>;          // by hash: what a block keeps is decided by its changed lines alone
+  arounds: Map<string, Set<string>>;  // hash -> every surroundings a block of it had an entry given by `by` among
+  partsOf: Map<string, Set<string>>;  // hunk hash -> hashes of its parts that had an entry given by `by`
   splits: Map<string, StoredSplit>;   // by the key of the hunk's hash and around
   stood: Map<string, { hash: string; around: string | null }>;   // by the key of hash and around
   wholeFile: ScoreEntry | null;
@@ -98,7 +99,7 @@ export function historyOf(args: { runs: StoredRun[]; last: StoredRun | null; by:
     for (const file of filesOf(run.result)) {
       let acc = accs.get(file.path);
       if (acc === undefined) {
-        acc = { blocks: new Map(), partsOf: new Map(), splits: new Map(), stood: new Map(), wholeFile: null, coveredAt: new Set(), readAt: null };
+        acc = { blocks: new Map(), arounds: new Map(), partsOf: new Map(), splits: new Map(), stood: new Map(), wholeFile: null, coveredAt: new Set(), readAt: null };
         accs.set(file.path, acc);
       }
       // Grouped by the hunk's hash and around: two hunks with the same changed lines among different lines are two hunks.
@@ -107,15 +108,15 @@ export function historyOf(args: { runs: StoredRun[]; last: StoredRun | null; by:
         const hunkKey = keyOf(b.hunkHash, b.around);
         hunks.set(hunkKey, [...(hunks.get(hunkKey) ?? []), b]);
         if (b.entry === null || b.by !== by) continue;
-        const key = keyOf(b.hash, b.around);
-        const kept = acc.blocks.get(key);
+        if (b.around !== null) acc.arounds.set(b.hash, (acc.arounds.get(b.hash) ?? new Set()).add(b.around));
+        const kept = acc.blocks.get(b.hash);
         // On a tie an entry that was not raised wins over one that was; then the newer run.
         const tie = kept !== undefined && b.entry.score === kept.entry.score
           && ((kept.raisedFrom !== null && b.raisedFrom === null) || ((kept.raisedFrom === null) === (b.raisedFrom === null) && run.id > kept.run));
         if (kept === undefined || b.entry.score > kept.entry.score || tie) {
-          acc.blocks.set(key, { hash: b.hash, around: b.around, entry: b.entry, raisedFrom: b.raisedFrom, run: run.id });
+          acc.blocks.set(b.hash, { entry: b.entry, raisedFrom: b.raisedFrom, run: run.id });
         }
-        if (b.hunkHash !== b.hash) acc.partsOf.set(hunkKey, (acc.partsOf.get(hunkKey) ?? new Set()).add(key));
+        if (b.hunkHash !== b.hash) acc.partsOf.set(b.hunkHash, (acc.partsOf.get(b.hunkHash) ?? new Set()).add(b.hash));
       }
       for (const [hunkKey, blocks] of hunks) {
         if (blocks.every((b) => b.range !== null && b.entry !== null && b.by === by)) {
@@ -139,8 +140,8 @@ export function historyOf(args: { runs: StoredRun[]; last: StoredRun | null; by:
     // A hunk does not stand below its own parts; repeated until nothing is raised, so the order hunks are met in does not matter.
     for (let raised = true; raised;) {
       raised = false;
-      for (const [hunkKey, parts] of acc.partsOf) {
-        const whole = acc.blocks.get(hunkKey);
+      for (const [hunkHash, parts] of acc.partsOf) {
+        const whole = acc.blocks.get(hunkHash);
         if (whole === undefined) continue;
         let highest: Kept | undefined;
         for (const p of parts) {
@@ -148,15 +149,15 @@ export function historyOf(args: { runs: StoredRun[]; last: StoredRun | null; by:
           if (kept !== undefined && (highest === undefined || kept.entry.score > highest.entry.score)) highest = kept;
         }
         if (highest !== undefined && whole.entry.score < highest.entry.score) {
-          acc.blocks.set(hunkKey, { ...whole, entry: highest.entry, raisedFrom: null, run: highest.run });
+          acc.blocks.set(hunkHash, { entry: highest.entry, raisedFrom: null, run: highest.run });
           raised = true;
         }
       }
     }
-    const blocks: StoredEntry[] = [...acc.blocks.values()].map((k) => ({ hash: k.hash, around: k.around, entry: { ...k.entry }, raisedFrom: k.raisedFrom }));
+    const blocks: StoredEntry[] = [...acc.blocks].map(([hash, k]) => ({ hash, arounds: [...(acc.arounds.get(hash) ?? [])], entry: { ...k.entry }, raisedFrom: k.raisedFrom }));
     files.push({
       path, blocks, splits: [...acc.splits.values()],
-      stoodFor: [...acc.stood].filter(([key]) => !acc.blocks.has(key)).map(([, pair]) => pair),
+      stoodFor: [...acc.stood.values()].filter((pair) => !acc.blocks.has(pair.hash)),
       wholeFile: acc.wholeFile === null ? null : { ...acc.wholeFile },
       coveredAt: [...acc.coveredAt], readAt: acc.readAt,
     });

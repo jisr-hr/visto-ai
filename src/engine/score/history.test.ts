@@ -30,8 +30,9 @@ function moved(path: string, previousPath: string): FileContext {
   return { file, hunks: [], ranges: null, diffText: null, full: null, test: null, skip: 'unchanged', blocks: [], plan: scorePlan(file, 'unchanged'), hidden: false };
 }
 const entry = (score: number): ScoreEntry => ({ score, category: 'fix', reason: '' });
-const stored = (hash: string, score: number, raisedFrom: number | null = null, around: string | null = aroundOf(hash)): StoredEntry =>
-  ({ hash, around, entry: entry(score), raisedFrom });
+// `around`: the surroundings a score was stored among for the hash; null for none, a list for several.
+const stored = (hash: string, score: number, raisedFrom: number | null = null, around: string | null | string[] = aroundOf(hash)): StoredEntry =>
+  ({ hash, arounds: around === null ? [] : Array.isArray(around) ? around : [around], entry: entry(score), raisedFrom });
 const pair = (hash: string, around: string | null = aroundOf(hash)) => ({ hash, around });
 const reuse = (hash: string, score: number, around: string = aroundOf(hash)) => ({ hash, around, entry: entry(score) });
 const hist = (over: Partial<FileHistory> = {}): FileHistory =>
@@ -434,13 +435,58 @@ test('the lookup asks with the surroundings, once for each path, hash and surrou
   assert.notEqual(apart.blocks[0]!.around, apart.blocks[1]!.around);
 });
 
-test('of a path and its earlier name the higher entry is kept for each pair', () => {
+test('of a path and its earlier name the higher entry is kept for each hash, with the surroundings of both', () => {
   const c = ctx('src/a.ts', PATCH_TWO_HUNKS, 'old/a.ts');
   const [b1, b2] = [c.blocks[0]!, c.blocks[1]!];
   const k = keptScores(c, H([
-    hist({ path: 'old/a.ts', blocks: [stored(b1.hash, 40, null, b1.around), stored(b1.hash, 90, null, OTHER_LINES), stored(b2.hash, 10, null, b2.around)] }),
-    hist({ path: 'src/a.ts', blocks: [stored(b1.hash, 55, null, b1.around), stored(b2.hash, 30, null, b2.around)] }),
+    hist({ path: 'old/a.ts', blocks: [stored(b1.hash, 90, null, OTHER_LINES), stored(b2.hash, 10, null, OTHER_LINES)] }),
+    hist({ path: 'src/a.ts', blocks: [stored(b1.hash, 55, null, b1.around), stored(b2.hash, 30, null, 'd'.repeat(64))] }),
   ]), [])!;
-  assert.deepEqual([...k.entries].map(([id, v]) => [id, v.entry.score]), [['B1', 55], ['B2', 30]]);
-  assert.deepEqual([heldOf(k), k.floor], [[], 0]);
+  // B1: the higher score, kept since one of the two names stored it among these lines. B2: neither did, so it is asked and held.
+  assert.deepEqual([...k.entries].map(([id, v]) => [id, v.entry.score]), [['B1', 90]]);
+  assert.deepEqual([heldOf(k), k.floor], [[['B2', 30]], 0]);
+});
+
+test('a block back among lines it was scored among keeps the highest score its changed lines had, and is not asked for', () => {
+  const here = ctx('src/a.ts', hunkAt(10, 'first'));
+  const b = here.blocks[0]!;
+  const k = keptScores(here, H([hist({ blocks: [stored(b.hash, 60, null, [b.around, OTHER_LINES])] })]), [])!;
+  assert.deepEqual([...k.entries].map(([id, v]) => [id, v.entry.score, v.origin]), [['B1', 60, 'earlier_run']]);
+  assert.deepEqual([[...k.scoredHunks], heldOf(k)], [['B1'], []]);
+});
+
+test('of two hunks with the same changed lines, each among known lines, both stand at the higher score', () => {
+  const twins = ctx('src/a.ts', `${hunkAt(10, 'first')}\n${amongOther(50, 'first')}`);
+  const [x, y] = [twins.blocks[0]!, twins.blocks[1]!];
+  assert.equal(x.hash, y.hash);
+  const history = H([hist({ blocks: [stored(x.hash, 85, null, [x.around, y.around])] })]);
+  assert.deepEqual([...keptScores(twins, history, [])!.entries].map(([id, v]) => [id, v.entry.score]), [['B1', 85], ['B2', 85]]);
+  // The 85 one gone from the diff: the other still stands at 85.
+  const left = ctx('src/a.ts', amongOther(50, 'first'));
+  assert.deepEqual([...keptScores(left, history, [])!.entries].map(([id, v]) => [id, v.entry.score]), [['B1', 85]]);
+});
+
+test('a block that stood under the whole-file score and has a score of its own stored elsewhere is asked for again and held', () => {
+  const c = ctx('src/a.ts', hunkAt(10, 'first'), 'old/a.ts');
+  const b = c.blocks[0]!;
+  // As when a path and its earlier name are joined: one stood for the block among these lines, the other scored it among others.
+  const k = keptScores(c, H([
+    hist({ path: 'old/a.ts', stoodFor: [pair(b.hash, b.around)], wholeFile: entry(30) }),
+    hist({ path: 'src/a.ts', blocks: [stored(b.hash, 55, null, OTHER_LINES)] }),
+  ]), [])!;
+  assert.deepEqual([[...k.stoodFor], [...k.scoredHunks], k.entries.size, heldOf(k)], [[], [], 0, [['B1', 55]]]);
+});
+
+test('a hunk scored whole, then split among other lines, does not stand below its highest part when it is back', () => {
+  // What the history holds once the hunk was raised to its highest part: the hunk's entry at 90, among the lines it was scored whole among.
+  const k = keptScores(forty, H([hist({ blocks: [stored(forty.blocks[0]!.hash, 90), stored(P1, 15, null, OTHER_LINES), stored(P2, 90, null, OTHER_LINES)] })]), [])!;
+  assert.deepEqual([...k.entries].map(([id, v]) => [id, v.entry.score, v.origin]), [['B1', 90, 'earlier_run']]);
+});
+
+test('a hunk whose stored split is found but no longer fits is held to the score stored for its changed lines', () => {
+  const k = keptScores(forty, H([hist({
+    blocks: [stored(forty.blocks[0]!.hash, 50, null, OTHER_LINES), stored(P1, 15), stored(P2, 92)],
+    splits: [split([{ hash: P1, range: [0, 19] }, { hash: P2, range: [20, 49] }])],
+  })]), [])!;
+  assert.deepEqual([k.blocks.map((b) => b.id), k.entries.size, heldOf(k), k.floor], [['B1'], 0, [['B1', 50]], 92]);
 });

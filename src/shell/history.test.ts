@@ -40,10 +40,8 @@ test('a block keeps the highest score any earlier run left it with', () => {
   const h = of([run(1, { scores: [file('src/a.ts', [blk('h1', 80)])] }), run(2, { scores: [file('src/a.ts', [blk('h1', 40), blk('h2', 60)])] })]);
   assert.deepEqual(h.files[0]!.blocks.map((b) => [b.hash, b.entry.score]), [['h1', 80], ['h2', 60]]);
 });
-test('two blocks of one run with the same changed lines among the same lines both stand at the higher score; among different lines each keeps its own', () => {
+test('two blocks of one run with the same changed lines both stand at the higher score', () => {
   assert.deepEqual(of([run(1, { scores: [file('src/a.ts', [blk('h1', 30), blk('h1', 80)])] })]).files[0]!.blocks.map((b) => b.entry.score), [80]);
-  const apart = of([run(1, { scores: [file('src/a.ts', [blk('h1', 30, { around: 'b'.repeat(64) }), blk('h1', 80)])] })]).files[0]!.blocks;
-  assert.deepEqual(apart.map((b) => [b.hash, b.around, b.entry.score]), [['h1', 'b'.repeat(64), 30], ['h1', AROUND, 80]]);
 });
 test('on a tie the newest run gives the entry', () => {
   const h = of([run(1, { scores: [file('src/a.ts', [blk('h1', 50, { entry: entry(50, 'old') })])] }), run(2, { scores: [file('src/a.ts', [blk('h1', 50, { entry: entry(50, 'new') })])] })]);
@@ -286,9 +284,16 @@ test('a split the model listed second part first is kept at the next review', as
 
 const X = 'b'.repeat(64);
 const Y = 'c'.repeat(64);
-test('the history keeps one entry for each hash and surroundings', () => {
-  const h = of([run(1, { scores: [file('src/a.ts', [blk('h1', 30, { around: X }), blk('h1', 80, { around: Y })])] }), run(2, { scores: [file('src/a.ts', [blk('h1', 50, { around: X })])] })]);
-  assert.deepEqual(h.files[0]!.blocks.map((b) => [b.hash, b.around, b.entry.score]), [['h1', X, 50], ['h1', Y, 80]]);
+test('the history keeps one entry for each hash, the highest, with every surroundings a score was stored among', () => {
+  const old = (b: BlockScore): Record<string, unknown> => { const rest: Record<string, unknown> = { ...b }; delete rest['around']; return rest; };
+  const h = of([
+    run(1, { scores: [file('src/a.ts', [blk('h1', 20, { around: X })])] }),
+    run(2, { scores: [{ ...file('src/a.ts', []), blocks: [blk('h1', 60, { around: Y }), old(blk('h1', 10))] }] }),
+  ]);
+  assert.deepEqual(h.files[0]!.blocks.map((b) => [b.hash, b.arounds, b.entry.score]), [['h1', [X, Y], 60]]);
+  // A block of the other scorer adds no surroundings.
+  const other = of([run(1, { scores: [file('src/a.ts', [blk('h1', 20, { around: X }), blk('h1', 90, { around: Y, by: 'scorer' })])] })]);
+  assert.deepEqual(other.files[0]!.blocks.map((b) => [b.arounds, b.entry.score]), [[[X], 20]]);
 });
 test('two hunks with the same changed lines among different lines are two hunks: each has its own split and its own parts', () => {
   const here = [blk('p1', 15, { hunkHash: 'H', range: [0, 19], around: X }), blk('p2', 92, { hunkHash: 'H', range: [20, 39], around: X })];
@@ -298,17 +303,17 @@ test('two hunks with the same changed lines among different lines are two hunks:
     { hunkHash: 'H', around: X, parts: [{ hash: 'p1', range: [0, 19] }, { hash: 'p2', range: [20, 39] }] },
     { hunkHash: 'H', around: Y, parts: [{ hash: 'p1', range: [0, 19] }, { hash: 'p2', range: [20, 39] }] },
   ]);
-  assert.deepEqual(f.blocks.map((b) => [b.hash, b.around, b.entry.score]), [['p1', X, 15], ['p2', X, 92], ['p1', Y, 20], ['p2', Y, 30]]);
+  assert.deepEqual(f.blocks.map((b) => [b.hash, b.arounds, b.entry.score]), [['p1', [X, Y], 20], ['p2', [X, Y], 92]]);
   // A remainder in one of them leaves the other's split whole.
   const rest = [blk('q1', 20, { hunkHash: 'H', range: [0, 9], around: Y }), blkNoEntry('r', { hunkHash: 'H', around: Y })];
   assert.deepEqual(of([run(1, { scores: [file('src/a.ts', [...here, ...rest])] })]).files[0]!.splits.map((one) => one.around), [X]);
 });
-test('a hunk does not stand below its own parts, by the pair', () => {
+test('a hunk does not stand below its own parts, wherever they were scored', () => {
   const h = of([
     run(1, { scores: [file('src/a.ts', [blk('H', 50, { around: X })])] }),
     run(2, { scores: [file('src/a.ts', [blk('p', 92, { hunkHash: 'H', around: X }), blk('q', 99, { hunkHash: 'H', around: Y })])] }),
   ]);
-  assert.deepEqual(h.files[0]!.blocks.map((b) => [b.hash, b.around, b.entry.score]), [['H', X, 92], ['p', X, 92], ['q', Y, 99]]);
+  assert.deepEqual(h.files[0]!.blocks.map((b) => [b.hash, b.arounds, b.entry.score]), [['H', [X], 99], ['p', [X], 92], ['q', [Y], 99]]);
 });
 test('a result stored before surroundings were kept reads with none', () => {
   const old = (b: BlockScore): Record<string, unknown> => { const rest: Record<string, unknown> = { ...b }; delete rest['around']; return rest; };
@@ -319,7 +324,7 @@ test('a result stored before surroundings were kept reads with none', () => {
     run(1, { scores: [{ ...file('src/a.ts', []), blocks: [...parts, ...damaged] }] }),
     run(2, { scores: [{ ...file('src/b.ts', [], { wholeFile: entry(60), covered: true }), blocks: stood }] }),
   ]).files;
-  assert.deepEqual(f[0]!.blocks.map((b) => [b.hash, b.around]), [['p1', null], ['p2', null], ['h2', null], ['h3', null], ['h4', null]]);
+  assert.deepEqual(f[0]!.blocks.map((b) => [b.hash, b.arounds]), [['p1', []], ['p2', []], ['h2', []], ['h3', []], ['h4', []]]);
   assert.deepEqual(f[0]!.splits, [{ hunkHash: 'H', around: null, parts: [{ hash: 'p1', range: [0, 19] }, { hash: 'p2', range: [20, 39] }] }]);
   assert.deepEqual(f[1]!.stoodFor, [{ hash: 'h5', around: null }]);
 });
@@ -328,10 +333,10 @@ test('a split and the blocks a whole-file score stood for carry their surroundin
   assert.deepEqual(of([run(1, { scores: [file('src/a.ts', parts)] })]).files[0]!.splits.map((one) => one.around), [X]);
   const runs = [
     run(1, { scores: [file('src/a.ts', [blk('h1', 30, { around: X })])] }),
-    run(2, { scores: [file('src/a.ts', [blkNoEntry('h1', { around: X }), blkNoEntry('h1', { around: Y })], { wholeFile: entry(60), covered: true })] }),
+    run(2, { scores: [file('src/a.ts', [blkNoEntry('h1', { around: Y }), blkNoEntry('h2', { around: X }), blkNoEntry('h2', { around: Y })], { wholeFile: entry(60), covered: true })] }),
   ];
-  // Less those with an entry for the same pair.
-  assert.deepEqual(of(runs).files[0]!.stoodFor, [{ hash: 'h1', around: Y }]);
+  // Less those whose hash has an entry, whatever its surroundings.
+  assert.deepEqual(of(runs).files[0]!.stoodFor, [{ hash: 'h2', around: X }, { hash: 'h2', around: Y }]);
 });
 test('the scores to store carry their surroundings', () => {
   const result = { scores: [{ ...file('src/a.ts', []), blocks: [blk('h1', 40, { around: X }), { ...blk('h2', 50), around: '' }, { ...blk('h3', 60), around: 7 }] }] };

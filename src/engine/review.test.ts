@@ -795,7 +795,7 @@ const aroundOfHash = (hash: string): string | null => (hash === hashB1 ? aroundB
 const historyOf = (blocks: Array<[string, number]>, covered = false): ScoreHistory => ({
   by: 'model', lastReview: null, shown: null,
   files: [{
-    path: 'src/t.ts', blocks: blocks.map(([hash, score]) => ({ hash, around: aroundOfHash(hash), entry: { score, category: 'fix', reason: '' }, raisedFrom: null })),
+    path: 'src/t.ts', blocks: blocks.map(([hash, score]) => ({ hash, arounds: aroundOfHash(hash) === null ? [] : [aroundOfHash(hash)!], entry: { score, category: 'fix', reason: '' }, raisedFrom: null })),
     splits: [], stoodFor: [], wholeFile: null, coveredAt: covered ? [fileDiffHash(hunksOf(twoHunkPatch).hunks)!] : [], readAt: null,
   }],
 });
@@ -877,45 +877,85 @@ test('with no history and no lookup the request is the one a first review sends 
   assert.deepEqual(d.model.requests[0]!.tools, [submitReviewTool]);
 });
 
-// The history a first review's stored result leaves, read as the shell reads it: each block with its entry,
-// and each hunk the run cut wholly into scored parts with their places.
-// `covered`: the first review was published, so each file it read is covered at the diff it had.
-// `readAt`: the head of the published run that read each file the first review read, with the hashes it had then.
-// A block with no score of its own is stood for by the whole-file score of a file the first review left covered.
-function historyFrom(first: ReviewResult, extra: {
+// The history earlier reviews' stored results leave, read as the shell reads them (oldest first): for each hash the highest
+// entry, with every surroundings a block of it had an entry among; a hunk not below its own parts; each hunk the newest run cut
+// wholly into scored parts, by the hunk's hash and surroundings, with their places.
+// `covered`: the last of them was published, so each file it read is covered at the diff it had.
+// `readAt`: the head of the published run that read each file the last of them read, with the hashes it had then.
+// A block with no score of its own is stood for by the whole-file score of a file a review left covered, unless its hash has an entry.
+function historyFrom(results: ReviewResult | ReviewResult[], extra: {
   covered?: boolean; lastReview?: ScoreHistory['lastReview']; shown?: string | null; readAt?: string;
 } = {}): ScoreHistory {
-  const stored = JSON.parse(JSON.stringify(first)) as ReviewResult;
-  const read = new Set(extra.covered === true ? stored.coverage.reviewed : []);
-  const readAtOf = (f: ReviewResult['scores'][number]) => (extra.readAt !== undefined && stored.coverage.reviewed.includes(f.path)
-    ? { head: extra.readAt, hashes: [...new Set(f.blocks.flatMap((one) => [one.hash, one.hunkHash]))] }
-    : null);
-  // As the shell reads it: an `around` that is not a string that is not empty is none, and everything is keyed by the hash and its around.
+  const runs = (Array.isArray(results) ? results : [results]).map((r) => JSON.parse(JSON.stringify(r)) as ReviewResult);
+  const last = runs.at(-1)!;
+  const read = new Set(extra.covered === true ? last.coverage.reviewed : []);
   const aroundOf = (one: BlockScore): string | null => (typeof one.around === 'string' && one.around !== '' ? one.around : null);
   const keyOf = (hash: string, around: string | null): string => `${hash}\n${around ?? ''}`;
-  return {
-    by: 'model', lastReview: extra.lastReview ?? null, shown: extra.shown ?? null,
-    files: stored.scores.map((f) => {
+  type Acc = {
+    entries: Map<string, { entry: ScoreEntry; raisedFrom: number | null; run: number }>; arounds: Map<string, Set<string>>; partsOf: Map<string, Set<string>>;
+    splits: Map<string, ScoreHistory['files'][number]['splits'][number]>; stood: Map<string, { hash: string; around: string | null }>;
+    wholeFile: ScoreEntry | null; coveredAt: string[]; readAt: ScoreHistory['files'][number]['readAt'];
+  };
+  const accs = new Map<string, Acc>();
+  for (const [n, run] of runs.entries()) {
+    for (const f of run.scores) {
+      let acc = accs.get(f.path);
+      if (acc === undefined) {
+        acc = { entries: new Map(), arounds: new Map(), partsOf: new Map(), splits: new Map(), stood: new Map(), wholeFile: null, coveredAt: [], readAt: null };
+        accs.set(f.path, acc);
+      }
       const hunks = new Map<string, BlockScore[]>();
       for (const one of f.blocks) {
         const key = keyOf(one.hunkHash, aroundOf(one));
         hunks.set(key, [...(hunks.get(key) ?? []), one]);
-      }
-      const entries = new Map<string, { hash: string; around: string | null; entry: ScoreEntry; raisedFrom: number | null }>();
-      for (const one of f.blocks) {
         if (one.entry === null) continue;
-        const key = keyOf(one.hash, aroundOf(one));
-        const known = entries.get(key);
-        if (known === undefined || one.entry.score > known.entry.score) entries.set(key, { hash: one.hash, around: aroundOf(one), entry: one.entry, raisedFrom: one.raisedFrom ?? null });
+        const around = aroundOf(one);
+        if (around !== null) acc.arounds.set(one.hash, (acc.arounds.get(one.hash) ?? new Set()).add(around));
+        const known = acc.entries.get(one.hash);
+        // On a tie an entry that was not raised wins over one that was; then the newer run.
+        const raised = one.raisedFrom ?? null;
+        const tie = known !== undefined && one.entry.score === known.entry.score
+          && ((known.raisedFrom !== null && raised === null) || ((known.raisedFrom === null) === (raised === null) && n > known.run));
+        if (known === undefined || one.entry.score > known.entry.score || tie) acc.entries.set(one.hash, { entry: one.entry, raisedFrom: raised, run: n });
+        if (one.hunkHash !== one.hash) acc.partsOf.set(one.hunkHash, (acc.partsOf.get(one.hunkHash) ?? new Set()).add(one.hash));
       }
-      const stood = f.covered && f.wholeFile !== null ? f.blocks.filter((one) => one.entry === null) : [];
+      for (const [key, parts] of hunks) {
+        if (parts.every((p) => p.range !== undefined && p.entry !== null)) {
+          acc.splits.set(key, { hunkHash: parts[0]!.hunkHash, around: aroundOf(parts[0]!), parts: parts.map((p) => ({ hash: p.hash, range: p.range! })) });
+        }
+      }
+      if (f.covered && f.wholeFile !== null) for (const one of f.blocks) if (one.entry === null) acc.stood.set(keyOf(one.hash, aroundOf(one)), { hash: one.hash, around: aroundOf(one) });
+      if (f.wholeFile !== null && (acc.wholeFile === null || f.wholeFile.score >= acc.wholeFile.score)) acc.wholeFile = f.wholeFile;
+      if (run === last) {
+        acc.coveredAt = read.has(f.path) && f.diffHash !== null ? [f.diffHash] : [];
+        acc.readAt = extra.readAt !== undefined && last.coverage.reviewed.includes(f.path)
+          ? { head: extra.readAt, hashes: [...new Set(f.blocks.flatMap((one) => [one.hash, one.hunkHash]))] }
+          : null;
+      }
+    }
+  }
+  return {
+    by: 'model', lastReview: extra.lastReview ?? null, shown: extra.shown ?? null,
+    files: [...accs].map(([path, acc]) => {
+      // A hunk does not stand below its own parts, by its hash; repeated until nothing is raised.
+      for (let raised = true; raised;) {
+        raised = false;
+        for (const [hunkHash, parts] of acc.partsOf) {
+          const whole = acc.entries.get(hunkHash);
+          const highest = Math.max(...[...parts].map((p) => acc.entries.get(p)!.entry.score));
+          if (whole !== undefined && whole.entry.score < highest) {
+            const top = [...parts].map((p) => acc.entries.get(p)!).find((e) => e.entry.score === highest)!;
+            acc.entries.set(hunkHash, { entry: top.entry, raisedFrom: null, run: top.run });
+            raised = true;
+          }
+        }
+      }
       return {
-        path: f.path,
-        blocks: [...entries.values()],
-        splits: [...hunks.values()].filter((parts) => parts.every((p) => p.range !== undefined && p.entry !== null))
-          .map((parts) => ({ hunkHash: parts[0]!.hunkHash, around: aroundOf(parts[0]!), parts: parts.map((p) => ({ hash: p.hash, range: p.range! })) })),
-        stoodFor: stood.filter((one) => !entries.has(keyOf(one.hash, aroundOf(one)))).map((one) => ({ hash: one.hash, around: aroundOf(one) })),
-        wholeFile: f.wholeFile, coveredAt: read.has(f.path) && f.diffHash !== null ? [f.diffHash] : [], readAt: readAtOf(f),
+        path,
+        blocks: [...acc.entries].map(([hash, k]) => ({ hash, arounds: [...(acc.arounds.get(hash) ?? [])], entry: k.entry, raisedFrom: k.raisedFrom })),
+        splits: [...acc.splits.values()],
+        stoodFor: [...acc.stood.values()].filter((one) => !acc.entries.has(one.hash)),
+        wholeFile: acc.wholeFile, coveredAt: acc.coveredAt, readAt: acc.readAt,
       };
     }),
   };
@@ -1732,4 +1772,33 @@ test('an answer of the lookup with other surroundings, or none, gives no score',
   const r = await review(input, d);
   assert.equal(r.status, 'ok');
   assert.deepEqual(headersOf(d), ['### Block B1 (2 changed lines, not scored)', '### Block B2 (2 changed lines, scored)']);
+});
+
+test('no score falls: a block whose neighbours change and change back, and two hunks with the same changed lines of which the higher is edited', async () => {
+  // A block scored 20; a line beside it changes: asked, 60; the line changes back: kept at 60, the model not asked for it.
+  const r1 = await firstOf([delayFile(2)], onT({ blocks: [{ id: 'B1', score: 20, category: 'fix', reason: '' }] }));
+  const beside: ChangedFile = { ...delayFile(2), patch: ['@@ -10,3 +10,3 @@', ' if (admin) {', '-const delay = 1;', '+const delay = 2;', ' }'].join('\n') };
+  const asked = deps({ files: [beside], answers: [onT({ blocks: [{ id: 'B1', score: 60, category: 'calculation', reason: 'Only admins wait.' }] })] });
+  const r2 = await review({ ...input, mode: 'full', history: historyFrom([r1]) }, asked);
+  assert.deepEqual([headersOf(asked), r2.scores[0]!.finalScore], [['### Block B1 (2 changed lines, not scored)'], 60]);
+  const back = deps({ files: [delayFile(2)], answers: [onT({ blocks: [{ id: 'B1', score: 5, category: 'fix', reason: '' }] })] });
+  const r3 = await review({ ...input, mode: 'full', history: historyFrom([r1, r2]) }, back);
+  assert.deepEqual(headersOf(back), ['### Block B1 (2 changed lines, scored)']);
+  assert.deepEqual([r3.scores[0]!.blocks[0]!.entry?.score, r3.scores[0]!.blocks[0]!.origin, r3.scores[0]!.finalScore], [60, 'earlier_run', 60]);
+
+  // Two hunks with the same changed lines scored 85 and 10; read again; then the first is edited and scored 15: the file stands at 85.
+  const twins = (value: number): ChangedFile => ({ ...fileTwo, patch: [
+    '@@ -10,3 +10,3 @@', ' keep', '-const delay = 1;', `+const delay = ${value};`, ' keep',
+    '@@ -50,3 +50,3 @@', ' if (admin) {', '-const delay = 1;', '+const delay = 2;', ' }',
+  ].join('\n') });
+  const t1 = await firstOf([twins(2)], twoAndWhole({ B1: 85, B2: 10 }));
+  assert.deepEqual(t1.scores[0]!.blocks.map((one) => one.entry?.score), [85, 10]);
+  const again = deps({ files: [twins(2)], answers: [twoAndWhole({})] });
+  const t2 = await review({ ...input, mode: 'full', history: historyFrom([t1]) }, again);
+  assert.deepEqual(t2.scores[0]!.blocks.map((one) => [one.entry?.score, one.origin]), [[85, 'earlier_run'], [85, 'earlier_run']]);
+  const edited = deps({ files: [twins(5)], answers: [twoAndWhole({ B1: 15 })] });
+  const t3 = await review({ ...input, mode: 'full', history: historyFrom([t1, t2]) }, edited);
+  assert.deepEqual(headersOf(edited), ['### Block B1 (2 changed lines, not scored)', '### Block B2 (2 changed lines, scored)']);
+  assert.deepEqual(t3.scores[0]!.blocks.map((one) => [one.entry?.score, one.origin]), [[15, undefined], [85, 'earlier_run']]);
+  assert.equal(t3.scores[0]!.finalScore, 85);
 });

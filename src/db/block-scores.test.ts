@@ -112,6 +112,9 @@ test('a score is reused only for the same path, hash and surroundings', async ()
   const asker = { service: 'github', owner: 'acme', repo: 'shop', number: 50 } as const;
   assert.deepEqual(await reusableScores(db, asker, 'model', ASK, at(-60)), [{ ...A, score: 75, reason: 'Higher.' }]);
   assert.deepEqual(await reusableScores(db, asker, 'model', [{ path: 'src/a.ts', hash: 'h1', around: 's2' }], at(-60)), [{ ...A, around: 's2', score: 90, reason: 'Elsewhere.' }]);
+  // Two surroundings of one path and hash asked at once: each gets its own row.
+  const both = await reusableScores(db, asker, 'model', [...ASK, { path: 'src/a.ts', hash: 'h1', around: 's2' }], at(-60));
+  assert.deepEqual([...both].sort((x, y) => x.around.localeCompare(y.around)), [{ ...A, score: 75, reason: 'Higher.' }, { ...A, around: 's2', score: 90, reason: 'Elsewhere.' }]);
   await db.close();
 });
 test('a row stored with no surroundings is reused by no one', async () => {

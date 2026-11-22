@@ -164,6 +164,12 @@ test("a block's surroundings are every line of its hunk, the unchanged ones too"
   assert.match(one!.around, /^[0-9a-f]{64}$/);
   // The changed lines count in the surroundings as well.
   assert.notEqual(one!.around, blocksOf(parsePatch(patch(10).replace('+new two', '+new 2')))[0]!.around);
+  // One literal value: sha256 of ' keep\n-old\n+new\n'.
+  assert.equal(blocksOf(parsePatch(['@@ -1,2 +1,2 @@', ' keep', '-old', '+new'].join('\n')))[0]!.around,
+    'ac6410dfee7bc96292925c928d94c6214d893d3be3ab50b8a322454c2bfa55ec');
+  // The same text as an added, a removed and an unchanged line: three values.
+  const as = (line: string) => blocksOf(parsePatch(['@@ -1,2 +1,2 @@', ' keep', line].join('\n')))[0]!.around;
+  assert.equal(new Set([as('+same'), as('-same'), as(' same')]).size, 3);
 });
 
 test('surroundings do not count line numbers, nor a line that says the file has no final line feed', () => {
