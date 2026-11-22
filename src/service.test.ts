@@ -4,12 +4,14 @@ import { generateKeyPairSync } from 'node:crypto';
 import { pgliteDb } from './db/pglite.ts';
 import type { Db, InstanceLock } from './db/types.ts';
 import { loadMigrations, MIGRATIONS_DIR, migrate } from './db/migrate.ts';
-import { claimJob, enqueueJob, finishJob, getJob, unfinishedJobs } from './db/jobs.ts';
+import { askGate, claimJob, enqueueJob, finishJob, getJob, unfinishedJobs } from './db/jobs.ts';
+import type { Job } from './db/jobs.ts';
+import { savePullRequest } from './db/pull-requests.ts';
 import { recordRun } from './db/review-runs.ts';
 import type { RunRecord } from './db/review-runs.ts';
 import { beat, readHeartbeat } from './db/heartbeat.ts';
 import { serviceConfig, parseConfig } from './config/load.ts';
-import type { AppIdentity, FeatureOff, ForgeEvent, HookDelivery, LivePullRequest, PullRequestAction, PullRequestFacts, Source } from './forge/types.ts';
+import type { AppIdentity, FeatureOff, ForgeEvent, HookDelivery, LivePullRequest, OwnCheck, PullRequestAction, PullRequestFacts, ReviewThread, Source } from './forge/types.ts';
 import type { ReviewDeps, ReviewInput, ReviewResult } from './engine/types.ts';
 import { BEAT_MS, CLOSE_WAIT_MS, DRAIN_WAIT_MS, startService, STOP_WAIT_MS, TICK_MS, UPKEEP_MS } from './service.ts';
 import type { Listening } from './service.ts';
@@ -50,6 +52,8 @@ const appKey = generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey.ex
 const BASE_YAML = 'model:\n  apiKey: { env: K }\n  model: vendor/model-a\napp:\n  id: 12345\n  privateKey: { env: A }\n  webhookSecret: { env: S }\ndatabase:\n  url: { env: U }\nserver:\n  port: 9191\nlimits:\n  spendPerDay: 50\ndryRun: true\n';
 const ENV = { K: 'k', A: appKey, S: 's', U: 'postgres://u:p@db.example.test/d' };
 const config = serviceConfig(parseConfig(BASE_YAML, ENV));
+/** The gate enabled on main for every repository. */
+const GATE_YAML = 'repositories:\n  defaults: { gate: { enabled: true, branches: [main] } }\n';
 
 const never = (): Promise<never> => new Promise(() => {});
 
@@ -67,6 +71,16 @@ interface Options {
   repositoriesYaml?: string;
   /** The key route's answer waits for this when given. */
   keyGate?: Promise<void>;
+  /** The gate enabled on main (GATE_YAML); it also leaves dry run unless `dryRun` is given. */
+  gate?: boolean;
+  /** What the writer's listThreads answers; it rejects when not given. */
+  threads?: ReviewThread[];
+  /** Every statement outside a transaction whose text holds this rejects. */
+  failQuery?: string;
+  /** What the review answers; okResult() when not given. */
+  result?: ReviewResult;
+  /** findCheck waits for this when given. */
+  holdCheck?: Promise<void>;
 }
 interface Timer { ms: number; work: () => Promise<void>; cancelled: boolean }
 
@@ -100,6 +114,10 @@ async function harness(options: Options = {}) {
   const order: string[] = [];
   const lacksCalls: boolean[] = [];
   const gateCalls: unknown[] = [];
+  /** Every call of the checks, as [name, ...args]. */
+  const checked: unknown[][] = [];
+  /** The checks GitHub holds, by commit. */
+  const held = new Map<string, OwnCheck>();
   const appInfo: AppIdentity = {
     read: () => Promise.reject(new Error('not_used')),
     canResolve: () => Promise.resolve(false),
@@ -107,7 +125,7 @@ async function harness(options: Options = {}) {
   };
 
   const db: Db = {
-    query: (text, params) => real.query(text, params),
+    query: (text, params) => (options.failQuery !== undefined && text.includes(options.failQuery) ? Promise.reject(new Error('db_down')) : real.query(text, params)),
     script: (sql) => (options.migrationError === undefined ? real.script(sql) : Promise.reject(options.migrationError)),
     transaction: async (work) => {
       if (h.beforeTransaction !== undefined) await h.beforeTransaction();
@@ -123,7 +141,7 @@ async function harness(options: Options = {}) {
   const lock: InstanceLock = { release: async () => { events.push('release'); } };
 
   const h = {
-    db, events, order, lacksCalls, gateCalls, timers, inputs, fetched, listedSince, logged, writes,
+    db, events, order, lacksCalls, gateCalls, checked, held, timers, inputs, fetched, listedSince, logged, writes,
     port: 0,
     /** What the clock reads; a test may move it. */
     now: options.now ?? at(0),
@@ -134,8 +152,10 @@ async function harness(options: Options = {}) {
     reviewed: () => reviewed,
     published: () => published,
     start: async () => {
-      const base = options.repositoriesYaml === undefined ? config : serviceConfig(parseConfig(BASE_YAML + options.repositoriesYaml, ENV));
-      const service = await startService(options.dryRun === false ? { ...base, dryRun: false } : base, {
+      const yaml = options.repositoriesYaml ?? (options.gate === true ? GATE_YAML : undefined);
+      const base = yaml === undefined ? config : serviceConfig(parseConfig(BASE_YAML + yaml, ENV));
+      const dry = options.dryRun ?? options.gate !== true;
+      const service = await startService(dry ? base : { ...base, dryRun: false }, {
       db, appInfo,
       reader: { read: () => ({ ok: true as const, delivery: delivered, name: current.kind, action: current.kind === 'pull_request' ? current.action : null, event: current }) },
       clock: () => new Date(h.now),
@@ -176,10 +196,29 @@ async function harness(options: Options = {}) {
         listReviewComments: async () => { writes.push(['listReviewComments']); return []; },
         react: async () => { writes.push(['react']); },
         comment: async () => { writes.push(['comment']); },
-        listThreads: () => Promise.reject(new Error('not_expected')),
+        listThreads: async () => {
+          writes.push(['listThreads']);
+          if (options.threads === undefined) throw new Error('not_expected');
+          return options.threads;
+        },
         replyToThread: () => Promise.reject(new Error('not_expected')),
         editThreadComment: () => Promise.reject(new Error('not_expected')),
         resolveThread: () => Promise.reject(new Error('not_expected')),
+      },
+      checks: {
+        async findCheck(_ref, installation, commit, name) {
+          checked.push(['findCheck', installation, commit, name]);
+          if (options.holdCheck !== undefined) await options.holdCheck;
+          return held.get(commit) ?? null;
+        },
+        async writeCheck(_ref, installation, check) {
+          checked.push(['writeCheck', installation, check]);
+          const id = check.id ?? '701';
+          held.set(check.commit, { id, status: check.status, conclusion: check.conclusion, title: check.title, summary: check.summary });
+          return { id };
+        },
+        greenChecks: async () => { checked.push(['greenChecks']); throw new Error('not_expected'); },
+        isTeamMember: async () => { checked.push(['isTeamMember']); throw new Error('not_expected'); },
       },
       fetch: (async (url: string | URL | Request) => {
         fetched.push(String(url));
@@ -200,7 +239,7 @@ async function harness(options: Options = {}) {
         inputs.push(input);
         reviewCalled();
         if (options.holdReview === true) await reviewHeld;
-        return okResult();
+        return options.result ?? okResult();
       },
       lineUrl: () => 'https://git.example.test/x',
       commentUrl: (_ref, commentId) => `https://git.example.test/c/${commentId}`,
@@ -222,6 +261,19 @@ async function harness(options: Options = {}) {
     flush: async () => {
       for (let i = 0; i < 5; i += 1) await new Promise((done) => setImmediate(done));
     },
+    /** Waits until `ready` answers true, for at most five seconds. */
+    until: async (ready: () => boolean | Promise<boolean>) => {
+      const end = Date.now() + 5_000;
+      while (!(await ready())) {
+        if (Date.now() > end) throw new Error('not reached within 5 seconds');
+        await new Promise((done) => { setTimeout(done, 5).unref(); });
+      }
+    },
+    /** The gate jobs, oldest first. */
+    gateJobs: async () => (await h.db.query<{ id: number }>("select id from visto_ai.jobs where kind = 'gate' order by id"))
+      .map((r) => r.id),
+    /** The checks written, in order. */
+    written: () => checked.filter((c) => c[0] === 'writeCheck').map((c) => c[2] as { title: string; status: string; conclusion: string | null; commit: string }),
   };
   return h;
 }
@@ -555,4 +607,131 @@ test('the app is asked for what the configured gate needs', async () => {
   const off = await harness();
   await (await off.start()).settled;
   assert.deepEqual(off.gateCalls, [{ check: false, statuses: false, members: false, bypass: false }]);
+});
+
+// The gate's runner beside the reviews.
+
+const manual = (over = {}) => job({ reason: 'command', headSha: '', trigger: 'manual' as const, requestedBy: 'octo-lead', commentId: '31', association: 'member', installation: '99', ...over });
+const jobOf = async (db: Db, id: number): Promise<Job> => (await getJob(db, id))!;
+const gateEntries = (logged: Array<Record<string, unknown>>) => logged.filter((e) => e.event === 'gate');
+
+test('a gate job runs while reviews are paused', async () => {
+  const h = await harness({ gate: true });
+  await migrate(h.db, loadMigrations(MIGRATIONS_DIR));
+  await savePullRequest(h.db, facts());
+  await recordRun(h.db, run({ startedAt: at(0), usage: { ...run().usage, cost: 50 } }));
+  const review = (await enqueueJob(h.db, manual()))!;
+  const sync = (await askGate(h.db, REF, at(0)))!;
+  const service = await h.start();
+  await service.settled;
+  await h.until(async () => (await jobOf(h.db, sync)).status === 'done');
+  await h.runTimer(TICK_MS);
+  await h.flush();
+  assert.deepEqual([h.inputs.length, (await jobOf(h.db, review)).status, (await jobOf(h.db, sync)).outcome], [0, 'pending', 'synced']);
+  assert.deepEqual(h.written().map((c) => [c.commit, c.status, c.title]), [['h1', 'queued', 'Review waiting: reviews are paused (spend_limit)']]);
+});
+test('stop waits for a gate job as it waits for a review', async () => {
+  let release!: () => void;
+  const holdCheck = new Promise<void>((done) => { release = done; });
+  const h = await harness({ gate: true, holdCheck });
+  await migrate(h.db, loadMigrations(MIGRATIONS_DIR));
+  await savePullRequest(h.db, facts());
+  const sync = (await askGate(h.db, REF, at(0)))!;
+  const service = await h.start();
+  await service.settled;
+  await h.until(() => h.checked.length > 0);
+  const stopping = service.stop();
+  await h.flush();
+  assert.equal(h.events.includes('listener-close'), false);
+  release();
+  await stopping;
+  assert.deepEqual(h.events.slice(-3), ['listener-close', 'close', 'release']);
+  assert.deepEqual([(await jobOf(h.db, sync)).outcome, h.written().map((c) => c.title)], ['synced', ['Waiting for /done']]);
+});
+test('in dry run a stored gate job is dropped, and neither the checks nor the writer it was given can be reached', async () => {
+  const h = await harness({ gate: true, dryRun: true });
+  await migrate(h.db, loadMigrations(MIGRATIONS_DIR));
+  await savePullRequest(h.db, facts());
+  const sync = (await askGate(h.db, REF, at(0)))!;
+  const service = await h.start();
+  await service.settled;
+  await h.until(async () => (await jobOf(h.db, sync)).status === 'dropped');
+  assert.equal((await jobOf(h.db, sync)).outcome, 'dry_run');
+  assert.deepEqual([h.checked, h.writes], [[], []]);
+});
+test('when a review job has left the runner the check is asked for and decided', async () => {
+  // Published: one gate job ran after it and wrote the check from the review.
+  const ok = await harness({ gate: true, threads: [] });
+  await migrate(ok.db, loadMigrations(MIGRATIONS_DIR));
+  await savePullRequest(ok.db, facts());
+  await enqueueJob(ok.db, manual());
+  await (await ok.start()).settled;
+  await ok.published();
+  await ok.until(() => ok.written().length > 0);
+  await ok.until(async () => (await ok.gateJobs()).length === 1 && (await jobOf(ok.db, (await ok.gateJobs())[0]!)).status === 'done');
+  assert.deepEqual(ok.written().map((c) => [c.commit, c.status, c.conclusion, c.title]), [['h1', 'completed', 'success', 'No blocking findings']]);
+  assert.equal((await jobOf(ok.db, (await ok.gateJobs())[0]!)).outcome, 'synced');
+
+  // Failed: the check says so with its code.
+  const failed = await harness({ gate: true, result: { ...okResult(), status: 'failed', failure: { stage: 'model', code: 'timeout' }, findings: [] } });
+  await migrate(failed.db, loadMigrations(MIGRATIONS_DIR));
+  await savePullRequest(failed.db, facts());
+  await enqueueJob(failed.db, manual());
+  await (await failed.start()).settled;
+  await failed.until(() => failed.written().length > 0);
+  assert.deepEqual(failed.written().map((c) => [c.status, c.conclusion, c.title]), [['completed', 'failure', 'Review failed (timeout): comment /done to retry']]);
+
+  // With the gate off, and against a branch the gate does not list: no gate job, no gate entry, no call of the checks.
+  for (const options of [{ dryRun: false }, { dryRun: false, repositoriesYaml: 'repositories:\n  defaults: { gate: { enabled: true, branches: [release] } }\n' }]) {
+    const off = await harness(options);
+    await migrate(off.db, loadMigrations(MIGRATIONS_DIR));
+    await savePullRequest(off.db, facts());
+    const id = (await enqueueJob(off.db, manual()))!;
+    await (await off.start()).settled;
+    await off.published();
+    await off.until(async () => (await jobOf(off.db, id)).status === 'done');
+    await off.flush();
+    assert.deepEqual([await off.gateJobs(), gateEntries(off.logged), off.checked], [[], [], []]);
+    assert.deepEqual(off.logged.map((e) => e.event), ['recovery', 'model_check', 'app_check', 'readback', 'review']);
+  }
+});
+test('a review job that is dropped as too old leaves the check to be decided', async () => {
+  const h = await harness({ gate: true });
+  await migrate(h.db, loadMigrations(MIGRATIONS_DIR));
+  await savePullRequest(h.db, facts());
+  const old = (await enqueueJob(h.db, manual({ runAt: at(-90_000), now: at(-90_000) })))!;
+  await (await h.start()).settled;
+  await h.until(() => h.written().length > 0);
+  assert.deepEqual([(await jobOf(h.db, old)).outcome, (await h.gateJobs()).length], ['too_old', 1]);
+  assert.deepEqual(h.written().map((c) => [c.status, c.title]), [['queued', 'Waiting for /done']]);
+});
+test('a review whose record failed leaves no Reviewing behind', async () => {
+  const h = await harness({ gate: true, failQuery: 'insert into visto_ai.review_runs' });
+  await migrate(h.db, loadMigrations(MIGRATIONS_DIR));
+  await savePullRequest(h.db, facts());
+  const id = (await enqueueJob(h.db, manual()))!;
+  await (await h.start()).settled;
+  await h.reviewed();
+  await h.until(() => h.written().length > 0);
+  assert.equal((await jobOf(h.db, id)).status, 'running');
+  assert.deepEqual(h.written().map((c) => [c.status, c.title]), [['queued', 'Waiting for /done']]);
+});
+test('a gate job the runner gives up raises the alert once and asks for nothing', async () => {
+  const h = await harness({ gate: true });
+  await migrate(h.db, loadMigrations(MIGRATIONS_DIR));
+  await savePullRequest(h.db, facts());
+  const first = (await askGate(h.db, REF, at(0)))!;
+  await h.db.query('update visto_ai.jobs set starts = 3 where id = $1', [first]);
+  await (await h.start()).settled;
+  await h.until(async () => (await jobOf(h.db, first)).status === 'dropped');
+  await h.flush();
+  assert.deepEqual([(await jobOf(h.db, first)).outcome, await h.gateJobs()], ['attempts_exhausted', [first]]);
+  const second = (await askGate(h.db, REF, at(0)))!;
+  await h.db.query('update visto_ai.jobs set starts = 3 where id = $1', [second]);
+  await h.runTimer(TICK_MS);
+  await h.until(async () => (await jobOf(h.db, second)).status === 'dropped');
+  await h.flush();
+  assert.deepEqual(await h.gateJobs(), [first, second]);
+  assert.deepEqual(h.logged.filter((e) => e.event === 'alert' && e.code === 'gate_check_failed'), [{ event: 'alert', code: 'gate_check_failed', reason: 'attempts_exhausted' }]);
+  assert.deepEqual(h.checked, []);
 });

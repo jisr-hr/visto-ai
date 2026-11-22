@@ -11,6 +11,7 @@ import { createJevScorer } from './engine/scorer/jev.ts';
 import { createGithubAccess } from './forge/github/access.ts';
 import { createAppAuth } from './forge/github/app-auth.ts';
 import { createAppInfo } from './forge/github/app-info.ts';
+import { createGithubChecks } from './forge/github/checks.ts';
 import { createGithubHookDeliveries } from './forge/github/hook-deliveries.ts';
 import { githubCommentUrl, githubLineUrl } from './forge/github/links.ts';
 import { createGithubWebhookReader } from './forge/github/webhook.ts';
@@ -141,6 +142,7 @@ export async function main(argv: string[], env: Record<string, string | undefine
         hooks: createGithubHookDeliveries({ auth, fetch }),
         appInfo: info,
         writer: createGithubWriter({ auth, info, fetch }),
+        checks: createGithubChecks({ auth, appId: config.app.id, fetch }),
         fetch,
         sleep,
         every: (ms, work) => {
