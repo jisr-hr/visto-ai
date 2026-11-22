@@ -35,6 +35,8 @@ function prEvent(over: Partial<PullRequestFacts> = {}): ForgeEvent {
 const NO_JOBS = {
   settingsFor: () => ({ primaryBranches: ['main'], scoreThreshold: 70, ignoredAuthors: [], baseBranches: [], newHead: null, inlineNotes: false, gate: GATE_OFF }),
   onQueued: () => {},
+  dryRun: false,
+  appId: '12345',
 };
 const headers = {};
 const empty = Buffer.from('');
@@ -194,5 +196,17 @@ test('a logger that throws does not change the answer', async () => {
     const answer = await receive({ db, reader: reader(read('d-1', reviewEvent)), clock, log, ...NO_JOBS }, headers, empty);
     assert.deepEqual(answer, { status: 202, body: 'accepted' });
     assert.equal((await listActivity(db, ref)).length, 1);
+  } finally { await db.close(); }
+});
+
+test('a re-run of the check with the gate off is recorded as handled, stores nothing and logs the plain entry', async () => {
+  const db = await testDb();
+  try {
+    const logs: Record<string, unknown>[] = [];
+    const event: ForgeEvent = { kind: 'check_rerun', ref, installation: '555', app: '12345', check: 'AI Review', headSha: 'aaa111', actor: 'octo-lead' };
+    assert.deepEqual(await run(db, read('d-1', event, 'check_run', 'rerequested'), logs), { status: 202, body: 'accepted' });
+    assert.deepEqual(await db.query('select outcome, reason from visto_ai.deliveries where id = $1', ['d-1']), [{ outcome: 'handled', reason: null }]);
+    assert.equal((await db.query('select 1 from visto_ai.jobs')).length, 0);
+    assert.deepEqual(logs, [{ event: 'webhook', delivery: 'd-1', name: 'check_run', action: 'rerequested', outcome: 'accepted', reason: null }]);
   } finally { await db.close(); }
 });

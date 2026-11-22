@@ -30,3 +30,13 @@ test('the filters, in their order: closed, draft, ignored author, base branch', 
   assert.deepEqual(triggerOf('opened', facts(), { ...SETTINGS, baseBranches: ['release'] }), { kind: 'skip', reason: 'base_filtered' });
   assert.equal(triggerOf('opened', facts(), { ...SETTINGS, baseBranches: ['main'] }).kind, 'queue');
 });
+test('a gated pull request is not reviewed on a push, an opening or a retarget; in shadow and against another branch it is', () => {
+  const GATED: RepoSettings = { ...SETTINGS, gate: { ...GATE_OFF, enabled: true, branches: ['main'] } };
+  for (const action of ['opened', 'reopened', 'ready_for_review', 'synchronize', 'retargeted'] as const) {
+    assert.deepEqual(triggerOf(action, facts(), GATED), { kind: 'skip', reason: 'gated' });
+    assert.equal(triggerOf(action, facts(), { ...GATED, gate: { ...GATED.gate, mode: 'shadow' } }).kind, 'queue');
+    assert.equal(triggerOf(action, facts({ baseBranch: 'feature/x' }), GATED).kind, 'queue');
+    assert.deepEqual(triggerOf(action, facts(), { ...GATED, gate: { ...GATED.gate, mode: 'bypass' } }), { kind: 'skip', reason: 'gated' });
+    assert.deepEqual(triggerOf(action, facts({ draft: true }), GATED), { kind: 'skip', reason: 'draft' });
+  }
+});

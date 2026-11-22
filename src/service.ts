@@ -162,7 +162,9 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps): Pr
     void gateRunner.tick();
   }
   const { listener, idle } = createListener({
-    webhook: (headers, body) => receive({ db, reader: deps.reader, clock, log: say, settingsFor, onQueued: tickBoth }, headers, body),
+    webhook: (headers, body) => receive({
+      db, reader: deps.reader, clock, log: say, settingsFor, onQueued: tickBoth, dryRun: config.dryRun, appId: config.app.id,
+    }, headers, body),
   });
 
   // 1 to 4: the lock, the migrations, the recovery, the listener.
