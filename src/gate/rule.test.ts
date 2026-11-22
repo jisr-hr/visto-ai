@@ -282,6 +282,28 @@ test('a damaged result, a damaged verdict and a thread listed twice change nothi
   assert.doesNotThrow(() => reviewedRun([run(1, { result: 'x' })], 'h1', 'b1'));
 });
 
+test('the first verdict entry for a thread decides, also when its replies are damaged', () => {
+  const damagedFirst = run(1, { verdicts: [verdict('open', { replies: -1 }), verdict('fixed')] });
+  assert.equal(gate({ reviewed: damagedFirst }).blocking.length, 1);
+  const objected = run(1, { verdicts: [verdict('fixed', { replies: 'x' }), verdict('fixed', { replies: 5 })] });
+  const t = thread({ comments: [appComment('8001'), reply('octo-dev'), reply('octo-dev', { id: '9005' })] });
+  assert.equal(gate({ reviewed: objected, threads: [t] }).blocking.length, 1);
+  const older = run(1, { headSha: 'h0', verdicts: [verdict('fixed')] });
+  const damagedNewest = run(2, { headSha: 'h0b', verdicts: [verdict('fixed', { replies: -1 })] });
+  const head = run(3);
+  const v = gate({ runs: [older, damagedNewest, head], reviewed: head, threads: [thread({ resolved: true, resolvedByApp: true })] });
+  assert.deepEqual(v.blocking.map((b) => b.why), ['resolved_no_reply']);
+  assert.equal(v.clearedByReview, 0);
+});
+
+test('a reply with a damaged author flag is no person\'s', () => {
+  for (const over of [{ byApp: undefined }, { authorIsBot: undefined }] as unknown as Array<Partial<ThreadComment>>) {
+    const v = gate({ threads: [thread({ resolved: true, comments: [appComment('8001'), reply('octo-dev', over)] })] });
+    assert.deepEqual(v.blocking.map((b) => b.why), ['resolved_no_reply']);
+    assert.equal(v.clearedByReply, 0);
+  }
+});
+
 test('a stored severity that is no severity gates as unknown', () => {
   const v = gate({ stored: [stored('8001', 'critical')] });
   assert.deepEqual(v.blocking.map((b) => b.severity), ['unknown']);

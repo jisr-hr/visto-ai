@@ -28,17 +28,18 @@ const RANK: Record<Severity, number> = { blocker: 4, major: 3, unknown: 2, minor
 
 const asArray = (value: unknown): unknown[] => (Array.isArray(value) ? value : []);
 const isObject = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
-const isPerson = (c: ThreadComment): boolean => !c.byApp && !c.authorIsBot;
-const cleared = (v: Verdict | null): boolean => v !== null && (v.verdict === 'fixed' || v.verdict === 'answered');
+const isPerson = (c: ThreadComment): boolean => c.byApp === false && c.authorIsBot === false;
+const cleared = (v: Verdict | 'damaged' | null): v is Verdict => v !== null && v !== 'damaged' && (v.verdict === 'fixed' || v.verdict === 'answered');
 
-/** A run's verdict on a thread: the first well-formed entry for it. An entry whose `replies` is present and not a whole number at or above 0 is no verdict. */
-function verdictOf(run: StoredRun, threadId: string): Verdict | null {
+/** A run's verdict on a thread: the first entry that is an object with the thread's id and a known word decides. `damaged` when that entry's `replies` is present and not a whole number at or above 0: no verdict, and no older run's verdict stands in for it. */
+function verdictOf(run: StoredRun, threadId: string): Verdict | 'damaged' | null {
   const list = asArray(isObject(run.result) ? run.result['threadVerdicts'] : undefined);
   for (const v of list) {
     if (!isObject(v) || v['threadId'] !== threadId || !VERDICTS.includes(v['verdict'])) continue;
     const replies = v['replies'];
     if (replies === undefined) return { verdict: v['verdict'] as Verdict['verdict'], replies: null };
     if (typeof replies === 'number' && Number.isInteger(replies) && replies >= 0) return { verdict: v['verdict'] as Verdict['verdict'], replies };
+    return 'damaged';
   }
   return null;
 }
@@ -115,10 +116,11 @@ export function evaluateGate(args: {
 
     const kept = verdictOf(args.reviewed, t.id);
     const personReplied = comments.slice(1).some(isPerson);
-    const verified = cleared(kept) && (kept!.replies === null || comments.slice(1 + kept!.replies).every((c) => c.byApp === true));
+    const verified = cleared(kept) && (kept.replies === null || comments.slice(1 + kept.replies).every((c) => c.byApp === true));
     if (verified) { verdict.clearedByReview += 1; continue; }
     if (t.resolved === true && t.resolvedByApp === true) {
-      let newest: Verdict | null = null;
+      // The newest run with an entry on the thread decides; a damaged one clears nothing.
+      let newest: Verdict | 'damaged' | null = null;
       for (const run of published) { newest = verdictOf(run, t.id); if (newest !== null) break; }
       if (cleared(newest)) { verdict.clearedByReview += 1; continue; }
     }
