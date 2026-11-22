@@ -72,7 +72,7 @@ dryRun: true
 #   # The port the service listens on (1 to 65535). It is 8080 when not written.
 #   port: 8080
 # alerts:
-#   # The environment variable that holds the URL (http or https) that gets the alerts: model_error, model_ok, spend_80, spend_limit, cost_unknown and redelivery_failed.
+#   # The environment variable that holds the URL (http or https) that gets the alerts: model_error, model_ok, spend_80, spend_limit, cost_unknown, redelivery_failed, feature_off, gate_check_failed and gate_bypass.
 #   webhook: { env: ALERT_WEBHOOK_URL }
 
 repositories:
@@ -105,8 +105,14 @@ repositories:
     # comments /done or /review, or re-runs the check in GitHub. Until then its check says it waits for /done.
     # After a review the check stays red while a major or blocker finding is neither verified by the review of the current head
     # nor answered by a person in a resolved thread; a person's reply and a resolve turn it green with no new review.
-    # The check must also be made required in GitHub (a ruleset or branch protection on the same branches); the service cannot do that.
-    # None of this can be set from inside a reviewed repository: only this file sets it.
+    # The check must also be made required in GitHub (a ruleset or branch protection on the same branches, naming the check and this app);
+    # the service cannot do that, and until it is done nothing holds a merge.
+    # None of this can be set from inside a reviewed repository: only this file sets it. Each key can be set for all repositories here
+    # or for one under overrides below. In dry run no check is written, and /done is a /review.
+    # The app needs Checks read and write and the event Check run; Commit statuses read when requiredChecks are named; the
+    # organisation permission Members read when skipTeam is named. An app made by npm run app:create has them. An existing app is given
+    # them by hand in its settings, each installation accepts them, and the service is restarted: it reads them once, at start.
+    # Switch it on in shadow mode first. The README's section "The merge gate (optional)" says what it does and what it costs.
     #   enabled:       the gate is off when not written, and then nothing here has any effect.
     #   branches:      the base branches that are gated. Required when the gate is enabled; there is no default list.
     #   checkName:     the name of the check, 1 to 100 printable ASCII characters. It is "AI Review" when not written.
@@ -116,8 +122,8 @@ repositories:
     #   clearByReply:  true: a person's reply in a thread and a resolve clear a blocking finding. false: only a new review that
     #                  verifies it, or a skip, gets past one. It is true when not written.
     #   skipTeam:      "<org>/<team-slug>", the one team whose members may comment /ai-review-skip <reason> to pass one commit.
-    #                  The org must own the repository. Not written means nobody may skip.
-    #   requiredChecks: names of other checks or statuses that /done reads before it says a head is already green.
+    #                  The org must own the repository. Not written means nobody may skip. The team's name is written nowhere on GitHub.
+    #   requiredChecks: names of other checks or statuses that /done reads before it says a head is already green (success only).
     # gate:
     #   enabled: true
     #   branches: [main]
