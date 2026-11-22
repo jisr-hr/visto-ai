@@ -5,7 +5,7 @@ import { recordBlockScores, reusableScores } from '../db/block-scores.ts';
 import { getPullRequest } from '../db/pull-requests.ts';
 import { listComments, NOTE, recordComments } from '../db/review-comments.ts';
 import type { StoredComment } from '../db/review-comments.ts';
-import { adoptableRun, hasOkRun, hasRun, listRuns, markPublished, recordRun, unpublishedRun } from '../db/review-runs.ts';
+import { adoptableRun, hasOkRun, hasRun, listRuns, markPublished, markPublishTried, recordRun, unpublishedRun } from '../db/review-runs.ts';
 import type { RunRecord, StoredRun } from '../db/review-runs.ts';
 import type { Db } from '../db/types.ts';
 import { renderReview } from '../engine/render/body.ts';
@@ -29,6 +29,8 @@ import { QUIET_SECONDS, skipReason } from './triggers.ts';
 export const RECORD_WAITS_MS = [1_000, 5_000];
 /** The wait before a job the git service failed is tried again: after its first start, then after its second or third. */
 export const RETRY_WAITS_MS = [60_000, 900_000];
+/** The wait after a publication that failed, and how old a recorded review must be before a later start posts it. */
+export const PUBLISH_WAIT_MS = 900_000;
 /** How old a stored, unpublished review may be and still be published by a later start of its job. */
 export const STORED_REVIEW_MS = 24 * 3_600_000;
 /** How many days back a score another pull request stored may be reused. */
@@ -557,7 +559,7 @@ export async function runReviewJob(job: Job, deps: ReviewJobDeps): Promise<void>
       written = await tried(async () => {
         const id = await recordRun(db, run);
         runId = id;
-        toPublish = { ...run, id, published: false, reviewId: null, publishedAt: null, inlineDropped: false };
+        toPublish = { ...run, id, published: false, reviewId: null, publishedAt: null, inlineDropped: false, publishTriedAt: null };
       });
       if (written && runId !== null) await keepScores(runId, run.finishedAt);
     }
@@ -566,8 +568,15 @@ export async function runReviewJob(job: Job, deps: ReviewJobDeps): Promise<void>
     let publish: PublishOutcome | null = null;
     const target = toPublish;
     if (!deps.dryRun && written && target !== null) {
-      const out = await publishRun({ forge: deps.forge, writer: deps.writer, lineUrl: deps.lineUrl, commentUrl: deps.commentUrl },
-        { ref: job.ref, installation, run: target, trigger: job.trigger, requestedBy, known: knownOf(runs), resumed: resumed !== null });
+      // A review recorded by an earlier start is held for the wait after a failed publication, counted from the last start that set out
+      // to post it: the git service may hold the review that start posted and not list it yet. The first start posts right after it records.
+      const age = resumed === null ? Number.NaN : now.getTime() - Date.parse(resumed.publishTriedAt ?? resumed.finishedAt);
+      const hold = age < PUBLISH_WAIT_MS;
+      // A later start that may post writes the time first, so that the start after it is held from then on. Without that, nothing is posted.
+      const timed = resumed === null || hold || await tried(async () => { await markPublishTried(db, target.id, nowIso); });
+      const out: PublishOutcome = !timed ? { kind: 'failed', code: 'record_failed' }
+        : await publishRun({ forge: deps.forge, writer: deps.writer, lineUrl: deps.lineUrl, commentUrl: deps.commentUrl },
+          { ref: job.ref, installation, run: target, trigger: job.trigger, requestedBy, known: knownOf(runs), resumed: resumed !== null, hold });
       publish = out;
       const finish = (outcome: string): Promise<boolean> => tried(async () => { await finishJob(db, job.id, 'done', outcome, nowIso); });
       if (out.kind === 'published') {
@@ -605,11 +614,14 @@ export async function runReviewJob(job: Job, deps: ReviewJobDeps): Promise<void>
       } else if (out.kind === 'rejected') {
         written = await finish('publish_rejected');
         if (written) await fail(installation, 'publish_rejected');
+      } else if (out.kind === 'unlisted') {
+        // Held: the job waits until the review is old enough, and the start is given back. A review dated after the clock waits no longer than one dated now.
+        const runAt = at(Math.min(PUBLISH_WAIT_MS, PUBLISH_WAIT_MS - age));
+        written = await tried(async () => { requeued = (await requeueJob(db, job.id, runAt, nowIso, true)) === 'requeued'; });
+        if (written && !requeued) await fail(installation, 'superseded');
       } else {
-        // After a network or server error GitHub may hold the review all the same: the later start, which adopts it, waits the longer time.
-        const unsettled = out.code === 'github_network' || /^github_5[0-9]{2}$/.test(out.code);
-        const wait = unsettled ? RETRY_WAITS_MS[1]! : retryWait;
-        written = await tried(async () => { requeued = (await requeueJob(db, job.id, later(wait), nowIso, false)) === 'requeued'; });
+        // After a failure the git service may hold the review all the same: the later start, which adopts it or posts it, comes when the review is no longer held.
+        written = await tried(async () => { requeued = (await requeueJob(db, job.id, later(PUBLISH_WAIT_MS), nowIso, false)) === 'requeued'; });
         if (written && !requeued) await fail(installation, 'superseded');
       }
     }

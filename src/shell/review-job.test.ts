@@ -76,6 +76,8 @@ interface Options {
   secondStart?: boolean;
   /** The time the clock reads once the review has been called; at(0) before. */
   afterReview?: string;
+  /** The time the clock reads; at(0) when not given. */
+  now?: string;
   dryRun?: boolean;
   /** What listOwnReviews answers, one answer for each call, the last one repeated; an Error rejects. [] when none is given. */
   own?: Array<Array<{ id: string; commit: string }> | Error>;
@@ -251,7 +253,7 @@ async function harness(options: Options = {}) {
       },
       sourceFor: () => Promise.resolve({} as Source),
     },
-    clock: () => new Date(reviewCalled && options.afterReview !== undefined ? options.afterReview : at(0)),
+    clock: () => new Date(reviewCalled && options.afterReview !== undefined ? options.afterReview : options.now ?? at(0)),
     log: (e) => { logged.push(e); },
     sleep: (ms) => { slept.push(ms); return Promise.resolve(); },
     settingsFor: () => options.settings ?? SETTINGS,
@@ -568,21 +570,114 @@ test('when the post cannot be made the review stays stored and the job is put ba
   const entry = h.logged.find((e) => e.event === 'review')!;
   assert.deepEqual([entry.publish, entry.publish_code, entry.requeued], ['failed', 'github_502', true]);
 });
-test('a publication that ended with a network error or a server error waits 15 minutes, since GitHub may hold the review', async () => {
-  for (const [code, number] of [['github_502', 8], ['github_500', 9], ['github_network', 10]] as const) {
+test('a publication that failed waits 15 minutes, whatever its code: the start after it posts a review only once it is that old', async () => {
+  for (const [code, number] of [['github_502', 8], ['github_500', 9], ['github_network', 10], ['github_403', 11], ['internal_error', 12]] as const) {
     const h = await live({ pullRequest: number, posts: [new Error(code)] });
     await runReviewJob(h.job, h.deps);
     const j = await getJob(db, h.job.id);
     assert.deepEqual([j?.status, j?.runAt, j?.starts], ['pending', at(900), 1], code);
   }
 });
-test('a publication that ended with another error waits a minute, as before', async () => {
-  for (const [code, number] of [['github_403', 8], ['github_5023', 9], ['internal_error', 10]] as const) {
-    const h = await live({ pullRequest: number, posts: [new Error(code)] });
-    await runReviewJob(h.job, h.deps);
-    const j = await getJob(db, h.job.id);
-    assert.deepEqual([j?.status, j?.runAt, j?.starts], ['pending', at(60), 1], code);
-  }
+test('a later start that finds its young recorded review unlisted posts nothing and waits until the review is 15 minutes old', async () => {
+  const before = await live({ posts: [new Error('github_502')] });
+  await runReviewJob(before.job, before.deps);
+  const early = await live({ reuseJob: before.job.id, now: at(5) });
+  await runReviewJob(early.job, early.deps);
+  const j = await getJob(db, early.job.id);
+  // The run was recorded at at(0): the wait ends at at(900), not 15 minutes after this start. The start is given back.
+  assert.deepEqual([j?.status, j?.outcome, j?.runAt, j?.starts], ['pending', null, at(900), 1]);
+  assert.deepEqual([early.writes.map((w) => w[0]), early.inputs.length, (await listRuns(db, REF))[0]!.published], [['listOwnReviews'], 0, false]);
+  const entry = early.logged.find((e) => e.event === 'review')!;
+  assert.deepEqual([entry.publish, entry.publish_code, entry.published, entry.requeued, entry.resumed, entry.adopted], ['unlisted', null, false, true, true, false]);
+});
+test('a recorded review waits to the second: one short of 15 minutes old it is held, at 15 minutes it is posted', async () => {
+  const before = await live({ posts: [new Error('github_502')] });
+  await runReviewJob(before.job, before.deps);
+  const early = await live({ reuseJob: before.job.id, now: at(899) });
+  await runReviewJob(early.job, early.deps);
+  assert.deepEqual([(await getJob(db, early.job.id))?.status, early.writes.filter((w) => w[0] === 'publishReview').length], ['pending', 0]);
+  const due = await live({ reuseJob: before.job.id, now: at(900) });
+  await runReviewJob(due.job, due.deps);
+  const [stored] = await listRuns(db, REF);
+  assert.deepEqual([stored!.published, stored!.reviewId, (await getJob(db, due.job.id))?.outcome, due.writes.filter((w) => w[0] === 'publishReview').length], [true, '501', 'published', 1]);
+});
+test('a recorded review dated after the clock waits 15 minutes from this start, not longer', async () => {
+  const before = await live({ posts: [new Error('github_502')] });
+  await runReviewJob(before.job, before.deps);
+  const early = await live({ reuseJob: before.job.id, now: at(-100) });
+  await runReviewJob(early.job, early.deps);
+  const j = await getJob(db, early.job.id);
+  assert.deepEqual([j?.status, j?.runAt, early.writes.filter((w) => w[0] === 'publishReview').length], ['pending', at(800), 0]);
+});
+test('a /review that meets a young recorded review waits too, and is told nothing', async () => {
+  const before = await live({ posts: [new Error('github_502')] });
+  await runReviewJob(before.job, before.deps);
+  const command = await manualJob({ now: at(5) });
+  await runReviewJob(command.job, command.deps);
+  const j = await getJob(db, command.job.id);
+  assert.deepEqual([j?.status, j?.trigger, j?.runAt, j?.starts, command.inputs.length], ['pending', 'manual', at(900), 0, 0]);
+  assert.deepEqual(command.writes.filter((w) => w[0] !== 'listOwnReviews'), [['react', '31', 'eyes']]);
+});
+test('a wait whose place a newer job took ends the job as superseded, and a command is told so', async () => {
+  const before = await live({ posts: [new Error('github_502')] });
+  await runReviewJob(before.job, before.deps);
+  const command = await manualJob({ now: at(5) });
+  const list = command.deps.writer.listOwnReviews;
+  let newer: number | null = null;
+  command.deps.writer = {
+    ...command.deps.writer,
+    listOwnReviews: async (ref, installation) => {
+      newer = await enqueueJob(db, { ref: REF, reason: 'synchronize', headSha: 'h2', runAt: at(100), now: at(1), delivery: 'd9', replace: false, ...AUTOMATIC });
+      return list(ref, installation);
+    },
+  };
+  await runReviewJob(command.job, command.deps);
+  assert.equal((await getJob(db, command.job.id))?.outcome, 'superseded');
+  assert.deepEqual((await unfinishedJobs(db)).map((j) => [j.id, j.status]), [[newer, 'pending']]);
+  assert.deepEqual(command.writes.slice(-2), [['react', '31', 'confused'], ['comment', '@octo-lead The review did not finish (`superseded`).']]);
+  assert.equal(command.writes.some((w) => w[0] === 'publishReview'), false);
+});
+test('a later start that may post writes the time first, so a start right after its failed post is held as well', async () => {
+  const posts = (h: { writes: unknown[][] }): number => h.writes.filter((w) => w[0] === 'publishReview').length;
+  const before = await live({ posts: [new Error('github_403')] });
+  await runReviewJob(before.job, before.deps);
+  assert.equal((await listRuns(db, REF))[0]!.publishTriedAt, null);
+  // The second start comes when the review is 15 minutes old: it posts, and GitHub answers with an error again.
+  const second = await live({ reuseJob: before.job.id, now: at(900), posts: [new Error('github_502')] });
+  await runReviewJob(second.job, second.deps);
+  let j = await getJob(db, second.job.id);
+  assert.deepEqual([j?.status, j?.runAt, (await listRuns(db, REF))[0]!.publishTriedAt, posts(second)], ['pending', at(1800), at(900), 1]);
+  // A /review five seconds later: the review is older than 15 minutes, its last post is not.
+  const command = await manualJob({ now: at(905) });
+  await runReviewJob(command.job, command.deps);
+  j = await getJob(db, command.job.id);
+  assert.deepEqual([j?.status, j?.runAt, j?.starts, posts(command), (await listRuns(db, REF))[0]!.publishTriedAt], ['pending', at(1800), 0, 0, at(900)]);
+  const due = await live({ reuseJob: command.job.id, now: at(1800) });
+  await runReviewJob(due.job, due.deps);
+  const [stored] = await listRuns(db, REF);
+  assert.deepEqual([stored!.published, stored!.reviewId, stored!.publishTriedAt, posts(due), (await getJob(db, due.job.id))?.outcome], [true, '501', at(1800), 1, 'published']);
+});
+test('a held start writes no time, and a first start writes none', async () => {
+  const first = await live();
+  await runReviewJob(first.job, first.deps);
+  assert.deepEqual([(await listRuns(db, REF))[0]!.published, (await listRuns(db, REF))[0]!.publishTriedAt], [true, null]);
+  const before = await live({ pullRequest: 8, posts: [new Error('github_502')] });
+  await runReviewJob(before.job, before.deps);
+  const early = await live({ pullRequest: 8, reuseJob: before.job.id, now: at(5) });
+  await runReviewJob(early.job, early.deps);
+  assert.equal((await listRuns(db, { ...REF, number: 8 }))[0]!.publishTriedAt, null);
+});
+test('when the time of a later post cannot be written, nothing is posted and the job is put back', async () => {
+  const before = await live({ posts: [new Error('github_502')] });
+  await runReviewJob(before.job, before.deps);
+  const again = await live({ reuseJob: before.job.id, now: at(900) });
+  const query = again.deps.db.query;
+  again.deps.db = { ...again.deps.db, query: (text, params) => (text.includes('set publish_tried_at') ? Promise.reject(new Error('db_down')) : query(text, params)) };
+  await runReviewJob(again.job, again.deps);
+  const j = await getJob(db, again.job.id);
+  assert.deepEqual([j?.status, j?.runAt, j?.starts, again.writes, again.slept, (await listRuns(db, REF))[0]!.published], ['pending', at(1800), 2, [], [1000, 5000], false]);
+  const entry = again.logged.find((e) => e.event === 'review')!;
+  assert.deepEqual([entry.publish, entry.publish_code, entry.requeued], ['failed', 'record_failed', true]);
 });
 test('after a server error, the next start adopts the review GitHub holds and posts nothing', async () => {
   const before = await live({ posts: [new Error('github_502')] });
@@ -596,7 +691,7 @@ test('after a server error, the next start adopts the review GitHub holds and po
 test('the next start publishes the stored review without calling the model, and tells no guard', async () => {
   const before = await live({ posts: [new Error('github_502')] });
   await runReviewJob(before.job, before.deps);
-  const again = await live({ reuseJob: before.job.id });
+  const again = await live({ reuseJob: before.job.id, now: at(900) });
   await runReviewJob(again.job, again.deps);
   const runs = await listRuns(db, REF);
   assert.deepEqual([runs.length, runs[0]!.published, runs[0]!.reviewId, again.inputs.length, (await getJob(db, again.job.id))?.outcome], [1, true, '501', 0, 'published']);
@@ -774,7 +869,11 @@ test('a stranger\'s command that superseded the head\'s job gives the head its j
   assert.equal((await getJob(db, command!))?.outcome, 'refused');
   const waiting = await unfinishedJobs(db);
   assert.deepEqual(waiting.map((j) => [j.trigger, j.headSha, j.status]), [['automatic', 'h1', 'pending']]);
-  const again = await live({ reuseJob: waiting[0]!.id });
+  // The job the head got back starts at once and finds the review young: it waits, and posts it once it is 15 minutes old.
+  const early = await live({ reuseJob: waiting[0]!.id });
+  await runReviewJob(early.job, early.deps);
+  assert.deepEqual([(await getJob(db, early.job.id))?.status, early.writes.filter((w) => w[0] === 'publishReview').length], ['pending', 0]);
+  const again = await live({ reuseJob: waiting[0]!.id, now: at(900) });
   await runReviewJob(again.job, again.deps);
   const [stored] = await listRuns(db, REF);
   assert.deepEqual([again.inputs.length, (await getJob(db, again.job.id))?.outcome, stored!.published, (await listRuns(db, REF)).length], [0, 'published', true, 1]);
@@ -897,7 +996,7 @@ test('what is recorded is what was rendered, and a resumed start posts exactly t
   const [stored] = await listRuns(db, REF);
   assert.equal(stored!.body, expected.body);
   assert.deepEqual(stored!.comments, expected.comments);
-  const again = await live({ reuseJob: before.job.id });
+  const again = await live({ reuseJob: before.job.id, now: at(900) });
   await runReviewJob(again.job, again.deps);
   assert.deepEqual(again.writes.filter((w) => w[0] === 'publishReview'), [['publishReview', 'h1', expected.body, 1]]);
 });
@@ -1267,7 +1366,7 @@ test('the scores of a run whose text could not be rendered are stored, and a res
   assert.deepEqual((await blockRows()).map((r) => [r.number, r.hash]), [[7, 'h']]);
   const before = await live({ pullRequest: 8, result: scoredResult(), posts: [new Error('github_502')] });
   await runReviewJob(before.job, before.deps);
-  const again = await live({ pullRequest: 8, reuseJob: before.job.id });
+  const again = await live({ pullRequest: 8, reuseJob: before.job.id, now: at(900) });
   await runReviewJob(again.job, again.deps);
   assert.deepEqual([again.inputs.length, (await getJob(db, again.job.id))?.outcome], [0, 'published']);
   assert.deepEqual((await blockRows()).map((r) => [r.number, r.hash]), [[7, 'h'], [8, 'h']]);

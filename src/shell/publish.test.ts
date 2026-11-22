@@ -26,7 +26,7 @@ const run: StoredRun = {
   id: 4, ref: REF, job: 1, trigger: 'automatic', mode: 'full', dryRun: false, headSha: 'h1', baseSha: 'merge000', baseBranch: null,
   outcome: 'ok', failureStage: null, failureCode: null, needsHuman: false, highestScore: 35,
   body: rendered.body, comments: rendered.comments, result: okResult(), usage: USAGE, startedAt: at(0), finishedAt: at(1),
-  published: false, reviewId: null, publishedAt: null, inlineDropped: false,
+  published: false, reviewId: null, publishedAt: null, inlineDropped: false, publishTriedAt: null,
 };
 
 interface Options {
@@ -38,6 +38,7 @@ interface Options {
   /** The ids of the reviews the database holds as published; none when not given. */
   known?: ReadonlySet<string>;
   resumed?: boolean;
+  hold?: boolean;
 }
 
 function harness(options: Options = {}) {
@@ -77,7 +78,7 @@ function harness(options: Options = {}) {
   };
   return {
     calls, drafts, deps: { forge, writer, lineUrl, commentUrl: (_ref: unknown, id: string) => `https://forge.example.test/c/${id}` },
-    args: { ref: REF, installation: '99', run: options.run ?? run, trigger: 'automatic' as const, requestedBy: null, known: options.known ?? new Set<string>(), resumed: options.resumed ?? false },
+    args: { ref: REF, installation: '99', run: options.run ?? run, trigger: 'automatic' as const, requestedBy: null, known: options.known ?? new Set<string>(), resumed: options.resumed ?? false, hold: options.hold ?? false },
   };
 }
 
@@ -269,6 +270,29 @@ test('a review a later start publishes that GitHub already holds is adopted', as
     posted: [{ id: '9001', path: 'a.ts', side: 'RIGHT', line: 3, body: 'x' }, { id: '9002', path: 'a.ts', side: 'RIGHT', line: 5, body: NOTE.body }] });
   assert.deepEqual(await publishRun(h.deps, h.args), { kind: 'published', reviewId: '480', body: run.body, inlineDropped: false, notesDropped: false, adopted: true });
   assert.equal(postCount(h.calls), 0);
+});
+test('a held review that GitHub does not list is not posted', async () => {
+  const h = harness({ run: withNote, resumed: true, hold: true });
+  assert.deepEqual(await publishRun(h.deps, h.args), { kind: 'unlisted' });
+  assert.deepEqual(h.calls, [['listOwnReviews']]);
+});
+test('a held review that GitHub lists is adopted all the same', async () => {
+  const h = harness({ resumed: true, hold: true, own: [{ id: '480', commit: 'h1' }] });
+  assert.deepEqual(await publishRun(h.deps, h.args), { kind: 'published', reviewId: '480', body: run.body, inlineDropped: false, notesDropped: false, adopted: true });
+  assert.equal(postCount(h.calls), 0);
+});
+test('a held review is not listed by a review the database knows, nor by one on another commit', async () => {
+  for (const [own, known] of [[{ id: '401', commit: 'h1' }, ['401']], [{ id: '470', commit: 'h0' }, []]] as const) {
+    const h = harness({ resumed: true, hold: true, own: [own], known: new Set(known) });
+    assert.deepEqual(await publishRun(h.deps, h.args), { kind: 'unlisted' }, own.id);
+    assert.equal(postCount(h.calls), 0);
+  }
+});
+test('a held review of a pull request that closed or moved ends as closed or moved', async () => {
+  const closed = harness({ resumed: true, hold: true, live: { ...LIVE, state: 'closed' } });
+  assert.deepEqual(await publishRun(closed.deps, closed.args), { kind: 'closed' });
+  const moved = harness({ resumed: true, hold: true, live: { ...LIVE, info: { ...LIVE.info, headSha: 'h2' } } });
+  assert.deepEqual(await publishRun(moved.deps, moved.args), { kind: 'moved', head: 'h2' });
 });
 
 const REASON_NOTE = { path: 'a.ts', side: 'RIGHT', line: 5, body: '**Human review:** line 5, 80% `calculation` \u2014 Totals are rounded twice.', note: 'hash5' } as const;
