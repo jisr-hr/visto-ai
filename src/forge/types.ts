@@ -88,6 +88,7 @@ export type ForgeEvent =
   | { kind: 'inline_comment'; ref: PullRequestRef; comment: HumanInlineComment }
   | { kind: 'general_comment'; ref: PullRequestRef; installation: string | null; comment: GeneralComment }
   | { kind: 'thread'; ref: PullRequestRef; action: 'resolved' | 'unresolved'; thread: string; rootComment: string | null; actor: string; actorIsBot: boolean }
+  | { kind: 'check_rerun'; ref: PullRequestRef; installation: string | null; app: string; check: string; headSha: string; actor: string }
   | { kind: 'ignored'; reason: 'unknown_event' | 'unknown_action' | 'not_a_pull_request' | 'malformed' };
 export type WebhookReading =
   | { ok: false; reason: 'bad_signature' | 'not_json' | 'no_delivery_id' | 'no_event_name' }
@@ -102,11 +103,13 @@ export interface AppInfo {
   permissions: Record<string, string>;       // as the git service names them: { pull_requests: 'write', contents: 'read', ... }
   events: string[];                          // the events the app is subscribed to
 }
-export interface FeatureOff { feature: 'reviews' | 'publishing' | 'resolving' | 'commands' | 'capture'; missing: string }
+/** What the configured gate uses of the app; all false when no gate is configured. */
+export interface GateNeeds { check: boolean; statuses: boolean; members: boolean }
+export interface FeatureOff { feature: 'reviews' | 'publishing' | 'resolving' | 'commands' | 'capture' | 'gate'; missing: string }
 export interface AppIdentity {
   read(): Promise<AppInfo>;
   /** What the app lacks: one entry for each permission or event a feature needs and the app has not got. */
-  lacks(dryRun: boolean): Promise<FeatureOff[]>;
+  lacks(dryRun: boolean, gate?: GateNeeds): Promise<FeatureOff[]>;
   /** True when the app may resolve a review thread: its `contents` permission is write or admin. */
   canResolve(): Promise<boolean>;
 }

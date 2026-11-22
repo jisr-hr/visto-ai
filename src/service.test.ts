@@ -47,9 +47,9 @@ const okResult = (): ReviewResult => ({
 });
 
 const appKey = generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey.export({ type: 'pkcs8', format: 'pem' }) as string;
-const config = serviceConfig(parseConfig(
-  'model:\n  apiKey: { env: K }\n  model: vendor/model-a\napp:\n  id: 12345\n  privateKey: { env: A }\n  webhookSecret: { env: S }\ndatabase:\n  url: { env: U }\nserver:\n  port: 9191\nlimits:\n  spendPerDay: 50\ndryRun: true\n',
-  { K: 'k', A: appKey, S: 's', U: 'postgres://u:p@db.example.test/d' }));
+const BASE_YAML = 'model:\n  apiKey: { env: K }\n  model: vendor/model-a\napp:\n  id: 12345\n  privateKey: { env: A }\n  webhookSecret: { env: S }\ndatabase:\n  url: { env: U }\nserver:\n  port: 9191\nlimits:\n  spendPerDay: 50\ndryRun: true\n';
+const ENV = { K: 'k', A: appKey, S: 's', U: 'postgres://u:p@db.example.test/d' };
+const config = serviceConfig(parseConfig(BASE_YAML, ENV));
 
 const never = (): Promise<never> => new Promise(() => {});
 
@@ -63,6 +63,8 @@ interface Options {
   lacks?: FeatureOff[] | Error;
   /** false to leave dry run; true when not given. */
   dryRun?: boolean;
+  /** Repository settings added to the deployment file (the text after `dryRun: true`). */
+  repositoriesYaml?: string;
   /** The key route's answer waits for this when given. */
   keyGate?: Promise<void>;
 }
@@ -97,10 +99,11 @@ async function harness(options: Options = {}) {
   const published = new Promise<void>((done) => { publishCalled = done; });
   const order: string[] = [];
   const lacksCalls: boolean[] = [];
+  const gateCalls: unknown[] = [];
   const appInfo: AppIdentity = {
     read: () => Promise.reject(new Error('not_used')),
     canResolve: () => Promise.resolve(false),
-    lacks: (dryRun) => (order.push('lacks'), lacksCalls.push(dryRun), options.lacks instanceof Error ? Promise.reject(options.lacks) : Promise.resolve(options.lacks ?? [])),
+    lacks: (dryRun, gate) => (order.push('lacks'), lacksCalls.push(dryRun), gateCalls.push(gate), options.lacks instanceof Error ? Promise.reject(options.lacks) : Promise.resolve(options.lacks ?? [])),
   };
 
   const db: Db = {
@@ -120,7 +123,7 @@ async function harness(options: Options = {}) {
   const lock: InstanceLock = { release: async () => { events.push('release'); } };
 
   const h = {
-    db, events, order, lacksCalls, timers, inputs, fetched, listedSince, logged, writes,
+    db, events, order, lacksCalls, gateCalls, timers, inputs, fetched, listedSince, logged, writes,
     port: 0,
     /** What the clock reads; a test may move it. */
     now: options.now ?? at(0),
@@ -131,7 +134,8 @@ async function harness(options: Options = {}) {
     reviewed: () => reviewed,
     published: () => published,
     start: async () => {
-      const service = await startService(options.dryRun === false ? { ...config, dryRun: false } : config, {
+      const base = options.repositoriesYaml === undefined ? config : serviceConfig(parseConfig(BASE_YAML + options.repositoriesYaml, ENV));
+      const service = await startService(options.dryRun === false ? { ...base, dryRun: false } : base, {
       db, appInfo,
       reader: { read: () => ({ ok: true as const, delivery: delivered, name: current.kind, action: current.kind === 'pull_request' ? current.action : null, event: current }) },
       clock: () => new Date(h.now),
@@ -541,4 +545,14 @@ test('a logger that throws changes nothing about stop', async () => {
   await service.settled;
   await service.stop();
   assert.deepEqual(h.events.slice(-2), ['close', 'release']);
+});
+test('the app is asked for what the configured gate needs', async () => {
+  const on = await harness({
+    repositoriesYaml: 'repositories:\n  defaults: { gate: { enabled: true, branches: [main], skipTeam: acme/release-managers } }\n',
+  });
+  await (await on.start()).settled;
+  assert.deepEqual(on.gateCalls, [{ check: true, statuses: false, members: true, bypass: false }]);
+  const off = await harness();
+  await (await off.start()).settled;
+  assert.deepEqual(off.gateCalls, [{ check: false, statuses: false, members: false, bypass: false }]);
 });

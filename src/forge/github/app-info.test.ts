@@ -82,3 +82,32 @@ test('canResolve is true for write and admin contents only', async () => {
   }
   assert.equal(await setup([new Response(JSON.stringify({ ...APP, permissions: {} }))]).info.canResolve(), false);
 });
+
+const NOTHING = { check: false, statuses: false, members: false };
+const TODAYS: AppInfo = { ...FULL, permissions: { pull_requests: 'write', contents: 'write', issues: 'write', metadata: 'read' } };
+test('with no gate configured the app lacks what it lacked before', () => {
+  const bare: AppInfo = { botLogin: 'visto-test[bot]', permissions: {}, events: [] };
+  assert.deepEqual(missingFor(bare, false), missingFor(bare, false, NOTHING));
+  assert.deepEqual(missingFor(bare, true), missingFor(bare, true, NOTHING));
+  assert.deepEqual(missingFor(TODAYS, false, NOTHING), []);
+});
+test('a configured gate needs the check permission and the check_run event; required checks need statuses; a skip team needs members', () => {
+  assert.deepEqual(missingFor(TODAYS, false, { ...NOTHING, check: true }), [
+    { feature: 'gate', missing: 'checks:write' }, { feature: 'gate', missing: 'event:check_run' },
+  ]);
+  assert.deepEqual(missingFor(TODAYS, false, { ...NOTHING, statuses: true }), [{ feature: 'gate', missing: 'statuses:read' }]);
+  assert.deepEqual(missingFor(TODAYS, false, { ...NOTHING, members: true }), [{ feature: 'gate', missing: 'members:read' }]);
+  const read: AppInfo = { ...TODAYS, permissions: { ...TODAYS.permissions, checks: 'read' }, events: [...TODAYS.events, 'check_run'] };
+  assert.deepEqual(missingFor(read, false, { ...NOTHING, check: true }), [{ feature: 'gate', missing: 'checks:write' }]);
+  const full: AppInfo = { ...TODAYS, permissions: { ...TODAYS.permissions, checks: 'write', statuses: 'read', members: 'read' }, events: [...TODAYS.events, 'check_run'] };
+  assert.deepEqual(missingFor(full, false, { check: true, statuses: true, members: true }), []);
+});
+test('in dry run the gate needs nothing', () => {
+  const all = { check: true, statuses: true, members: true };
+  assert.deepEqual(missingFor(TODAYS, true, all), []);
+  assert.deepEqual(missingFor(TODAYS, true, all), missingFor(TODAYS, true));
+});
+test('lacks passes what the gate needs on', async () => {
+  const { info } = setup([new Response(JSON.stringify({ ...APP, events: FULL.events, permissions: TODAYS.permissions }))]);
+  assert.deepEqual((await info.lacks(false, { ...NOTHING, check: true })).map((m) => m.missing), ['checks:write', 'event:check_run']);
+});

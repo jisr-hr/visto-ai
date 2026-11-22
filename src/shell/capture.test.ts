@@ -157,3 +157,8 @@ test('the same arguments give equal results', () => {
   const event: ForgeEvent = { kind: 'inline_comment', ref, comment: inline() };
   assert.deepEqual(captureOf(event, delivery, receivedAt), captureOf(event, delivery, receivedAt));
 });
+
+test('a re-run is handled and stores nothing', () => {
+  const event: ForgeEvent = { kind: 'check_rerun', ref, installation: '555', app: '12345', check: 'AI Review', headSha: 'aaa111', actor: 'octo-lead' };
+  assert.deepEqual(captureOf(event, delivery, receivedAt), { outcome: 'handled', pullRequest: null, activity: null });
+});

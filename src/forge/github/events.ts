@@ -86,6 +86,33 @@ function pullRequestEvent(p: Record<string, unknown>): ForgeEvent {
 
 const prNumber = (p: Record<string, unknown>): unknown => obj(p.pull_request).number;
 
+/** The pull request a check run belongs to: the number the check carries, else the first one GitHub lists; null with neither. */
+function checkRunNumber(run: Record<string, unknown>): number | null {
+  const carried = run.external_id;
+  if (typeof carried === 'string' && /^[0-9]{1,10}$/.test(carried)) {
+    const n = Number(carried);
+    if (n > 0 && n <= MAX_INT) return n;
+  }
+  const listed: unknown = Array.isArray(run.pull_requests) ? run.pull_requests[0] : undefined;
+  return listed === undefined ? null : whole(obj(listed).number);
+}
+
+function checkRunEvent(p: Record<string, unknown>): ForgeEvent {
+  if (p.action !== 'rerequested') return unknownAction;
+  const run = obj(p.check_run);
+  const check = str(run.name);
+  const headSha = str(run.head_sha);
+  const appId = obj(run.app).id;
+  if (typeof appId !== 'number' && typeof appId !== 'string') throw bad();
+  const app = str(String(appId));
+  short(app);
+  const actor = str(obj(p.sender).login);
+  const number = checkRunNumber(run);
+  const ref = refOf(p, number ?? 1);
+  if (number === null) return { kind: 'ignored', reason: 'not_a_pull_request' };
+  return { kind: 'check_rerun', ref, installation: installationOf(p), app, check, headSha, actor };
+}
+
 function build(name: string, p: Record<string, unknown>): ForgeEvent {
   switch (name) {
     case 'ping':
@@ -137,6 +164,8 @@ function build(name: string, p: Record<string, unknown>): ForgeEvent {
       const sender = authorOf(p.sender);
       return { kind: 'thread', ref, action: p.action, thread: threadId, rootComment, actor: sender.author, actorIsBot: sender.authorIsBot };
     }
+    case 'check_run':
+      return checkRunEvent(p);
     default:
       return { kind: 'ignored', reason: 'unknown_event' };
   }

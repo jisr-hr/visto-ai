@@ -2,7 +2,7 @@ import { loadMigrations, MIGRATIONS_DIR, migrate } from './db/migrate.ts';
 import { beat, readHeartbeat } from './db/heartbeat.ts';
 import { deleteFinishedJobs } from './db/jobs.ts';
 import type { Db, InstanceLock } from './db/types.ts';
-import { repoSettingsFor } from './config/load.ts';
+import { gateUseOf, repoSettingsFor } from './config/load.ts';
 import type { ServiceConfig } from './config/load.ts';
 import type { ReviewDeps, ReviewInput, ReviewResult } from './engine/types.ts';
 import type { AppIdentity, ForgeAccess, ForgeWriter, HookDeliveries, Source, WebhookReader } from './forge/types.ts';
@@ -173,7 +173,7 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps): Pr
 
   async function appCheck(): Promise<void> {
     if (ending) return;
-    const lacking = await deps.appInfo.lacks(config.dryRun);
+    const lacking = await deps.appInfo.lacks(config.dryRun, gateUseOf(config));
     if (ending) return;
     if (lacking.length === 0) say({ event: 'app_check', missing: 0 });
     for (const { feature, missing } of lacking) {

@@ -168,3 +168,38 @@ test('the texts the database indexes are at most MAX_ID_CHARS long', () => {
     assert.notDeepEqual(eventOf(...make(ok)), malformed, `${name}: ${String(MAX_ID_CHARS)}`);
   }
 });
+
+const checkRun = (over: Record<string, unknown> = {}, top: Record<string, unknown> = {}) => ({
+  action: 'rerequested', repository: repo(), installation: { id: 99 }, sender: user('octo-lead', 'User'),
+  check_run: { name: 'AI Review', head_sha: 'abc123', external_id: '7', app: { id: 12345 }, pull_requests: [{ number: 9 }], ...over },
+  ...top,
+});
+const rerun = (number: number) => ({
+  kind: 'check_rerun', ref: { ...ref, number }, installation: '99', app: '12345', check: 'AI Review', headSha: 'abc123', actor: 'octo-lead',
+});
+test('a re-run of a check names its pull request by the number the check carries, else by the first one GitHub lists', () => {
+  assert.deepEqual(eventOf('check_run', checkRun()), rerun(7));
+  assert.deepEqual(eventOf('check_run', checkRun({ external_id: '' })), rerun(9));
+  assert.deepEqual(eventOf('check_run', checkRun({ external_id: '0' })), rerun(9));
+  assert.deepEqual(eventOf('check_run', checkRun({ external_id: '12345678901' })), rerun(9));
+  assert.deepEqual(eventOf('check_run', checkRun({ external_id: undefined })), rerun(9));
+  assert.deepEqual(eventOf('check_run', checkRun({ external_id: '7' }, { installation: undefined })), { ...rerun(7), installation: null });
+});
+test('a re-run that names no pull request is not one, and another action of a check run is unknown', () => {
+  assert.deepEqual(eventOf('check_run', checkRun({ external_id: 'build-41', pull_requests: undefined })), { kind: 'ignored', reason: 'not_a_pull_request' });
+  assert.deepEqual(eventOf('check_run', checkRun({ external_id: 'build-41', pull_requests: [] })), { kind: 'ignored', reason: 'not_a_pull_request' });
+  for (const action of ['created', 'completed', 'requested_action']) {
+    assert.deepEqual(eventOf('check_run', checkRun({}, { action })), { kind: 'ignored', reason: 'unknown_action' }, action);
+  }
+});
+test('a check run with no name, no app or no head is malformed', () => {
+  const malformed = { kind: 'ignored', reason: 'malformed' };
+  for (const over of [{ name: undefined }, { name: '' }, { app: undefined }, { app: {} }, { head_sha: undefined }, { head_sha: '' }, { app: { id: 'x'.repeat(MAX_ID_CHARS + 1) } }]) {
+    assert.deepEqual(eventOf('check_run', checkRun(over)), malformed, JSON.stringify(over));
+  }
+  assert.deepEqual(eventOf('check_run', checkRun({}, { sender: undefined })), malformed);
+  assert.deepEqual(eventOf('check_run', checkRun({}, { repository: undefined })), malformed);
+});
+test('a re-run of a check suite is not taken in', () => {
+  assert.deepEqual(eventOf('check_suite', { action: 'rerequested', repository: repo(), check_suite: { head_sha: 'abc123', pull_requests: [{ number: 7 }] } }), { kind: 'ignored', reason: 'unknown_event' });
+});
