@@ -82,7 +82,7 @@ test('a later review shows the thread to the model, lists what it already raised
         sourceFor: async () => ({}) as Source,
       },
       clock: () => new Date(now), log: () => {}, sleep: async () => {},
-      settingsFor: () => ({ primaryBranches: ['main'], scoreThreshold: 70, ignoredAuthors: [], baseBranches: [], newHead: null }),
+      settingsFor: () => ({ primaryBranches: ['main'], scoreThreshold: 70, ignoredAuthors: [], baseBranches: [], newHead: null, inlineNotes: false }),
       limits: { inputTokensPerCall: 200_000, batchesPerReview: 6, modelTimeoutSeconds: 240 },
       dryRun: false, writer, engineDeps, review,
       lineUrl: () => 'https://git.example.test/x',
@@ -193,7 +193,7 @@ async function twoFiles(patches: (head: string) => Record<string, string>) {
       sourceFor: async () => ({}) as Source,
     },
     clock: () => new Date(now), log: () => {}, sleep: async () => {},
-    settingsFor: () => ({ primaryBranches: ['main'], scoreThreshold: 70, ignoredAuthors: [], baseBranches: [], newHead: null }),
+    settingsFor: () => ({ primaryBranches: ['main'], scoreThreshold: 70, ignoredAuthors: [], baseBranches: [], newHead: null, inlineNotes: false }),
     limits: { inputTokensPerCall: 200_000, batchesPerReview: 6, modelTimeoutSeconds: 240 },
     dryRun: false, writer, engineDeps, review,
     lineUrl: () => 'https://git.example.test/x',
@@ -277,6 +277,157 @@ test('a push that changes nothing in the diff ends as nothing new, with no model
     assert.deepEqual([t.requests.length, t.gh.reviews.length], [1, 1]);
     const last = (await listRuns(t.db, REF)).at(-1)!;
     assert.deepEqual([last.mode, last.body, last.published, (last.result as ReviewResult).nothingToDo], ['incremental', '', false, true]);
+  } finally {
+    await t.db.close();
+  }
+});
+
+/**
+ * The real engine under the real job, with inline notes on, against a fake of the git service that keeps every review and the threads of
+ * what it was posted with, so that the next start reads them. `patches` gives each file's patch at a head; the model answers whatever
+ * `answer` holds and every request is kept. `runJob` runs an automatic job for the current head, or with `manual` a /review.
+ */
+async function keptThreads(patches: (head: string) => Record<string, string>) {
+  const db = await testDb();
+  let now = Date.parse('2026-03-01T10:00:00.000Z');
+  const iso = (): string => new Date(now).toISOString();
+  const gh = { head: 'aaaa111', reviews: [] as Array<{ id: string; commit: string; body: string }>, threads: [] as ReviewThread[], nextReview: 501, nextComment: 9001 };
+  const appComment = (body: string, reviewId: string | null) => {
+    const id = String(gh.nextComment++);
+    return { id, node: `PRRC_${id}`, author: 'visto-test[bot]', authorIsBot: true, byApp: true, reviewId, body, at: iso() };
+  };
+  const writer: ForgeWriter = {
+    publishReview: async (_ref, _installation, draft) => {
+      const id = String(gh.nextReview++);
+      gh.reviews.unshift({ id, commit: draft.commit, body: draft.body });
+      for (const c of draft.comments) {
+        gh.threads.push({ id: `PRRT_${gh.threads.length + 1}`, path: c.path, side: c.side, line: c.line, resolved: false, resolvedByApp: false, comments: [appComment(c.body, id)] });
+      }
+      return { id };
+    },
+    listOwnReviews: async () => gh.reviews.map((r) => ({ id: r.id, commit: r.commit })),
+    listReviewComments: async (_ref, _installation, reviewId) => gh.threads
+      .filter((t) => t.comments[0]!.reviewId === reviewId)
+      .map((t) => ({ id: t.comments[0]!.id, path: t.path, side: t.side, line: t.line!, body: t.comments[0]!.body })),
+    react: async () => {},
+    comment: async () => {},
+    listThreads: async () => structuredClone(gh.threads),
+    replyToThread: async (_installation, threadId, body) => { gh.threads.find((t) => t.id === threadId)!.comments.push(appComment(body, null)); },
+    editThreadComment: async () => { throw new Error('not_expected'); },
+    resolveThread: async (_installation, threadId) => {
+      const t = gh.threads.find((x) => x.id === threadId)!;
+      t.resolved = true;
+      t.resolvedByApp = true;
+    },
+  };
+  const requests: ModelRequest[] = [];
+  const state = { answer: null as unknown };
+  const engineDeps = (): ReviewDeps => {
+    const source: Source = {
+      listFiles: async () => Object.entries(patches(gh.head)).map(([path, patch]) => ({ path, previousPath: null, status: 'modified' as const, additions: 1, deletions: 0, patch })),
+      getFileContent: async () => null,
+      getDefaultBranchFile: async () => null,
+    };
+    return {
+      source, contract: 'You review pull requests.', clock: () => new Date(now), token: () => 'abcdef0123456789', log: () => {},
+      model: {
+        complete: async (request) => {
+          requests.push(request);
+          return { toolName: SUBMIT_REVIEW, toolArguments: JSON.stringify(state.answer), text: null, model: 'm', provider: null, usage: { calls: 1, inputTokens: 10, outputTokens: 5, cachedTokens: 0, cost: 0.1 } };
+        },
+      },
+    };
+  };
+  const deps: ReviewJobDeps = {
+    db,
+    forge: {
+      readPullRequest: async () => ({
+        info: { ref: REF, title: 'Add a total', description: '', author: 'octo-dev', baseBranch: 'main', headBranch: 'feat', baseSha: 'base000', headSha: gh.head, draft: false },
+        state: 'open',
+      }),
+      sourceFor: async () => ({}) as Source,
+    },
+    clock: () => new Date(now), log: () => {}, sleep: async () => {},
+    settingsFor: () => ({ primaryBranches: ['main'], scoreThreshold: 70, ignoredAuthors: [], baseBranches: [], newHead: null, inlineNotes: true }),
+    limits: { inputTokensPerCall: 200_000, batchesPerReview: 6, modelTimeoutSeconds: 240 },
+    dryRun: false, writer, engineDeps, review,
+    lineUrl: () => 'https://git.example.test/x',
+    commentUrl: (_ref, commentId) => `https://git.example.test/c/${commentId}`,
+    canResolve: async () => true,
+    health: { reviewed: () => {} },
+    spend: { noteRun: () => {} },
+  };
+  await savePullRequest(db, {
+    ref: REF, author: 'octo-dev', authorIsBot: false, baseBranch: 'main', headBranch: 'feat', headSha: gh.head, draft: false, state: 'open',
+    mergedAt: null, closedAt: null, mergeCommit: null, installation: '99', updatedAt: iso(),
+  });
+  const runJob = async (manual = false): Promise<string | null | undefined> => {
+    now += 600_000;
+    await enqueueJob(db, manual
+      ? { ref: REF, reason: 'command', headSha: '', runAt: iso(), now: iso(), delivery: null, replace: true, trigger: 'manual', requestedBy: 'octo-lead', commentId: '31', association: 'member', installation: '99' }
+      : { ref: REF, reason: 'synchronize', headSha: gh.head, runAt: iso(), now: iso(), delivery: null, replace: true, trigger: 'automatic', requestedBy: null, commentId: null, association: null, installation: null });
+    const pending = (await unfinishedJobs(db)).find((j) => j.status === 'pending')!;
+    const job = (await claimJob(db, pending.id, iso()))!;
+    await runReviewJob(job, deps);
+    return (await getJob(db, job.id))?.outcome;
+  };
+  return { db, gh, requests, state, runJob };
+}
+
+/** Whether a thread was opened by a note: its first comment is one. */
+const isNoteThread = (t: ReviewThread): boolean => t.comments[0]!.body.startsWith('**Human review:**');
+
+test('a note thread is not shown to the model and gets no reply at the next review', async () => {
+  const t = await keptThreads((head) => ({ 'src/a.ts': `@@ -1,1 +1,4 @@\n head\n+const a = 1;\n+const b = total(a); // ${head}\n+export { b };` }));
+  try {
+    const finding = { path: 'src/a.ts', side: 'RIGHT', line: 3, severity: 'major', body: 'total() is called before a is checked.', beyond_diff: false };
+    const files = [{ path: 'src/a.ts', change_summary: 'Adds a total.', blocks: [{ id: 'B1', score: 85, category: 'calculation', reason: 'A total.' }] }];
+    t.state.answer = { overview: 'src/a.ts adds a total.', findings: [{ ...finding, quote: `const b = total(a); // ${t.gh.head}` }], files };
+    assert.equal(await t.runJob(), 'published');
+    assert.deepEqual(t.gh.threads.map(isNoteThread), [false, true]);
+    const [findingThread, noteThread] = t.gh.threads;
+    findingThread!.comments.push({ id: '9500', node: 'PRRC_9500', author: 'octo-dev', authorIsBot: false, byApp: false, reviewId: null, body: 'The caller checks a first.', at: new Date().toISOString() });
+
+    t.gh.head = 'bbbb222';
+    t.requests.length = 0;
+    t.state.answer = { overview: 'src/a.ts adds a total.', findings: [], files, thread_verdicts: [{ thread_id: 'T1', verdict: 'answered', reply: REASON }] };
+    assert.equal(await t.runJob(), 'published');
+    const asked = t.requests.at(-1)!.messages.at(-1)!.content;
+    assert.equal(asked.split('### Thread ').length - 1, 1);
+    assert.equal(asked.includes(noteThread!.comments[0]!.body), false);
+    assert.equal(findingThread!.comments.at(-1)!.body, `**Answered.** ${REASON}\n\n${markerOf(t.gh.reviews[0]!.id, 'bbbb222')}`);
+    assert.deepEqual([noteThread!.comments.length, noteThread!.resolved], [1, false]);
+    assert.ok(t.gh.reviews[0]!.body.includes('Earlier threads: 1 cleared, 0 still open.'));
+  } finally {
+    await t.db.close();
+  }
+});
+
+test('more flagged blocks than the cap get their notes over two reviews', async () => {
+  /** Twenty hunks of one added line each, every one its own text. */
+  const twenty = (name: string): string => Array.from({ length: 20 }, (_, i) =>
+    `@@ -${10 * i + 1},1 +${10 * i + 1 + i},2 @@\n ctx${i}\n+const ${name}${i} = ${i};`).join('\n');
+  const paths = ['src/a.ts', 'src/b.ts', 'src/c.ts'];
+  const t = await keptThreads(() => Object.fromEntries(paths.map((p, i) => [p, twenty(`v${i}_`)])));
+  try {
+    t.state.answer = {
+      overview: 'src/a.ts, src/b.ts and src/c.ts add constants.', findings: [],
+      files: paths.map((path) => ({ path, change_summary: 'Adds constants.', blocks: Array.from({ length: 20 }, (_, i) => ({ id: `B${i + 1}`, score: 85, category: 'calculation', reason: 'A constant.' })) })),
+    };
+    assert.equal(await t.runJob(), 'published');
+    assert.equal(t.gh.threads.filter(isNoteThread).length, 50);
+    const calls = t.requests.length;
+
+    // A /review on that head: a re-check, published with the other ten notes and no model call.
+    assert.equal(await t.runJob(true), 'published');
+    assert.deepEqual([t.gh.reviews.length, t.gh.threads.filter(isNoteThread).length, t.requests.length], [2, 60, calls]);
+    const keys = new Set(t.gh.threads.map((th) => `${th.path}:${th.line}`));
+    assert.equal(keys.size, 60);
+
+    // A second /review: every block has its note.
+    assert.equal(await t.runJob(true), 'published');
+    assert.deepEqual([t.gh.reviews.length, t.gh.threads.length], [3, 60]);
+    assert.deepEqual((await listRuns(t.db, REF)).map((r) => r.mode), ['full', 'recheck', 'recheck']);
   } finally {
     await t.db.close();
   }

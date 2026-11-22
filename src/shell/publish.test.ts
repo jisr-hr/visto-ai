@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { renderReview } from '../engine/render/body.ts';
 import type { ReviewResult } from '../engine/types.ts';
-import type { ForgeAccess, ForgeWriter, LivePullRequest, PostedComment } from '../forge/types.ts';
+import type { ForgeAccess, ForgeWriter, LivePullRequest, PostedComment, ReviewDraft } from '../forge/types.ts';
 import type { StoredRun } from '../db/review-runs.ts';
 import { publishRun } from './publish.ts';
 import type { PublishOutcome } from './publish.ts';
@@ -37,10 +37,12 @@ interface Options {
   run?: StoredRun;
   /** The ids of the reviews the database holds as published; none when not given. */
   known?: ReadonlySet<string>;
+  resumed?: boolean;
 }
 
 function harness(options: Options = {}) {
   const calls: unknown[][] = [];
+  const drafts: ReviewDraft[] = [];
   const posts = [...(options.posts ?? [])];
   const live = options.live === undefined ? LIVE : options.live;
   const forge = {
@@ -49,6 +51,7 @@ function harness(options: Options = {}) {
   const writer: ForgeWriter = {
     publishReview: async (_ref, _installation, draft) => {
       calls.push(['publishReview', draft.commit, draft.body, draft.comments.length]);
+      drafts.push(draft);
       const next = posts.shift() ?? { id: '501' };
       if (next instanceof Error) throw next;
       return next;
@@ -73,19 +76,19 @@ function harness(options: Options = {}) {
     resolveThread: () => Promise.reject(new Error('not_expected')),
   };
   return {
-    calls, deps: { forge, writer, lineUrl, commentUrl: (_ref: unknown, id: string) => `https://forge.example.test/c/${id}` },
-    args: { ref: REF, installation: '99', run: options.run ?? run, trigger: 'automatic' as const, requestedBy: null, known: options.known ?? new Set<string>() },
+    calls, drafts, deps: { forge, writer, lineUrl, commentUrl: (_ref: unknown, id: string) => `https://forge.example.test/c/${id}` },
+    args: { ref: REF, installation: '99', run: options.run ?? run, trigger: 'automatic' as const, requestedBy: null, known: options.known ?? new Set<string>(), resumed: options.resumed ?? false },
   };
 }
 
 test('a review is posted pinned to the commit it was computed for', async () => {
   const h = harness();
-  assert.deepEqual(await publishRun(h.deps, h.args), { kind: 'published', reviewId: '501', body: run.body, inlineDropped: false, adopted: false });
+  assert.deepEqual(await publishRun(h.deps, h.args), { kind: 'published', reviewId: '501', body: run.body, inlineDropped: false, notesDropped: false, adopted: false });
   assert.deepEqual(h.calls, [['listOwnReviews'], ['publishReview', 'h1', run.body, 1]]);
 });
 test('a review an earlier attempt already posted is adopted, and nothing is posted', async () => {
   const h = harness({ own: [{ id: '480', commit: 'h1' }] });
-  assert.deepEqual(await publishRun(h.deps, h.args), { kind: 'published', reviewId: '480', body: run.body, inlineDropped: false, adopted: true });
+  assert.deepEqual(await publishRun(h.deps, h.args), { kind: 'published', reviewId: '480', body: run.body, inlineDropped: false, notesDropped: false, adopted: true });
   assert.equal(h.calls.some((c) => c[0] === 'publishReview'), false);
 });
 test('an adopted review that was posted without its inline comments is recorded as such', async () => {
@@ -97,15 +100,15 @@ test('an adopted review that was posted without its inline comments is recorded 
 });
 test('a review on another commit does not stop the post', async () => {
   const h = harness({ own: [{ id: '401', commit: 'h0' }], known: new Set(['401']) });
-  assert.deepEqual(await publishRun(h.deps, h.args), { kind: 'published', reviewId: '501', body: run.body, inlineDropped: false, adopted: false });
+  assert.deepEqual(await publishRun(h.deps, h.args), { kind: 'published', reviewId: '501', body: run.body, inlineDropped: false, notesDropped: false, adopted: false });
   assert.deepEqual(h.calls, [['listOwnReviews'], ['publishReview', 'h1', run.body, 1]]);
 });
 test('only a review on this commit that the database does not know is adopted', async () => {
   const unknown = harness({ own: [{ id: '401', commit: 'h1' }] });
-  assert.deepEqual(await publishRun(unknown.deps, unknown.args), { kind: 'published', reviewId: '401', body: run.body, inlineDropped: false, adopted: true });
+  assert.deepEqual(await publishRun(unknown.deps, unknown.args), { kind: 'published', reviewId: '401', body: run.body, inlineDropped: false, notesDropped: false, adopted: true });
   assert.equal(unknown.calls.some((c) => c[0] === 'publishReview'), false);
   const known = harness({ own: [{ id: '401', commit: 'h1' }], known: new Set(['401']) });
-  assert.deepEqual(await publishRun(known.deps, known.args), { kind: 'published', reviewId: '501', body: run.body, inlineDropped: false, adopted: false });
+  assert.deepEqual(await publishRun(known.deps, known.args), { kind: 'published', reviewId: '501', body: run.body, inlineDropped: false, notesDropped: false, adopted: false });
   assert.deepEqual(known.calls, [['listOwnReviews'], ['publishReview', 'h1', run.body, 1]]);
 });
 test('nothing is posted for a head or a base that moved, or on a pull request that is closed or gone', async () => {
@@ -169,4 +172,121 @@ test("the body-only form links each finding already discussed to its earlier thr
   assert.equal(out.inlineDropped, true);
   assert.ok(out.body.includes('## Already discussed'));
   assert.ok(out.body.includes('(https://forge.example.test/c/8001)'));
+});
+
+const NOTE = { path: 'a.ts', side: 'RIGHT', line: 5, body: '**Human review:** line 5, 80% `logic`', note: 'hash5' } as const;
+const FINDING = (rendered.comments as unknown[])[0];
+const withNote: StoredRun = { ...run, comments: [FINDING, NOTE] };
+const bodyOnlyText = renderReview(okResult(), { trigger: 'automatic', requestedBy: null, lineUrl, inline: false }).body;
+const postCount = (calls: unknown[][]): number => calls.filter((c) => c[0] === 'publishReview').length;
+
+test('a review with notes is posted with them', async () => {
+  const h = harness({ run: withNote });
+  assert.deepEqual(await publishRun(h.deps, h.args), { kind: 'published', reviewId: '501', body: run.body, inlineDropped: false, notesDropped: false, adopted: false });
+  assert.equal(postCount(h.calls), 1);
+  assert.deepEqual(h.drafts[0]?.comments, [FINDING, NOTE]);
+});
+test('refused with notes, the review is posted again without them and the findings stay inline', async () => {
+  const h = harness({ run: withNote, posts: [new Error('review_rejected'), { id: '502' }] });
+  assert.deepEqual(await publishRun(h.deps, h.args), { kind: 'published', reviewId: '502', body: run.body, inlineDropped: false, notesDropped: true, adopted: false });
+  assert.equal(postCount(h.calls), 2);
+  assert.equal(h.drafts[1]?.body, run.body);
+  assert.deepEqual(h.drafts[1]?.comments, [FINDING]);
+});
+test('refused again, it is posted as body only', async () => {
+  const h = harness({ run: withNote, posts: [new Error('review_rejected'), new Error('review_rejected'), { id: '503' }] });
+  assert.deepEqual(await publishRun(h.deps, h.args), { kind: 'published', reviewId: '503', body: bodyOnlyText, inlineDropped: true, notesDropped: true, adopted: false });
+  assert.equal(postCount(h.calls), 3);
+  assert.deepEqual(h.drafts[2], { commit: 'h1', body: bodyOnlyText, comments: [] });
+});
+test('a review with notes and no finding is posted without them when refused', async () => {
+  const onlyNote: StoredRun = { ...run, comments: [NOTE] };
+  const once = harness({ run: onlyNote, posts: [new Error('review_rejected'), { id: '502' }] });
+  assert.deepEqual(await publishRun(once.deps, once.args), { kind: 'published', reviewId: '502', body: run.body, inlineDropped: false, notesDropped: true, adopted: false });
+  assert.deepEqual(once.drafts[1], { commit: 'h1', body: run.body, comments: [] });
+  const twice = harness({ run: onlyNote, posts: [new Error('review_rejected'), new Error('review_rejected')] });
+  assert.deepEqual(await publishRun(twice.deps, twice.args), { kind: 'rejected' });
+  assert.equal(postCount(twice.calls), 2);
+});
+test('a review with no note is retried as today', async () => {
+  const h = harness({ posts: [new Error('review_rejected'), { id: '502' }] });
+  assert.deepEqual(await publishRun(h.deps, h.args), { kind: 'published', reviewId: '502', body: bodyOnlyText, inlineDropped: true, notesDropped: false, adopted: false });
+  assert.equal(postCount(h.calls), 2);
+  assert.deepEqual(h.drafts[1], { commit: 'h1', body: bodyOnlyText, comments: [] });
+});
+test('an error that is not a refusal ends the publication at once', async () => {
+  const h = harness({ run: withNote, posts: [new Error('review_rejected'), new Error('github_502'), { id: '503' }] });
+  assert.deepEqual(await publishRun(h.deps, h.args), { kind: 'failed', code: 'github_502' });
+  assert.equal(postCount(h.calls), 2);
+});
+test('an adopted review whose listed comments are not the notes has lost its notes', async () => {
+  const h = harness({ run: withNote, own: [{ id: '480', commit: 'h1' }], posted: [{ id: '9001', path: 'a.ts', side: 'RIGHT', line: 3, body: 'x' }] });
+  assert.deepEqual(await publishRun(h.deps, h.args), { kind: 'published', reviewId: '480', body: run.body, inlineDropped: false, notesDropped: true, adopted: true });
+  assert.equal(postCount(h.calls), 0);
+});
+test('an adopted review that holds only the note has lost its findings', async () => {
+  const h = harness({ run: withNote, own: [{ id: '480', commit: 'h1' }], posted: [{ id: '9002', path: 'a.ts', side: 'RIGHT', line: 5, body: NOTE.body }] });
+  assert.deepEqual(await publishRun(h.deps, h.args), { kind: 'published', reviewId: '480', body: bodyOnlyText, inlineDropped: true, notesDropped: false, adopted: true });
+  assert.equal(postCount(h.calls), 0);
+});
+test('an adopted review with nothing listed has lost its notes and its findings', async () => {
+  const h = harness({ run: withNote, own: [{ id: '480', commit: 'h1' }], posted: [] });
+  assert.deepEqual(await publishRun(h.deps, h.args), { kind: 'published', reviewId: '480', body: bodyOnlyText, inlineDropped: true, notesDropped: true, adopted: true });
+  assert.equal(postCount(h.calls), 0);
+});
+test('an adopted review whose comment list was cut short drops nothing', async () => {
+  const h = harness({ run: withNote, own: [{ id: '480', commit: 'h1' }] });
+  h.deps.writer.listReviewComments = async () => null;
+  assert.deepEqual(await publishRun(h.deps, h.args), { kind: 'published', reviewId: '480', body: run.body, inlineDropped: false, notesDropped: false, adopted: true });
+  assert.equal(postCount(h.calls), 0);
+});
+test('a comment list that is not a list is posted as the body alone', async () => {
+  const h = harness({ run: { ...run, comments: { 0: FINDING } } });
+  assert.deepEqual(await publishRun(h.deps, h.args), { kind: 'published', reviewId: '501', body: run.body, inlineDropped: false, notesDropped: false, adopted: false });
+  assert.equal(postCount(h.calls), 1);
+  assert.deepEqual(h.drafts[0]?.comments, []);
+});
+test('an entry of the comment list that is not an object is dropped', async () => {
+  const h = harness({ run: { ...run, comments: [FINDING, 'x', null, 7] } });
+  assert.deepEqual(await publishRun(h.deps, h.args), { kind: 'published', reviewId: '501', body: run.body, inlineDropped: false, notesDropped: false, adopted: false });
+  assert.equal(postCount(h.calls), 1);
+  assert.deepEqual(h.drafts[0]?.comments, [FINDING]);
+});
+test('a review a later start publishes goes without its notes', async () => {
+  const h = harness({ run: withNote, resumed: true });
+  assert.deepEqual(await publishRun(h.deps, h.args), { kind: 'published', reviewId: '501', body: run.body, inlineDropped: false, notesDropped: true, adopted: false });
+  assert.equal(postCount(h.calls), 1);
+  assert.deepEqual(h.drafts[0]?.comments, [FINDING]);
+});
+test('a review a later start publishes that is refused is posted as body only', async () => {
+  const h = harness({ run: withNote, resumed: true, posts: [new Error('review_rejected'), { id: '502' }] });
+  assert.deepEqual(await publishRun(h.deps, h.args), { kind: 'published', reviewId: '502', body: bodyOnlyText, inlineDropped: true, notesDropped: true, adopted: false });
+  assert.equal(postCount(h.calls), 2);
+  assert.deepEqual(h.drafts[1], { commit: 'h1', body: bodyOnlyText, comments: [] });
+});
+test('a review a later start publishes that GitHub already holds is adopted', async () => {
+  const h = harness({ run: withNote, resumed: true, own: [{ id: '480', commit: 'h1' }],
+    posted: [{ id: '9001', path: 'a.ts', side: 'RIGHT', line: 3, body: 'x' }, { id: '9002', path: 'a.ts', side: 'RIGHT', line: 5, body: NOTE.body }] });
+  assert.deepEqual(await publishRun(h.deps, h.args), { kind: 'published', reviewId: '480', body: run.body, inlineDropped: false, notesDropped: false, adopted: true });
+  assert.equal(postCount(h.calls), 0);
+});
+
+const REASON_NOTE = { path: 'a.ts', side: 'RIGHT', line: 5, body: '**Human review:** line 5, 80% `calculation` \u2014 Totals are rounded twice.', note: 'hash5' } as const;
+const withReasonNote: StoredRun = { ...run, comments: [FINDING, REASON_NOTE] };
+test('at adoption a note GitHub gave back with its reason changed is a note GitHub holds', async () => {
+  const b = REASON_NOTE.body;
+  for (const body of [b.replace('twice', 'twicE'), b.replace('twice', 'twce'), b.slice(0, -10), b.replace('\u2014', '-')]) {
+    const h = harness({ run: withReasonNote, own: [{ id: '480', commit: 'h1' }],
+      posted: [{ id: '9001', path: 'a.ts', side: 'RIGHT', line: 3, body: 'x' }, { id: '9002', path: 'a.ts', side: 'RIGHT', line: 5, body }] });
+    assert.deepEqual(await publishRun(h.deps, h.args), { kind: 'published', reviewId: '480', body: run.body, inlineDropped: false, notesDropped: false, adopted: true }, body);
+    assert.equal(postCount(h.calls), 0);
+  }
+});
+test('at adoption a comment that only begins as a note does, with another label, is no note of the run', async () => {
+  for (const body of ['**Human review:** line 6, 80% `calculation` \u2014 Totals are rounded twice.', '**Human review:** line 5, 81% `calculation`', '**Human review:**']) {
+    const h = harness({ run: withReasonNote, own: [{ id: '480', commit: 'h1' }],
+      posted: [{ id: '9001', path: 'a.ts', side: 'RIGHT', line: 3, body: 'x' }, { id: '9002', path: 'a.ts', side: 'RIGHT', line: 5, body }] });
+    const out = await publishRun(h.deps, h.args);
+    assert.equal(out.kind === 'published' && out.notesDropped, true, body);
+  }
 });

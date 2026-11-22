@@ -815,3 +815,31 @@ test('a raised note is written only for a whole number from 0 to 100', () => {
   assert.equal(rf({ raisedFrom: 60, origin: 'other_pull_request' }), '- [lines 5-6](u:src/a.ts:5), 85% `calculation` _(60% was given; a block this file lost had scored 85%)_');
   assert.equal(rf({ origin: 'elsewhere' as unknown as 'earlier_run' }), plain);
 });
+
+test('the Human review section is written as before', () => {
+  const r = scored([
+    file('src/a.ts', { blocks: [
+      block('B1', span(5, 5), 85, 'calculation', 'Changes tax.\nSecond line.'),
+      block('B2', span(3, 5, 'LEFT'), 90, 'permission', '@octo-dev <b>x</b>'),
+      { ...block('B3', span(20, 30), 75, 'billing', 'Elsewhere.'), origin: 'other_pull_request' as const },
+      { ...block('B4', span(40, 41), 72, 'fix', 'Kept.'), origin: 'earlier_run' as const },
+      block('B5', span(50, 51), 10, 'test', 'Low.'),
+    ] }),
+    file('src/b.ts', { fileLevel: level(95, 'team_floor'), blocks: [block('B1', span(1, 2), 70, 'other', '')] }),
+  ]);
+  const text = [
+    'A person should read these parts. Each is at or above 70%.',
+    '',
+    '**`src/b.ts`**',
+    '- whole file, 95% \u2014 a path the team marked as always needing a person',
+    '- [lines 1-2](u:src/b.ts:1), 70% `other`',
+    '',
+    '**`src/a.ts`**',
+    '- [old lines 3-5](u:src/a.ts:3), 90% `permission` \u2014 @\u200bocto-dev <\u200bb>x<\u200b/b>',
+    '- [line 5](u:src/a.ts:5), 85% `calculation` \u2014 Changes tax.',
+    '- [lines 20-30](u:src/a.ts:20), 75% `billing` _(scored on another pull request)_',
+    '- [lines 40-41](u:src/a.ts:40), 72% `fix` \u2014 Kept. _(kept from an earlier review)_',
+  ].join('\n');
+  assert.equal(section(renderReview(r, withUrl).body), text);
+  assert.equal(section(renderReview(r, auto).body), text.replace(/\[([^\]]+)\]\([^)]+\)/g, '$1'));
+});

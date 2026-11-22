@@ -17,7 +17,8 @@
     "eval:backtest": "node src/eval/cli.ts backtest",
     "eval:score-noise": "node src/eval/cli.ts score-noise",
     "start": "node src/main.ts",
-    "dev:send-webhook": "node src/forge/github/send-sample.ts"
+    "dev:send-webhook": "node src/forge/github/send-sample.ts",
+    "app:create": "node src/forge/github/create-app.ts"
   },
   "dependencies": {
     "diff": "^9.0.0",

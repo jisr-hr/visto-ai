@@ -3,13 +3,14 @@ import { enqueueJob, finishJob, requeueJob } from '../db/jobs.ts';
 import type { Job } from '../db/jobs.ts';
 import { recordBlockScores, reusableScores } from '../db/block-scores.ts';
 import { getPullRequest } from '../db/pull-requests.ts';
-import { listComments, recordComments } from '../db/review-comments.ts';
+import { listComments, NOTE, recordComments } from '../db/review-comments.ts';
 import type { StoredComment } from '../db/review-comments.ts';
 import { adoptableRun, hasOkRun, hasRun, listRuns, markPublished, recordRun, unpublishedRun } from '../db/review-runs.ts';
 import type { RunRecord, StoredRun } from '../db/review-runs.ts';
 import type { Db } from '../db/types.ts';
 import { renderReview } from '../engine/render/body.ts';
 import type { InlineComment } from '../engine/render/body.ts';
+import { renderNotes } from '../engine/render/notes.ts';
 import type { Category, ScoredBy, Span } from '../engine/score/types.ts';
 import type { EarlierState, Limits, ReviewDeps, ReviewInput, ReviewResult, ThreadVerdict, Usage } from '../engine/types.ts';
 import type { ForgeAccess, ForgeWriter, LivePullRequest, PullRequestInfo, PullRequestRef, ReviewThread, Source } from '../forge/types.ts';
@@ -18,7 +19,7 @@ import type { ModelHealth } from './model-health.ts';
 import { codeOf } from './codes.ts';
 import { failureText, mayCommand, refusalText } from './commands.ts';
 import { earlierOf, missedComments } from './earlier.ts';
-import { matchPosted } from './posted.ts';
+import { matchPosted, notedOf } from './posted.ts';
 import { publishRun } from './publish.ts';
 import type { PublishOutcome } from './publish.ts';
 import { CATEGORY_NAMES, historyOf, lastReviewOf, scoresToStore } from './history.ts';
@@ -103,6 +104,12 @@ function nothingNewOf(result: unknown): boolean {
 function duplicatesOf(result: unknown): number {
   const discussed = (result as { alreadyDiscussed?: unknown } | null | undefined)?.alreadyDiscussed;
   return Array.isArray(discussed) ? discussed.length : 0;
+}
+
+/** How many of a run's recorded comments, as stored, are notes: the entries with a string `note`; 0 when they cannot be read. */
+function notesOf(comments: unknown): number {
+  if (!Array.isArray(comments)) return 0;
+  return (comments as unknown[]).filter((c) => typeof c === 'object' && c !== null && typeof (c as { note?: unknown }).note === 'string').length;
 }
 
 /**
@@ -194,8 +201,11 @@ export async function runReviewJob(job: Job, deps: ReviewJobDeps): Promise<void>
   const fail = (installation: string, code: string): Promise<void> =>
     manual ? answer(installation, failureText(job.requestedBy, code)) : Promise.resolve();
 
-  /** Stores the posted inline comments of a published run, each with the finding it came from. Never rejects; changes nothing else. */
-  const readBack = async (target: StoredRun, installation: string, reviewId: string): Promise<void> => {
+  /**
+   * Stores the posted inline comments of a published run, each with the finding or the block it came from. Never rejects; changes nothing else.
+   * `notesDropped`: the publication did not post the run's notes, or nothing is known of them; no note is then counted as missing.
+   */
+  const readBack = async (target: StoredRun, installation: string, reviewId: string, notesDropped: boolean): Promise<void> => {
     try {
       const posted = await deps.writer.listReviewComments(job.ref, installation, reviewId);
       if (posted === null) {
@@ -204,7 +214,9 @@ export async function runReviewJob(job: Job, deps: ReviewJobDeps): Promise<void>
       }
       const matched = matchPosted(target, posted);
       await recordComments(db, target.id, job.ref, matched);
-      log({ event: 'readback', job: job.id, run: target.id, posted: posted.length, stored: matched.length });
+      const notes = matched.filter((m) => m.severity === NOTE).length;
+      const missing = notesDropped ? 0 : Math.max(0, notesOf(target.comments) - notes);
+      log({ event: 'readback', job: job.id, run: target.id, posted: posted.length, stored: matched.length, notes, notes_missing: missing });
     } catch (error) {
       log({ event: 'readback_failed', job: job.id, run: target.id, reason: codeOf(error) });
     }
@@ -276,6 +288,8 @@ export async function runReviewJob(job: Job, deps: ReviewJobDeps): Promise<void>
     /** The last review: the newest published run that is not a re-check; null in dry run. */
     let last: StoredRun | null = null;
     let earlier: EarlierState | null = null;
+    /** The blocks of the pull request that have their note (noteKey); empty when the stored comments were not read. */
+    let noted = new Set<string>();
 
     // 2. The live read.
     let live: LivePullRequest | null = null;
@@ -351,7 +365,8 @@ export async function runReviewJob(job: Job, deps: ReviewJobDeps): Promise<void>
               await markPublished(db, found.id, { reviewId: review.id, publishedAt: nowIso, body: found.body, inlineDropped: false });
               adopted = true;
               log({ event: 'adopted_late', job: job.id, run: found.id, review: review.id });
-              await readBack(found, installation, review.id);
+              // Nothing is known of the notes it was posted with: none is counted as missing.
+              await readBack(found, installation, review.id, true);
             }
             if (adopted) {
               runs = await listRuns(db, job.ref);
@@ -369,8 +384,11 @@ export async function runReviewJob(job: Job, deps: ReviewJobDeps): Promise<void>
             }
             if (threads !== null) {
               let stored = await listComments(db, job.ref);
+              const read = stored;
+              /** What the threads show that the database did not hold, whether or not recording it succeeded. */
+              let missed: Array<StoredComment & { run: number }> = [];
               try {
-                const missed = missedComments({ runs, stored, threads });
+                missed = missedComments({ runs, stored, threads });
                 const byRun = new Map<number, StoredComment[]>();
                 for (const m of missed) byRun.set(m.run, [...(byRun.get(m.run) ?? []), m]);
                 for (const [runId, comments] of byRun) await recordComments(db, runId, job.ref, comments);
@@ -378,6 +396,7 @@ export async function runReviewJob(job: Job, deps: ReviewJobDeps): Promise<void>
               } catch (error) {
                 log({ event: 'repair_failed', job: job.id, reason: codeOf(error) });
               }
+              noted = notedOf([...read, ...missed]);
               earlier = earlierOf({ last, runs, stored, threads });
             }
           }
@@ -442,6 +461,15 @@ export async function runReviewJob(job: Job, deps: ReviewJobDeps): Promise<void>
         }));
       } catch {
         log({ event: 'render_failed', job: job.id, repo, number: job.ref.number });
+      }
+      // The notes: after the findings' comments, which the read-back takes the first entries for.
+      if (body !== '' && result.status === 'ok' && deps.settingsFor(repo).inlineNotes) {
+        try {
+          comments = [...comments, ...renderNotes(result, noted)];
+        } catch {
+          // Notes that cannot be rendered are none: the review goes without them.
+          log({ event: 'notes_failed', job: job.id });
+        }
       }
       try {
         deps.spend.noteRun(result.usage);
@@ -539,7 +567,7 @@ export async function runReviewJob(job: Job, deps: ReviewJobDeps): Promise<void>
     const target = toPublish;
     if (!deps.dryRun && written && target !== null) {
       const out = await publishRun({ forge: deps.forge, writer: deps.writer, lineUrl: deps.lineUrl, commentUrl: deps.commentUrl },
-        { ref: job.ref, installation, run: target, trigger: job.trigger, requestedBy, known: knownOf(runs) });
+        { ref: job.ref, installation, run: target, trigger: job.trigger, requestedBy, known: knownOf(runs), resumed: resumed !== null });
       publish = out;
       const finish = (outcome: string): Promise<boolean> => tried(async () => { await finishJob(db, job.id, 'done', outcome, nowIso); });
       if (out.kind === 'published') {
@@ -548,7 +576,7 @@ export async function runReviewJob(job: Job, deps: ReviewJobDeps): Promise<void>
           await finishJob(tx, job.id, 'done', 'published', nowIso);
         }));
         if (written) {
-          await readBack(target, installation, out.reviewId);
+          await readBack(target, installation, out.reviewId, out.notesDropped);
           await threadFollowUp(target, installation, out.reviewId);
         }
       } else if (out.kind === 'moved' && manual && job.reason === 'command') {
@@ -578,7 +606,10 @@ export async function runReviewJob(job: Job, deps: ReviewJobDeps): Promise<void>
         written = await finish('publish_rejected');
         if (written) await fail(installation, 'publish_rejected');
       } else {
-        written = await tried(async () => { requeued = (await requeueJob(db, job.id, later(retryWait), nowIso, false)) === 'requeued'; });
+        // After a network or server error GitHub may hold the review all the same: the later start, which adopts it, waits the longer time.
+        const unsettled = out.code === 'github_network' || /^github_5[0-9]{2}$/.test(out.code);
+        const wait = unsettled ? RETRY_WAITS_MS[1]! : retryWait;
+        written = await tried(async () => { requeued = (await requeueJob(db, job.id, later(wait), nowIso, false)) === 'requeued'; });
         if (written && !requeued) await fail(installation, 'superseded');
       }
     }
@@ -594,6 +625,7 @@ export async function runReviewJob(job: Job, deps: ReviewJobDeps): Promise<void>
       resumed: resumed !== null, adopted: publish?.kind === 'published' && publish.adopted,
       threads_due: threadsDueOf(result ?? resumed?.result), verdicts: verdictsOf(result ?? resumed?.result).length, duplicates: duplicatesOf(result ?? resumed?.result),
       blocking_on_unchanged: blockingOnUnchangedOf(result ?? resumed?.result), nothing_new: endedNothingNew,
+      notes: endedNothingNew ? 0 : notesOf(run.comments), notes_dropped: publish?.kind === 'published' ? publish.notesDropped : null,
     });
   } catch (error) {
     if (result !== null) {

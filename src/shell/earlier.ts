@@ -31,7 +31,7 @@ function diffHashOf(run: StoredRun, path: string): string | null {
   return null;
 }
 
-/** First comments of threads that belong to a review this service published and are not stored, each tied to its finding. */
+/** First comments of threads that belong to a review this service published and are not stored, each tied to its finding, or to its note: a missed note is repaired as a note. */
 export function missedComments(args: { runs: StoredRun[]; stored: Stored[]; threads: ReviewThread[] }): Stored[] {
   const known = new Set(args.stored.map((s) => s.commentId));
   const missed: Stored[] = [];
@@ -47,7 +47,7 @@ export function missedComments(args: { runs: StoredRun[]; stored: Stored[]; thre
   return missed;
 }
 
-/** What the engine is told about the pull request's earlier review and its threads. */
+/** What the engine is told about the pull request's earlier review and its threads. Only the three finding severities count: a note is no earlier thread, so it is not shown, owes no verdict, gets no reply and is no source of a duplicate. */
 export function earlierOf(args: { last: StoredRun; runs: StoredRun[]; stored: Stored[]; threads: ReviewThread[] }): EarlierState {
   const byComment = new Map(args.stored.filter((s) => SEVERITIES.includes(s.severity)).map((s) => [s.commentId, s]));
   const newestFirst = args.runs.filter((r) => r.published).sort((a, b) => b.id - a.id);

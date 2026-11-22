@@ -192,7 +192,7 @@ function commentBody(f: Finding): string {
 }
 
 // The part after the score: the category in a code span, then the dash and the reason when there is one.
-function scoreTail(entry: ScoreEntry): string {
+export function scoreTail(entry: ScoreEntry): string {
   const reason = inertInline(firstLine(entry.reason));
   return `${codeSpan(entry.category)}${reason === '' ? '' : ` \u2014 ${reason}`}`;
 }
@@ -206,10 +206,14 @@ function wholeFileLine(file: FileScore, level: NonNullable<FileScore['fileLevel'
   return file.wholeFile === null ? head : `${head} ${scoreTail(file.wholeFile)}`;
 }
 
+export function blockLabel(span: Span): string {
+  const range = span.first === span.last ? `line ${span.first}` : `lines ${span.first}-${span.last}`;
+  return `${span.side === 'LEFT' ? 'old ' : ''}${range}`;
+}
+
 function blockLine(file: FileScore, block: BlockScore, entry: ScoreEntry, lineUrl: Meta['lineUrl']): string {
   const { span } = block;
-  const range = span.first === span.last ? `line ${span.first}` : `lines ${span.first}-${span.last}`;
-  const label = `${span.side === 'LEFT' ? 'old ' : ''}${range}`;
+  const label = blockLabel(span);
   const shown = lineUrl === null ? label : `[${label}](${lineUrl(file, span)})`;
   // A reason written on another pull request is not shown here: only its category.
   const base = `- ${shown}, ${entry.score}% ${block.origin === 'other_pull_request' ? codeSpan(entry.category) : scoreTail(entry)}`;
