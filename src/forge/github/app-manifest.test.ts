@@ -5,9 +5,9 @@ import { missingFor } from './app-info.ts';
 
 const infoWith = (permissions: Record<string, string>, events: string[]) => ({ botLogin: 'x[bot]', permissions, events });
 
-test('an app made from the manifest lacks nothing the service needs, but the right to resolve', () => {
+test('an app made from the manifest lacks nothing the service needs', () => {
   const info = infoWith(manifest.default_permissions, manifest.default_events);
-  assert.deepEqual([missingFor(info, true), missingFor(info, false)], [[], [{ feature: 'resolving', missing: 'contents:write' }]]);
+  assert.deepEqual([missingFor(info, true), missingFor(info, false)], [[], []]);
 });
 
 test('the manifest asks for no permission the service does not use', () => {
@@ -29,8 +29,8 @@ test('the manifest asks for no event the service does not use', () => {
   }
 });
 
-test('the manifest asks to write pull requests and issues because the service writes them', () => {
-  for (const name of ['pull_requests', 'issues']) {
+test('the manifest asks to write pull requests, issues and contents because a feature needs each', () => {
+  for (const name of ['pull_requests', 'issues', 'contents']) {
     const permissions = { ...manifest.default_permissions, [name]: 'read' };
     const missing = missingFor(infoWith(permissions, manifest.default_events), false).map((m) => m.missing);
     assert.ok(missing.includes(`${name}:write`), name);
@@ -42,6 +42,6 @@ test('the manifest is private, has an active hook and no address to come back to
   assert.equal(manifest.public, false);
   assert.deepEqual(manifest.hook_attributes, { url: 'https://example.invalid/webhooks/github', active: true });
   assert.equal('redirect_url' in manifest, false);
-  assert.deepEqual(manifest.default_permissions, { pull_requests: 'write', contents: 'read', issues: 'write', metadata: 'read' });
+  assert.deepEqual(manifest.default_permissions, { pull_requests: 'write', contents: 'write', issues: 'write', metadata: 'read' });
   assert.deepEqual(manifest.default_events, ['pull_request', 'issue_comment', 'pull_request_review', 'pull_request_review_comment', 'pull_request_review_thread']);
 });

@@ -12,6 +12,7 @@ These notes record what happened while `2026-11-21-inline-notes-and-the-app-mani
 - At the end: 1,844 tests pass, the type check and the lint are clean, source and tests are ASCII.
 - The real run under Docker was made on the final code. What it showed is below.
 - Inline notes were tried against a real GitHub App. The command that creates the app was not: it needs a person at a browser.
+- After the merge the owner ruled on the first question put to him: the manifest asks for `contents` write, so that an app made from it resolves threads (call 2). The manifest, its tests, the README and the plan were changed in one commit. The suite still counts 1,844 tests.
 
 ## Decisions taken while building
 
@@ -90,7 +91,6 @@ On 2026-11-21 and 22 the branch was tried against the real GitHub App and the pr
 - **The gate** (stage 5) is next. What is stored here lets it tell a note from a finding.
 - **A note's replies counted as labels for the score:** stage 8.
 - **For the owner to decide:**
-  - whether the manifest should ask for `contents` write, so that an app made from it resolves threads (call 2);
   - whether a recorded review that is young and finds no review of its own on GitHub should wait instead of being posted (decision 12 covers the usual case by time; a `/review` or a reopening within seconds of the failure can still start too early);
   - whether notes that were refused should be remembered, so that one note GitHub never accepts stops costing the others (call 10).
 - **Known and left as they are:**
@@ -100,6 +100,7 @@ On 2026-11-21 and 22 the branch was tried against the real GitHub App and the pr
   - If the list of the app's own reviews does not show a review GitHub created, the review is posted a second time; the code cannot tell the two cases apart.
   - Each note is a thread: the limits on reading a pull request's threads and comments are reached sooner.
   - Each later permission (the gate's, automatic approval's) is added by hand in the app's settings and accepted by every installation (call 1).
+  - Every app made from the manifest may push to the repositories it is installed on, though the service has no code that does (call 2, the owner's ruling). An adopter who will not grant that lowers `Contents` in the app's settings, which was not tried.
   - The last re-check's two leftovers, both needing someone to move or replace the secrets file during the minute the command waits. A reserved file that was moved aside holds the secrets, while the command ends with `write_failed` and says no key is in anyone's hands. And on a stop or a failed exchange the command removes whatever the path names, also a file put in the reserved one's place. The README says both.
 
 ## Not verified
