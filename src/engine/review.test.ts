@@ -882,7 +882,7 @@ test('with no history and no lookup the request is the one a first review sends 
 // wholly into scored parts, by the hunk's hash and surroundings, with their places.
 // `covered`: the last of them was published, so each file it read is covered at the diff it had.
 // `readAt`: the head of the published run that read each file the last of them read, with the hashes it had then.
-// A block with no score of its own is stood for by the whole-file score of a file a review left covered, unless its hash has an entry.
+// A block with no score of its own in a file a review left covered with a whole-file score is a stood-for pair, also when its hash has an entry.
 function historyFrom(results: ReviewResult | ReviewResult[], extra: {
   covered?: boolean; lastReview?: ScoreHistory['lastReview']; shown?: string | null; readAt?: string;
 } = {}): ScoreHistory {
@@ -954,7 +954,7 @@ function historyFrom(results: ReviewResult | ReviewResult[], extra: {
         path,
         blocks: [...acc.entries].map(([hash, k]) => ({ hash, arounds: [...(acc.arounds.get(hash) ?? [])], entry: k.entry, raisedFrom: k.raisedFrom })),
         splits: [...acc.splits.values()],
-        stoodFor: [...acc.stood.values()].filter((one) => !acc.entries.has(one.hash)),
+        stoodFor: [...acc.stood.values()],
         wholeFile: acc.wholeFile, coveredAt: acc.coveredAt, readAt: acc.readAt,
       };
     }),
@@ -1801,4 +1801,30 @@ test('no score falls: a block whose neighbours change and change back, and two h
   assert.deepEqual(headersOf(edited), ['### Block B1 (2 changed lines, not scored)', '### Block B2 (2 changed lines, scored)']);
   assert.deepEqual(t3.scores[0]!.blocks.map((one) => [one.entry?.score, one.origin]), [[15, undefined], [85, 'earlier_run']]);
   assert.equal(t3.scores[0]!.finalScore, 85);
+
+  // A block scored 20; a line beside it changes: asked, the model gives the file 50 and the block nothing. The review after asks nothing.
+  const c1 = await firstOf([delayFile(2)], onT({ blocks: [{ id: 'B1', score: 20, category: 'fix', reason: '' }] }));
+  const wholeOnly = deps({ files: [beside], answers: [onT({ score: 50, category: 'business_rule', reason: 'Only admins wait.' })] });
+  const c2 = await review({ ...input, mode: 'full', history: historyFrom([c1]) }, wholeOnly);
+  assert.deepEqual([headersOf(wholeOnly), c2.scores[0]!.blocks[0]!.entry, c2.scores[0]!.finalScore, c2.scores[0]!.covered], [['### Block B1 (2 changed lines, not scored)'], null, 50, true]);
+  const after = deps({ files: [beside] });
+  const c3 = await review({ ...input, mode: 'incremental', history: historyFrom([c1, c2], { covered: true, lastReview: LAST, readAt: NOW }) }, after);
+  assert.equal(after.model.requests.length, 0);
+  assert.deepEqual([c3.scores[0]!.blocks[0]!.entry?.score, c3.scores[0]!.blocks[0]!.origin, c3.scores[0]!.fileLevel, c3.scores[0]!.finalScore],
+    [20, 'earlier_run', { score: 50, source: 'whole_file' }, 50]);
+
+  // A hunk split by the model into parts scored 10 and 20; a line beside it changes: asked as one, 70; the line changes back: one block at 70, not asked.
+  const rows = Array.from({ length: 32 }, (_, i) => `+const row${i} = ${i * 13};`);
+  const tall = (head: string): ChangedFile => ({ path: 'src/t.ts', previousPath: null, status: 'modified', additions: 32, deletions: 0, patch: ['@@ -1,1 +1,33 @@', ` ${head}`, ...rows].join('\n') });
+  const d1 = await firstOf([tall('head')], onT({ blocks: [{ id: 'B1', parts: [
+    { first: 'R2', last: 'R17', score: 10, category: 'test', reason: '' }, { first: 'R18', last: 'R33', score: 20, category: 'fix', reason: '' },
+  ] }] }));
+  assert.deepEqual(d1.scores[0]!.blocks.map((one) => [one.id, one.entry?.score]), [['B1.1', 10], ['B1.2', 20]]);
+  const whole = deps({ files: [tall('other head')], answers: [onT({ blocks: [{ id: 'B1', score: 70, category: 'data_model', reason: 'Adds the rows.' }] })] });
+  const d2 = await review({ ...input, mode: 'full', history: historyFrom([d1]) }, whole);
+  assert.deepEqual([headersOf(whole), d2.scores[0]!.finalScore], [['### Block B1 (32 changed lines, not scored)'], 70]);
+  const backTall = deps({ files: [tall('head')], answers: [onT({ blocks: [] })] });
+  const d3 = await review({ ...input, mode: 'full', history: historyFrom([d1, d2]) }, backTall);
+  assert.deepEqual(headersOf(backTall), ['### Block B1 (32 changed lines, scored)']);
+  assert.deepEqual([d3.scores[0]!.blocks.map((one) => [one.id, one.entry?.score, one.origin]), d3.scores[0]!.finalScore], [[['B1', 70, 'earlier_run']], 70]);
 });

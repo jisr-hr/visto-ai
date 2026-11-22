@@ -107,12 +107,14 @@ test('a block is remembered as stood for only by a run that left the file covere
   const stood = (over: Partial<FileScore>) => of([run(1, { scores: [file('src/a.ts', [blkNoEntry('h1')], { wholeFile: entry(60), covered: true, ...over })] })]).files[0]!.stoodFor;
   assert.deepEqual([stood({}), stood({ covered: false }), stood({ wholeFile: null })], [[{ hash: 'h1', around: AROUND }], [], []]);
 });
-test('a block that has a score of its own is not stood for', () => {
+test('a block that has a score of its own is still remembered as stood for: the model was asked for it among those lines', () => {
   const runs = [
     run(1, { scores: [file('src/a.ts', [blk('h1', 30)])] }),
     run(2, { scores: [file('src/a.ts', [blkNoEntry('h1'), blkNoEntry('h2')], { wholeFile: entry(60), covered: true })] }),
   ];
-  assert.deepEqual(of(runs).files[0]!.stoodFor, [{ hash: 'h2', around: AROUND }]);
+  assert.deepEqual(of(runs).files[0]!.stoodFor, [{ hash: 'h1', around: AROUND }, { hash: 'h2', around: AROUND }]);
+  // The entry stays what it was.
+  assert.deepEqual(of(runs).files[0]!.blocks.map((b) => [b.hash, b.entry.score]), [['h1', 30]]);
 });
 test('with the scorer nothing is stood for', () => {
   const runs = [run(1, { scores: [file('src/a.ts', [blkNoEntry('h1')], { wholeFile: entry(60), covered: true })] })];
@@ -335,8 +337,8 @@ test('a split and the blocks a whole-file score stood for carry their surroundin
     run(1, { scores: [file('src/a.ts', [blk('h1', 30, { around: X })])] }),
     run(2, { scores: [file('src/a.ts', [blkNoEntry('h1', { around: Y }), blkNoEntry('h2', { around: X }), blkNoEntry('h2', { around: Y })], { wholeFile: entry(60), covered: true })] }),
   ];
-  // Less those whose hash has an entry, whatever its surroundings.
-  assert.deepEqual(of(runs).files[0]!.stoodFor, [{ hash: 'h2', around: X }, { hash: 'h2', around: Y }]);
+  // Every one, also of a hash that has an entry.
+  assert.deepEqual(of(runs).files[0]!.stoodFor, [{ hash: 'h1', around: Y }, { hash: 'h2', around: X }, { hash: 'h2', around: Y }]);
 });
 test('the scores to store carry their surroundings', () => {
   const result = { scores: [{ ...file('src/a.ts', []), blocks: [blk('h1', 40, { around: X }), { ...blk('h2', 50), around: '' }, { ...blk('h3', 60), around: 7 }] }] };

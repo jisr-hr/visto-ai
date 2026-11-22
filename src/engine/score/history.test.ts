@@ -466,27 +466,41 @@ test('of two hunks with the same changed lines, each among known lines, both sta
   assert.deepEqual([...keptScores(left, history, [])!.entries].map(([id, v]) => [id, v.entry.score]), [['B1', 85]]);
 });
 
-test('a block that stood under the whole-file score and has a score of its own stored elsewhere is asked for again and held', () => {
-  const c = ctx('src/a.ts', hunkAt(10, 'first'), 'old/a.ts');
+test('a block the model left to the whole-file score among these lines, whose changed lines have a score, is kept at that score and not asked for', () => {
+  const c = ctx('src/a.ts', amongOther(10, 'first'));
   const b = c.blocks[0]!;
-  // As when a path and its earlier name are joined: one stood for the block among these lines, the other scored it among others.
-  const k = keptScores(c, H([
-    hist({ path: 'old/a.ts', stoodFor: [pair(b.hash, b.around)], wholeFile: entry(30) }),
-    hist({ path: 'src/a.ts', blocks: [stored(b.hash, 55, null, OTHER_LINES)] }),
+  // Scored 20 among other lines; among these the model gave the file 50 and the block nothing.
+  const k = keptScores(c, H([hist({ blocks: [stored(b.hash, 20, null, OTHER_LINES)], stoodFor: [pair(b.hash, b.around)], wholeFile: entry(50), coveredAt: [fileDiffHash(c.hunks)!] })]), [])!;
+  assert.deepEqual([...k.entries].map(([id, v]) => [id, v.entry.score, v.origin]), [['B1', 20, 'earlier_run']]);
+  assert.deepEqual([[...k.stoodFor], [...k.scoredHunks], heldOf(k), k.wholeFile?.score, k.settled], [[], ['B1'], [], 50, true]);
+  // The same with the two stored under a path and its earlier name.
+  const renamed = ctx('src/a.ts', amongOther(10, 'first'), 'old/a.ts');
+  const j = keptScores(renamed, H([
+    hist({ path: 'old/a.ts', blocks: [stored(b.hash, 20, null, OTHER_LINES)] }),
+    hist({ path: 'src/a.ts', stoodFor: [pair(b.hash, b.around)], wholeFile: entry(50), coveredAt: [fileDiffHash(renamed.hunks)!] }),
   ]), [])!;
-  assert.deepEqual([[...k.stoodFor], [...k.scoredHunks], k.entries.size, heldOf(k)], [[], [], 0, [['B1', 55]]]);
+  assert.deepEqual([[...j.entries].map(([id, v]) => [id, v.entry.score, v.origin]), heldOf(j), j.settled], [[['B1', 20, 'earlier_run']], [], true]);
 });
 
+test('a hunk split among these lines and scored whole among others is kept whole at its score', () => {
+  const k = keptScores(forty, H([hist({
+    blocks: [stored(forty.blocks[0]!.hash, 70, null, OTHER_LINES), stored(P1, 10), stored(P2, 20)],
+    splits: [split([{ hash: P1, range: [0, 19] }, { hash: P2, range: [20, 39] }])],
+  })]), [])!;
+  assert.deepEqual(k.blocks.map((b) => b.id), ['B1']);
+  assert.deepEqual([...k.entries].map(([id, v]) => [id, v.entry.score, v.origin, v.range]), [['B1', 70, 'earlier_run', null]]);
+  assert.deepEqual([[...k.scoredHunks], heldOf(k)], [['B1'], []]);
+});
 test('a hunk scored whole, then split among other lines, does not stand below its highest part when it is back', () => {
   // What the history holds once the hunk was raised to its highest part: the hunk's entry at 90, among the lines it was scored whole among.
   const k = keptScores(forty, H([hist({ blocks: [stored(forty.blocks[0]!.hash, 90), stored(P1, 15, null, OTHER_LINES), stored(P2, 90, null, OTHER_LINES)] })]), [])!;
   assert.deepEqual([...k.entries].map(([id, v]) => [id, v.entry.score, v.origin]), [['B1', 90, 'earlier_run']]);
 });
 
-test('a hunk whose stored split is found but no longer fits is held to the score stored for its changed lines', () => {
+test('a hunk whose stored split is found but no longer fits is kept whole at the score stored for its changed lines', () => {
   const k = keptScores(forty, H([hist({
     blocks: [stored(forty.blocks[0]!.hash, 50, null, OTHER_LINES), stored(P1, 15), stored(P2, 92)],
     splits: [split([{ hash: P1, range: [0, 19] }, { hash: P2, range: [20, 49] }])],
   })]), [])!;
-  assert.deepEqual([k.blocks.map((b) => b.id), k.entries.size, heldOf(k), k.floor], [['B1'], 0, [['B1', 50]], 92]);
+  assert.deepEqual([k.blocks.map((b) => b.id), [...k.entries].map(([id, v]) => [id, v.entry.score]), heldOf(k), k.floor], [['B1'], [['B1', 50]], [], 92]);
 });

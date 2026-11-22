@@ -157,7 +157,8 @@ export function historyOf(args: { runs: StoredRun[]; last: StoredRun | null; by:
     const blocks: StoredEntry[] = [...acc.blocks].map(([hash, k]) => ({ hash, arounds: [...(acc.arounds.get(hash) ?? [])], entry: { ...k.entry }, raisedFrom: k.raisedFrom }));
     files.push({
       path, blocks, splits: [...acc.splits.values()],
-      stoodFor: [...acc.stood.values()].filter((pair) => !acc.blocks.has(pair.hash)),
+      // Every one, also of a hash that has an entry: it tells that the model was asked among those lines.
+      stoodFor: [...acc.stood.values()],
       wholeFile: acc.wholeFile === null ? null : { ...acc.wholeFile },
       coveredAt: [...acc.coveredAt], readAt: acc.readAt,
     });

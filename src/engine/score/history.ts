@@ -122,15 +122,20 @@ export function keptScores(context: FileContext, history: ScoreHistory | null, r
   const open: Block[] = []; // blocks the history does not settle, in diff order
   for (const block of context.blocks) {
     present.add(block.hash);
-    const stored = answering(j, block.hash, block.around);
-    if (stored !== undefined) {
+    const stored = j?.entries.get(block.hash);
+    const split = j?.splits.find((s) => s.hunkHash === block.hash && answers(s.around) && s.around === block.around);
+    const stood = stoodForHashes.has(keyOf(block.hash, block.around));
+    // The model was asked for this block among these lines: a score was stored for its changed lines among them,
+    // the whole-file score was left to stand for it among them, or it was split among them.
+    const askedHere = (stored !== undefined && stored.arounds.includes(block.around)) || stood || split !== undefined;
+    if (askedHere && stored !== undefined) {
+      // What it keeps is decided by its changed lines alone: whole, at the score stored for them, even when a split is stored for it.
       blocks.push(block);
       entries.set(block.id, { entry: stored.entry, origin: 'earlier_run', raisedFrom: stored.raisedFrom ?? null, range: null });
       scoredHunks.add(block.hunk);
       continue;
     }
-    const split = j?.splits.find((s) => s.hunkHash === block.hash && answers(s.around) && s.around === block.around);
-    if (split !== undefined) {
+    if (askedHere && split !== undefined) {
       const stParts = list(split.parts);
       const parts = partsAt(block, stParts.map((p) => p.range));
       const fits = parts !== null && parts.every((p, i) => p.hash === stParts[i]!.hash && answering(j, p.hash, p.around) !== undefined);
@@ -143,14 +148,12 @@ export function keptScores(context: FileContext, history: ScoreHistory | null, r
         });
         scoredHunks.add(block.hunk);
       } else {
-        blocks.push(block); // the hunk is not kept
-        hold(block);
+        blocks.push(block); // the hunk is not kept; its changed lines have no score to hold it to
       }
       continue;
     }
     blocks.push(block);
-    // A block whose changed lines have a score of their own is held to it, not stood for.
-    if (stoodForHashes.has(keyOf(block.hash, block.around)) && !(j?.entries.has(block.hash) ?? false)) {
+    if (askedHere && stood) {
       stoodFor.add(block.id);
       scoredHunks.add(block.hunk);
       continue;
