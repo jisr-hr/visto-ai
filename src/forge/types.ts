@@ -151,3 +151,27 @@ export interface ForgeWriter {
   /** Marks a thread resolved. Sent once. */
   resolveThread(installation: string, threadId: string): Promise<void>;
 }
+
+export interface OwnCheck {
+  id: string;
+  status: 'queued' | 'in_progress' | 'completed';
+  conclusion: string | null;         // as the git service names it; null while the check is not completed
+  title: string; summary: string;    // '' when the check has none
+}
+export interface CheckWrite {
+  id: string | null;                 // the check to rewrite; null creates one on `commit`
+  commit: string; name: string;
+  status: 'queued' | 'in_progress' | 'completed';
+  conclusion: 'success' | 'action_required' | 'failure' | null;   // set exactly when the status is completed
+  title: string; summary: string;
+}
+export interface ForgeChecks {
+  /** The app's own check of that name on a commit, the newest when there are several; null when there is none. Rejects with a short code. */
+  findCheck(ref: PullRequestRef, installation: string, commit: string, name: string): Promise<OwnCheck | null>;
+  /** Creates the check, or rewrites the one named by `id`. Sent once. Rejects with a short code and says nothing about whether it took effect. */
+  writeCheck(ref: PullRequestRef, installation: string, check: CheckWrite): Promise<{ id: string }>;
+  /** Those of `names` that are green on the commit: every commit status and newest check run of that name says success, and at least one reports it. Rejects with a short code. */
+  greenChecks(ref: PullRequestRef, installation: string, commit: string, names: string[]): Promise<string[]>;
+  /** Whether `login` is an active member of the team `<org>/<slug>`. Rejects with a short code when the git service did not say. */
+  isTeamMember(installation: string, team: string, login: string): Promise<boolean>;
+}
