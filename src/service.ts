@@ -12,9 +12,10 @@ import { gatingOf } from './gate/gating.ts';
 import { runGateJob } from './gate/job.ts';
 import type { GateJobDeps } from './gate/job.ts';
 import { createKeyedLock } from './gate/lock.ts';
+import { askWaiting, sweepGate } from './gate/sweep.ts';
 import { ALERT_TIMEOUT_MS, createAlerts } from './shell/alerts.ts';
 import type { Alert } from './shell/alerts.ts';
-import { isShortCode } from './shell/codes.ts';
+import { codeOf, isShortCode } from './shell/codes.ts';
 import { dryChecks, dryWriter } from './shell/dry-writer.ts';
 import { createListener } from './shell/http.ts';
 import type { RequestLike, ResponseLike } from './shell/http.ts';
@@ -121,19 +122,39 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps): Pr
     raisedGate.add(key);
     alert(code, details);
   };
+  /** Why reviews do not start now, as the short code the gate jobs are given; null when they do. */
+  async function pauseCode(): Promise<string | null> {
+    if (health.paused(clock())) return 'model_error';
+    return (await spend.level()) === 'limit' ? 'spend_limit' : null;
+  }
+  /** Whether the gate is in use here: out of dry run, with some repository's gate enabled. */
+  const gateLive = !config.dryRun && gateUseOf(config).check;
+  /** The pause the review runner's last pass saw; null at start. */
+  let pauseSeen: string | null = null;
+  /** When the pause begins, ends or changes, the checks of the waiting reviews are asked for. A failure is logged, and the next pass tries again. */
+  async function mayStartReview(): Promise<boolean> {
+    const code = await pauseCode();
+    if (gateLive && code !== pauseSeen) {
+      try {
+        await askWaiting(db, settingsFor, clock().toISOString());
+        pauseSeen = code;
+        void gateRunner.tick();
+      } catch (error) {
+        say({ event: 'gate_ask_failed', reason: codeOf(error) });
+      }
+    }
+    return code === null;
+  }
   const runner = createRunner({
     db, kind: 'review', concurrency: config.limits.queueConcurrency, clock, log: say,
-    mayStart: async () => !health.paused(clock()) && (await spend.level()) !== 'limit',
+    mayStart: mayStartReview,
     run: (job) => runReviewJob(job, reviewDeps),
     onLeft: reviewLeft,
   });
   const gateDeps: GateJobDeps = {
     db, forge: deps.forge, checks: config.dryRun ? dryChecks() : deps.checks, writer: config.dryRun ? dryWriter() : deps.writer,
     clock, log: say, settingsFor, dryRun: config.dryRun,
-    paused: async () => {
-      if (health.paused(clock())) return 'model_error';
-      return (await spend.level()) === 'limit' ? 'spend_limit' : null;
-    },
+    paused: pauseCode,
     reviewing: (ref) => runner.holds(ref),
     commentUrl: deps.commentUrl, alert: gateAlert, lock: createKeyedLock(),
     onQueued: () => { tickBoth(); },
@@ -184,6 +205,8 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps): Pr
   try {
     await migrate(db, loadMigrations(MIGRATIONS_DIR));
     await recoverJobs(db, clock(), say);
+    // The checks the record and the config disagree on, or that a review left under way, are asked for.
+    if (gateLive) say({ event: 'gate_sweep', asked: await sweepGate(db, settingsFor, clock().toISOString()) });
     listening = await deps.listen(listener, config.server.port);
   } catch (error) {
     try {
@@ -200,6 +223,12 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps): Pr
     } catch {
       // the start failure is the one to report
     }
+  }
+
+  // A repository in bypass is said at each start.
+  if (!config.dryRun && gateUseOf(config).bypass) {
+    say({ event: 'gate_bypass' });
+    alert('gate_bypass');
   }
 
   // 5 to 8: what follows listening.
