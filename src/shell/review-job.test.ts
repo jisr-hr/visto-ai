@@ -99,6 +99,12 @@ interface Options {
   renderThrows?: boolean;
   /** The job is a manual one, from a /review comment. */
   manual?: boolean;
+  /** A manual job's reason; 'command' when not given. */
+  reason?: string;
+  /** A manual job's comment; '31' when not given. */
+  commentId?: string | null;
+  /** A manual job's requester; 'octo-lead' when not given. */
+  requestedBy?: string;
   /** The association of a manual job's requester; 'member' when not given. */
   association?: string | null;
   /** react and comment reject. */
@@ -135,7 +141,8 @@ async function harness(options: Options = {}) {
     job = (await claimJob(db, again.id, again.runAt))!;
   } else if (options.manual === true) {
     await enqueueJob(db, {
-      ref, reason: 'command', headSha: '', runAt: at(0), now: at(0), delivery: 'd1', replace: true, trigger: 'manual', requestedBy: 'octo-lead', commentId: '31',
+      ref, reason: options.reason ?? 'command', headSha: '', runAt: at(0), now: at(0), delivery: 'd1', replace: true, trigger: 'manual',
+      requestedBy: options.requestedBy ?? 'octo-lead', commentId: 'commentId' in options ? options.commentId ?? null : '31',
       association: 'association' in options ? options.association ?? null : 'member', installation: '99',
     });
     const jobs = await unfinishedJobs(db);
@@ -1734,4 +1741,130 @@ test('a result whose status is not ok is given no note by the job: notes are not
   await runReviewJob(h.job, h.deps);
   assert.deepEqual(h.logged.filter((e) => e.event === 'notes_failed'), []);
   assert.deepEqual((await listRuns(db, REF))[0]!.comments, []);
+});
+
+const GATED: RepoSettings = { ...SETTINGS, gate: { ...GATE_OFF, enabled: true, branches: ['main'] } };
+const SHADOW: RepoSettings = { ...SETTINGS, gate: { ...GATED.gate, mode: 'shadow' } };
+const REPLY_OFF = (settings: RepoSettings): RepoSettings => ({ ...settings, gate: { ...settings.gate, clearByReply: false } });
+const MOVED: LivePullRequest = { ...LIVE, info: { ...LIVE.info, headSha: 'h2' } };
+const MOVED_AGAIN: LivePullRequest = { ...LIVE, info: { ...LIVE.info, headSha: 'h3' } };
+const pendingOf = async (number: number): Promise<Job[]> => (await unfinishedJobs(db)).filter((j) => j.ref.number === number && j.status === 'pending');
+
+test('a push\'s job for a pull request that became gated is dropped', async () => {
+  for (const [settings, number] of [[GATED, 7], [{ ...GATED, gate: { ...GATED.gate, mode: 'bypass' as const } }, 8]] as const) {
+    await published({ pullRequest: number });
+    const h = await live({ settings, pullRequest: number, own: OWN_401 });
+    await runReviewJob(h.job, h.deps);
+    const job = await getJob(db, h.job.id);
+    assert.deepEqual([job?.status, job?.outcome, h.inputs.length, h.writes], ['dropped', 'gated', 0, []]);
+    assert.deepEqual(h.logged, [{ event: 'job', job: h.job.id, repo: 'acme/shop', number, outcome: 'dropped', reason: 'gated' }]);
+    assert.equal((await listRuns(db, { ...REF, number })).length, 1);
+  }
+  assert.deepEqual(await db.query("select id from visto_ai.jobs where kind = 'gate'"), []);
+});
+test('in shadow a push\'s job reviews and publishes as before', async () => {
+  const entries = async (settings: RepoSettings, number: number): Promise<unknown[]> => {
+    await published({ pullRequest: number });
+    const h = await live({ settings, pullRequest: number, own: OWN_401 });
+    await runReviewJob(h.job, h.deps);
+    assert.deepEqual([(await getJob(db, h.job.id))?.outcome, h.inputs[0]!.mode], ['published', 'incremental']);
+    return h.logged.map((e) => ({ ...e, job: null, number: null, run: null }));
+  };
+  assert.deepEqual(await entries(SHADOW, 8), await entries(SETTINGS, 9));
+});
+test('a gated pull request gets a full review at a new head unless the repository says otherwise', async () => {
+  const modeOf = async (settings: RepoSettings, number: number): Promise<unknown[]> => {
+    await published({ pullRequest: number });
+    const h = await manualJob({ reason: 'done', settings, pullRequest: number, own: OWN_401 });
+    await runReviewJob(h.job, h.deps);
+    return [h.inputs[0]!.mode, (await listRuns(db, { ...REF, number })).at(-1)!.mode, (await getJob(db, h.job.id))?.outcome];
+  };
+  assert.deepEqual(await modeOf(GATED, 7), ['full', 'full', 'published']);
+  assert.deepEqual(await modeOf({ ...GATED, newHead: 'incremental' }, 8), ['incremental', 'incremental', 'published']);
+  assert.deepEqual(await modeOf({ ...GATED, gate: { ...GATED.gate, mode: 'bypass' } }, 9), ['full', 'full', 'published']);
+  assert.deepEqual(await modeOf(SHADOW, 10), ['incremental', 'incremental', 'published']);
+  assert.deepEqual(await modeOf(SETTINGS, 11), ['incremental', 'incremental', 'published']);
+  assert.deepEqual(await modeOf({ ...GATED, gate: { ...GATED.gate, branches: ['release'] } }, 12), ['incremental', 'incremental', 'published']);
+});
+test('a /done on the head and base of the last review is a re-check', async () => {
+  await published({ head: 'h1' });
+  const h = await manualJob({ reason: 'done', settings: GATED, own: [[{ id: '401', commit: 'h1' }]] });
+  await runReviewJob(h.job, h.deps);
+  assert.deepEqual([h.inputs[0]!.mode, (await listRuns(db, REF)).at(-1)!.mode, (await getJob(db, h.job.id))?.outcome], ['recheck', 'recheck', 'published']);
+});
+test('with clearing by reply off a resolved thread with a person\'s reply is judged again', async () => {
+  const RESOLVED: ReviewThread = { ...THREAD, resolved: true };
+  const settledUnder = async (settings: RepoSettings, number: number): Promise<unknown> => {
+    await published({ pullRequest: number });
+    const h = await manualJob({ reason: 'done', settings, pullRequest: number, own: OWN_401, threads: [[RESOLVED]] });
+    await runReviewJob(h.job, h.deps);
+    return h.inputs[0]!.earlier?.threads.map((t) => [t.id, t.resolved, t.settled]);
+  };
+  assert.deepEqual(await settledUnder(REPLY_OFF(GATED), 7), [['PRRT_1', true, false]]);
+  assert.deepEqual(await settledUnder(REPLY_OFF({ ...GATED, gate: { ...GATED.gate, mode: 'bypass' } }), 8), [['PRRT_1', true, false]]);
+  assert.deepEqual(await settledUnder(GATED, 9), [['PRRT_1', true, true]]);
+  assert.deepEqual(await settledUnder(REPLY_OFF(SHADOW), 10), [['PRRT_1', true, true]]);
+  assert.deepEqual(await settledUnder(REPLY_OFF(SETTINGS), 11), [['PRRT_1', true, true]]);
+  assert.deepEqual(await settledUnder(REPLY_OFF({ ...GATED, gate: { ...GATED.gate, branches: ['release'] } }), 12), [['PRRT_1', true, true]]);
+});
+test('a /done review and a re-run start over once when the head moved, with the fields of who asked', async () => {
+  const done = await manualJob({ reason: 'done', settings: GATED, liveAfter: MOVED });
+  await runReviewJob(done.job, done.deps);
+  assert.deepEqual([(await getJob(db, done.job.id))?.outcome, done.writes.some((w) => w[0] === 'comment' || w[0] === 'react')], ['head_moved', false]);
+  const [retry, ...others] = await pendingOf(7);
+  assert.deepEqual(others, []);
+  assert.deepEqual([retry!.kind, retry!.trigger, retry!.reason, retry!.headSha, retry!.requestedBy, retry!.commentId, retry!.association, retry!.installation, retry!.runAt],
+    ['review', 'manual', 'done_retry', '', 'octo-lead', '31', 'member', '99', at(0)]);
+
+  const rerun = await manualJob({ reason: 'rerun', settings: GATED, pullRequest: 8, requestedBy: 'octo-dev', commentId: null, association: null, liveAfter: MOVED });
+  await runReviewJob(rerun.job, rerun.deps);
+  assert.equal((await getJob(db, rerun.job.id))?.outcome, 'head_moved');
+  const [again] = await pendingOf(8);
+  assert.deepEqual([again!.trigger, again!.reason, again!.requestedBy, again!.commentId, again!.association, again!.installation],
+    ['manual', 'rerun_retry', 'octo-dev', null, null, '99']);
+
+  // A retry whose head moved again does not start over: the live head gets a push's job, and the one who asked is told.
+  const second = await manualJob({ reuseJob: retry!.id, settings: GATED, live: MOVED, liveAfter: MOVED_AGAIN });
+  await runReviewJob(second.job, second.deps);
+  assert.deepEqual([(await getJob(db, second.job.id))?.outcome, second.writes.at(-1)], ['head_moved', ['comment', '@octo-lead The review did not finish (`head_moved`).']]);
+  assert.deepEqual((await pendingOf(7)).map((j) => [j.trigger, j.reason, j.headSha, j.runAt]), [['automatic', 'synchronize', 'h3', at(180)]]);
+  const third = await manualJob({ reuseJob: again!.id, settings: GATED, pullRequest: 8, live: MOVED, liveAfter: MOVED_AGAIN });
+  await runReviewJob(third.job, third.deps);
+  assert.deepEqual([(await getJob(db, third.job.id))?.outcome, third.writes.filter((w) => w[0] === 'comment' || w[0] === 'react')], ['head_moved', []]);
+  assert.deepEqual((await pendingOf(8)).map((j) => [j.trigger, j.reason, j.headSha]), [['automatic', 'synchronize', 'h3']]);
+  assert.equal(third.logged.some((e) => e.event === 'answer_failed'), false);
+});
+test('a re-run and its retry are not asked who commented, get no reaction and no sentence, and the review names who asked', async () => {
+  for (const [reason, number] of [['rerun', 7], ['rerun_retry', 8]] as const) {
+    const h = await manualJob({ reason, settings: GATED, pullRequest: number, requestedBy: 'octo-dev', commentId: null, association: null });
+    await runReviewJob(h.job, h.deps);
+    assert.deepEqual([(await getJob(db, h.job.id))?.outcome, h.inputs.length], ['published', 1], reason);
+    assert.deepEqual(h.writes.filter((w) => w[0] === 'react' || w[0] === 'comment'), [], reason);
+    assert.equal(h.logged.some((e) => e.event === 'answer_failed'), false, reason);
+    assert.ok((await listRuns(db, { ...REF, number }))[0]!.body.includes('**Full review** requested by @octo-dev.'), reason);
+  }
+  // A re-run whose review fails is told nothing either, and nothing is logged for the comment it does not have.
+  const failing = await manualJob({ reason: 'rerun', settings: GATED, pullRequest: 9, requestedBy: 'octo-dev', commentId: null, association: null,
+    result: failed('model', 'timeout', { dependencies: { model: 'error' } }) });
+  await runReviewJob(failing.job, failing.deps);
+  assert.deepEqual([(await getJob(db, failing.job.id))?.outcome, failing.writes.filter((w) => w[0] === 'react' || w[0] === 'comment')], ['failed', []]);
+  assert.equal(failing.logged.some((e) => e.event === 'answer_failed'), false);
+  // Every other manual job is still asked who commented.
+  const stranger = await manualJob({ reason: 'done', settings: GATED, pullRequest: 10, association: 'none' });
+  await runReviewJob(stranger.job, stranger.deps);
+  assert.deepEqual([(await getJob(db, stranger.job.id))?.outcome, stranger.reads], ['refused', 0]);
+});
+test('a /done job and its retry get no second eyes, and a failure is answered', async () => {
+  for (const [reason, number] of [['done', 7], ['done_retry', 8]] as const) {
+    const h = await manualJob({ reason, settings: GATED, pullRequest: number });
+    await runReviewJob(h.job, h.deps);
+    assert.deepEqual([(await getJob(db, h.job.id))?.outcome, h.writes.filter((w) => w[0] === 'react' || w[0] === 'comment')], ['published', []], reason);
+  }
+  const failing = await manualJob({ reason: 'done', settings: GATED, pullRequest: 9, result: failed('model', 'timeout', { dependencies: { model: 'error' } }) });
+  await runReviewJob(failing.job, failing.deps);
+  assert.deepEqual(failing.writes.filter((w) => w[0] === 'react' || w[0] === 'comment'),
+    [['react', '31', 'confused'], ['comment', '@octo-lead The review did not finish (`review_failed`).']]);
+  const closed = await manualJob({ reason: 'done', settings: GATED, pullRequest: 10, live: { ...LIVE, state: 'closed' } });
+  await runReviewJob(closed.job, closed.deps);
+  assert.deepEqual(closed.writes, [['react', '31', 'confused'], ['comment', '@octo-lead The review was not started (`closed`).']]);
 });

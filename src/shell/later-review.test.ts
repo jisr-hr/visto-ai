@@ -1,6 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { GATE_OFF } from '../config/load.ts';
+import type { RepoSettings } from '../config/load.ts';
+import { listComments } from '../db/review-comments.ts';
+import { evaluateGate, reviewedRun } from '../gate/rule.ts';
 import { testDb } from '../db/testing.ts';
 import { claimJob, enqueueJob, getJob, unfinishedJobs } from '../db/jobs.ts';
 import { savePullRequest } from '../db/pull-requests.ts';
@@ -288,7 +291,7 @@ test('a push that changes nothing in the diff ends as nothing new, with no model
  * what it was posted with, so that the next start reads them. `patches` gives each file's patch at a head; the model answers whatever
  * `answer` holds and every request is kept. `runJob` runs an automatic job for the current head, or with `manual` a /review.
  */
-async function keptThreads(patches: (head: string) => Record<string, string>) {
+async function keptThreads(patches: (head: string) => Record<string, string>, over: Partial<RepoSettings> = {}) {
   const db = await testDb();
   let now = Date.parse('2026-03-01T10:00:00.000Z');
   const iso = (): string => new Date(now).toISOString();
@@ -349,7 +352,7 @@ async function keptThreads(patches: (head: string) => Record<string, string>) {
       sourceFor: async () => ({}) as Source,
     },
     clock: () => new Date(now), log: () => {}, sleep: async () => {},
-    settingsFor: () => ({ primaryBranches: ['main'], scoreThreshold: 70, ignoredAuthors: [], baseBranches: [], newHead: null, inlineNotes: true, gate: GATE_OFF }),
+    settingsFor: () => ({ primaryBranches: ['main'], scoreThreshold: 70, ignoredAuthors: [], baseBranches: [], newHead: null, inlineNotes: true, gate: GATE_OFF, ...over }),
     limits: { inputTokensPerCall: 200_000, batchesPerReview: 6, modelTimeoutSeconds: 240 },
     dryRun: false, writer, engineDeps, review,
     lineUrl: () => 'https://git.example.test/x',
@@ -362,10 +365,11 @@ async function keptThreads(patches: (head: string) => Record<string, string>) {
     ref: REF, author: 'octo-dev', authorIsBot: false, baseBranch: 'main', headBranch: 'feat', headSha: gh.head, draft: false, state: 'open',
     mergedAt: null, closedAt: null, mergeCommit: null, installation: '99', updatedAt: iso(),
   });
-  const runJob = async (manual = false): Promise<string | null | undefined> => {
+  /** An automatic job; with `manual`, a /review; with a reason, a manual job of that reason. */
+  const runJob = async (manual: boolean | string = false): Promise<string | null | undefined> => {
     now += 600_000;
-    await enqueueJob(db, manual
-      ? { ref: REF, reason: 'command', headSha: '', runAt: iso(), now: iso(), delivery: null, replace: true, trigger: 'manual', requestedBy: 'octo-lead', commentId: '31', association: 'member', installation: '99' }
+    await enqueueJob(db, manual !== false
+      ? { ref: REF, reason: manual === true ? 'command' : manual, headSha: '', runAt: iso(), now: iso(), delivery: null, replace: true, trigger: 'manual', requestedBy: 'octo-lead', commentId: '31', association: 'member', installation: '99' }
       : { ref: REF, reason: 'synchronize', headSha: gh.head, runAt: iso(), now: iso(), delivery: null, replace: true, trigger: 'automatic', requestedBy: null, commentId: null, association: null, installation: null });
     const pending = (await unfinishedJobs(db)).find((j) => j.status === 'pending')!;
     const job = (await claimJob(db, pending.id, iso()))!;
@@ -431,5 +435,39 @@ test('more flagged blocks than the cap get their notes over two reviews', async 
     assert.deepEqual((await listRuns(t.db, REF)).map((r) => r.mode), ['full', 'recheck', 'recheck']);
   } finally {
     await t.db.close();
+  }
+});
+
+test('on a gated pull request a silently resolved major is judged again and its verdict is stored for the gate', async () => {
+  for (const verdict of ['fixed', 'open'] as const) {
+    const t = await keptThreads((head) => ({ 'src/a.ts': `@@ -1,1 +1,4 @@\n head\n+const a = 1;\n+const b = total(a); // ${head}\n+export { b };` }),
+      { inlineNotes: false, gate: { ...GATE_OFF, enabled: true, branches: ['main'] } });
+    try {
+      const finding = { path: 'src/a.ts', side: 'RIGHT', line: 3, severity: 'major', body: 'total() is called before a is checked.', beyond_diff: false, quote: `const b = total(a); // ${t.gh.head}` };
+      // A push is not reviewed: the first review is asked for with /done.
+      assert.equal(await t.runJob(), 'gated');
+      t.state.answer = { overview: 'src/a.ts adds a total.', findings: [finding], files: [] };
+      assert.equal(await t.runJob('done'), 'published');
+      assert.equal(t.gh.threads.length, 1);
+      const thread = t.gh.threads[0]!;
+      // Resolved by a person with no reply.
+      thread.resolved = true;
+
+      t.gh.head = 'bbbb222';
+      t.requests.length = 0;
+      t.state.answer = { overview: 'src/a.ts adds a total.', findings: [], files: [], thread_verdicts: [{ thread_id: 'T1', verdict, reply: REASON }] };
+      assert.equal(await t.runJob('done'), 'published', verdict);
+      assert.ok(t.requests.at(-1)!.messages.at(-1)!.content.includes('### Thread T1'), verdict);
+
+      const runs = await listRuns(t.db, REF);
+      assert.deepEqual(runs.map((r) => r.mode), ['full', 'full'], verdict);
+      const reviewed = reviewedRun(runs, 'bbbb222', 'base000')!;
+      const kept = (reviewed.result as ReviewResult).threadVerdicts ?? [];
+      assert.deepEqual(kept.map((v) => [v.threadId, v.verdict]), [[thread.id, verdict]], verdict);
+      const gate = evaluateGate({ threads: structuredClone(t.gh.threads), stored: await listComments(t.db, REF), runs, reviewed, clearByReply: true });
+      assert.deepEqual([gate.blocking.map((b) => b.thread), gate.clearedByReview], verdict === 'fixed' ? [[], 1] : [[thread.id], 0], verdict);
+    } finally {
+      await t.db.close();
+    }
   }
 });
