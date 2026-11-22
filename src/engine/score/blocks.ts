@@ -26,6 +26,15 @@ function hashOf(lines: HunkLine[]): string {
   return hash.digest('hex');
 }
 
+// Every line of a hunk, the unchanged ones included, with its kind and without its number. `blocksOf` leaves meta lines out before this.
+function aroundOf(lines: HunkLine[]): string {
+  const hash = createHash('sha256');
+  for (const line of lines) {
+    hash.update(`${line.kind === 'add' ? '+' : line.kind === 'del' ? '-' : ' '}${line.text}\n`);
+  }
+  return hash.digest('hex');
+}
+
 function spanOf(changed: HunkLine[], fallback: number): Span {
   const added = changed.filter((l) => l.kind === 'add').map((l) => l.newLine!);
   if (added.length > 0) return { side: 'RIGHT', first: Math.min(...added), last: Math.max(...added) };
@@ -34,7 +43,7 @@ function spanOf(changed: HunkLine[], fallback: number): Span {
   return { side: 'RIGHT', first: fallback, last: fallback };
 }
 
-function build(id: string, hunk: string, hunkHash: string | null, lines: HunkLine[], fallback: number): Block {
+function build(id: string, hunk: string, hunkHash: string | null, around: string | null, lines: HunkLine[], fallback: number): Block {
   const hash = hashOf(lines);
   const changed = lines.filter(isChanged);
   const block: Block = {
@@ -42,6 +51,7 @@ function build(id: string, hunk: string, hunkHash: string | null, lines: HunkLin
     hunk,
     hunkHash: hunkHash ?? hash,
     hash,
+    around: around ?? aroundOf(lines),
     anchors: lines.map(anchorOf).filter((a): a is Anchor => a !== null),
     changed: changed.map((l) => anchorOf(l)!),
     span: spanOf(changed, fallback),
@@ -55,6 +65,7 @@ export function blocksOf(hunks: Hunk[]): Block[] {
     build(
       `B${i + 1}`,
       `B${i + 1}`,
+      null,
       null,
       hunk.lines.filter((l) => l.kind !== 'meta'),
       hunk.newStart,
@@ -112,11 +123,11 @@ export function splitBlock(
       continue;
     }
     for (let i = from; i <= to; i++) taken.add(i);
-    kept.push(build(`${block.id}.${position + 1}`, block.hunk, block.hunkHash, slice, block.span.first));
+    kept.push(build(`${block.id}.${position + 1}`, block.hunk, block.hunkHash, block.around, slice, block.span.first));
   }
 
   const left = anchored.filter((l, i) => isChanged(l) && !taken.has(i));
-  const rest = left.length === 0 ? null : build(`${block.id}.rest`, block.hunk, block.hunkHash, left, block.span.first);
+  const rest = left.length === 0 ? null : build(`${block.id}.rest`, block.hunk, block.hunkHash, block.around, left, block.span.first);
   return { parts: kept, rest };
 }
 

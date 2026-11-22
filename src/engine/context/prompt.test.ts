@@ -92,7 +92,7 @@ test('per-file lines follow the heading, previous path only when renamed', () =>
 });
 test('a file with nothing left to score is told it takes no whole-file score', () => {
   const kept = (settled: boolean): KeptScores => ({
-    blocks: [], entries: new Map(), stoodFor: new Set(), wholeFile: null, floor: 0, settled, covered: false, scoredHunks: new Set(['B1']), readAt: null,
+    blocks: [], entries: new Map(), stoodFor: new Set(), wholeFile: null, floor: 0, settled, covered: false, scoredHunks: new Set(['B1']), readAt: null, held: new Map(),
   });
   const header = (c: FileContext): string => buildMessages({ ...args, batch: { files: [c], tokens: 1 } })[2]!.content;
   assert.match(header(ctx('src/a.ts', { kept: kept(true) })), /\ndeletions: 1\nwhole-file score: not allowed\. Every block of this file already has its score\.\n<<<data/);

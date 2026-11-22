@@ -439,7 +439,7 @@ export async function runReviewJob(job: Job, deps: ReviewJobDeps): Promise<void>
             result = await deps.review({ ...input, mode, history: historyOf({ runs, last, by: scoredBy }) }, {
               ...engine,
               reusableScores: async (blocks) => (await reusableScores(db, job.ref, scoredBy, blocks, since)).map((row) => ({
-                path: row.path, hash: row.hash,
+                path: row.path, hash: row.hash, around: row.around,
                 entry: { score: row.score, category: (CATEGORY_NAMES.includes(row.category) ? row.category : 'other') as Category, reason: row.reason },
               })),
             });

@@ -1381,16 +1381,34 @@ test('the scores of a push with nothing new are stored', async () => {
 test('the engine can look up scores other pull requests stored in the last 30 days', async () => {
   const other = { ...REF, number: 8 };
   const day = 86_400;
-  await recordBlockScores(db, 1, other, 'model', [{ path: 'src/a.ts', hash: 'k1', score: 60, category: 'calculation', reason: 'Totals.' }], at(-29 * day));
-  await recordBlockScores(db, 2, other, 'model', [{ path: 'src/a.ts', hash: 'k2', score: 50, category: 'fix', reason: 'Old.' }], at(-31 * day));
-  await recordBlockScores(db, 3, other, 'model', [{ path: 'src/a.ts', hash: 'k3', score: 40, category: 'made_up', reason: 'Odd.' }], at(-29 * day));
+  await recordBlockScores(db, 1, other, 'model', [{ path: 'src/a.ts', hash: 'k1', around: 's1', score: 60, category: 'calculation', reason: 'Totals.' }], at(-29 * day));
+  await recordBlockScores(db, 2, other, 'model', [{ path: 'src/a.ts', hash: 'k2', around: 's1', score: 50, category: 'fix', reason: 'Old.' }], at(-31 * day));
+  await recordBlockScores(db, 3, other, 'model', [{ path: 'src/a.ts', hash: 'k3', around: 's1', score: 40, category: 'made_up', reason: 'Odd.' }], at(-29 * day));
   const h = await live();
   await runReviewJob(h.job, h.deps);
   const lookUp = h.engines[0]!.reusableScores!;
-  assert.deepEqual(await lookUp([{ path: 'src/a.ts', hash: 'k1' }, { path: 'src/a.ts', hash: 'k2' }, { path: 'src/a.ts', hash: 'k3' }]), [
-    { path: 'src/a.ts', hash: 'k1', entry: { score: 60, category: 'calculation', reason: 'Totals.' } },
-    { path: 'src/a.ts', hash: 'k3', entry: { score: 40, category: 'other', reason: 'Odd.' } },
+  assert.deepEqual(await lookUp([{ path: 'src/a.ts', hash: 'k1', around: 's1' }, { path: 'src/a.ts', hash: 'k2', around: 's1' }, { path: 'src/a.ts', hash: 'k3', around: 's1' }]), [
+    { path: 'src/a.ts', hash: 'k1', around: 's1', entry: { score: 60, category: 'calculation', reason: 'Totals.' } },
+    { path: 'src/a.ts', hash: 'k3', around: 's1', entry: { score: 40, category: 'other', reason: 'Odd.' } },
   ]);
+});
+test('the engine looks up and stores scores with their surroundings', async () => {
+  const other = { ...REF, number: 8 };
+  await recordBlockScores(db, 1, other, 'model', [
+    { path: 'src/a.ts', hash: 'k1', around: 's1', score: 60, category: 'calculation', reason: 'Totals.' },
+    { path: 'src/a.ts', hash: 'k1', around: 's2', score: 90, category: 'billing', reason: 'Elsewhere.' },
+    { path: 'src/a.ts', hash: 'k1', around: null, score: 95, category: 'billing', reason: 'Old.' },
+  ], at(-60));
+  const withAround = scoredResult();
+  withAround.scores[0]!.blocks[0]!.around = 's9';
+  const h = await live({ result: withAround });
+  await runReviewJob(h.job, h.deps);
+  const lookUp = h.engines[0]!.reusableScores!;
+  assert.deepEqual(await lookUp([{ path: 'src/a.ts', hash: 'k1', around: 's1' }, { path: 'src/a.ts', hash: 'k1', around: 's3' }]), [
+    { path: 'src/a.ts', hash: 'k1', around: 's1', entry: { score: 60, category: 'calculation', reason: 'Totals.' } },
+  ]);
+  const rows = await db.query<{ number: number; hash: string; around: string | null }>('select number, hash, around from visto_ai.block_scores where number = 7 order by id');
+  assert.deepEqual(rows, [{ number: 7, hash: 'h', around: 's9' }]);
 });
 test('in dry run nothing of this happens', async () => {
   await published({ head: 'h0' });

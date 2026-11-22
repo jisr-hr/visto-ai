@@ -46,6 +46,7 @@ const blockScore = (block: Block, entry: ScoreEntry | null): BlockScore => ({
   span: block.span,
   lines: linesOf(block),
   entry,
+  around: block.around,
 });
 
 interface ValidPart { first: Anchor; last: Anchor; entry: ScoreEntry }
@@ -197,7 +198,7 @@ const keptScore = (block: Block, kept: KeptEntry, by: ScoredBy): BlockScore => (
   ...(by === 'scorer' ? { by } : {}),
 });
 
-// A score given in this run below the floor is raised to it; the given one is kept beside it.
+// A score given in this run below the bound (the file's floor, or the block's hold when higher) is raised to it; the given one is kept beside it.
 function atFloor(score: BlockScore, floor: number): BlockScore {
   if (score.entry === null || score.entry.score >= floor) return score;
   return { ...score, entry: { ...score.entry, score: floor }, raisedFrom: score.entry.score };
@@ -267,11 +268,13 @@ function scoreFile(
     } else if (kept?.stoodFor.has(block.id) === true) {
       scored.push({ score: blockScore(block, null), voided: false, stoodFor: true });
     } else {
+      // A block whose changed lines were scored among other lines cannot score below them; nor can the parts it is cut into.
+      const bound = Math.max(lost, kept?.held.get(block.id) ?? 0);
       for (const s of blocksFor(path, block, items.get(block.id) ?? [], audit)) {
-        let score = atFloor(s.score, lost);
-        if (score.entry === null && given !== null && !s.voided && given.score < lost) {
-          // A whole-file score in place of a block score cannot go under the floor either.
-          score = { ...score, entry: { ...given, score: lost }, raisedFrom: given.score };
+        let score = atFloor(s.score, bound);
+        if (score.entry === null && given !== null && !s.voided && given.score < bound) {
+          // A whole-file score in place of a block score cannot go under the bound either.
+          score = { ...score, entry: { ...given, score: bound }, raisedFrom: given.score };
         } else if (score.entry !== null && by === 'scorer') {
           score = { ...score, by };
         }

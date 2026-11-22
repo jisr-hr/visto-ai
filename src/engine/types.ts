@@ -70,8 +70,8 @@ export interface ReviewDeps {
   token: () => string;        // fresh random text for data markers, 16 hex characters
   log: (entry: Record<string, unknown>) => void;
   scorer?: Scorer;            // scores the blocks in place of the review model, when set
-  /** The highest scores other pull requests of the repository stored for these blocks in the last 30 days. May reject. */
-  reusableScores?: (blocks: Array<{ path: string; hash: string }>) => Promise<Array<{ path: string; hash: string; entry: ScoreEntry }>>;
+  /** The highest scores other pull requests of the repository stored for these blocks, among the same lines, in the last 30 days. May reject. */
+  reusableScores?: (blocks: Array<{ path: string; hash: string; around: string }>) => Promise<Array<{ path: string; hash: string; around: string; entry: ScoreEntry }>>;
 }
 
 export interface RawFinding { path: string; side: Side; line: number; severity: Severity; body: string; quote: string; beyond_diff: boolean }

@@ -17,6 +17,7 @@ export interface Block {
   hunk: string;       // the id of the diff hunk it came from: 'B3' for 'B3.1'
   hunkHash: string;   // the hash of that whole hunk; equal to `hash` for a block that is not a part
   hash: string;       // sha256, hex, of the block's changed lines, without line numbers
+  around: string;     // sha256, hex, of every line of the block's hunk, the unchanged ones included, without line numbers; a part has its hunk's
   anchors: Anchor[];  // every anchored line of the block, context included, in diff order
   changed: Anchor[];  // its added and removed lines, in diff order
   span: Span;
@@ -37,6 +38,7 @@ export interface BlockScore {
   raisedFrom?: number;                              // the score that was given, before the floor raised it
   range?: [number, number];                         // a part: the places of its first and last changed line among its hunk's changed lines
   by?: ScoredBy;                                    // who gave the score; absent reads as 'model'
+  around?: string;                                  // the block's `around`
 }
 
 export type FileLevelSource =
@@ -57,15 +59,18 @@ export interface FileScore {
 
 export interface Verdict { threshold: number; needsHuman: boolean; highest: number }
 
-/** The highest score a block or a part with this hash had of its own at the end of an earlier run. */
-export interface StoredEntry { hash: string; entry: ScoreEntry; raisedFrom: number | null }
-/** A hunk an earlier run split into parts that covered all its changed lines. */
-export interface StoredSplit { hunkHash: string; parts: Array<{ hash: string; range: [number, number] }> }
+/**
+ * The highest score a block or a part with this hash had of its own at the end of an earlier run, wherever it stood.
+ * `arounds`: the surroundings among which a score was stored for it; empty when none was stored with surroundings.
+ */
+export interface StoredEntry { hash: string; arounds: string[]; entry: ScoreEntry; raisedFrom: number | null }
+/** A hunk an earlier run split into parts that covered all its changed lines. `around` is the hunk's, null as in StoredEntry. */
+export interface StoredSplit { hunkHash: string; around: string | null; parts: Array<{ hash: string; range: [number, number] }> }
 export interface FileHistory {
   path: string;
   blocks: StoredEntry[];            // one for each hash
-  splits: StoredSplit[];            // one for each hunk hash: the newest run's parts
-  stoodFor: string[];               // hashes of blocks a covered run left with no entry of their own, under the file's whole-file score
+  splits: StoredSplit[];            // one for each hunk hash and around: the newest run's parts
+  stoodFor: Array<{ hash: string; around: string | null }>;   // blocks a covered run left with no entry of their own, under the file's whole-file score, less those whose hash has an entry
   wholeFile: ScoreEntry | null;     // the highest whole-file score an earlier run left the path with
   coveredAt: string[];              // the diff hashes at which a published run read the file
   readAt: { head: string; hashes: string[] } | null;   // the newest published run that read the file: its head, and every block, part and hunk hash the file had in it

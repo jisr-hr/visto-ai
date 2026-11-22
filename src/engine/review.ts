@@ -216,9 +216,9 @@ async function keepScores(contexts: FileContext[], history: ScoreHistory | null,
   if (history === null && deps.reusableScores === undefined) return [];
   const audit: AuditEntry[] = [];
   const wanted = blocksToLookUp(contexts, history);
-  const reused: Array<{ path: string; hash: string; entry: ScoreEntry }> = [];
+  const reused: Array<{ path: string; hash: string; around: string; entry: ScoreEntry }> = [];
   if (wanted.length > 0 && deps.reusableScores !== undefined) {
-    const asked = new Set(wanted.map((w) => `${w.path}\n${w.hash}`));
+    const asked = new Set(wanted.map((w) => `${w.path}\n${w.hash}\n${w.around}`));
     let answer: unknown = [];
     try {
       answer = await deps.reusableScores(wanted);
@@ -228,10 +228,10 @@ async function keepScores(contexts: FileContext[], history: ScoreHistory | null,
     }
     for (const one of Array.isArray(answer) ? (answer as unknown[]) : []) {
       if (typeof one !== 'object' || one === null) continue;
-      const { path, hash, entry } = one as { path?: unknown; hash?: unknown; entry?: { score?: unknown } | null };
-      if (typeof path !== 'string' || typeof hash !== 'string' || !asked.has(`${path}\n${hash}`)) continue;
+      const { path, hash, around, entry } = one as { path?: unknown; hash?: unknown; around?: unknown; entry?: { score?: unknown } | null };
+      if (typeof path !== 'string' || typeof hash !== 'string' || typeof around !== 'string' || !asked.has(`${path}\n${hash}\n${around}`)) continue;
       if (typeof entry !== 'object' || entry === null || !isWholeScore(entry.score)) continue;
-      reused.push({ path, hash, entry: entry as ScoreEntry });
+      reused.push({ path, hash, around, entry: entry as ScoreEntry });
     }
   }
   for (const context of contexts) {
