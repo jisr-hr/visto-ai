@@ -10,8 +10,7 @@ import { MAX_STARTS } from '../shell/runner.ts';
 import { doneFailed, doneRefused, nothingLeft, skipFailed, skipRefused } from './answers.ts';
 import type { SkipRefusal } from './answers.ts';
 import { gatingOf } from './gating.ts';
-import type { Gating } from './gating.ts';
-import { GATE_RETRY_WAITS_MS, planNow, underWay } from './job.ts';
+import { GATE_RETRY_WAITS_MS, planNow } from './job.ts';
 import type { GateJobDeps } from './job.ts';
 
 /** What is said on the command's comment once its job has ended. */
@@ -20,16 +19,20 @@ type Answer =
   | { kind: 'eyes'; required: { head: string; names: string[] } | null }   // required: the checks to ask about, on that head
   | { kind: 'refused'; text: string };
 
-/** How a command ends. `review`: a review is wanted, with the pull request's gating; the end decides whether it joins one. */
+/** How a command ends. `review`: a review is wanted; the end decides whether it joins one that will run. */
 interface Ending {
   status: 'done' | 'dropped';
   outcome: string;
   code: string | null;
   ask: boolean;
   answer: Answer;
-  review?: Gating;
+  review?: true;
   skip?: { headSha: string; actor: string; reason: string; commentId: string };
 }
+
+/** Whether a review job will run: manual, and asked for by a re-run or by someone D15 lets command. */
+const willRun = (j: Job): boolean =>
+  j.trigger === 'manual' && (j.reason === 'rerun' || j.reason === 'rerun_retry' || mayCommand(j.association));
 
 /** A job finished meanwhile: its end is not stored again and nothing is answered. */
 class Gone extends Error {}
@@ -48,7 +51,9 @@ export async function runGateCommand(job: Job, deps: GateJobDeps, at: { installa
     try { deps.log(entry); } catch { /* a logger that throws changes nothing */ }
   };
   const now = at.now.toISOString();
-  const entry = { event: 'gate', job: job.id, repo: `${job.ref.owner}/${job.ref.repo}`, number: job.ref.number, reason: job.reason, outcome: null as string | null, code: null as string | null };
+  // `requeued` is written only on the entry of a job that was put back, or given up on its last start.
+  const entry: { event: 'gate'; job: number; repo: string; number: number; reason: string; outcome: string | null; code: string | null; requeued?: boolean } =
+    { event: 'gate', job: job.id, repo: `${job.ref.owner}/${job.ref.repo}`, number: job.ref.number, reason: job.reason, outcome: null, code: null };
 
   let ending: Ending;
   try {
@@ -66,6 +71,7 @@ export async function runGateCommand(job: Job, deps: GateJobDeps, at: { installa
       try {
         const wait = GATE_RETRY_WAITS_MS[job.starts <= 1 ? 0 : 1]!;
         const answer = await requeueJob(deps.db, job.id, new Date(at.now.getTime() + wait).toISOString(), now, false);
+        entry.requeued = answer === 'requeued';
         entry.outcome = answer === 'requeued' ? 'put_back' : 'superseded';
       } catch {
         entry.outcome = 'error';
@@ -75,11 +81,12 @@ export async function runGateCommand(job: Job, deps: GateJobDeps, at: { installa
     }
     const text = job.reason === 'done' ? doneFailed(job.requestedBy, code) : skipFailed(job.requestedBy, code);
     ending = { status: 'done', outcome: 'failed', code, ask: true, answer: job.reason === 'rerun' ? { kind: 'none' } : { kind: 'refused', text } };
+    entry.requeued = false;
     try {
       await end(job, deps, ending, now);
-    } catch {
-      // Left as it is: it runs again after the next start.
-      entry.outcome = 'error';
+    } catch (last) {
+      // Already finished: gone. Otherwise left as it is: it runs again after the next start.
+      entry.outcome = last instanceof Gone ? 'gone' : 'error';
       log(entry);
       return;
     }
@@ -106,13 +113,13 @@ async function decideDone(job: Job, deps: GateJobDeps, at: { installation: strin
   if (live.state !== 'open') return refuse('closed', false);
   const gating = gatingOf(at.settings, live.info.baseBranch);
   // Not gated: here /done is a /review, and there is no check to bring up to date.
-  if (gating === 'off') return accepted('review_queued', { ask: false, review: gating });
+  if (gating === 'off') return accepted('review_queued', { ask: false, review: true });
   const { plan } = await planNow(deps, { ref: job.ref, installation: at.installation, settings: at.settings, gating, live });
   if (plan.state === 'passed' || plan.state === 'skipped' || plan.state === 'bypassed') {
     const names = at.settings.gate.requiredChecks;
     return accepted('already_green', { answer: { kind: 'eyes', required: names.length > 0 ? { head: live.info.headSha, names } : null } });
   }
-  return accepted('review_queued', { review: gating });
+  return accepted('review_queued', { review: true });
 }
 
 async function decideSkip(job: Job, deps: GateJobDeps, at: { installation: string; settings: RepoSettings }): Promise<Ending> {
@@ -150,7 +157,7 @@ async function decideRerun(job: Job, deps: GateJobDeps, at: { installation: stri
   if (gating === 'off') return silent('not_gated', false);
   if (live.info.headSha !== job.headSha) return silent('stale_head', true);
   if (gating === 'bypass') return silent('bypassed', true);
-  return silent('review_queued', true, { review: gating });
+  return silent('review_queued', true, { review: true });
 }
 
 /** The end of a command, in one transaction: its effect, the job finished, and the check asked for. Answers the outcome stored. */
@@ -159,8 +166,9 @@ async function end(job: Job, deps: GateJobDeps, ending: Ending, now: string): Pr
     let outcome = ending.outcome;
     if (ending.review !== undefined) {
       const jobs = await reviewJobsOf(tx, job.ref);
-      const joins = underWay(jobs, ending.review, deps.reviewing(job.ref)) === 'running'
-        || jobs.some((j) => j.status === 'pending' && j.trigger === 'manual');
+      // Only a review that will run is joined: a stranger's waiting /review is about to be refused (call 25).
+      const held = deps.reviewing(job.ref);
+      const joins = jobs.some((j) => willRun(j) && (j.status === 'pending' || (j.status === 'running' && held)));
       if (joins) {
         outcome = 'coalesced';
       } else {

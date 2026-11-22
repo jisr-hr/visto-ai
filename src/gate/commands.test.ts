@@ -1,7 +1,7 @@
 import test, { afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { recordSkip } from '../db/gate.ts';
-import { askGate, claimJob, enqueueJob, getJob } from '../db/jobs.ts';
+import { askGate, claimJob, enqueueJob, finishJob, getJob } from '../db/jobs.ts';
 import type { Db } from '../db/types.ts';
 import type { CheckWrite } from '../forge/types.ts';
 import { at, closeHarnesses, harness, liveOf, REF, storeRun, withGate } from './testing.ts';
@@ -147,6 +147,42 @@ test('/done joins a review that is running or was asked for, and takes the place
     [['done', 'review_queued'], [['running', 'command'], ['pending', 'done']]]);
 });
 
+/** Stores a manual review job of the pull request with this association and reason: pending, or claimed. */
+async function manualJob(db: Db, association: string | null, reason: string, claim = false): Promise<void> {
+  const id = await enqueueJob(db, {
+    ref: REF, reason, headSha: '', runAt: at(0), now: at(0), delivery: null, replace: true, trigger: 'manual',
+    requestedBy: 'octo-dev', commentId: reason.startsWith('rerun') ? null : '21', association, installation: '99',
+  });
+  if (claim) await claimJob(db, id!, at(0));
+}
+
+test('/done joins only a review that will run', async () => {
+  const stranger = await harness({ reason: 'done' });
+  await manualJob(stranger.db, 'none', 'command');
+  await stranger.run();
+  assert.deepEqual([await statusOf(stranger), answers(stranger)], [['done', 'review_queued'], [['react', '31', 'eyes']]]);
+  assert.deepEqual((await reviewJobs(stranger.db)).map((j) => [j.status, j.reason, j.requested_by, j.comment_id, j.association]),
+    [['pending', 'done', 'octo-lead', '31', 'member']], "the member's job takes the stranger's place");
+
+  const member = await harness({ reason: 'done' });
+  await manualJob(member.db, 'member', 'command');
+  await member.run();
+  assert.deepEqual([await statusOf(member), (await reviewJobs(member.db)).map((j) => j.requested_by)], [['done', 'coalesced'], ['octo-dev']]);
+
+  for (const reason of ['rerun', 'rerun_retry']) {
+    const rerun = await harness({ reason: 'done' });
+    await manualJob(rerun.db, null, reason);
+    await rerun.run();
+    assert.deepEqual([await statusOf(rerun), (await reviewJobs(rerun.db)).map((j) => j.reason)], [['done', 'coalesced'], [reason]], reason);
+  }
+
+  const running = await harness({ reason: 'done' });
+  await manualJob(running.db, 'none', 'command', true);
+  await running.run();
+  assert.deepEqual([await statusOf(running), (await reviewJobs(running.db)).map((j) => [j.status, j.association])],
+    [['done', 'review_queued'], [['running', 'none'], ['pending', 'member']]]);
+});
+
 test('/done by someone who may not command, and on a closed pull request, is refused with its code', async () => {
   const none = await harness({ reason: 'done', association: 'none' });
   await none.run();
@@ -211,6 +247,7 @@ test('/done put back after a failed read keeps its place against a sync stored m
   assert.deepEqual(await statusOf(h), ['pending', null]);
   assert.deepEqual(await statusOf(h, sync), ['dropped', 'superseded']);
   assert.deepEqual([outcomeOf(h), answers(h)], [['put_back', null], []]);
+  assert.equal(gateLog(h)?.['requeued'], true);
   assert.equal(await askGate(h.db, REF, at(2)), null, 'while it waits the command holds the slot');
 
   h.deps.forge = forge;
@@ -375,6 +412,13 @@ test('a command GitHub fails three times is answered as failed', async () => {
   const rerun = await harness({ reason: 'rerun', requestedBy: 'octo-dev', commentId: null, association: null, starts: 3, live: new Error('github_502') });
   await rerun.run();
   assert.deepEqual([await statusOf(rerun), answers(rerun)], [['done', 'failed'], []]);
+});
+
+test('a command found already finished at its last end is gone, stores nothing and says nothing', async () => {
+  const h = await harness({ reason: 'done', starts: 3, live: new Error('github_502') });
+  await finishJob(h.db, h.job.id, 'done', 'review_queued', at(0));
+  await h.run();
+  assert.deepEqual([outcomeOf(h), answers(h), (await pendingSyncs(h.db)).length, await statusOf(h)], [['gone', null], [], 0, ['done', 'review_queued']]);
 });
 
 test('an answer that cannot be written is logged and changes nothing', async () => {
