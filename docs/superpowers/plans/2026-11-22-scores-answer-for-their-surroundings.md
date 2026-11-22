@@ -18,8 +18,8 @@ None of these is in the owner's ruling. Each is the planner's call, listed so th
 
 1. **`hash` is not changed; a second hash is added.** Changing what `hash` covers would also change when a note is given again, what an incremental review reads, when a push tells nothing new and how the backtest labels a hunk. The ruling is about a score being reused with the model not asked, and only that is changed.
 2. **The surroundings are those of the hunk, not of the block.** A part of a split hunk has its hunk's `around`. A part holds no line outside its own changed lines, so a hash of the part's lines would not see the hunk moved.
-3. **A stored score among other lines is a floor, by the rule that exists.** `keptScores` already computes "the highest stored score whose hash no present block has" and no new score of the file may be below it. That rule now reads "whose hash and surroundings no present block has". Cost: it is the file's floor, not the block's own, so when one block's surroundings change, every block of that file scored in the same run is held to that block's old score. A floor of the block's own would need a new mechanism; this one errs towards a person.
-4. **A score stored before this plan answers for no block.** It has no `around`. Cost: at the first review after this is deployed, every block of every open pull request is scored again once, each file's new scores held to the highest block score the file had. Old rows of `block_scores` are reused by no one and age out in 30 days.
+3. **A stored score among other lines holds its own block, not the file.** A block that is asked again because its surroundings changed cannot score below the highest score stored for its changed lines (`held`, by block). The file's floor stays what it is: the highest stored score whose `hash` no present block has. As first written this plan put the moved block's score into the file's floor; the plan's review showed that every block of the file scored in the same run would then be raised to it, and, with inline notes on, each given a note. One exception is left to the worst-case rule that exists: the parts of a split hunk are not held one by one. When their hunk stands among other lines the hunk is asked again as one block, the parts' hashes are in the diff no more, and their scores are the file's floor, as when a split hunk is edited today.
+4. **A score stored before this plan answers for no block.** It has no `around`. Costs: at the first review after this is deployed, every block of every open pull request is scored again once, each held to its own stored score; a file that held a split hunk has its new scores held to the highest of the parts; no file is covered any more, so every file is sent again, and in a pull request larger than the batches allow, a file that finds no room is not read and goes to a person (100, `not_scored`) where it was left out as covered before. It settles over the next reviews. The same happens, for the files concerned, after a merge of the base branch that changes lines beside their blocks. Old rows of `block_scores` are reused by no one and age out in 30 days.
 5. **Not covered, and said in the README:** lines moved to a place whose neighbours read the same; a hunk with no unchanged line (a new file); the lines an incremental review shows as removed, which are still told by `hash` (`leftBlocksOf`).
 
 ## Global Constraints
@@ -36,8 +36,8 @@ None of these is in the owner's ruling. Each is the planner's call, listed so th
 
 Each has its test in the task below.
 
-1. **Lines scored in one place and moved to another in a later push:** the model is asked again, and the score cannot fall below the stored one.
-2. **A result stored before this plan** (no `around`): no block is kept from it, each file's highest stored block score is the floor, and nothing throws.
+1. **Lines scored in one place and moved to another in a later push:** the model is asked again, the score cannot fall below the stored one, and no other block of the file is raised by it.
+2. **A result stored before this plan** (no `around`): no block is kept from it, each block is held to the score stored for its own changed lines, and nothing throws.
 3. **A split hunk whose surroundings changed:** none of its parts is kept.
 4. **A block that stood under its file's whole-file score, moved:** it is no longer stood for, so the file is not settled and is sent.
 5. **A row of `block_scores` with no `around`, and an answer of the lookup with a wrong or missing `around`:** neither gives a block a score.
@@ -67,12 +67,15 @@ export interface FileHistory { /* as today, but: */ blocks: StoredEntry[]; /* on
 reusableScores?: (blocks: Array<{ path: string; hash: string; around: string }>) => Promise<Array<{ path: string; hash: string; around: string; entry: ScoreEntry }>>;
 
 // src/engine/score/history.ts
+export interface KeptScores { /* as today, and: */ held: Map<string, number> }
+//   held, by block id: the highest score stored for the block's changed lines among other lines, or with no surroundings;
+//   only for a block that is asked again. Empty for a moved file.
 export function keptScores(context: FileContext, history: ScoreHistory | null, reused: Array<{ hash: string; around: string; entry: ScoreEntry }>): KeptScores | null;
 export function blocksToLookUp(contexts: FileContext[], history: ScoreHistory | null): Array<{ path: string; hash: string; around: string }>;
 
 // src/db/block-scores.ts
 export interface StoredBlockScore { path: string; hash: string; around: string | null; score: number; category: string; reason: string }
-export async function reusableScores(db: Db, ref: PullRequestRef, by: 'model' | 'scorer', blocks: Array<{ path: string; hash: string; around: string }>, since: string): Promise<StoredBlockScore[]>;
+export async function reusableScores(db: Db, ref: PullRequestRef, by: 'model' | 'scorer', blocks: Array<{ path: string; hash: string; around: string }>, since: string): Promise<Array<StoredBlockScore & { around: string }>>;   // the join leaves no row without surroundings
 
 // src/shell/history.ts
 export function scoresToStore(result: unknown): Array<{ path: string; hash: string; around: string | null; score: number; category: string; reason: string }>;
@@ -87,12 +90,13 @@ export function scoresToStore(result: unknown): Array<{ path: string; hash: stri
    - a split is kept when the stored split has the hunk's `hunkHash` and `around`, and a stored entry answers for each part;
    - a block is stood for by the kept whole-file score when a stored stood-for pair answers for it;
    - a score another pull request stored is taken when its `hash` and `around` are the block's;
-   - the floor is the highest stored score whose pair (`hash`, `around`) no present block has. A block present with the same `hash` among other lines therefore leaves its stored score in the floor.
+   - the floor is computed as today, by `hash`: the highest stored score whose `hash` no present block has.
+   - **`held`.** A block that is left open (no entry answers for it, no split is kept for it, it is not stood for) and whose `hash` has stored entries, among other lines or with no surroundings, is held: `held` has, under its id, the highest of their scores. A score taken from another pull request for a held block is raised to the higher of the floor and its hold, as it is raised to the floor today.
    Where the histories of a path and of its earlier name are joined, the higher entry is kept for each pair. The search that lets a file shown as added answer to the other paths that held one of its blocks still goes by `hash`: it only finds the histories to join.
 4. **`blocksToLookUp`** returns the `around` of each block it asks for; two blocks with the same path, `hash` and `around` are asked once.
 5. **`keepScores` in `review.ts`** asks with the three values, and takes from the answer only a row whose `path`, `hash` and `around` are strings and are one of those asked. Any other row is skipped, as a row with an unknown hash is today.
-6. **`blockScore` in `reconcile/scores.ts`** writes the block's `around` on every `BlockScore` it builds, kept or given in this run.
-7. **`historyOf` in `src/shell/history.ts`** reads `around` from each stored block: a string that is not empty, else null. Everything it keyed by a hash it keys by the pair: the highest entry for each pair; the parts of a hunk, by the hunk's pair; the splits, each with its hunk's `around`; the stood-for blocks, as pairs, less those that have an entry for the same pair; and the rule that a hunk does not stand below its own parts, by the hunk's pair and the parts' pairs. `coveredAt` and `readAt` are built as today.
+6. **`reconcile/scores.ts`.** `blockScore` writes the block's `around` on every `BlockScore` it builds, kept or given in this run. In `scoreFile`, where a score given in this run for a block is raised to the file's floor (`atFloor`, and the whole-file score that stands in place of a block score), the bound is the higher of the file's floor and the block's hold; the given score is kept in `raisedFrom` as today. The parts the model cuts a held block into are each held.
+7. **`historyOf` in `src/shell/history.ts`** reads `around` from each stored block: a string that is not empty, else null. Everything it keyed by a hash it keys by the pair: the highest entry for each pair; the blocks of a stored file grouped into hunks by the hunk's pair (`hunkHash`, `around`), so that two hunks with the same changed lines among different lines are two groups; one split for each hunk pair, with its `around`; the parts of a hunk, by the hunk's pair; the stood-for blocks, as pairs, less those that have an entry for the same pair; and the rule that a hunk does not stand below its own parts, by the hunk's pair and the parts' pairs. `coveredAt` and `readAt` are built as today. Two blocks of one run with the same changed lines among different lines therefore each keep their own score, where both stood at the higher before: the existing test of `src/shell/history.test.ts` that says so ("two blocks of one run with the same changed lines both stand at the higher score") is rewritten to the new rule, and holds as it was for two blocks with the same pair. The test helper `historyFrom` in `src/engine/review.test.ts` mirrors `historyOf`: it is brought up the same way, so that the end-to-end tests go on testing the real shape.
 8. **`scoresToStore`** adds each block's `around`, or null.
 9. **The database.** `0007_score_surroundings.sql` is `alter table visto_ai.block_scores add column around text;`. `recordBlockScores` writes it. `reusableScores` joins on `path`, `hash` and `around`, answers the highest score for each of the three, and returns `around`. A row whose `around` is null matches no pair.
 10. **`review-job.ts`** passes `around` both ways between the engine's lookup and `reusableScores`.
@@ -104,11 +108,14 @@ export function scoresToStore(result: unknown): Array<{ path: string; hash: stri
 test("a block's surroundings are every line of its hunk, the unchanged ones too", () => { /* two hunks with the same added and removed lines between different unchanged lines: equal hash, different around */ });
 test('surroundings do not count line numbers, nor a line that says the file has no final line feed', () => { /* the same hunk at other line numbers, and with a meta line: equal around */ });
 test('a part and the rest have the surroundings of the hunk they were cut from', () => { /* splitBlock and partsAt: every part.around === hunk.around */ });
-test('the hash of a block, of its hunk and of a file diff are what they were', () => { /* literal expected values taken from a run on the code before this task */ });
+test('the hash of a block, of its hunk and of a file diff are what they were', () => { /* for one patch with unchanged lines, a line saying the file has no final line feed, and a hunk cut in two by splitBlock: the hash and hunkHash of the hunk and of each part, and fileDiffHash, as literal values; the literals are got by running the code as it is BEFORE blocks.ts is touched, and the report quotes that run */ });
 
 // src/engine/score/history.test.ts
-test('a stored score answers for a block only among the same lines', () => { /* same hash and around: kept as earlier_run, hunk in scoredHunks; same hash, other around: no entry, hunk not in scoredHunks, floor is the stored score */ });
-test('a score stored with no surroundings answers for no block and is the floor', () => { /* around null */ });
+test('a stored score answers for a block only among the same lines', () => { /* same hash and around: kept as earlier_run, hunk in scoredHunks, nothing held; same hash, other around: no entry, hunk not in scoredHunks, held at the stored score, and the floor is 0 */ });
+test('a score stored with no surroundings answers for no block and holds it', () => { /* around null: held, floor 0 */ });
+test('a block is held to the highest score stored for its changed lines, and a stored score whose lines are gone is still the floor', () => { /* two stored entries of one hash among different lines; another hash no present block has */ });
+test('a score from another pull request is raised to the hold of a held block', () => { /* reused below the hold: raised, raisedFrom is the reused score */ });
+test('a file shown as added answers to the path that held its blocks, and keeps an entry only for the same pair', () => { /* the rename-as-added case: same hash and around kept; same hash among other lines held */ });
 test('a split is kept only when its hunk stands among the same lines', () => { /* Review Focus 3 */ });
 test('a block is stood for by the whole-file score only among the same lines', () => { /* Review Focus 4: moved, it is open and the file is not settled */ });
 test('a score from another pull request is taken only for the same surroundings', () => { /* reused with another around: not taken */ });
@@ -117,13 +124,17 @@ test('of a path and its earlier name the higher entry is kept for each pair', ()
 
 // src/engine/reconcile/scores.test.ts
 test("a block's score carries its surroundings", () => { /* given in this run, and kept */ });
+test('a held block scored below its hold is raised to it, and no other block of the file is', () => { /* given 5 with a hold of 40 and a floor of 0: 40 with raisedFrom 5; a second open block of the file given 5 stays 5; a whole-file score that stands in place of the held block's score is raised too; with a floor of 60 and a hold of 40 the bound is 60 */ });
 
 // src/engine/review.test.ts
-test('lines scored in one place and moved to another are scored again and cannot score lower', async () => { /* Review Focus 1: a first review's result, read back through the same shape a stored result has, is the history of a second review of the same changed lines between other unchanged lines; the model is sent the hunk without `scored`; it answers lower: the stored score stands with raisedFrom; it answers higher: the higher stands */ });
+test('lines scored in one place and moved to another are scored again and cannot score lower', async () => { /* Review Focus 1: a first review's result, read back through the same shape a stored result has, is the history of a second review of the same changed lines between other unchanged lines; the model is sent the hunk without `scored`; it answers lower: the stored score stands with raisedFrom; it answers higher: the higher stands; a second, new block of the same file that the model scores low keeps its low score */ });
+test('a result stored with no surroundings: every block is asked for again and each is held to its own stored score', async () => { /* Review Focus 2: a file of two blocks stored at 80 and 10 with no around; the file is sent, both hunks shown without `scored`; answers of 5 and 5 end as 80 and 10 */ });
 test('an answer of the lookup with other surroundings, or none, gives no score', async () => { /* Review Focus 5 */ });
 
 // src/shell/history.test.ts
 test('the history keeps one entry for each hash and surroundings', () => { /* the same hash stored among two sets of lines: two entries, each with its around */ });
+test('two hunks with the same changed lines among different lines are two hunks: each has its own split and its own parts', () => { /* grouping by the hunk pair */ });
+test('a hunk does not stand below its own parts, by the pair', () => { /* a hunk entry below its highest part of the same pair is raised; a part of the same hunkHash among other lines does not raise it */ });
 test('a result stored before surroundings were kept reads with none', () => { /* Review Focus 2: around null on entries, splits and stood-for; a damaged around (a number, an empty string) reads as null */ });
 test('a split and the blocks a whole-file score stood for carry their surroundings', () => { /* */ });
 test('the scores to store carry their surroundings', () => { /* scoresToStore */ });
