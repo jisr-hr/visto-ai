@@ -13,6 +13,7 @@ These notes record what happened while `2026-11-21-inline-notes-and-the-app-mani
 - The real run under Docker was made on the final code. What it showed is below.
 - Inline notes were tried against a real GitHub App. The command that creates the app was not: it needs a person at a browser.
 - After the merge the owner ruled on the first question put to him: the manifest asks for `contents` write, so that an app made from it resolves threads (call 2). The manifest, its tests, the README and the plan were changed in one commit. The suite still counts 1,844 tests.
+- Then he ruled on the second: a later start does not post a recorded review that GitHub does not list within 15 minutes of the last try to post it; the job waits (call 17). Two parts of it are the builder's, for the owner to overrule. Every failed publication now waits 15 minutes, not only one that ended with a network or a server error (call 16). And the time of a later start's try is stored on the run, in a new column (migration `0006_publish_tried`): a second model reviewed the change before it was committed and found that counting from the record alone left the hole open after a second failed post. The suite counts 1,856 tests. The migration was then tried under Docker on a real Postgres, in a network with no way out: the previous release applied its five migrations, this code added the sixth and one column and nothing else; a run the previous release's schema had stored read with no time; the time was written, read back by the query a later start uses, and left alone on a published run.
 
 ## Decisions taken while building
 
@@ -91,13 +92,15 @@ On 2026-11-21 and 22 the branch was tried against the real GitHub App and the pr
 - **The gate** (stage 5) is next. What is stored here lets it tell a note from a finding.
 - **A note's replies counted as labels for the score:** stage 8.
 - **For the owner to decide:**
-  - whether a recorded review that is young and finds no review of its own on GitHub should wait instead of being posted (decision 12 covers the usual case by time; a `/review` or a reopening within seconds of the failure can still start too early);
   - whether notes that were refused should be remembered, so that one note GitHub never accepts stops costing the others (call 10).
 - **Known and left as they are:**
   - An edited block, a merged or split hunk and a renamed file's blocks get new notes, and the old threads stay (calls 5 and 11).
   - A note is never rewritten when its block's score changes later.
   - With more than 50 flagged blocks a block can be in neither the body's list nor the notes of one review (call 13).
-  - If the list of the app's own reviews does not show a review GitHub created, the review is posted a second time; the code cannot tell the two cases apart.
+  - If the list of the app's own reviews still does not show a review GitHub created 15 minutes after the try that posted it, the review is posted a second time; the code cannot tell the two cases apart (call 17 covers the 15 minutes).
+  - Each publication that truly failed, or was cut by a restart, delays the review by up to 15 minutes, a `/review` included, and the command is told nothing while it waits (call 17).
+  - The time written is the start's, some seconds before its post, so the wait ends that much short of 15 minutes after the post. And a later start that writes its time and then posts nothing, because the pull request was closed or had moved, still holds a start that comes back to that head within 15 minutes.
+  - A job that records its review within 15 minutes of being a day old, and then fails to post it, is dropped as too old before its next start; before call 16 was widened, a failure that was not a network or a server error was tried again after a minute.
   - Each note is a thread: the limits on reading a pull request's threads and comments are reached sooner.
   - Each later permission (the gate's, automatic approval's) is added by hand in the app's settings and accepted by every installation (call 1).
   - Every app made from the manifest may push to the repositories it is installed on, though the service has no code that does (call 2, the owner's ruling). An adopter who will not grant that lowers `Contents` in the app's settings, which was not tried.

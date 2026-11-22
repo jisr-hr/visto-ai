@@ -28,7 +28,7 @@ const run = (id: number, result: Record<string, unknown>, over: Partial<StoredRu
   body: '', comments: [],
   result: { overview: `overview ${id}`, coverage: { reviewed: [], notReviewed: [] }, verdict: { threshold: 70, needsHuman: false, highest: 0 }, ...result },
   usage: USAGE, startedAt: '2026-03-01T10:00:00.000Z', finishedAt: '2026-03-01T10:01:00.000Z',
-  published: false, reviewId: null, publishedAt: null, inlineDropped: false, ...over,
+  published: false, reviewId: null, publishedAt: null, inlineDropped: false, publishTriedAt: null, ...over,
 });
 const published = { published: true, reviewId: '401', publishedAt: '2026-03-01T10:02:00.000Z' };
 const reviewed = (...paths: string[]) => ({ reviewed: paths, notReviewed: [] });

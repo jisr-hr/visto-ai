@@ -19,7 +19,7 @@ const run = (over: Partial<StoredRun> & { verdicts?: unknown; result?: unknown }
     body: '', comments: [{ path: 'src/a.ts', side: 'RIGHT', line: 12, body: BODY }],
     result: verdicts === undefined ? base : { ...(base as object), threadVerdicts: verdicts },
     usage: USAGE, startedAt: '2026-03-01T10:00:00.000Z', finishedAt: '2026-03-01T10:01:00.000Z',
-    published: true, reviewId: '401', publishedAt: '2026-03-01T10:02:00.000Z', inlineDropped: false, ...rest,
+    published: true, reviewId: '401', publishedAt: '2026-03-01T10:02:00.000Z', inlineDropped: false, publishTriedAt: null, ...rest,
   };
 };
 const STORED = { commentId: '8001', path: 'src/a.ts', side: 'RIGHT' as const, line: 12, severity: 'major', quote: 'total = a + b', run: 1 };

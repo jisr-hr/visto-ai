@@ -10,6 +10,7 @@ export type PublishOutcome =
   | { kind: 'published'; reviewId: string; body: string; inlineDropped: boolean; notesDropped: boolean; adopted: boolean }
   | { kind: 'moved'; head: string }          // the head or the base is not the one the review was computed for
   | { kind: 'closed' }
+  | { kind: 'unlisted' }                     // held, and the git service lists no review of the app's own for it: nothing was posted
   | { kind: 'rejected' }
   | { kind: 'failed'; code: string };
 
@@ -28,6 +29,8 @@ export async function publishRun(deps: PublishDeps, args: {
   known: ReadonlySet<string>;
   /** The run was recorded by an earlier start: its review is posted without its notes. */
   resumed: boolean;
+  /** The run is too young to be posted by a later start: the git service may hold its review and not list it yet. */
+  hold: boolean;
 }): Promise<PublishOutcome> {
   const { ref, installation, run } = args;
   try {
@@ -68,6 +71,7 @@ export async function publishRun(deps: PublishDeps, args: {
       }
       return { kind: 'published', reviewId: same.id, body: inlineDropped ? bodyOnly() : run.body, inlineDropped, notesDropped, adopted: true };
     }
+    if (args.hold) return { kind: 'unlisted' };
 
     // 3. The post: with every recorded comment, or the findings' alone for a review a later start publishes.
     let notesDropped = args.resumed && hadNotes;

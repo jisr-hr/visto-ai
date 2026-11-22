@@ -19,6 +19,8 @@ export interface RunRecord {
 export interface StoredRun extends RunRecord {
   id: number;
   published: boolean; reviewId: string | null; publishedAt: string | null; inlineDropped: boolean;
+  /** When a later start last set out to post the run; null when none did. */
+  publishTriedAt: string | null;
 }
 
 /** A finite number at or above 0, else 0: what the provider reported must not break the row or the day's sum. */
@@ -53,13 +55,13 @@ interface Row {
   body: string; comments: unknown; result: unknown;
   calls: number; input_tokens: number; output_tokens: number; cached_tokens: number; cost: number;
   started_at: Date; finished_at: Date;
-  published: boolean; review_id: string | null; published_at: Date | null; inline_dropped: boolean;
+  published: boolean; review_id: string | null; published_at: Date | null; inline_dropped: boolean; publish_tried_at: Date | null;
 }
 
 const COLUMNS = `id, job, trigger, mode, dry_run, head_sha, base_sha, base_branch, outcome, failure_stage, failure_code,
             needs_human, highest_score, body, comments, result,
             calls, input_tokens, output_tokens, cached_tokens, cost::float8 as cost, started_at, finished_at,
-            published, review_id, published_at, inline_dropped`;
+            published, review_id, published_at, inline_dropped, publish_tried_at`;
 
 function toRun(r: Row, ref: PullRequestRef): StoredRun {
   return {
@@ -71,6 +73,7 @@ function toRun(r: Row, ref: PullRequestRef): StoredRun {
     usage: { calls: r.calls, inputTokens: r.input_tokens, outputTokens: r.output_tokens, cachedTokens: r.cached_tokens, cost: r.cost },
     startedAt: r.started_at.toISOString(), finishedAt: r.finished_at.toISOString(),
     published: r.published, reviewId: r.review_id, publishedAt: r.published_at?.toISOString() ?? null, inlineDropped: r.inline_dropped,
+    publishTriedAt: r.publish_tried_at?.toISOString() ?? null,
   };
 }
 
@@ -98,6 +101,11 @@ export async function markPublished(db: Db, runId: number, p: { reviewId: string
      returning id`,
     [runId, storable(p.reviewId), p.publishedAt, storable(p.body), p.inlineDropped]);
   return rows.length === 1;
+}
+
+/** Writes when a later start set out to post a run that is not published yet. */
+export async function markPublishTried(db: Db, runId: number, at: string): Promise<void> {
+  await db.query('update visto_ai.review_runs set publish_tried_at = $2::timestamptz where id = $1 and published = false', [runId, at]);
 }
 
 /** The newest run of the pull request that is not a dry run, ended ok, has a body that is not empty, is not published, has this head and base, and started at or after `since`. */

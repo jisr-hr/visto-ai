@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { testDb } from './testing.ts';
-import { adoptableRun, hasOkRun, hasRun, lastPublishedRun, listRuns, markPublished, recordRun, spentSince, unpublishedRun } from './review-runs.ts';
+import { adoptableRun, hasOkRun, hasRun, lastPublishedRun, listRuns, markPublished, markPublishTried, recordRun, spentSince, unpublishedRun } from './review-runs.ts';
 import type { RunRecord } from './review-runs.ts';
 import { enqueueJob, finishJob } from './jobs.ts';
 
@@ -15,7 +15,7 @@ const run = (over: Partial<RunRecord> = {}): RunRecord => ({
   usage: { calls: 2, inputTokens: 1000, outputTokens: 200, cachedTokens: 50, cost: 0.0375 },
   startedAt: at(0), finishedAt: at(90), ...over,
 });
-const UNPUBLISHED = { published: false, reviewId: null, publishedAt: null, inlineDropped: false };
+const UNPUBLISHED = { published: false, reviewId: null, publishedAt: null, inlineDropped: false, publishTriedAt: null };
 test('a run is read back as it was recorded', async () => {
   const db = await testDb();
   const id = await recordRun(db, run());
@@ -92,6 +92,18 @@ test('token counts are stored as whole numbers, and a count or a cost that is no
   const [odd, negative] = await listRuns(db, REF);
   assert.deepEqual([odd!.usage.inputTokens, odd!.usage.outputTokens, odd!.usage.cost, negative!.usage.cost], [13, 0, 0, 0]);
   assert.equal(await spentSince(db, at(0)), 0);
+  await db.close();
+});
+test('the time a later start set out to post a run is kept, the newest one, and only while the run is unpublished', async () => {
+  const db = await testDb();
+  const id = await recordRun(db, run({ dryRun: false }));
+  await markPublishTried(db, id, at(900));
+  assert.equal((await listRuns(db, REF))[0]!.publishTriedAt, at(900));
+  await markPublishTried(db, id, at(1800));
+  assert.equal((await unpublishedRun(db, REF, 'h1', run().baseSha!, at(0)))!.publishTriedAt, at(1800));
+  await markPublished(db, id, { reviewId: '501', publishedAt: at(1801), body: 'posted text', inlineDropped: false });
+  await markPublishTried(db, id, at(2700));
+  assert.equal((await listRuns(db, REF))[0]!.publishTriedAt, at(1800));
   await db.close();
 });
 test('a run is recorded unpublished and marked published once', async () => {
