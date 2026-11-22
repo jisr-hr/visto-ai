@@ -44,6 +44,7 @@ None of these is in the design. Each is the planner's call, listed so the owner 
 13. **With more than 50 flagged blocks, a block can be in neither list in one review.** The body lists at most 50 entries in the order of its files; the notes go to the 50 highest scores across files. 6.3 says the remaining blocks appear in the body only. Such a block gets its note at the next posted review.
 14. **A posted note is recognised by the part of its text the service wrote itself,** up to and including the category, on the same path and side; the model's reason after it is not compared. If GitHub ever gave a comment's text back changed in the reason, a note matched by its whole text would be unknown at every review and posted again each time, with no bound. Cost: none known.
 15. **The command asks for the app's name.** GitHub does not let an app take the name of an account that is not its owner's, and `visto-ai` is this project's own account, so the name in the manifest file can serve nobody else.
+16. **A publication that ended with a network error or a server error is tried again after 15 minutes, not one.** A trial showed twice that GitHub answers a review with many inline comments with a server error and creates it all the same. The next start asks GitHub for the app's own reviews of the commit and adopts the one it finds; started too early, it would not find it and would post the review a second time. Cost: after a real outage a review is posted a quarter of an hour later. A `/review` or a reopening within seconds of the failure can still start too early.
 
 ## Global Constraints
 
@@ -475,3 +476,9 @@ Each of these needs the owner's go-ahead. The last also needs him at the browser
 4. A review GitHub refuses for one comment: which try is accepted.
 5. A note resolved by a person stays resolved and is not given again.
 6. **The manifest flow accepts this permission set** (design 20, item 3): `npm run app:create` against GitHub, the page, the way back to `127.0.0.1` on a port the system picked, the exchange, the file; then a start of the service with what it wrote.
+
+## What was built
+
+All seven tasks were built and reviewed, and corrected after a review of the whole branch; the rules above are the rules as built (calls 14 to 16 came from that review and from the trial). What was decided on the way, what the real run and a trial with a real app showed, and what was put off are in `2026-11-21-inline-notes-and-the-app-manifest-notes.md`.
+
+Of "To verify with a real app": items 1, 2, 3 and 5 were seen. Item 1 with a twist: GitHub took the review and answered with a server error; the next start adopted it. Item 4 was not met. Item 6, the manifest flow, was not tried: it needs a person at a browser.
