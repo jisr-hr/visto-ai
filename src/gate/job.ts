@@ -14,6 +14,7 @@ import { codeOf } from '../shell/codes.ts';
 import { missedComments } from '../shell/earlier.ts';
 import { MAX_STARTS } from '../shell/runner.ts';
 import { checkText, countsOf, planAfter, planBefore, sameCheck } from './check.ts';
+import { runGateCommand } from './commands.ts';
 import type { CheckPlan } from './check.ts';
 import { gatingOf, reviewedOnRequest } from './gating.ts';
 import type { Gating } from './gating.ts';
@@ -104,7 +105,11 @@ type Entry = {
 /** How the job ends: finished with an outcome (and maybe a request for the check), or tried again with a code. */
 type End =
   | { kind: 'finish'; status: 'done' | 'dropped'; outcome: string; ask?: boolean }
-  | { kind: 'retry'; code: string };
+  | { kind: 'retry'; code: string }
+  | { kind: 'command'; installation: string; settings: RepoSettings };
+
+/** The reasons of the gate's commands: runGateCommand takes them to their end. */
+const COMMANDS = new Set(['done', 'skip', 'rerun']);
 
 const codeOfPlan = (plan: CheckPlan): string | null => (plan.state === 'failed' || plan.state === 'paused' ? plan.code : null);
 
@@ -128,6 +133,12 @@ export async function runGateJob(job: Job, deps: GateJobDeps): Promise<void> {
     end = await work(job, deps, entry, log);
   } catch (error) {
     end = { kind: 'retry', code: codeOf(error) };
+  }
+  if (end.kind === 'command') {
+    let at: Date;
+    try { at = deps.clock(); } catch { at = new Date(); }
+    await runGateCommand(job, deps, { installation: end.installation, settings: end.settings, now: at });
+    return;
   }
 
   try {
@@ -167,6 +178,7 @@ async function work(job: Job, deps: GateJobDeps, entry: Entry, log: (e: Record<s
   if (!settings.gate.enabled) return { kind: 'finish', status: 'dropped', outcome: 'gate_off' };
   const installation = job.installation ?? (await getPullRequest(db, job.ref))?.installation ?? null;
   if (installation === null) return { kind: 'finish', status: 'dropped', outcome: 'no_installation' };
+  if (COMMANDS.has(job.reason)) return { kind: 'command', installation, settings };
   if (job.reason !== 'sync') return { kind: 'finish', status: 'done', outcome: 'unknown_reason', ask: true };
 
   const live = await deps.forge.readPullRequest(job.ref, installation);

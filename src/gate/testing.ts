@@ -2,6 +2,7 @@ import { GATE_OFF } from '../config/load.ts';
 import type { GateSettings, RepoSettings } from '../config/load.ts';
 import { askGate, claimJob, enqueueJob } from '../db/jobs.ts';
 import type { Job } from '../db/jobs.ts';
+import { recordActivity } from '../db/human-activity.ts';
 import { savePullRequest } from '../db/pull-requests.ts';
 import { recordComments } from '../db/review-comments.ts';
 import type { StoredComment } from '../db/review-comments.ts';
@@ -20,7 +21,7 @@ export const at = (seconds: number): string => new Date(Date.parse('2026-03-01T1
 export const commentUrl = (_ref: PullRequestRef, id: string): string => `https://git.example.test/c/${id}`;
 
 /** The gate enabled on main, in enforce. */
-export const GATE_ON: GateSettings = { ...GATE_OFF, enabled: true, branches: ['main'] };
+export const GATE_ON: GateSettings = { ...GATE_OFF, enabled: true, branches: ['main'], skipTeam: 'acme/release-managers' };
 export const SETTINGS: RepoSettings = {
   primaryBranches: ['main'], scoreThreshold: 70, ignoredAuthors: [], baseBranches: [], newHead: null, inlineNotes: false, gate: GATE_ON,
 };
@@ -107,6 +108,22 @@ export interface HarnessOptions {
   failQuery?: string;
   /** The lock the job is given; a new one when not given. */
   lock?: KeyedLock;
+  /** A command's association; member when not given. */
+  association?: string | null;
+  /** The text stored as the commenter's general comment 31; nothing is stored when not given. */
+  comment?: string;
+  /** The head stored with a command's job; the live head when not given. */
+  head?: string;
+  /** A command's requester; octo-lead when not given. */
+  requestedBy?: string | null;
+  /** A command's comment id; '31' when not given. */
+  commentId?: string | null;
+  /** What isTeamMember answers, or an Error it rejects with; true when not given. */
+  member?: boolean | Error;
+  /** The names greenChecks answers, or an Error it rejects with; every name asked when not given. */
+  green?: string[] | Error;
+  /** react and comment reject. */
+  answerFails?: boolean;
 }
 
 export interface Harness {
@@ -198,8 +215,18 @@ export async function harness(options: HarnessOptions = {}): Promise<Harness> {
         held.set(check.commit, { id, status: check.status, conclusion: check.conclusion, title: check.title, summary: check.summary });
         return { id };
       },
-      async greenChecks() { throw new Error('not_used'); },
-      async isTeamMember() { throw new Error('not_used'); },
+      async greenChecks(ref, installation, commit, names) {
+        calls.push(['greenChecks', ref, installation, commit, names]);
+        await wait();
+        if (options.green instanceof Error) throw options.green;
+        return options.green === undefined ? names : names.filter((n) => (options.green as string[]).includes(n));
+      },
+      async isTeamMember(installation, team, login) {
+        calls.push(['isTeamMember', installation, team, login]);
+        await wait();
+        if (options.member instanceof Error) throw options.member;
+        return options.member ?? true;
+      },
     },
     writer: {
       async listThreads(ref, installation) {
@@ -210,8 +237,16 @@ export async function harness(options: HarnessOptions = {}): Promise<Harness> {
         if (answer instanceof Error) throw answer;
         return answer;
       },
-      async react() { throw new Error('not_used'); },
-      async comment() { throw new Error('not_used'); },
+      async react(ref, installation, commentId, reaction) {
+        calls.push(['react', ref, installation, commentId, reaction]);
+        await wait();
+        if (options.answerFails === true) throw new Error('github_500');
+      },
+      async comment(ref, installation, body) {
+        calls.push(['comment', ref, installation, body]);
+        await wait();
+        if (options.answerFails === true) throw new Error('github_500');
+      },
     },
     clock: () => now,
     log: (entry) => { logs.push(entry); },
@@ -234,12 +269,20 @@ export async function harness(options: HarnessOptions = {}): Promise<Harness> {
       ref, author: 'octo-dev', authorIsBot: false, baseBranch: 'main', headBranch: 'feat', headSha: liveHead, draft: false, state: 'open',
       mergedAt: null, closedAt: null, mergeCommit: null, installation: 'installation' in options ? options.installation ?? null : '99', updatedAt: at(0),
     });
+    if (options.comment !== undefined) {
+      await recordActivity(db, {
+        ref, kind: 'general_comment', sourceId: '31', author: 'octo-lead', association: 'member', state: null, body: options.comment,
+        path: null, side: null, line: null, startLine: null, fileLevel: null, commit: null, replyTo: null, thread: null, at: at(0), delivery: 'd1',
+      });
+    }
     const reason = options.reason ?? 'sync';
     const id = reason === 'sync'
       ? await askGate(db, ref, at(0))
       : await enqueueJob(db, {
-        ref, kind: 'gate', reason, headSha: liveHead, runAt: at(0), now: at(0), delivery: 'd1', replace: true,
-        trigger: 'manual', requestedBy: 'octo-lead', commentId: '31', association: 'member', installation: null,
+        ref, kind: 'gate', reason, headSha: options.head ?? liveHead, runAt: at(0), now: at(0), delivery: 'd1', replace: true,
+        trigger: 'manual', requestedBy: 'requestedBy' in options ? options.requestedBy ?? null : 'octo-lead',
+        commentId: 'commentId' in options ? options.commentId ?? null : '31',
+        association: 'association' in options ? options.association ?? null : 'member', installation: '99',
       });
     const starts = options.starts ?? 1;
     if (starts > 1) await db.query('update visto_ai.jobs set starts = $2 where id = $1', [id, starts - 1]);
