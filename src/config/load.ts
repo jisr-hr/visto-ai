@@ -22,8 +22,27 @@ export interface DeploymentConfig {
   dryRun: boolean;
   alerts: { webhook: string } | null;
   limits: { inputTokensPerCall: number; batchesPerReview: number; spendPerDay: number; queueConcurrency: number };
-  repositories: { defaults: RepoSettings; overrides: Record<string, Partial<RepoSettings>> };
+  repositories: { defaults: RepoSettings; overrides: Record<string, RepoOverride> };
 }
+
+/** The merge gate of one repository (section 9). */
+export interface GateSettings {
+  enabled: boolean;
+  /** The base branches whose pull requests are gated. */
+  branches: string[];
+  checkName: string;
+  mode: 'enforce' | 'shadow' | 'bypass';
+  /** O18: whether a person's reply and a resolve clear a blocking thread. */
+  clearByReply: boolean;
+  /** "org/team-slug". */
+  skipTeam: string | null;
+  /** The names `/done` reads. */
+  requiredChecks: string[];
+}
+
+export const GATE_OFF: GateSettings = {
+  enabled: false, branches: [], checkName: 'AI Review', mode: 'enforce', clearByReply: true, skipTeam: null, requiredChecks: [],
+};
 
 export interface RepoSettings extends RepoConfig {
   ignoredAuthors: string[]; baseBranches: string[];
@@ -31,7 +50,11 @@ export interface RepoSettings extends RepoConfig {
   newHead: 'full' | 'incremental' | null;
   /** Whether a short note is posted in the diff for each block a person should read. */
   inlineNotes: boolean;
+  gate: GateSettings;
 }
+
+/** What a repository's entry under `overrides` sets: each key it writes replaces the default's, and the gate key by key. */
+export type RepoOverride = Partial<Omit<RepoSettings, 'gate'>> & { gate?: Partial<GateSettings> };
 
 export type ServiceConfig = DeploymentConfig & {
   app: { id: string; privateKey: string; webhookSecret: string }; database: { url: string };
@@ -69,6 +92,28 @@ function writesDefaultThreshold(doc: unknown): boolean {
   return true;
 }
 
+const GATE_NEEDS_BRANCH = 'must name at least one branch when the gate is enabled';
+
+/** An enabled gate with no branch gates nothing, which is never what was meant. No issue quotes a value. */
+function gateBranchIssues(repositories: { defaults: { gate: GateSettings }; overrides: Record<string, { gate?: Partial<GateSettings> | undefined }> }): string[] {
+  const { gate: defaults } = repositories.defaults;
+  const issues: string[] = [];
+  const defaultsBad = defaults.enabled && defaults.branches.length === 0;
+  if (defaultsBad) issues.push(`repositories.defaults.gate.branches: ${GATE_NEEDS_BRANCH}`);
+  for (const [name, o] of Object.entries(repositories.overrides)) {
+    const merged = { ...defaults, ...definedOnly(o.gate ?? {}) };
+    if (!(merged.enabled && merged.branches.length === 0)) continue;
+    // Defaults already named as bad cover an override that sets neither key.
+    if (defaultsBad && o.gate?.enabled === undefined && o.gate?.branches === undefined) continue;
+    issues.push(`repositories.overrides.${name}.gate.branches: ${GATE_NEEDS_BRANCH}`);
+  }
+  return issues;
+}
+
+function definedOnly<T extends object>(value: T): Partial<T> {
+  return Object.fromEntries(Object.entries(value).filter(([, v]) => v !== undefined)) as Partial<T>;
+}
+
 export function parseConfig(yamlText: string, env: Record<string, string | undefined>): DeploymentConfig {
   let doc: unknown;
   try {
@@ -93,6 +138,8 @@ export function parseConfig(yamlText: string, env: Record<string, string | undef
     );
   }
   const raw = result.data;
+  const gateIssues = gateBranchIssues(raw.repositories);
+  if (gateIssues.length > 0) throw new ConfigError(gateIssues);
   const varName = raw.model.apiKey.env;
   const apiKey = env[varName];
   if (apiKey === undefined || apiKey === '') {
@@ -170,7 +217,7 @@ export function parseConfig(yamlText: string, env: Record<string, string | undef
       defaults: {
         primaryBranches: defaults.primaryBranches, scoreThreshold: defaults.score.threshold,
         ignoredAuthors: defaults.ignoredAuthors, baseBranches: defaults.baseBranches, newHead: defaults.newHead ?? null,
-        inlineNotes: defaults.score.inlineNotes,
+        inlineNotes: defaults.score.inlineNotes, gate: defaults.gate,
       },
       overrides: Object.fromEntries(
         Object.entries(overrides).map(([name, o]) => [
@@ -182,6 +229,7 @@ export function parseConfig(yamlText: string, env: Record<string, string | undef
             ...(o.ignoredAuthors === undefined ? {} : { ignoredAuthors: o.ignoredAuthors }),
             ...(o.baseBranches === undefined ? {} : { baseBranches: o.baseBranches }),
             ...(o.newHead === undefined ? {} : { newHead: o.newHead }),
+            ...(o.gate === undefined ? {} : { gate: definedOnly(o.gate) }),
           },
         ]),
       ),
@@ -211,7 +259,24 @@ export function repoSettingsFor(config: DeploymentConfig, fullName: string): Rep
   const wanted = fullName.toLowerCase();
   const key = Object.keys(config.repositories.overrides).find((name) => name.toLowerCase() === wanted);
   const override = key === undefined ? {} : config.repositories.overrides[key]!;
-  return { ...config.repositories.defaults, ...override };
+  const defaults = config.repositories.defaults;
+  return { ...defaults, ...override, gate: { ...defaults.gate, ...override.gate } };
+}
+
+/** What of the gate some repository switches on. */
+export interface GateUse { check: boolean; statuses: boolean; members: boolean; bypass: boolean }
+
+/** Looks at the defaults and at each override once merged. A key of a gate that is not enabled switches nothing on. */
+export function gateUseOf(config: DeploymentConfig): GateUse {
+  const { defaults, overrides } = config.repositories;
+  const merged = [defaults, ...Object.keys(overrides).map((name) => repoSettingsFor(config, name))];
+  const gates = merged.map((s) => s.gate).filter((g) => g.enabled);
+  return {
+    check: gates.length > 0,
+    statuses: gates.some((g) => g.requiredChecks.length > 0),
+    members: gates.some((g) => g.skipTeam !== null),
+    bypass: gates.some((g) => g.mode === 'bypass'),
+  };
 }
 
 /** The two keys the engine reads. */

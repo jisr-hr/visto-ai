@@ -99,6 +99,33 @@ repositories:
     # score:
     #   threshold: 70
     #   inlineNotes: false
+
+    # The merge gate. A pull request is gated when its repository has the gate enabled and its base branch is listed in branches
+    # (compared exactly, case and all). A gated pull request is not reviewed when someone pushes; it is reviewed when someone
+    # comments /done or /review, or re-runs the check in GitHub. Until then its check says it waits for /done.
+    # After a review the check stays red while a major or blocker finding is neither verified by the review of the current head
+    # nor answered by a person in a resolved thread; a person's reply and a resolve turn it green with no new review.
+    # The check must also be made required in GitHub (a ruleset or branch protection on the same branches); the service cannot do that.
+    # None of this can be set from inside a reviewed repository: only this file sets it.
+    #   enabled:       the gate is off when not written, and then nothing here has any effect.
+    #   branches:      the base branches that are gated. Required when the gate is enabled; there is no default list.
+    #   checkName:     the name of the check, 1 to 100 printable ASCII characters. It is "AI Review" when not written.
+    #   mode:          enforce writes the check as described above. shadow writes it too, but a push is reviewed as without a gate,
+    #                  so the gate can be watched before it is relied on. bypass writes a passing check on every gated pull request
+    #                  and reviews only when asked. It is enforce when not written.
+    #   clearByReply:  true: a person's reply in a thread and a resolve clear a blocking finding. false: only a new review that
+    #                  verifies it, or a skip, gets past one. It is true when not written.
+    #   skipTeam:      "<org>/<team-slug>", the one team whose members may comment /ai-review-skip <reason> to pass one commit.
+    #                  The org must own the repository. Not written means nobody may skip.
+    #   requiredChecks: names of other checks or statuses that /done reads before it says a head is already green.
+    # gate:
+    #   enabled: true
+    #   branches: [main]
+    #   checkName: AI Review
+    #   mode: enforce
+    #   clearByReply: true
+    #   skipTeam: acme/release-managers
+    #   requiredChecks: [build]
   # Per-repository changes, keyed by "owner/name"; each replaces only the keys it sets.
   overrides:
     acme/shop: { primaryBranches: [trunk], baseBranches: [trunk], score: { threshold: 60 } }

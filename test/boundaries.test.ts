@@ -52,3 +52,9 @@ test('the db part may not import from the engine', async () => {
   assert.ok((await lint("import '../engine/x.ts';\n", 'src/db/x.ts')).includes('no-restricted-imports'));
   assert.deepEqual(await lint("import '../forge/types.ts';\n", 'src/db/x.ts'), []);
 });
+test('the gate may not import the GitHub adapter or a Postgres client', async () => {
+  assert.ok((await lint("import '../forge/github/read-source.ts';\n", 'src/gate/x.ts')).includes('no-restricted-imports'));
+  for (const name of ['pg', '@electric-sql/pglite']) {
+    assert.ok((await lint(`import '${name}';\n`, 'src/gate/x.ts')).includes('no-restricted-imports'), name);
+  }
+});

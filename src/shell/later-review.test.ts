@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { GATE_OFF } from '../config/load.ts';
 import { testDb } from '../db/testing.ts';
 import { claimJob, enqueueJob, getJob, unfinishedJobs } from '../db/jobs.ts';
 import { savePullRequest } from '../db/pull-requests.ts';
@@ -82,7 +83,7 @@ test('a later review shows the thread to the model, lists what it already raised
         sourceFor: async () => ({}) as Source,
       },
       clock: () => new Date(now), log: () => {}, sleep: async () => {},
-      settingsFor: () => ({ primaryBranches: ['main'], scoreThreshold: 70, ignoredAuthors: [], baseBranches: [], newHead: null, inlineNotes: false }),
+      settingsFor: () => ({ primaryBranches: ['main'], scoreThreshold: 70, ignoredAuthors: [], baseBranches: [], newHead: null, inlineNotes: false, gate: GATE_OFF }),
       limits: { inputTokensPerCall: 200_000, batchesPerReview: 6, modelTimeoutSeconds: 240 },
       dryRun: false, writer, engineDeps, review,
       lineUrl: () => 'https://git.example.test/x',
@@ -193,7 +194,7 @@ async function twoFiles(patches: (head: string) => Record<string, string>) {
       sourceFor: async () => ({}) as Source,
     },
     clock: () => new Date(now), log: () => {}, sleep: async () => {},
-    settingsFor: () => ({ primaryBranches: ['main'], scoreThreshold: 70, ignoredAuthors: [], baseBranches: [], newHead: null, inlineNotes: false }),
+    settingsFor: () => ({ primaryBranches: ['main'], scoreThreshold: 70, ignoredAuthors: [], baseBranches: [], newHead: null, inlineNotes: false, gate: GATE_OFF }),
     limits: { inputTokensPerCall: 200_000, batchesPerReview: 6, modelTimeoutSeconds: 240 },
     dryRun: false, writer, engineDeps, review,
     lineUrl: () => 'https://git.example.test/x',
@@ -348,7 +349,7 @@ async function keptThreads(patches: (head: string) => Record<string, string>) {
       sourceFor: async () => ({}) as Source,
     },
     clock: () => new Date(now), log: () => {}, sleep: async () => {},
-    settingsFor: () => ({ primaryBranches: ['main'], scoreThreshold: 70, ignoredAuthors: [], baseBranches: [], newHead: null, inlineNotes: true }),
+    settingsFor: () => ({ primaryBranches: ['main'], scoreThreshold: 70, ignoredAuthors: [], baseBranches: [], newHead: null, inlineNotes: true, gate: GATE_OFF }),
     limits: { inputTokensPerCall: 200_000, batchesPerReview: 6, modelTimeoutSeconds: 240 },
     dryRun: false, writer, engineDeps, review,
     lineUrl: () => 'https://git.example.test/x',

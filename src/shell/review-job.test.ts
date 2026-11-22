@@ -10,7 +10,7 @@ import { recordBlockScores } from '../db/block-scores.ts';
 import type { RunRecord } from '../db/review-runs.ts';
 import { listComments, recordComments } from '../db/review-comments.ts';
 import type { StoredComment } from '../db/review-comments.ts';
-import type { RepoSettings } from '../config/load.ts';
+import { GATE_OFF, type RepoSettings } from '../config/load.ts';
 import type { ForgeWriter, LivePullRequest, PostedComment, ReviewDraft, ReviewThread, Source } from '../forge/types.ts';
 import { review } from '../engine/review.ts';
 import { renderReview } from '../engine/render/body.ts';
@@ -32,7 +32,7 @@ beforeEach(async () => { db = await testDb(); });
 afterEach(async () => { await db.close(); });
 
 const LIMITS = { inputTokensPerCall: 200_000, batchesPerReview: 6, modelTimeoutSeconds: 240 };
-const SETTINGS: RepoSettings = { primaryBranches: ['main'], scoreThreshold: 70, ignoredAuthors: ['dependabot[bot]'], baseBranches: [], newHead: null, inlineNotes: false };
+const SETTINGS: RepoSettings = { primaryBranches: ['main'], scoreThreshold: 70, ignoredAuthors: ['dependabot[bot]'], baseBranches: [], newHead: null, inlineNotes: false, gate: GATE_OFF };
 const LIVE: LivePullRequest = {
   info: { ref: REF, title: 'Add things', description: '', author: 'octo-dev', baseBranch: 'main', headBranch: 'feat', baseSha: 'merge000', headSha: 'h1', draft: false },
   state: 'open',
@@ -1482,7 +1482,7 @@ test('the review entry says nothing was new only when the job ended so', async (
   assert.equal(h.logged.find((e) => e.event === 'review')!.nothing_new, false);
 });
 
-const NOTES_ON: RepoSettings = { ...SETTINGS, inlineNotes: true };
+const NOTES_ON: RepoSettings = { ...SETTINGS, inlineNotes: true, gate: GATE_OFF };
 /** A finished review, with okResult's finding, whose file a.ts has one block for each [hash, score, line] given. */
 const blocksResult = (blocks: Array<[string, number, number]>, over: Partial<ReviewResult> = {}): ReviewResult => {
   const highest = Math.max(...blocks.map(([, score]) => score));

@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { receive } from './receive.ts';
+import { GATE_OFF } from '../config/load.ts';
 import { testDb } from '../db/testing.ts';
 import { listActivity } from '../db/human-activity.ts';
 import { getPullRequest } from '../db/pull-requests.ts';
@@ -32,7 +33,7 @@ function prEvent(over: Partial<PullRequestFacts> = {}): ForgeEvent {
   return { kind: 'pull_request', action: 'synchronize', facts: facts(over) };
 }
 const NO_JOBS = {
-  settingsFor: () => ({ primaryBranches: ['main'], scoreThreshold: 70, ignoredAuthors: [], baseBranches: [], newHead: null, inlineNotes: false }),
+  settingsFor: () => ({ primaryBranches: ['main'], scoreThreshold: 70, ignoredAuthors: [], baseBranches: [], newHead: null, inlineNotes: false, gate: GATE_OFF }),
   onQueued: () => {},
 };
 const headers = {};
