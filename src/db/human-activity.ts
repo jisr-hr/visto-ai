@@ -59,3 +59,12 @@ export async function listActivity(db: Db, ref: PullRequestRef): Promise<Activit
     at: r.at.toISOString(), delivery: r.delivery,
   }));
 }
+
+/** The text of a general comment a person wrote on the pull request, or null when none is stored under that id. */
+export async function commentBody(db: Db, ref: PullRequestRef, commentId: string): Promise<string | null> {
+  const rows = await db.query<{ body: string }>(
+    `select body from visto_ai.human_activity
+     where service = $1 and owner = $2 and repo = $3 and number = $4 and kind = 'general_comment' and source_id = $5`,
+    [ref.service, storable(ref.owner).toLowerCase(), storable(ref.repo).toLowerCase(), ref.number, storable(commentId)]);
+  return rows[0]?.body ?? null;
+}

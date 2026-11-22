@@ -2,7 +2,7 @@ import test, { afterEach, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { testDb } from '../db/testing.ts';
 import type { Db } from '../db/types.ts';
-import { claimJob, enqueueJob, getJob } from '../db/jobs.ts';
+import { askGate, claimJob, enqueueJob, getJob } from '../db/jobs.ts';
 import { recoverJobs } from './recovery.ts';
 
 const REF = { service: 'github', owner: 'acme', repo: 'shop', number: 7 } as const;
@@ -32,4 +32,20 @@ test('an interrupted job whose pull request has a newer pending job is dropped a
   await enqueueJob(db, job({ headSha: 'h2', runAt: at(1), now: at(1) }));
   assert.deepEqual(await recoverJobs(db, new Date(at(10)), () => {}), { requeued: 0, dropped: 1 });
   assert.equal((await getJob(db, cut))?.outcome, 'superseded');
+});
+test('a running gate job and a running review job of one pull request are both put back', async () => {
+  const review = (await enqueueJob(db, job()))!;
+  await claimJob(db, review, at(0));
+  const command = (await enqueueJob(db, job({ kind: 'gate', reason: 'done', headSha: '', trigger: 'manual', requestedBy: 'octo-lead', commentId: '31' })))!;
+  await claimJob(db, command, at(0));
+  assert.deepEqual(await recoverJobs(db, new Date(at(10)), () => {}), { requeued: 2, dropped: 0 });
+  assert.deepEqual([(await getJob(db, review))?.status, (await getJob(db, command))?.status], ['pending', 'pending']);
+});
+test('a command cut by a stop takes the slot of the sync stored meanwhile', async () => {
+  const command = (await enqueueJob(db, job({ kind: 'gate', reason: 'done', headSha: '', trigger: 'manual', requestedBy: 'octo-lead', commentId: '31' })))!;
+  await claimJob(db, command, at(0));
+  const waiting = (await askGate(db, REF, at(1)))!;
+  assert.deepEqual(await recoverJobs(db, new Date(at(10)), () => {}), { requeued: 1, dropped: 0 });
+  const sync = await getJob(db, waiting);
+  assert.deepEqual([(await getJob(db, command))?.status, sync?.status, sync?.outcome], ['pending', 'dropped', 'superseded']);
 });

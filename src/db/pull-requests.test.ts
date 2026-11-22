@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import type { PullRequestFacts } from '../forge/types.ts';
 import { testDb } from './testing.ts';
-import { getPullRequest, savePullRequest } from './pull-requests.ts';
+import { getPullRequest, openPullRequests, savePullRequest } from './pull-requests.ts';
 
 const ref = { service: 'github' as const, owner: 'acme', repo: 'shop', number: 7 };
 function facts(over: Partial<PullRequestFacts> = {}): PullRequestFacts {
@@ -76,5 +76,13 @@ test('a merged pull request keeps its merge facts', async () => {
   const merged = facts({ state: 'merged', mergedAt: '2026-03-03T09:00:00.000Z', closedAt: '2026-03-03T09:00:00.000Z', mergeCommit: 'fff999', updatedAt: '2026-03-03T09:00:00.000Z' });
   await savePullRequest(db, merged);
   assert.deepEqual(await getPullRequest(db, ref), merged);
+  await db.close();
+});
+test('the open pull requests are listed with their base branch', async () => {
+  const db = await testDb();
+  await savePullRequest(db, facts({ ref: { ...ref, owner: 'Acme' }, baseBranch: 'release' }));
+  await savePullRequest(db, facts({ ref: { ...ref, number: 8 }, state: 'closed', closedAt: '2026-03-01T11:00:00.000Z' }));
+  await savePullRequest(db, facts({ ref: { ...ref, number: 9 }, state: 'merged', mergedAt: '2026-03-01T11:00:00.000Z' }));
+  assert.deepEqual(await openPullRequests(db), [{ ref, baseBranch: 'release' }]);
   await db.close();
 });

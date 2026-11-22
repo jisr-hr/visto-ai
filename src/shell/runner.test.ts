@@ -23,7 +23,7 @@ function harness(over: Partial<RunnerDeps> = {}) {
   const ends = new Map<string, () => void>();          // by "<number> <head>"
   const state = { now: at(600) };
   const runner = createRunner({
-    db, concurrency: 2, clock: () => new Date(state.now), log: (e) => { logged.push(e); }, mayStart: async () => true,
+    db, kind: 'review', concurrency: 2, clock: () => new Date(state.now), log: (e) => { logged.push(e); }, mayStart: async () => true,
     run: (j) => new Promise<void>((end) => { started.push(j); ends.set(`${j.ref.number} ${j.headSha}`, end); }),
     ...over,
   });
@@ -163,11 +163,82 @@ test('a database failure in a pass is logged and the next pass works', async () 
   fail = false;
   await h.runner.tick();
   assert.deepEqual(numbers(h.started), [7]);
-});test('a run that rejects after its job was finished logs no failed outcome', async () => {
+});
+test('a run that rejects after its job was finished logs no failed outcome', async () => {
   const id = (await enqueueJob(db, job()))!;
   const h = harness({ run: async (j) => { await finishJob(db, j.id, 'done', 'reviewed', at(600)); throw new TypeError('late'); } });
   await h.runner.tick();
   await h.next();
   const j = await getJob(db, id);
   assert.deepEqual([j?.outcome, h.logged], ['reviewed', []]);
+});
+test('a runner takes only the jobs of its kind', async () => {
+  await enqueueJob(db, job());
+  const command = (await enqueueJob(db, job({ ref: { ...REF, number: 8 }, kind: 'gate', reason: 'done', headSha: '', trigger: 'manual' })))!;
+  const h = harness({ kind: 'gate' });
+  await h.runner.tick();
+  assert.deepEqual(h.started.map((j) => [j.id, j.kind]), [[command, 'gate']]);
+});
+test('the runner says whether it holds a job of a pull request', async () => {
+  await enqueueJob(db, job());
+  const h = harness();
+  const other = { ...REF, number: 8 };
+  assert.deepEqual([h.runner.holds(REF), h.runner.holds(other)], [false, false]);
+  await h.runner.tick();
+  assert.deepEqual([h.runner.holds(REF), h.runner.holds({ ...REF, owner: 'Acme' }), h.runner.holds(other)], [true, true, false]);
+  h.end('7 h1');
+  await h.next();
+  assert.deepEqual([h.runner.holds(REF), h.runner.holds(other)], [false, false]);
+});
+test('the runner tells when a job has left it, and by then it no longer holds the pull request', async () => {
+  const left: Array<[number, number, string, boolean, string | null | undefined]> = [];
+  let hook: (job: Job, how: 'ended' | 'too_old' | 'attempts_exhausted') => Promise<void> = async () => {};
+  const ran: number[] = [];
+  const resolves = (await enqueueJob(db, job()))!;
+  const throws = (await enqueueJob(db, job({ ref: { ...REF, number: 8 }, runAt: at(1) })))!;
+  const h = harness({
+    concurrency: 1,
+    run: async (j) => { ran.push(j.ref.number); if (j.ref.number === 8) throw new TypeError('private detail'); },
+    onLeft: (j, how) => hook(j, how),
+  });
+  hook = async (j, how) => { left.push([j.id, j.ref.number, how, h.runner.holds(j.ref), (await getJob(db, j.id))?.outcome]); };
+  await h.runner.tick();
+  await h.next();
+  await h.next();
+  assert.deepEqual(left, [[resolves, 7, 'ended', false, null], [throws, 8, 'ended', false, 'failed']]);
+
+  left.length = 0;
+  const old = (await enqueueJob(db, job({ ref: { ...REF, number: 9 }, now: at(-90_000), runAt: at(-90_000) })))!;
+  const spent = (await enqueueJob(db, job({ ref: { ...REF, number: 10 }, runAt: at(2) })))!;
+  await db.query('update visto_ai.jobs set starts = 3 where id = $1', [spent]);
+  await h.runner.tick();
+  assert.deepEqual(left, [[old, 9, 'too_old', false, 'too_old'], [spent, 10, 'attempts_exhausted', false, 'attempts_exhausted']]);
+
+  left.length = 0;
+  hook = () => Promise.reject(Object.assign(new Error('private detail'), { code: '57P01' }));
+  const failing = (await enqueueJob(db, job({ ref: { ...REF, number: 11 }, runAt: at(3) })))!;
+  const after = (await enqueueJob(db, job({ ref: { ...REF, number: 12 }, runAt: at(4) })))!;
+  h.logged.length = 0;
+  await h.runner.tick();
+  await h.next();
+  await h.next();
+  assert.deepEqual(ran.slice(-2), [11, 12]);
+  assert.deepEqual(h.logged.filter((e) => e.event === 'runner_failed'), [
+    { event: 'runner_failed', job: failing, error: 'Error', code: '57P01' },
+    { event: 'runner_failed', job: after, error: 'Error', code: '57P01' },
+  ]);
+  assert.equal(JSON.stringify(h.logged).includes('private detail'), false);
+
+  let release = (): void => {};
+  hook = () => new Promise<void>((r) => { release = r; });
+  await enqueueJob(db, job({ ref: { ...REF, number: 13 }, runAt: at(5) }));
+  await h.runner.tick();
+  await new Promise((r) => setImmediate(r));
+  let drained = false;
+  const draining = h.runner.drain().then(() => { drained = true; });
+  await new Promise((r) => setImmediate(r));
+  assert.deepEqual([ran.at(-1), h.runner.running(), drained], [13, 0, false]);
+  release();
+  await draining;
+  assert.equal(drained, true);
 });

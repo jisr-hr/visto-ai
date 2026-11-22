@@ -57,3 +57,12 @@ export async function getPullRequest(db: Db, ref: PullRequestRef): Promise<PullR
     updatedAt: r.updated_at.toISOString(),
   };
 }
+
+/** Every stored pull request whose state is open, with its base branch. */
+export async function openPullRequests(db: Db): Promise<Array<{ ref: PullRequestRef; baseBranch: string }>> {
+  const rows = await db.query<{ service: 'github'; owner: string; repo: string; number: number; base_branch: string }>(
+    `select service, owner, repo, number, base_branch from visto_ai.pull_requests
+     where state = 'open'
+     order by service, owner, repo, number`);
+  return rows.map((r) => ({ ref: { service: r.service, owner: r.owner, repo: r.repo, number: r.number }, baseBranch: r.base_branch }));
+}

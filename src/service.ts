@@ -103,7 +103,7 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps): Pr
     commentUrl: deps.commentUrl, canResolve: () => deps.appInfo.canResolve(),
   };
   const runner = createRunner({
-    db, concurrency: config.limits.queueConcurrency, clock, log: say,
+    db, kind: 'review', concurrency: config.limits.queueConcurrency, clock, log: say,
     mayStart: async () => !health.paused(clock()) && (await spend.level()) !== 'limit',
     run: (job) => runReviewJob(job, reviewDeps),
   });
