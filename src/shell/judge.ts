@@ -2,7 +2,8 @@
 // one reply at a time, writes each verdict, its cost and its lesson in one transaction, stops at the cap of lessons,
 // at a stop, while reviews are paused and after failures at the provider, and records what it did. Logs hold counts,
 // a cost and short codes: never a reply's words, a finding, a lesson's text, a quote, a path or a login.
-import { addToLearning, noteLearning } from '../db/learning.ts';
+import { addToLearning, noteLearning, readLearning, startLearning } from '../db/learning.ts';
+import type { LearningState } from '../db/learning.ts';
 import { addRecords, standingLessons } from '../db/memory-records.ts';
 import type { NewRecord, RepoKey } from '../db/memory-records.ts';
 import { lessonsMadeSince, laterVerdict, noteVerdict, repliesToJudge } from '../db/reply-verdicts.ts';
@@ -16,7 +17,9 @@ import type { Outcome } from '../memory/judge.ts';
 import { LESSON_DAYS, LESSONS_READ } from '../memory/lessons.ts';
 import { dayStart } from '../memory/select.ts';
 import { directoryOf, ownWords } from '../memory/signals.ts';
+import type { Alert } from './alerts.ts';
 import { codeOf } from './codes.ts';
+import { STALE_AFTER_MS } from './learning.ts';
 
 export const WORK_LESSONS = 'lessons';     // the row of the learning table this work writes
 export const JUDGE_REPLIES = 100;          // replies one run takes
@@ -24,6 +27,8 @@ export const JUDGE_STRANGERS = 20;         // of those, the replies of strangers
 export const JUDGE_ATTEMPTS = 3;           // answers with no verdict after which a reply is retired
 export const LESSONS_PER_RUN = 10;
 export const JUDGE_FAILURES = 3;           // calls that fail at the provider in a row before a run ends for now
+export const NIGHT_RETRY_MS = 3_600_000;   // how long after a run that did not complete the next is tried
+export const ROW_WAIT_MS = 5_000;          // how long a tick waits for its read of the row
 
 export type RunEnd = 'done' | 'lesson_cap' | 'stopped' | 'spend_limit' | 'model_error' | 'auth' | 'no_credit' | 'rate_limited' | 'timeout' | 'provider';
 export interface Judged {
@@ -210,4 +215,162 @@ async function runOnce(deps: Deps, log: Log): Promise<Judged> {
   else if (out.end !== 'stopped') await addToLearning(db, WORK_LESSONS, now(), counts);
   log({ event: 'lessons', judged: out.judged, lessons: out.lessons, given_up: out.givenUp, failed: out.failed, calls: out.calls, cost: out.cost, more: out.more, end: out.end });
   return out;
+}
+
+export interface Nightly {
+  /** Makes sure the work's row is there, and logs what it holds. Rejects when the database does. */
+  start(): Promise<void>;
+  /** The check for staleness, then a run when one is due, which is not waited for. Never rejects. */
+  tick(): Promise<void>;
+  /** Resolves when no run is under way. */
+  idle(): Promise<void>;
+  /** No run starts from now on, and the run under way is told. */
+  stop(): void;
+}
+
+const HOUR_MS = 3_600_000;
+
+// The clock's time in milliseconds; null when it cannot be read.
+function msOf(clock: () => Date): number | null {
+  try {
+    const ms = clock().getTime();
+    return Number.isFinite(ms) ? ms : null;
+  } catch {
+    return null;
+  }
+}
+
+type RowRead = { ok: true; row: LearningState | null } | { ok: false; reason: string };
+
+// The row, read once and waited for at most `ms`: a read that rejects or has not settled by then is a failed read.
+async function readRow(db: Db, ms: number): Promise<RowRead> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const late = new Promise<RowRead>((resolve) => {
+    timer = setTimeout(() => resolve({ ok: false, reason: 'timeout' }), ms);
+    timer.unref?.();
+  });
+  let read: Promise<RowRead>;
+  try {
+    read = readLearning(db, WORK_LESSONS).then((row): RowRead => ({ ok: true, row }), (err: unknown): RowRead => ({ ok: false, reason: codeOf(err) }));
+  } catch (err) {
+    read = Promise.resolve({ ok: false, reason: codeOf(err) });
+  }
+  try {
+    return await Promise.race([read, late]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** The nightly work (7.3, 14, D13, calls 15, 16): a run once in a UTC day, asked at every tick of the learning timer;
+ *  a run that did not complete is tried again NIGHT_RETRY_MS later; lessons_stale after STALE_AFTER_MS with none. */
+export function createNightly(deps: {
+  db: Db; clock: () => Date; log: (entry: Record<string, unknown>) => void; alert: Alert;
+  model: ModelClient; token: () => string; auto: boolean; timeoutMs: number; paused: () => Promise<string | null>;   // each handed to judgeOnce as it is
+  noteUsage?: (usage: { inputTokens: number; outputTokens: number; cost: number }) => void;
+  rowWaitMs?: number;   // for tests; absent: ROW_WAIT_MS
+}): Nightly {
+  const log = safe(deps.log);
+  const rowWait = deps.rowWaitMs ?? ROW_WAIT_MS;
+  let made: number | null = null;            // the first time the clock could be read: the 36 hours count from it when nothing else tells
+  let lastCompleted: number | null = null;   // when a run last completed in this process
+  let raised = false;                        // lessons_stale was raised since a run last completed
+  let stopped = false;
+  let notBefore: number | null = null;       // after a run that did not complete: no run is due before this time
+  let current: Promise<void> | null = null;  // the run under way
+
+  const now = (): number | null => {
+    const ms = msOf(deps.clock);
+    if (made === null && ms !== null) made = ms;
+    return ms;
+  };
+  now();
+
+  // Rule 4: what a run's end sets. `began`: the tick's time, used when the clock cannot be read at the end.
+  function startRun(began: number): Promise<void> {
+    return (async () => {
+      let complete = false;
+      try {
+        const judged = await judgeOnce({
+          db: deps.db, clock: deps.clock, model: deps.model, token: deps.token, auto: deps.auto, timeoutMs: deps.timeoutMs,
+          paused: deps.paused, log, stopping: () => stopped,
+          ...(deps.noteUsage === undefined ? {} : { noteUsage: deps.noteUsage }),
+        });
+        complete = judged.complete;
+      } catch {
+        // logged by the run
+      }
+      const ended = now() ?? began;
+      if (complete) {
+        lastCompleted = ended;
+        notBefore = null;
+        raised = false;
+      } else {
+        notBefore = ended + NIGHT_RETRY_MS;
+      }
+    })().finally(() => {
+      current = null;
+    });
+  }
+
+  // Rule 5: the time the 36 hours count from.
+  function lastOf(read: RowRead): number | null {
+    const fallback = lastCompleted ?? made;
+    if (!read.ok || read.row === null) return fallback;
+    const ms = Date.parse(read.row.ranAt ?? read.row.since);
+    return Number.isFinite(ms) ? ms : fallback;
+  }
+
+  function checkStale(read: RowRead, at: number): void {
+    const last = lastOf(read);
+    if (raised || last === null || at - last <= STALE_AFTER_MS) return;
+    raised = true;
+    try {
+      // An alert that throws, or returns a promise that rejects, changes nothing.
+      const returned: unknown = deps.alert('lessons_stale', { hours: Math.floor((at - last) / HOUR_MS) });
+      void Promise.resolve(returned).catch(() => {});
+    } catch {
+      // an alert that throws changes nothing
+    }
+  }
+
+  // Rule 3: a run is due when none is under way, the wait after a run cut short is over, and none completed today.
+  function due(read: RowRead & { ok: true }, at: number): boolean {
+    if (current !== null) return false;
+    if (notBefore !== null && at < notBefore) return false;
+    const ranAt = read.row?.ranAt ?? null;
+    if (ranAt === null) return true;
+    return Date.parse(ranAt) < dayStart(new Date(at)).getTime();
+  }
+
+  return {
+    async start(): Promise<void> {
+      const at = deps.clock().toISOString();
+      const row = await startLearning(deps.db, WORK_LESSONS, at);
+      log({ event: 'lessons_state', since: row.since, last_ran: row.ranAt, judged: row.examined, lessons: row.added, given_up: row.retired, failed: row.failed });
+    },
+    async tick(): Promise<void> {
+      try {
+        if (stopped) return;
+        const at = now();
+        if (at === null) return;   // a tick whose clock cannot be read does nothing
+        const read = await readRow(deps.db, rowWait);
+        checkStale(read, at);
+        if (!read.ok) {
+          log({ event: 'lessons_failed', reason: read.reason });
+          return;
+        }
+        if (stopped || !due(read, at)) return;
+        current = startRun(at);
+      } catch {
+        // a tick never rejects
+      }
+    },
+    async idle(): Promise<void> {
+      while (current !== null) await current;
+    },
+    stop(): void {
+      stopped = true;
+    },
+  };
 }

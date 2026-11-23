@@ -14,10 +14,10 @@ import type { RunRecord } from '../db/review-runs.ts';
 import { recordComments } from '../db/review-comments.ts';
 import type { StoredComment } from '../db/review-comments.ts';
 import { addRecords } from '../db/memory-records.ts';
-import { readLearning, startLearning } from '../db/learning.ts';
+import { noteLearning, readLearning, startLearning } from '../db/learning.ts';
 import { restates } from '../memory/judge.ts';
-import { JUDGE_STRANGERS, judgeOnce, LESSONS_PER_RUN, WORK_LESSONS } from './judge.ts';
-import type { Judged } from './judge.ts';
+import { createNightly, JUDGE_STRANGERS, judgeOnce, LESSONS_PER_RUN, NIGHT_RETRY_MS, WORK_LESSONS } from './judge.ts';
+import type { Judged, Nightly } from './judge.ts';
 
 const REF: PullRequestRef = { service: 'github', owner: 'acme', repo: 'shop', number: 7 };
 const PATH = 'src/billing/tax.ts';
@@ -611,4 +611,384 @@ test('no entry of a run holds a reply\'s words, a lesson\'s text, a quote, a pat
     }
   }
   await db.close();
+});
+
+// The schedule, the row and the alert (Task 7).
+
+const HOUR_MS = 3_600_000;
+const NOON = '2026-03-11T12:00:00.000Z';
+const ZEROS = { examined: 0, added: 0, retired: 0, failed: 0 };
+const QUEUE = (text: string): boolean => text.includes('from visto_ai.human_activity h') && text.includes('visto_ai.reply_verdicts v');
+const READ_ROW = (text: string): boolean => text.includes('select since, ran_at');
+
+/** Settles as `work` does, or rejects after `ms` of the test's own: a limit that is not applied fails rather than hangs. */
+async function bounded<T>(work: Promise<T>, ms: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([work, new Promise<T>((_, reject) => { timer = setTimeout(() => reject(new Error('bounded')), ms); })]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+function held(): { promise: Promise<void>; release: () => void } {
+  let release = (): void => {};
+  const promise = new Promise<void>((resolve) => { release = resolve; });
+  return { promise, release };
+}
+const turns = async (n = 5): Promise<void> => { for (let i = 0; i < n; i += 1) await new Promise((resolve) => setImmediate(resolve)); };
+
+/** A Db that counts its statements and the reads of the queue (one for each run started); `fail` may replace a statement. */
+function counted(db: Db, fail: (text: string) => Promise<never> | null = () => null): { db: Db; stats: { statements: number; queues: number } } {
+  const stats = { statements: 0, queues: 0 };
+  return {
+    stats,
+    db: wrap(db, {
+      query: <R,>(text: string, params?: unknown[]) => {
+        stats.statements += 1;
+        if (QUEUE(text)) stats.queues += 1;
+        return (fail(text) as Promise<R[]> | null) ?? db.query<R>(text, params);
+      },
+      transaction: <T,>(work: (tx: Db) => Promise<T>) => {
+        stats.statements += 1;
+        return db.transaction(work);
+      },
+    }),
+  };
+}
+
+interface NightDeps { db: Db; clock: () => Date; model?: ModelClient; paused?: () => Promise<string | null>; log?: (e: Record<string, unknown>) => void; alert?: (code: string, details?: Record<string, string | number | boolean | null>) => void; rowWaitMs?: number }
+const nightly = (d: NightDeps): Nightly => createNightly({
+  db: d.db, clock: d.clock, log: d.log ?? (() => {}), alert: d.alert ?? (() => {}),
+  model: d.model ?? modelOf(() => noise()).model, token: () => 'tok123', auto: false, timeoutMs: 60_000,
+  paused: d.paused ?? (async () => null), ...(d.rowWaitMs === undefined ? {} : { rowWaitMs: d.rowWaitMs }),
+});
+const tickAndWait = async (n: Nightly): Promise<void> => {
+  await bounded(n.tick(), 5_000);
+  await bounded(n.idle(), 5_000);
+};
+
+test('start makes the row once and logs what it holds', async () => {
+  const db = await testDb();
+  const logged: Array<Record<string, unknown>> = [];
+  let now = NOW;
+  const n = nightly({ db, clock: () => new Date(now), log: (e) => { logged.push(e); } });
+  await n.start();
+  now = NOON;
+  await n.start();
+  const state = { event: 'lessons_state', since: NOW, last_ran: null, judged: 0, lessons: 0, given_up: 0, failed: 0 };
+  assert.deepEqual(logged, [state, state]);
+  await noteLearning(db, WORK_LESSONS, NOON, { examined: 4, added: 1, retired: 2, failed: 3 });
+  await n.start();
+  assert.deepEqual(logged[2], { event: 'lessons_state', since: NOW, last_ran: NOON, judged: 4, lessons: 1, given_up: 2, failed: 3 });
+  const down = nightly({ db: wrap(db, { query: () => Promise.reject(new Error('db_down')) }), clock: () => new Date(now) });
+  await assert.rejects(down.start());
+  n.stop();
+  await db.close();
+});
+
+test('a run is due once in a UTC day, and a new nightly over the same row starts none', async () => {
+  const plain = await setup();
+  await recordActivity(plain, reply());
+  const { db, stats } = counted(plain);
+  let now = NOW;
+  const clock = () => new Date(now);
+  const { model, requests } = modelOf(() => noise());
+  const n = nightly({ db, clock, model });
+  await tickAndWait(n);
+  assert.equal(stats.queues, 1);
+  assert.equal(requests.length, 1);
+  assert.equal((await readLearning(plain, WORK_LESSONS))!.ranAt, NOW);
+  for (const t of ['2026-03-11T00:10:00.000Z', '2026-03-11T23:55:00.000Z']) {
+    now = t;
+    await tickAndWait(n);
+  }
+  assert.equal(stats.queues, 1);
+  n.stop();
+  now = NOON;
+  const restarted = nightly({ db, clock, model });
+  await tickAndWait(restarted);
+  assert.equal(stats.queues, 1);
+  now = '2026-03-12T00:05:00.000Z';
+  await tickAndWait(restarted);
+  assert.equal(stats.queues, 2);
+  assert.equal((await readLearning(plain, WORK_LESSONS))!.ranAt, now);
+  restarted.stop();
+  await plain.close();
+});
+
+test('after two days down one run is due, and it takes the replies of both', async () => {
+  const plain = await setup();
+  await noteLearning(plain, WORK_LESSONS, '2026-03-09T00:05:00.000Z', ZEROS);
+  await recordActivity(plain, reply({ sourceId: 'r-1', at: '2026-03-09T12:00:00.000Z' }));
+  await recordActivity(plain, reply({ sourceId: 'r-2', at: REPLY_AT }));
+  const { db, stats } = counted(plain);
+  const { model, requests } = modelOf(() => noise());
+  const n = nightly({ db, clock: at(NOW), model });
+  await tickAndWait(n);
+  await tickAndWait(n);
+  assert.equal(stats.queues, 1);
+  assert.equal(requests.length, 2);
+  assert.deepEqual((await verdicts(plain)).map((v) => v.reply), ['r-1', 'r-2']);
+  n.stop();
+  await plain.close();
+});
+
+test('a tick while a run is under way starts no second run', async () => {
+  const plain = await setup();
+  await recordActivity(plain, reply());
+  const { db, stats } = counted(plain);
+  const gate = held();
+  const requests: ModelRequest[] = [];
+  const model: ModelClient = { complete: async (request) => { requests.push(request); await gate.promise; return noise(); } };
+  const n = nightly({ db, clock: at(NOW), model });
+  await bounded(n.tick(), 5_000);
+  while (requests.length === 0) await turns(1);
+  await bounded(n.tick(), 5_000);
+  await turns();
+  assert.equal(stats.queues, 1);
+  assert.equal(requests.length, 1);
+  let idle = false;
+  const waiting = n.idle().then(() => { idle = true; });
+  await turns();
+  assert.equal(idle, false);
+  gate.release();
+  await bounded(waiting, 5_000);
+  assert.equal(requests.length, 1);
+  assert.equal((await verdicts(plain)).length, 1);
+  n.stop();
+  await plain.close();
+});
+
+test('a run cut short is tried again an hour later, not at the next tick', async () => {
+  const plain = await setup();
+  await recordActivity(plain, reply());
+  const { db, stats } = counted(plain);
+  let now = NOW;
+  const clock = () => new Date(now);
+  let asked = 0;
+  const n = nightly({ db, clock, paused: async () => { asked += 1; return 'spend_limit'; } });
+  await tickAndWait(n);
+  assert.equal(asked, 1);
+  assert.equal((await readLearning(plain, WORK_LESSONS))!.ranAt, null);
+  now = plus(NOW, 5 * 60_000);
+  await tickAndWait(n);
+  now = plus(NOW, 59 * 60_000);
+  await tickAndWait(n);
+  assert.equal(stats.queues, 1);
+  assert.equal(NIGHT_RETRY_MS, HOUR_MS);
+  now = plus(NOW, 61 * 60_000);
+  await tickAndWait(n);
+  assert.equal(stats.queues, 2);
+  assert.equal(asked, 2);
+  n.stop();
+
+  // A run that rejected waits the same.
+  let rejects = true;
+  const broken = counted(plain, (text) => (rejects && QUEUE(text) ? Promise.reject(new Error('db_down')) : null));
+  now = '2026-03-12T00:05:00.000Z';
+  const entries: Array<Record<string, unknown>> = [];
+  const m = nightly({ db: broken.db, clock, log: (e) => { entries.push(e); } });
+  await tickAndWait(m);
+  assert.equal(broken.stats.queues, 1);
+  assert.deepEqual(entries, [{ event: 'lessons_failed', reason: 'db_down' }]);
+  rejects = false;
+  now = '2026-03-12T00:10:00.000Z';
+  await tickAndWait(m);
+  assert.equal(broken.stats.queues, 1);
+  now = '2026-03-12T01:06:00.000Z';
+  await tickAndWait(m);
+  assert.equal(broken.stats.queues, 2);
+  assert.equal((await readLearning(plain, WORK_LESSONS))!.ranAt, now);
+  m.stop();
+  await plain.close();
+});
+
+test('a run that completes after midnight counts for the new day', async () => {
+  const plain = await setup();
+  await recordActivity(plain, reply({ at: '2026-03-09T14:00:00.000Z' }));
+  const { db, stats } = counted(plain);
+  let now = '2026-03-10T23:58:00.000Z';
+  const clock = () => new Date(now);
+  const { model } = modelOf(() => { now = '2026-03-11T00:03:00.000Z'; return noise(); });
+  const n = nightly({ db, clock, model });
+  await tickAndWait(n);
+  assert.equal(stats.queues, 1);
+  assert.equal((await readLearning(plain, WORK_LESSONS))!.ranAt, '2026-03-11T00:03:00.000Z');
+  now = NOW;
+  await tickAndWait(n);
+  assert.equal(stats.queues, 1);
+  now = '2026-03-12T00:05:00.000Z';
+  await tickAndWait(n);
+  assert.equal(stats.queues, 2);
+  n.stop();
+  await plain.close();
+});
+
+test('lessons_stale is raised once after 36 hours without a completed run, and again only after one completed', async () => {
+  const db = await setup();
+  await recordActivity(db, reply());
+  const T = '2026-03-10T00:00:00.000Z';
+  let now = T;
+  const clock = () => new Date(now);
+  const alerts: Array<[string, unknown]> = [];
+  let failing = true;
+  const n = nightly({ db, clock, paused: async () => (failing ? 'model_error' : null), alert: (code, details) => { alerts.push([code, details]); } });
+  await n.start();
+  now = plus(T, 35 * HOUR_MS);
+  await tickAndWait(n);
+  assert.deepEqual(alerts, []);
+  now = plus(T, 37 * HOUR_MS);
+  await tickAndWait(n);
+  assert.deepEqual(alerts, [['lessons_stale', { hours: 37 }]]);
+  now = plus(T, 38 * HOUR_MS);
+  await tickAndWait(n);
+  assert.equal(alerts.length, 1);
+  assert.equal((await readLearning(db, WORK_LESSONS))!.ranAt, null);
+  failing = false;
+  const worked = plus(T, 39 * HOUR_MS);
+  now = worked;
+  await tickAndWait(n);
+  assert.equal((await readLearning(db, WORK_LESSONS))!.ranAt, worked);
+  assert.equal(alerts.length, 1);
+  failing = true;
+  await recordActivity(db, reply({ sourceId: 'r-2', at: plus(T, 40 * HOUR_MS) }));
+  now = plus(worked, 35 * HOUR_MS);
+  await tickAndWait(n);
+  assert.equal(alerts.length, 1);
+  now = plus(worked, 37 * HOUR_MS);
+  await tickAndWait(n);
+  assert.deepEqual(alerts, [['lessons_stale', { hours: 37 }], ['lessons_stale', { hours: 37 }]]);
+  n.stop();
+  await db.close();
+});
+
+test('with no row the 36 hours count from when the nightly was made', async () => {
+  const plain = await setup();
+  await recordActivity(plain, reply());
+  const { db, stats } = counted(plain, (text) => (READ_ROW(text) ? Promise.reject(new Error('db_down')) : null));
+  let now = NOW;
+  const alerts: Array<[string, unknown]> = [];
+  const logged: Array<Record<string, unknown>> = [];
+  const n = nightly({ db, clock: () => new Date(now), log: (e) => { logged.push(e); }, alert: (code, details) => { alerts.push([code, details]); } });
+  now = plus(NOW, 35 * HOUR_MS);
+  await tickAndWait(n);
+  assert.deepEqual(alerts, []);
+  now = plus(NOW, 37 * HOUR_MS);
+  await tickAndWait(n);
+  assert.deepEqual(alerts, [['lessons_stale', { hours: 37 }]]);
+  assert.deepEqual(logged, [{ event: 'lessons_failed', reason: 'db_down' }, { event: 'lessons_failed', reason: 'db_down' }]);
+  assert.equal(stats.queues, 0);
+  assert.equal(await readLearning(plain, WORK_LESSONS), null);
+  n.stop();
+  await plain.close();
+});
+
+test('a read of the row that never settles: the tick returns at its limit, starts no run, and lessons_stale is still raised at 36 hours', async () => {
+  const plain = await setup();
+  await recordActivity(plain, reply());
+  await startLearning(plain, WORK_LESSONS, NOW);
+  const { db, stats } = counted(plain, (text) => (READ_ROW(text) ? new Promise<never>(() => {}) : null));
+  let now = NOW;
+  const alerts: Array<[string, unknown]> = [];
+  const logged: Array<Record<string, unknown>> = [];
+  const n = nightly({ db, clock: () => new Date(now), rowWaitMs: 5, log: (e) => { logged.push(e); }, alert: (code, details) => { alerts.push([code, details]); } });
+  await tickAndWait(n);
+  assert.deepEqual(logged, [{ event: 'lessons_failed', reason: 'timeout' }]);
+  assert.equal(stats.queues, 0);
+  now = plus(NOW, 37 * HOUR_MS);
+  await tickAndWait(n);
+  assert.deepEqual(alerts, [['lessons_stale', { hours: 37 }]]);
+  assert.equal(stats.queues, 0);
+  n.stop();
+  await plain.close();
+});
+
+test('after stop no run starts, and the run under way ends without another call or statement', async () => {
+  const plain = await setup();
+  for (let i = 0; i < 3; i += 1) await recordActivity(plain, reply({ sourceId: `r-${i}`, at: plus(REPLY_AT, i * 60_000) }));
+  const { db, stats } = counted(plain);
+  const gate = held();
+  const requests: ModelRequest[] = [];
+  const model: ModelClient = { complete: async (request) => { requests.push(request); await gate.promise; return noise(); } };
+  const logged: Array<Record<string, unknown>> = [];
+  const n = nightly({ db, clock: at(NOW), model, log: (e) => { logged.push(e); } });
+  await bounded(n.tick(), 5_000);
+  while (requests.length === 0) await turns(1);
+  n.stop();
+  const before = stats.statements;
+  gate.release();
+  await bounded(n.idle(), 5_000);
+  assert.equal(requests.length, 1);
+  assert.equal(stats.statements, before);
+  assert.deepEqual(logged.filter((e) => e.event === 'lessons').map((e) => e.end), ['stopped']);
+  await bounded(n.tick(), 5_000);
+  await bounded(n.idle(), 5_000);
+  assert.equal(stats.statements, before);
+  assert.equal(requests.length, 1);
+  assert.deepEqual(await verdicts(plain), []);
+  await plain.close();
+});
+
+test('an alert that returns a rejected promise leaves no unhandled rejection, and the tick goes on', async () => {
+  const plain = await setup();
+  await startLearning(plain, WORK_LESSONS, NOW);
+  const { db, stats } = counted(plain);
+  const seen: unknown[] = [];
+  const listener = (reason: unknown) => { seen.push(reason); };
+  process.on('unhandledRejection', listener);
+  try {
+    let alerts = 0;
+    const n = nightly({
+      db, clock: at(plus(NOW, 37 * HOUR_MS)),
+      alert: (() => { alerts += 1; return Promise.reject(new Error('x')); }) as unknown as () => void,
+    });
+    await tickAndWait(n);
+    await turns(3);
+    assert.equal(alerts, 1);
+    assert.deepEqual(seen, []);
+    assert.equal(stats.queues, 1);
+    n.stop();
+  } finally {
+    process.off('unhandledRejection', listener);
+  }
+  await plain.close();
+});
+
+test('a tick whose clock cannot be read does nothing, and a logger that throws changes nothing', async () => {
+  const plain = await setup();
+  await recordActivity(plain, reply());
+  const { db, stats } = counted(plain);
+  let broken = true;
+  const clock = () => { if (broken) throw new Error('clock'); return new Date(NOW); };
+  const n = nightly({ db, clock, log: () => { throw new Error('log'); } });
+  await tickAndWait(n);
+  assert.equal(stats.statements, 0);
+  broken = false;
+  await tickAndWait(n);
+  assert.equal(stats.queues, 1);
+  assert.equal((await verdicts(plain)).length, 1);
+  n.stop();
+  await plain.close();
+});
+
+test('with a row that cannot be read, the 36 hours count from the last run this process completed', async () => {
+  const plain = await setup();
+  let readFails = false;
+  const { db } = counted(plain, (text) => (readFails && READ_ROW(text) ? Promise.reject(new Error('db_down')) : null));
+  let now = NOW;
+  const alerts: Array<[string, unknown]> = [];
+  const n = nightly({ db, clock: () => new Date(now), alert: (code, details) => { alerts.push([code, details]); } });
+  const worked = plus(NOW, 30 * HOUR_MS);
+  now = worked;
+  await tickAndWait(n);
+  assert.equal((await readLearning(plain, WORK_LESSONS))!.ranAt, worked);
+  readFails = true;
+  now = plus(worked, 35 * HOUR_MS);
+  await tickAndWait(n);
+  assert.deepEqual(alerts, []);
+  now = plus(worked, 37 * HOUR_MS);
+  await tickAndWait(n);
+  assert.deepEqual(alerts, [['lessons_stale', { hours: 37 }]]);
+  n.stop();
+  await plain.close();
 });
