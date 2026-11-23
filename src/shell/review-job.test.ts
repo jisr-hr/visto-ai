@@ -2517,7 +2517,7 @@ test('with learning off the review line and the alerts are those of before', asy
 test('a status with no lessons part logs as it did, and a damaged part is not logged', async () => {
   const signals: MemoryStatus = { status: 'ok', code: 'ok', lines: 2 };
   let number = 110;
-  for (const lessons of [undefined, 'x', { status: 'fine' }, { status: 'ok', code: 'ok', shown: -1 }, { status: 'ok', code: 'ok', shown: 1.5 }, { status: 'ok', code: 'Not A Code', shown: 0 }, null, []]) {
+  for (const lessons of [undefined, 'x', { status: 'fine' }, { status: 'fine', code: 'ok', shown: 0 }, { status: 'ok', code: 'ok', shown: -1 }, { status: 'ok', code: 'ok', shown: 1.5 }, { status: 'ok', code: 'Not A Code', shown: 0 }, null, []]) {
     number += 1;
     const memory = lessons === undefined ? signals : { ...signals, lessons };
     const dependencies = { model: 'ok', memory } as unknown as ReviewResult['dependencies'];
@@ -2544,6 +2544,13 @@ test('the review line carries how each part of memory did', async () => {
     const keys = Object.keys(reviewLine(h));
     assert.deepEqual(keys.slice(keys.indexOf('extensions')), ['extensions', 'memory']);
   }
+  // a part with a key too many is logged with its three keys, and nothing else of it
+  const extra = { status: 'ok', code: 'ok', lines: 1, lessons: { status: 'ok', code: 'ok', shown: 2, text: 'octo-lead wrote src/billing/tax.ts' } };
+  const wide = await harness({ pullRequest: 143, result: okResult({ dependencies: { model: 'ok', memory: extra } as unknown as ReviewResult['dependencies'] }) });
+  await runReviewJob(wide.job, wide.deps);
+  assert.deepEqual(reviewLine(wide).memory, { status: 'ok', code: 'ok', lines: 1, lessons: { status: 'ok', code: 'ok', shown: 2 } });
+  assert.deepEqual(Object.keys((reviewLine(wide).memory as { lessons: object }).lessons), ['status', 'code', 'shown']);
+  assert.equal(JSON.stringify(reviewLine(wide)).includes('octo-lead'), false);
   // a review an earlier start recorded: its line carries what it stored
   await recorded({ ref: { ...REF, number: 142 }, result: okResult({ dependencies: { model: 'ok', memory } }) });
   const resumed = await live({ pullRequest: 142 });
@@ -2559,6 +2566,8 @@ test('the health is told once for a review: an error of either part is a failure
     [{ status: 'skipped', code: 'no_room', lines: 0, lessons: { status: 'skipped', code: 'no_room', shown: 0 } }, []],
     [{ status: 'error', code: 'timeout', lines: 0, lessons: { status: 'error', code: 'lookup_failed', shown: 0 } }, [[false, 'timeout']]],
     [{ status: 'skipped', code: 'second_scorer', lines: 0, lessons: { status: 'empty', code: 'no_lessons', shown: 0 } }, [[true, 'no_lessons']]],
+    // the code of the first part that was asked
+    [{ status: 'ok', code: 'ok', lines: 2, lessons: { status: 'empty', code: 'no_lessons', shown: 0 } }, [[true, 'ok']]],
   ];
   let number = 150;
   for (const [memory, expected] of cases) {
