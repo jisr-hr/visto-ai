@@ -67,3 +67,12 @@ test('the extensions part may not import the GitHub adapter or a Postgres client
 test('the engine may not import the extensions part', async () => {
   assert.ok((await lint("import '../extensions/load.ts';\n", 'src/engine/x.ts')).includes('no-restricted-imports'));
 });
+test('the engine may not import the mcp part', async () => {
+  assert.ok((await lint("import '../mcp/client.ts';\n", 'src/engine/x.ts')).includes('no-restricted-imports'));
+});
+test('the mcp part may not import the GitHub adapter or a Postgres client', async () => {
+  assert.ok((await lint("import '../forge/github/read-source.ts';\n", 'src/mcp/x.ts')).includes('no-restricted-imports'));
+  for (const name of ['pg', '@electric-sql/pglite']) {
+    assert.ok((await lint(`import '${name}';\n`, 'src/mcp/x.ts')).includes('no-restricted-imports'), name);
+  }
+});
