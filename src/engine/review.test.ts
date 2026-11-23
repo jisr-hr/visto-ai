@@ -3289,3 +3289,154 @@ test('two reviews of one pull request are sent the same lessons under different 
   assert.equal(q2.messages[2]!.content.endsWith(`\n${lessonsPart(taughtCtx(taught), 'fedcba9876543210')}`), true);
   assert.notEqual(q1.messages[2]!.content, q2.messages[2]!.content);
 });
+
+test('a memory whose lessons cannot be read costs the review its lessons, not the review', async () => {
+  const plain = deps({ files: [fileA], answers: [answerOnA], memory: memoryOf(memoryAnswer([])) });
+  const expected = await review(own, plain);
+  const throwing = { blocks: async () => memoryAnswer([]), get lessons(): never { throw new Error('getter'); } } as Memory;
+  const d = deps({ files: [fileA], answers: [answerOnA], memory: throwing });
+  const r = await review(own, d);
+  assert.equal(r.status, 'ok');
+  assert.deepEqual(d.model.requests, plain.model.requests);
+  assert.deepEqual(r.dependencies.memory, { status: 'empty', code: 'no_records', lines: 0, lessons: { status: 'error', code: 'lookup_failed', shown: 0 } });
+  assert.deepEqual(r.audit.filter((e) => e.action.startsWith('lesson')), [{ stage: 'context', action: 'lessons_failed', subject: 'lessons', reason: 'lookup_failed' }]);
+  assert.deepEqual(r.findings, expected.findings);
+  // A getter that answers a function on its first read and throws on a second: it is read once, and its lessons are shown.
+  let reads = 0;
+  const once = {
+    blocks: async () => memoryAnswer([]),
+    get lessons() {
+      reads += 1;
+      if (reads > 1) throw new Error('read twice');
+      return async () => lessonsOf([lesson()]);
+    },
+  } as Memory;
+  const o = deps({ files: [fileA], answers: [answerOnA], memory: once });
+  const ro = await review(own, o);
+  assert.equal(reads, 1);
+  assert.deepEqual(ro.dependencies.memory!.lessons, { status: 'ok', code: 'ok', shown: 1 });
+  assert.ok(o.model.requests[0]!.messages[1]!.content.endsWith(`\n${lessonsPart(taughtCtx(lessonsOf([lesson()])), TOKEN)}`));
+  // The function read is called on the memory, as a method.
+  let onMemory = false;
+  const method: Memory = { blocks: async () => memoryAnswer([]), async lessons() { onMemory = this === method; return lessonsOf([]); } };
+  await review(own, deps({ files: [fileA], answers: [answerOnA], memory: method }));
+  assert.equal(onMemory, true);
+});
+
+test('a memory whose lessons is no function is a memory with no lessons', async () => {
+  const plain = deps({ files: [fileA], answers: [answerOnA], memory: memoryOf(memoryAnswer([])) });
+  const expected = await review(own, plain);
+  for (const value of [5, 'lessons', null]) {
+    const memory = { blocks: async () => memoryAnswer([]), lessons: value } as unknown as Memory;
+    const d = deps({ files: [fileA], answers: [answerOnA], memory });
+    const r = await review(own, d);
+    assert.deepEqual(d.model.requests, plain.model.requests, String(value));
+    assert.deepEqual(r, expected, String(value));
+    assert.equal('lessons' in r.dependencies.memory!, false);
+  }
+});
+
+test('a renamed file is handed to the lookup of lessons with the path it had', async () => {
+  const renamed: ChangedFile = { ...fileAt('src/cart/new.ts'), previousPath: 'src/cart/old.ts', status: 'renamed' };
+  const memory = teaching(memoryAnswer([]), lessonsOf([]));
+  const r = await review(own, deps({ files: [renamed], answers: [{ overview: 'src/cart/new.ts is fine.', findings: [], files: [] }], memory }));
+  assert.deepEqual(r.failure, null);
+  assert.deepEqual(memory.lessonCalls.map(([files]) => files), [[{ path: 'src/cart/new.ts', previousPath: 'src/cart/old.ts' }]]);
+});
+
+test('with nothing to show the review goes on with the packing memory chose', async () => {
+  const answer = memoryAnswer(twoLines);
+  const lim = await memoryRoom(answer, 1.5);
+  // Without memory the two files share one call; with memory shown they take two.
+  assert.ok(memoryTokens(answer) > 0.5 * (await unitOf(fileA, false)));
+  const bare = deps({ files: [fileA, fileB], answerFor: { 'src/a.ts': answerOnA, 'src/b.ts': answerOnB } });
+  await review(lim, bare);
+  assert.equal(bare.model.requests.length, 1);
+  const plain = deps({ files: [fileA, fileB], answerFor: { 'src/a.ts': answerOnA, 'src/b.ts': answerOnB }, memory: memoryOf(answer) });
+  await review(lim, plain);
+  assert.equal(plain.model.requests.length, 2);
+  const d = deps({ files: [fileA, fileB], answerFor: { 'src/a.ts': answerOnA, 'src/b.ts': answerOnB }, memory: teaching(answer, lessonsOf([])) });
+  const r = await review(lim, d);
+  assert.deepEqual(d.model.requests, plain.model.requests);
+  assert.deepEqual(r.dependencies.memory, { status: 'ok', code: 'ok', lines: 2, lessons: { status: 'empty', code: 'no_lessons', shown: 0 } });
+});
+
+// The smallest limit under which a review with no lessons, made by `run`, keeps its file whole; lessons then need their own tokens more.
+async function edgeOf(low: number, keeps: (limit: number) => Promise<boolean>): Promise<number> {
+  let high = low + 10_000;
+  assert.ok(await keeps(high));
+  assert.equal(await keeps(low), false);
+  while (high - low > 1) {
+    const mid = Math.floor((low + high) / 2);
+    if (await keeps(mid)) high = mid; else low = mid;
+  }
+  return high;
+}
+
+test('lessons are fitted with the threads counted', async () => {
+  const taught = lessonsOf([lesson()]);
+  const thread = earlierThread({ resolved: false });
+  const later = (inputTokensPerCall: number): ReviewInput => ({ ...limitsOf(inputTokensPerCall), earlier: { head: 'abcdef0', threads: [thread] } });
+  const run = async (inputTokensPerCall: number, memory?: Memory) => {
+    const d = withContent(deps({ files: [fileA], answers: [answerOnA], ...(memory === undefined ? {} : { memory }) }));
+    return { r: await review(later(inputTokensPerCall), d), d };
+  };
+  const keeps = async (n: number) => { const { r } = await run(n); return r.status === 'ok' && !r.audit.some((e) => e.action === 'full_file_cut'); };
+  const high = await edgeOf(fixedTokens(CONTRACT, own.pullRequest, true), keeps);
+  assert.ok(fixedTokens(CONTRACT, own.pullRequest, true) - fixedTokens(CONTRACT, own.pullRequest, false) >= 1);
+  // One token short of the room lessons need with the threads counted.
+  const edge = high + lessonTokens(taught) - 1;
+  const short = await run(edge, teaching(memoryAnswer([]), taught));
+  const plain = await run(edge, memoryOf(memoryAnswer([])));
+  assert.ok(short.d.model.requests[0]!.messages[2]!.content.includes('### Thread T1'));
+  assert.deepEqual(short.d.model.requests, plain.d.model.requests);
+  assert.deepEqual(short.r.dependencies.memory!.lessons, { status: 'skipped', code: 'no_room', shown: 0 });
+  const shown = await run(edge + 1, teaching(memoryAnswer([]), taught));
+  assert.deepEqual(shown.r.dependencies.memory!.lessons, { status: 'ok', code: 'ok', shown: 1 });
+  assert.ok(shown.d.model.requests[0]!.messages[2]!.content.includes('### Full file'));
+});
+
+test('lessons are fitted with the last overview counted', async () => {
+  const taught = lessonsOf([lesson({ path: 'src/u.ts' })]);
+  const first = await firstOf([fileT, fileU], blockAnswer({ 'src/t.ts': 40, 'src/u.ts': 20 }));
+  const later = (inputTokensPerCall: number): ReviewInput =>
+    ({ ...limitsOf(inputTokensPerCall), mode: 'incremental', history: historyFrom(first, { covered: true, lastReview: LAST }) });
+  const run = async (inputTokensPerCall: number, memory?: Memory) => {
+    const d = deps({ files: [fileT, valueFile('src/u.ts', 5)], answers: [blockAnswer({ 'src/u.ts': 30 })], ...(memory === undefined ? {} : { memory }) });
+    return { r: await review(later(inputTokensPerCall), d), d };
+  };
+  const keeps = async (n: number) => { const { r } = await run(n); return r.status === 'ok' && r.coverage.reviewed.includes('src/u.ts'); };
+  const high = await edgeOf(fixedTokens(CONTRACT, own.pullRequest, false, LAST.overview), keeps);
+  assert.ok(fixedTokens(CONTRACT, own.pullRequest, false, LAST.overview) - fixedTokens(CONTRACT, own.pullRequest) >= 1);
+  const edge = high + lessonTokens(taught) - 1;
+  const short = await run(edge, teaching(memoryAnswer([]), taught));
+  const plain = await run(edge, memoryOf(memoryAnswer([])));
+  assert.ok(short.d.model.requests[0]!.messages[1]!.content.includes(LAST.overview));
+  assert.deepEqual(short.d.model.requests, plain.d.model.requests);
+  assert.deepEqual(short.r.dependencies.memory!.lessons, { status: 'skipped', code: 'no_room', shown: 0 });
+  const shown = await run(edge + 1, teaching(memoryAnswer([]), taught));
+  assert.deepEqual(shown.r.dependencies.memory!.lessons, { status: 'ok', code: 'ok', shown: 1 });
+  assert.deepEqual(shown.r.coverage.reviewed, ['src/u.ts']);
+});
+
+test('extension context that does not fit beside lessons leaves the review the packing lessons chose', async () => {
+  const taught = lessonsOf(twoLessons);
+  const ctx = taughtCtx(taught);
+  const unit = await unitOf(fileA, false);
+  // With the lessons each call holds one file; without them the two files share one call.
+  assert.ok(lessonTokens(taught) >= unit);
+  const lim = limitsOf(fixedTokens(CONTRACT, own.pullRequest, false, undefined, undefined, undefined, ctx) + unit);
+  const bare = deps({ files: [fileA, fileB], answerFor: { 'src/a.ts': answerOnA, 'src/b.ts': answerOnB } });
+  await review(lim, bare);
+  assert.equal(bare.model.requests.length, 1);
+  const d = deps({ files: [fileA, fileB], answerFor: { 'src/a.ts': answerOnA, 'src/b.ts': answerOnB }, memory: teaching(memoryAnswer([]), taught), contextProviders: [ticketProvider()] });
+  const r = await review(lim, d);
+  assert.equal(d.model.requests.length, 2);
+  for (const q of d.model.requests) {
+    assert.equal(q.messages[1]!.content.endsWith(`\n${lessonsPart(ctx, TOKEN)}`), true);
+    assert.equal(q.messages[1]!.content.includes(EXTENSION_LINE), false);
+  }
+  assert.deepEqual(r.dependencies.memory!.lessons, { status: 'ok', code: 'ok', shown: 2 });
+  assert.deepEqual(r.audit.filter((e) => e.action === 'extension_context_cut'), [{ stage: 'context', action: 'extension_context_cut', subject: 'extensions', reason: 'over_call_budget' }]);
+  assert.deepEqual(r.coverage, { reviewed: ['src/a.ts', 'src/b.ts'], notReviewed: [] });
+});

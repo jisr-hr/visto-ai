@@ -37,7 +37,7 @@ import { shownOf } from './score/shown.ts';
 import type { ScoredBy, ScoreEntry, ScoreHistory } from './score/types.ts';
 import { askScorer, summariesOf } from './scorer/ask.ts';
 import type {
-  AcceptanceRow, AuditEntry, ChangedFile, Discussed, EarlierThread, Effort, ExtensionStatus, Finding, LessonsStatus, MemoryStatus, NotReviewed, PullRequestInfo, RepoConfig, ReviewDeps, ReviewInput, ReviewResult,
+  AcceptanceRow, AuditEntry, ChangedFile, Discussed, EarlierThread, Effort, ExtensionStatus, Finding, LessonsStatus, Memory, MemoryStatus, NotReviewed, PullRequestInfo, RepoConfig, ReviewDeps, ReviewInput, ReviewResult,
   Severity, Side, Source, ToolDefinition, Usage,
 } from './types.ts';
 
@@ -416,12 +416,27 @@ async function chooseLessons(
   deps: ReviewDeps, first: Packing, chosen: Packing, asOf: Date, budgetWith: (shown: LessonsContext) => number, pack: (budget: number) => Packing,
 ): Promise<{ packed: Packing; shown: LessonsContext | undefined; status: LessonsStatus | undefined; audit: AuditEntry[] }> {
   const memory = deps.memory;
-  if (memory === undefined || typeof memory.lessons !== 'function') return { packed: chosen, shown: undefined, status: undefined, audit: [] };
+  if (memory === undefined) return { packed: chosen, shown: undefined, status: undefined, audit: [] };
+  const failed = (): { packed: Packing; shown: undefined; status: LessonsStatus; audit: AuditEntry[] } => ({
+    packed: chosen, shown: undefined, status: { status: 'error', code: 'lookup_failed', shown: 0 },
+    audit: [{ stage: 'context', action: 'lessons_failed', subject: 'lessons', reason: 'lookup_failed' }],
+  });
+  // Read once, inside a guard: a getter may throw, or answer otherwise the second time.
+  let lessons: unknown;
+  try {
+    lessons = memory.lessons;
+  } catch {
+    return failed();
+  }
+  if (typeof lessons !== 'function') return { packed: chosen, shown: undefined, status: undefined, audit: [] };
+  const ask = lessons as NonNullable<Memory['lessons']>;
+  // What was read is handed on, so that the lookup does not read the memory's property again; it is called on the memory.
+  const once: Memory = { blocks: () => Promise.reject(new Error('not_asked')), lessons: (files, asOf, signal) => ask.call(memory, files, asOf, signal) };
   if (first.batches.length === 0) return { packed: chosen, shown: undefined, status: { status: 'skipped', code: 'no_model_call', shown: 0 }, audit: [] };
   const files = first.batches.flatMap((b) => b.files).map((c) => ({ path: c.file.path, previousPath: c.file.previousPath }));
   let asked: Awaited<ReturnType<typeof askLessons>>;
   try {
-    asked = await askLessons(memory, files, asOf);
+    asked = await askLessons(once, files, asOf);
   } catch {
     // askLessons never rejects; guarded all the same, as memory's lookup is.
     asked = { context: undefined, status: { status: 'error', code: 'lookup_failed', shown: 0 }, audit: [{ stage: 'context', action: 'lessons_failed', subject: 'lessons', reason: 'lookup_failed' }] };
