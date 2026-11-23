@@ -12,7 +12,7 @@ export const SETUP_TIMEOUT_MS = 30_000;
 const PARTS = ['context', 'notify', 'alert', 'route'] as const;
 type Part = (typeof PARTS)[number];
 
-/** A failure of a module's own, told apart from the limit's timeout whatever the module threw. */
+/** A failure of a module's own (its import or its set-up), told apart from the limit's timeout whatever the module threw. */
 class ModuleError {
   readonly error: unknown;
   constructor(error: unknown) { this.error = error; }
@@ -23,12 +23,16 @@ class LoadFailure {
   constructor(code: string, error: unknown = null) { this.code = code; this.error = error; }
 }
 
-/** The error's name, or its own string code, only when it reads as an identifier: never a message. */
-function identifier(error: unknown, key: 'name' | 'code'): string | null {
+const BUILT_IN_ERRORS = new Set(['Error', 'TypeError', 'RangeError', 'ReferenceError', 'SyntaxError', 'EvalError', 'URIError', 'AggregateError']);
+
+/** A field of a thrown error that is safe to log: a built-in error's name, or a code of Node's style. Never a message, never free text. */
+function safeField(error: unknown, key: 'name' | 'code'): string | null {
   try {
     if (typeof error !== 'object' || error === null) return null;
     const value: unknown = (error as Record<string, unknown>)[key];
-    return typeof value === 'string' && /^[A-Za-z][A-Za-z0-9_]{0,79}$/.test(value) ? value : null;
+    if (typeof value !== 'string') return null;
+    if (key === 'name') return BUILT_IN_ERRORS.has(value) ? value : null;
+    return /^[A-Z][A-Z0-9_]{0,79}$/.test(value) ? value : null;
   } catch {
     return null;
   }
@@ -57,7 +61,7 @@ function partsOf(returned: unknown): Extension | null {
       const value = source[part];
       if (value === undefined) continue;
       if (typeof value !== 'function') return null;
-      parts[part] = (value as (...args: never[]) => unknown).bind(source);
+      parts[part] = value as (...args: never[]) => unknown;
     }
     return Object.keys(parts).length === 0 ? null : (parts as Extension);
   } catch {
@@ -90,11 +94,19 @@ function setupFor(config: ExtensionConfig, deps: Parameters<typeof loadExtension
 
 async function loadOne(config: ExtensionConfig, deps: Parameters<typeof loadExtensions>[1]): Promise<Extension> {
   const importModule = deps.importModule ?? ((specifier: string) => import(specifier));
+  const limitMs = deps.setupTimeoutMs ?? SETUP_TIMEOUT_MS;
   let namespace: unknown;
   try {
-    namespace = await importModule(specifierOf(config.module, deps.configDir));
-  } catch (error) {
-    throw new LoadFailure('extension_import_failed', error);
+    namespace = await withLimit(limitMs, async () => {
+      try {
+        return await importModule(specifierOf(config.module, deps.configDir));
+      } catch (error) {
+        throw new ModuleError(error);
+      }
+    });
+  } catch (failure) {
+    if (failure instanceof ModuleError) throw new LoadFailure('extension_import_failed', failure.error);
+    throw new LoadFailure('extension_import_timeout');
   }
   let factory: unknown;
   try {
@@ -106,7 +118,7 @@ async function loadOne(config: ExtensionConfig, deps: Parameters<typeof loadExte
   const setup = setupFor(config, deps);
   let returned: unknown;
   try {
-    returned = await withLimit(deps.setupTimeoutMs ?? SETUP_TIMEOUT_MS, async () => {
+    returned = await withLimit(limitMs, async () => {
       try {
         return await (factory as (setup: ExtensionSetup) => unknown)(setup);
       } catch (error) {
@@ -139,7 +151,7 @@ export async function loadExtensions(configs: ExtensionConfig[], deps: {
       const known = failure instanceof LoadFailure ? failure : new LoadFailure('extension_setup_failed', failure);
       deps.log({
         event: 'extension_failed', extension: config.name, code: known.code,
-        error: identifier(known.error, 'name'), cause: identifier(known.error, 'code'),
+        error: safeField(known.error, 'name'), cause: safeField(known.error, 'code'),
       });
       throw new Error(known.code);
     }

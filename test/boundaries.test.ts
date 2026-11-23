@@ -64,3 +64,6 @@ test('the extensions part may not import the GitHub adapter or a Postgres client
     assert.ok((await lint(`import '${name}';\n`, 'src/extensions/x.ts')).includes('no-restricted-imports'), name);
   }
 });
+test('the engine may not import the extensions part', async () => {
+  assert.ok((await lint("import '../extensions/load.ts';\n", 'src/engine/x.ts')).includes('no-restricted-imports'));
+});

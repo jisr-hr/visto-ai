@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
 import type { ExtensionConfig } from '../config/load.ts';
+import type { ReviewDeps } from '../engine/types.ts';
 import type { PullRequestInfo } from '../forge/types.ts';
 import { alertSinksOf, contextProvidersOf, loadExtensions, notifiersOf } from './load.ts';
 import type { FeedbackAnswer, FeedbackOutcome, LoadedExtension, ReviewNotice, RouteRequest } from './types.ts';
@@ -150,6 +151,10 @@ test('a module that does not load stops the loading and is named, without its pa
     importModule: withDefault(() => new Promise(() => {})), setupTimeoutMs: 5,
   });
   assert.equal(hung.error, null);
+  const importHung = await fails({ name: 'tickets', module: 'acme-visto-chat', options: {} }, 'extension_import_timeout', {
+    importModule: () => new Promise(() => {}), setupTimeoutMs: 5,
+  });
+  assert.equal(importHung.error, null);
   for (const shape of [null, [], {}, { notifier: fn }, { notify: 'x' }, { context: fn, extra: 1 }, 5, { notify: undefined }]) {
     await fails({ name: 'tickets', module: 'acme-visto-chat', options: {} }, 'extension_bad_shape', { importModule: withDefault(() => shape) });
   }
@@ -233,4 +238,34 @@ test('the three lists hold only the modules that have the part, in order', async
   assert.deepEqual(notifiersOf(loaded).map((n) => [n.name, n.notify]), [['chat', notify], ['example', notify]]);
   assert.deepEqual(alertSinksOf(loaded).map((n) => [n.name, n.alert]), [['tickets', alert], ['chat', alert]]);
   assert.deepEqual([contextProvidersOf([]), notifiersOf([]), alertSinksOf([])], [[], [], []]);
+});
+
+test('the failure line keeps only a built-in error name and an error code of Node\'s style', async () => {
+  const thrown = (name: string, code: string) => withDefault(() => {
+    const error = new Error('boom');
+    Object.defineProperty(error, 'name', { value: name });
+    Object.assign(error, { code });
+    throw error;
+  });
+  const kept = harness({ importModule: thrown('TypeError', 'ERR_MODULE_NOT_FOUND') });
+  await assert.rejects(loadExtensions([{ name: 'tickets', module: 'acme-visto-chat', options: {} }], kept.deps), { message: 'extension_setup_failed' });
+  assert.deepEqual(kept.logged, [{ event: 'extension_failed', extension: 'tickets', code: 'extension_setup_failed', error: 'TypeError', cause: 'ERR_MODULE_NOT_FOUND' }]);
+  const dropped = harness({ importModule: thrown('sk_live_ABCDEF0123456789', 'ghp_token1234567890abcdef') });
+  await assert.rejects(loadExtensions([{ name: 'tickets', module: 'acme-visto-chat', options: {} }], dropped.deps), { message: 'extension_setup_failed' });
+  assert.deepEqual(dropped.logged, [{ event: 'extension_failed', extension: 'tickets', code: 'extension_setup_failed', error: null, cause: null }]);
+  for (const name of ['Error', 'RangeError', 'ReferenceError', 'SyntaxError', 'EvalError', 'URIError', 'AggregateError']) {
+    const h = harness({ importModule: thrown(name, 'ENOENT') });
+    await assert.rejects(loadExtensions([{ name: 'tickets', module: 'acme-visto-chat', options: {} }], h.deps));
+    assert.deepEqual([h.logged[0]!.error, h.logged[0]!.cause], [name, 'ENOENT']);
+  }
+  for (const code of ['enoent', 'E-NOENT', 'A'.repeat(81), '']) {
+    const h = harness({ importModule: thrown('Error', code) });
+    await assert.rejects(loadExtensions([{ name: 'tickets', module: 'acme-visto-chat', options: {} }], h.deps));
+    assert.equal(h.logged[0]!.cause, null, code);
+  }
+});
+
+test('review dependencies may carry context providers', () => {
+  const providers: NonNullable<ReviewDeps['contextProviders']> = contextProvidersOf([{ name: 'tickets', parts: { context: fn } }]);
+  assert.deepEqual(providers.map((p) => p.name), ['tickets']);
 });

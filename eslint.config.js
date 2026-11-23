@@ -33,7 +33,7 @@ export default tseslint.config(
       'no-restricted-imports': [
         'error',
         {
-          patterns: [githubAdapter, '**/eval/**', '**/db/**', '**/shell/**'],
+          patterns: [githubAdapter, '**/eval/**', '**/db/**', '**/shell/**', '**/extensions/**'],
           paths: [...engineForbidden.flatMap((name) => [name, `node:${name}`]), ...postgresClients],
         },
       ],
