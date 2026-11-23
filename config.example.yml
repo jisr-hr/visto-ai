@@ -87,7 +87,7 @@ learning: false
 #   # The port the service listens on (1 to 65535). It is 8080 when not written.
 #   port: 8080
 # alerts:
-#   # The environment variable that holds the URL (http or https) that gets the alerts: model_error, model_ok, spend_80, spend_limit, cost_unknown, redelivery_failed, feature_off, gate_check_failed, gate_bypass, extension_error, extension_ok, mcp_error and mcp_ok.
+#   # The environment variable that holds the URL (http or https) that gets the alerts: model_error, model_ok, spend_80, spend_limit, cost_unknown, redelivery_failed, feature_off, gate_check_failed, gate_bypass, extension_error, extension_ok, mcp_error, mcp_ok, memory_error, memory_ok and learning_stale.
 #   webhook: { env: ALERT_WEBHOOK_URL }
 
 # Optional extension modules: code of your own that the service loads once, at start. A module can give the reviewer
