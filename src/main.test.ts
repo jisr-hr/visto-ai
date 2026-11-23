@@ -3,7 +3,9 @@ import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { boundedFetch, createServer, describeFailure, GITHUB_CALL_MS, HEADERS_TIMEOUT_MS, main, REQUEST_TIMEOUT_MS, runUntilSignal } from './main.ts';
+import type { InstanceLock } from './db/types.ts';
+import type { LoadedExtension } from './extensions/types.ts';
+import { boundedFetch, createServer, describeFailure, GITHUB_CALL_MS, HEADERS_TIMEOUT_MS, lockThenLoad, main, REQUEST_TIMEOUT_MS, runUntilSignal } from './main.ts';
 
 async function run(argv: string[], env: Record<string, string | undefined> = {}): Promise<{ code: number; lines: string[] }> {
   const lines: string[] = [];
@@ -122,4 +124,32 @@ test('every call to GitHub has a time limit of a minute, for its answer and its 
   assert.equal(empty.status, 204);
   const failing: typeof fetch = async () => { throw new TypeError('fetch failed'); };
   await assert.rejects(boundedFetch(failing, 60_000)('https://api.example.test/x'), TypeError);
+});
+
+test('the lock is taken before a module is loaded, and a second instance loads none', async () => {
+  const calls: string[] = [];
+  const lock: InstanceLock = { release: async () => { calls.push('release'); } };
+  const modules: LoadedExtension[] = [{ name: 'tickets', parts: { context: async () => ({ status: 'empty' }) } }];
+  const load = async (): Promise<LoadedExtension[]> => { calls.push('load'); return modules; };
+
+  // The lock held elsewhere: refused, and nothing is loaded.
+  await assert.rejects(lockThenLoad(async () => { calls.push('lock'); return null; }, load), /^Error: another_instance_running$/);
+  assert.deepEqual(calls, ['lock']);
+
+  // A module that does not load: the lock is released once and the loader's error passed on.
+  calls.length = 0;
+  const failed = new Error('extension_import_failed');
+  await assert.rejects(lockThenLoad(async () => { calls.push('lock'); return lock; }, async () => { calls.push('load'); throw failed; }), (error) => error === failed);
+  assert.deepEqual(calls, ['lock', 'load', 'release']);
+
+  // A release that throws changes nothing.
+  calls.length = 0;
+  const stuck: InstanceLock = { release: async () => { calls.push('release'); throw new Error('release_failed'); } };
+  await assert.rejects(lockThenLoad(async () => { calls.push('lock'); return stuck; }, async () => { calls.push('load'); throw failed; }), (error) => error === failed);
+  assert.deepEqual(calls, ['lock', 'load', 'release']);
+
+  // Both succeed: the lock and the modules come back, and nothing is released.
+  calls.length = 0;
+  const done = await lockThenLoad(async () => { calls.push('lock'); return lock; }, load);
+  assert.deepEqual([done.lock === lock, done.extensions === modules, calls], [true, true, ['lock', 'load']]);
 });

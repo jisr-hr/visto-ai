@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import test from 'node:test';
@@ -170,4 +170,11 @@ test('score-noise warns in one line when the runs were answered by different mod
 test('the usage line of an unknown command names backtest and score-noise', async () => {
   const [, lines] = await run(['bogus']);
   assert.match(lines[0]!, /backtest\|score-noise/);
+});
+
+test('the eval commands load no module', () => {
+  const text = readFileSync(join(projectRoot, 'src', 'eval', 'cli.ts'), 'utf8');
+  assert.equal(/from '\.\.\/extensions\//.test(text), false);
+  assert.equal(text.includes('loadExtensions'), false);
+  assert.equal(text.includes('contextProviders'), false);
 });

@@ -18,6 +18,8 @@ import { BEAT_MS, CLOSE_WAIT_MS, DRAIN_WAIT_MS, gateForge, startService, STOP_WA
 import type { Listening } from './service.ts';
 import type { RequestLike, ResponseLike } from './shell/http.ts';
 import { checkText } from './gate/check.ts';
+import type { LoadedExtension } from './extensions/types.ts';
+import { createFeedback } from './shell/feedback.ts';
 
 const REF = { service: 'github', owner: 'acme', repo: 'shop', number: 7 } as const;
 const at = (seconds: number): string => new Date(Date.parse('2026-03-01T10:00:00.000Z') + seconds * 1000).toISOString();
@@ -87,6 +89,8 @@ interface Options {
   github?: boolean;
   /** What isTeamMember answers; it rejects when not given. */
   member?: boolean;
+  /** The modules the service is given; none when not given. */
+  extensions?: LoadedExtension[];
 }
 interface Timer { ms: number; work: () => Promise<void>; cancelled: boolean }
 
@@ -297,6 +301,9 @@ async function harness(options: Options = {}) {
       },
       lineUrl: () => 'https://git.example.test/x',
       commentUrl: (_ref, commentId) => `https://git.example.test/c/${commentId}`,
+      extensions: options.extensions ?? [],
+      reviewUrl: (ref, reviewId) => `https://git.example.test/${ref.owner}/${ref.repo}/pull/${ref.number}#review-${reviewId}`,
+      pullRequestUrl: (ref) => `https://git.example.test/${ref.owner}/${ref.repo}/pull/${ref.number}`,
       });
       started.push(service);
       return service;
@@ -310,6 +317,19 @@ async function harness(options: Options = {}) {
       listener!(req, {
         writeHead(status: number) { answer.status = status; },
         end(body: string) { answer.body = body; resolve(answer); },
+      });
+    }),
+    /** A request to the listener; a body of null never ends. Resolves with the answer. */
+    request: (method: string, url: string, body: Buffer | null = Buffer.from('')) => new Promise<{ status: number; headers: Record<string, string>; body: string }>((resolve) => {
+      const req: RequestLike = {
+        method, url, headers: {},
+        async *[Symbol.asyncIterator]() { if (body === null) await never(); else yield body; },
+      };
+      let status = 0;
+      let headers: Record<string, string> = {};
+      listener!(req, {
+        writeHead(s: number, hs: Record<string, string>) { status = s; headers = hs; },
+        end(text: string) { resolve({ status, headers, body: text }); },
       });
     }),
     flush: async () => {
@@ -1254,4 +1274,125 @@ test('after the app is installed again, a reply and a resolve that arrive throug
   await h.timers.filter((t) => t.ms === TICK_MS && !t.cancelled).at(-1)!.work();
   await h.until(() => titleOn(h, 'h1') === '1 finding, none blocking');
   assert.equal(h.held.get('h1')!.conclusion, 'success');
+});
+
+// Extension modules (plan 2026-11-22, Task 10).
+
+const alertsOf = (h: { logged: Array<Record<string, unknown>> }, ...codes: string[]) => h.logged.filter((e) => e.event === 'alert' && codes.includes(e.code as string));
+const LACKS: FeatureOff[] = [{ feature: 'commands', missing: 'issues:write' }];
+/** A module named chat with a notifier and a sink, each of which records its calls. */
+function chatModule(): { module: LoadedExtension; calls: unknown[][] } {
+  const calls: unknown[][] = [];
+  return {
+    calls,
+    module: { name: 'chat', parts: {
+      notify: async (notice) => { calls.push(['notify', notice]); },
+      alert: async (notice) => { calls.push(['alert', notice]); },
+    } },
+  };
+}
+
+test('a module is asked for its route in dry run too, and an unknown one is not found', async () => {
+  let throwing = false;
+  const seen: string[] = [];
+  const h = await harness({ extensions: [{ name: 'chat', parts: { route: async (request) => {
+    seen.push(`${request.method} ${request.path}`);
+    if (throwing) throw new Error('chat down');
+    return { status: 200, body: 'pong' };
+  } } }] });
+  await (await h.start()).settled;
+  const sent = async (url: string) => { const a = await h.request('GET', url); return [a.status, a.body]; };
+  assert.deepEqual(await sent('/extensions/chat/ping'), [200, 'pong']);
+  assert.deepEqual(await sent('/extensions/other/ping'), [404, 'not_found']);
+  assert.deepEqual(seen, ['GET /ping']);
+  throwing = true;
+  assert.deepEqual(await sent('/extensions/chat/ping'), [500, 'internal_error']);
+  assert.deepEqual(await sent('/extensions/chat/ping'), [500, 'internal_error']);
+  assert.deepEqual(alertsOf(h, 'extension_error', 'extension_ok'), [{ event: 'alert', code: 'extension_error', extension: 'chat', part: 'route', reason: 'threw' }]);
+  throwing = false;
+  assert.deepEqual(await sent('/extensions/chat/ping'), [200, 'pong']);
+  assert.deepEqual(alertsOf(h, 'extension_error', 'extension_ok').slice(1), [{ event: 'alert', code: 'extension_ok', extension: 'chat', part: 'route' }]);
+});
+test('out of dry run a published review reaches the notifier, and an alert reaches the sink', async () => {
+  const { module, calls } = chatModule();
+  const h = await harness({ dryRun: false, extensions: [module], lacks: LACKS });
+  await (await h.start()).settled;
+  await h.until(() => calls.some((c) => c[0] === 'alert'));
+  assert.deepEqual(calls, [['alert', { code: 'feature_off', at: at(0), details: { feature: 'commands', missing: 'issues:write' } }]]);
+  await h.webhook(pr('opened'), 'd1');
+  await h.until(() => calls.some((c) => c[0] === 'notify'));
+  await h.flush();
+  const runs = await h.db.query<{ id: number }>('select id from visto_ai.review_runs');
+  const notices = calls.filter((c) => c[0] === 'notify').map((c) => c[1] as Record<string, unknown>);
+  assert.equal(notices.length, 1);
+  assert.deepEqual([notices[0]!.run, notices[0]!.repository, notices[0]!.number, notices[0]!.reviewUrl, notices[0]!.pullRequestUrl], [
+    runs[0]!.id, 'acme/shop', 7, 'https://git.example.test/acme/shop/pull/7#review-501', 'https://git.example.test/acme/shop/pull/7',
+  ]);
+  assert.equal(h.logged.some((e) => e.event === 'extensions_quiet'), false);
+});
+test('in dry run no notifier and no sink is called, and the start says so once', async () => {
+  const { module, calls } = chatModule();
+  const h = await harness({ extensions: [module], lacks: LACKS });
+  await (await h.start()).settled;
+  await h.webhook(pr('opened'), 'd1');
+  await h.until(async () => (await h.db.query<{ n: number }>("select count(*)::int as n from visto_ai.jobs where kind = 'review' and status = 'done'"))[0]!.n === 1);
+  await h.flush();
+  assert.equal((await h.db.query('select id from visto_ai.review_runs')).length, 1);
+  assert.equal(alertsOf(h, 'feature_off').length, 1);
+  assert.deepEqual(calls, []);
+  assert.deepEqual(h.logged.filter((e) => e.event === 'extensions_quiet'), [{ event: 'extensions_quiet', reason: 'dry_run', notifiers: 1, sinks: 1 }]);
+});
+test('a provider that starts failing raises one alert, and one more when it works again', async () => {
+  const h = await harness({ extensions: [{ name: 'tickets', parts: { context: async () => ({ status: 'empty' }) } }] });
+  const statuses = [['error', 'timeout'], ['error', 'timeout'], ['ok', 'ok']];
+  h.resultFor = (input) => {
+    const [status, code] = statuses[h.inputs.indexOf(input)]!;
+    return { ...okResult(), dependencies: { model: 'ok', extensions: { tickets: { status: status as 'ok', code: code! } } } };
+  };
+  await (await h.start()).settled;
+  for (const [i, head] of ['h1', 'h2', 'h3'].entries()) {
+    h.live = { ...LIVE, info: { ...LIVE.info, headSha: head } };
+    h.now = at(i * 3600);
+    await h.webhook(pr(i === 0 ? 'opened' : 'synchronize', { headSha: head, updatedAt: at(i * 3600) }), `d${i + 1}`);
+    // A push is delayed a little: the clock moves past it and the runner ticks.
+    h.now = at(i * 3600 + 600);
+    await h.runTimer(TICK_MS);
+    await h.until(() => h.logged.filter((e) => e.event === 'review').length === i + 1);
+  }
+  assert.deepEqual(alertsOf(h, 'extension_error', 'extension_ok'), [
+    { event: 'alert', code: 'extension_error', extension: 'tickets', part: 'context', reason: 'timeout' },
+    { event: 'alert', code: 'extension_ok', extension: 'tickets', part: 'context' },
+  ]);
+});
+test('an answer a module reports for a published review is stored, and one for a dry run is refused', async () => {
+  const out = await harness({ dryRun: false });
+  await (await out.start()).settled;
+  await out.webhook(pr('opened'), 'd1');
+  await out.until(async () => (await out.db.query("select id from visto_ai.review_runs where published")).length === 1);
+  const [published] = await out.db.query<{ id: number }>('select id from visto_ai.review_runs');
+  const report = createFeedback({ db: out.db, clock: () => new Date(out.now), log: () => {} });
+  assert.deepEqual(await report('chat', { run: published!.id, login: 'octo-lead', vote: 'up' }), { ok: true });
+  assert.equal((await out.db.query('select id from visto_ai.review_feedback')).length, 1);
+  const dry = await harness();
+  await (await dry.start()).settled;
+  await dry.webhook(pr('opened'), 'd1');
+  await dry.until(async () => (await dry.db.query('select id from visto_ai.review_runs')).length === 1);
+  const [recorded] = await dry.db.query<{ id: number }>('select id from visto_ai.review_runs');
+  const refused = createFeedback({ db: dry.db, clock: () => new Date(dry.now), log: () => {} });
+  assert.deepEqual(await refused('chat', { run: recorded!.id, login: 'octo-lead', vote: 'up' }), { ok: false, code: 'unknown_run' });
+  assert.equal((await dry.db.query('select id from visto_ai.review_feedback')).length, 0);
+});
+test('with no module the service starts, reviews and logs as before, and an address under /extensions/ is not found without being read', async () => {
+  const h = await harness({ dryRun: false, extensions: [] });
+  await (await h.start()).settled;
+  const atStart = h.logged.map((e) => e.event);
+  assert.deepEqual(atStart, ['recovery', 'model_check', 'app_check']);
+  const answer = await h.request('POST', '/extensions/x/y', null);
+  assert.deepEqual([answer.status, answer.body], [404, 'not_found']);
+  assert.deepEqual(await h.webhook(pr('opened'), 'd1'), { status: 202, body: 'accepted' });
+  await h.until(() => h.logged.some((e) => e.event === 'review'));
+  await h.flush();
+  assert.equal(h.writes.some((w) => w[0] === 'publishReview'), true);
+  assert.equal(h.logged.some((e) => typeof e.event === 'string' && (e.event.startsWith('extension') || e.event.startsWith('notice'))), false);
+  assert.equal(h.logged.find((e) => e.event === 'review')!.extensions, null);
 });
