@@ -1841,18 +1841,21 @@ test('a push\'s job already waiting when a /done review ends head_moved is repla
   assert.equal((await getJob(db, done.job.id))?.outcome, 'head_moved');
   assert.deepEqual((await pendingOf(7)).map((j) => [j.id, j.trigger, j.reason, j.headSha, j.requestedBy, j.runAt]), [[push, 'manual', 'done_retry', '', 'octo-lead', at(0)]]);
 });
-/** The head the service stores for the pull request moves on, as a push's event would move it. */
-const moveStored = (number: number, head = 'h2') => db.query('update visto_ai.pull_requests set head_sha = $2 where number = $1', [number, head]);
+/** The head the service stores for the pull request moves on, as a push's event after the job started would move it; `at` is when GitHub says it was updated. */
+const moveStored = (number: number, head = 'h2', updatedAt = at(5)) =>
+  db.query('update visto_ai.pull_requests set head_sha = $2, updated_at = $3::timestamptz where number = $1', [number, head, updatedAt]);
 const TIMEOUT = () => failed('model', 'timeout', { dependencies: { model: 'error' } });
+/** What the job told the one who asked about its end: a comment or a confused reaction (the eyes of an accepted command are not). */
+const endAnswers = (writes: unknown[][]): unknown[][] => writes.filter((w) => w[0] === 'comment' || (w[0] === 'react' && w[2] === 'confused'));
 
-test('a manual review that fails, cannot be rendered or is refused while the stored head moved starts over once, and says what it says today', async () => {
+test('a manual review that fails, cannot be rendered or is refused while the stored head moved starts over once, and says nothing: the retry answers', async () => {
   const fails = await manualJob({ reason: 'done', settings: GATED, result: TIMEOUT() });
   await moveStored(7);
   await runReviewJob(fails.job, fails.deps);
   assert.equal((await getJob(db, fails.job.id))?.outcome, 'failed');
   assert.deepEqual((await pendingOf(7)).map((j) => [j.kind, j.trigger, j.reason, j.headSha, j.requestedBy, j.commentId, j.association, j.installation, j.runAt]),
     [['review', 'manual', 'done_retry', '', 'octo-lead', '31', 'member', '99', at(0)]]);
-  assert.deepEqual(fails.writes.filter((w) => w[0] === 'comment'), [['comment', '@octo-lead The review did not finish (`review_failed`).']]);
+  assert.deepEqual(endAnswers(fails.writes), []);
 
   // Not gated: a /review starts over too.
   const unrendered = await manualJob({ pullRequest: 8, renderThrows: true });
@@ -1860,6 +1863,7 @@ test('a manual review that fails, cannot be rendered or is refused while the sto
   await runReviewJob(unrendered.job, unrendered.deps);
   assert.equal((await getJob(db, unrendered.job.id))?.outcome, 'render_failed');
   assert.deepEqual((await pendingOf(8)).map((j) => [j.trigger, j.reason, j.requestedBy, j.commentId]), [['manual', 'command_retry', 'octo-lead', '31']]);
+  assert.deepEqual(endAnswers(unrendered.writes), []);
 
   const rejected = await manualJob({ reason: 'rerun', settings: GATED, pullRequest: 9, requestedBy: 'octo-dev', commentId: null, association: null,
     posts: [new Error('review_rejected'), new Error('review_rejected')] });
@@ -1867,12 +1871,32 @@ test('a manual review that fails, cannot be rendered or is refused while the sto
   await runReviewJob(rejected.job, rejected.deps);
   assert.equal((await getJob(db, rejected.job.id))?.outcome, 'publish_rejected');
   assert.deepEqual((await pendingOf(9)).map((j) => [j.trigger, j.reason, j.requestedBy, j.commentId, j.association]), [['manual', 'rerun_retry', 'octo-dev', null, null]]);
+
+  // A /review on the second try of its review: the retry starts over, says nothing, and the retry's failure is the one answer.
+  const twice = await manualJob({ pullRequest: 10, result: TIMEOUT(), secondStart: true });
+  await moveStored(10);
+  await runReviewJob(twice.job, twice.deps);
+  assert.deepEqual(endAnswers(twice.writes), []);
+  const [retry] = await pendingOf(10);
+  const again = await manualJob({ reuseJob: retry!.id, pullRequest: 10, result: TIMEOUT(), live: { ...LIVE, info: { ...LIVE.info, headSha: 'h2' } } });
+  await runReviewJob(again.job, again.deps);
+  assert.deepEqual(again.writes.filter((w) => w[0] === 'comment'), [['comment', '@octo-lead The review did not finish (`review_failed`).']]);
+  assert.deepEqual(await pendingOf(10), []);
 });
 test('a manual review that fails at the stored head, with no stored row, as a retry, or a push\'s that fails, does not start over', async () => {
   const unmoved = await manualJob({ reason: 'done', settings: GATED, result: TIMEOUT() });
   await runReviewJob(unmoved.job, unmoved.deps);
   assert.equal((await getJob(db, unmoved.job.id))?.outcome, 'failed');
   assert.deepEqual(await pendingOf(7), []);
+  assert.deepEqual(unmoved.writes.filter((w) => w[0] === 'comment'), [['comment', '@octo-lead The review did not finish (`review_failed`).']]);
+
+  // A stored head merely behind the reviewed one (its row not updated since the job started) starts no second review of the same head.
+  const behind = await manualJob({ pullRequest: 11, result: TIMEOUT(), head: 'h2' });
+  await moveStored(11, 'h1', at(-60));
+  await runReviewJob(behind.job, behind.deps);
+  assert.equal((await getJob(db, behind.job.id))?.outcome, 'failed');
+  assert.deepEqual(await pendingOf(11), []);
+  assert.deepEqual(behind.writes.filter((w) => w[0] === 'comment'), [['comment', '@octo-lead The review did not finish (`review_failed`).']]);
 
   const unknown = await manualJob({ settings: GATED, pullRequest: 8, stored: false, result: TIMEOUT() });
   await runReviewJob(unknown.job, unknown.deps);

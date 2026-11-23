@@ -461,3 +461,26 @@ test('an answer that cannot be written is logged and changes nothing', async () 
   await refused.run();
   assert.equal(refused.logs.filter((e) => e['event'] === 'answer_failed').length, 2, 'the sentence is still tried after the reaction failed');
 });
+
+test('a command uses its own installation before the stored one: the app installed again has a new id', async () => {
+  const h = await harness({ reason: 'done', installation: '1' });
+  const forge = h.deps.forge;
+  h.deps.forge = { ...forge, readPullRequest: (ref, installation) => (installation === '99' ? forge.readPullRequest(ref, installation) : Promise.reject(new Error('github_404'))) };
+  await h.run();
+  assert.deepEqual(await statusOf(h), ['done', 'review_queued']);
+  assert.deepEqual(h.calls.filter((c) => c[0] === 'react').map((c) => c[2]), ['99']);
+});
+
+test('a /done while a review that started over runs is stored as its own job, and one while it waits joins it', async () => {
+  for (const [claim, outcome, jobs] of [[true, 'review_queued', [['running', 'done_retry'], ['pending', 'done']]], [false, 'coalesced', [['pending', 'done_retry']]]] as const) {
+    const h = await harness({ reason: 'done' });
+    const id = await enqueueJob(h.db, {
+      ref: REF, reason: 'done_retry', headSha: '', runAt: at(0), now: at(0), delivery: null, replace: true, trigger: 'manual',
+      requestedBy: 'octo-dev', commentId: '21', association: 'member', installation: '99',
+    });
+    if (claim) await claimJob(h.db, id!, at(0));
+    await h.run();
+    assert.deepEqual(await statusOf(h), ['done', outcome], String(claim));
+    assert.deepEqual((await reviewJobs(h.db)).map((j) => [j.status, j.reason]), jobs, String(claim));
+  }
+});

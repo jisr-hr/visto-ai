@@ -205,16 +205,19 @@ export async function runReviewJob(job: Job, deps: ReviewJobDeps): Promise<void>
     return stored;
   };
   /**
-   * A manual job that ends without a published review while the head the service stores is not the one it reviewed
-   * starts over once, as a new job for the live head, in the transaction of its end: a command that joined it is
-   * answered by a review of the new head. Not for a retry, and not when no row is stored.
+   * A manual job that ends without a published review while the pull request moved on starts over once, as a new job
+   * for the live head, in the transaction of its end: a command that joined it is answered by a review of the new head.
+   * Moved on: the stored row was updated after this job started and its head is not the one reviewed; a stored head
+   * that is merely behind starts nothing. Not for a retry, and not when no row is stored. true when it started over:
+   * the job then says nothing, and the retry's own end answers, as at a publication whose head moved.
    */
-  const startOverIfMoved = async (tx: Db, reviewed: string): Promise<void> => {
-    if (retryReason === null || reviewed === '') return;
+  const startOverIfMoved = async (tx: Db, reviewed: string): Promise<boolean> => {
+    if (retryReason === null || reviewed === '') return false;
     const stored = await getPullRequest(tx, job.ref);
-    if (stored === null || stored.headSha === reviewed) return;
+    if (stored === null || stored.headSha === reviewed || !(Date.parse(stored.updatedAt) > now.getTime())) return false;
     await enqueueJob(tx, { ref: job.ref, reason: retryReason, headSha: '', runAt: later(0), now: nowIso, delivery: null, replace: true,
       trigger: 'manual', requestedBy: job.requestedBy, commentId: job.commentId, association: job.association, installation: job.installation });
+    return true;
   };
   /** Says that the command failed; the job has already been given its outcome. */
   const fail = (installation: string, code: string): Promise<void> =>
@@ -552,13 +555,16 @@ export async function runReviewJob(job: Job, deps: ReviewJobDeps): Promise<void>
       }
     } else if (deps.dryRun || run.outcome !== 'ok') {
       const ended = run.outcome === 'ok' ? 'reviewed' : 'failed';
+      let startedOver = false;
       written = await tried(() => db.transaction(async (tx) => {
+        // Each try starts afresh: a retry stored by a try that was rolled back is no job.
+        startedOver = false;
         if (await finishJob(tx, job.id, 'done', ended, nowIso)) {
           await recordRun(tx, run);
-          if (ended === 'failed') await startOverIfMoved(tx, run.headSha);
+          if (ended === 'failed') startedOver = await startOverIfMoved(tx, run.headSha);
         }
       }));
-      if (written && ended === 'failed') await fail(installation, 'review_failed');
+      if (written && ended === 'failed' && !startedOver) await fail(installation, 'review_failed');
     } else if (!manual && nothingNewOf(result)) {
       // Nothing new: no review is posted. The run is kept with no body, so that no later start takes it for a review waiting to be published.
       let runId: number | null = null;
@@ -572,16 +578,18 @@ export async function runReviewJob(job: Job, deps: ReviewJobDeps): Promise<void>
     } else if (run.body === '') {
       // A review whose text could not be rendered is never posted.
       let runId: number | null = null;
+      let startedOver = false;
       written = await tried(() => db.transaction(async (tx) => {
         runId = null;
+        startedOver = false;
         if (await finishJob(tx, job.id, 'done', 'render_failed', nowIso)) {
           runId = await recordRun(tx, run);
-          await startOverIfMoved(tx, run.headSha);
+          startedOver = await startOverIfMoved(tx, run.headSha);
         }
       }));
       if (written) {
         if (runId !== null) await keepScores(runId, run.finishedAt);
-        await fail(installation, 'render_failed');
+        if (!startedOver) await fail(installation, 'render_failed');
       }
     } else {
       // Recorded alone: the job stays running until the publication is settled.
@@ -642,10 +650,12 @@ export async function runReviewJob(job: Job, deps: ReviewJobDeps): Promise<void>
       } else if (out.kind === 'closed') {
         written = await finish('closed');
       } else if (out.kind === 'rejected') {
+        let startedOver = false;
         written = await tried(() => db.transaction(async (tx) => {
-          if (await finishJob(tx, job.id, 'done', 'publish_rejected', nowIso)) await startOverIfMoved(tx, target.headSha);
+          startedOver = false;
+          if (await finishJob(tx, job.id, 'done', 'publish_rejected', nowIso)) startedOver = await startOverIfMoved(tx, target.headSha);
         }));
-        if (written) await fail(installation, 'publish_rejected');
+        if (written && !startedOver) await fail(installation, 'publish_rejected');
       } else if (out.kind === 'unlisted') {
         // Held: the job waits until the review is old enough, and the start is given back. A review dated after the clock waits no longer than one dated now.
         const runAt = at(Math.min(PUBLISH_WAIT_MS, PUBLISH_WAIT_MS - age));

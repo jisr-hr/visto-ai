@@ -229,9 +229,9 @@ async function work(job: Job, deps: GateJobDeps, entry: Entry, log: (e: Record<s
   if (deps.dryRun) return { kind: 'finish', status: 'dropped', outcome: 'dry_run' };
   const settings = deps.settingsFor(`${job.ref.owner}/${job.ref.repo}`);
   if (!settings.gate.enabled) return { kind: 'finish', status: 'dropped', outcome: 'gate_off' };
-  // The stored pull request's installation, else the job's own: a pull request the service stores no row for gets its check too.
+  // The job's own installation, else the stored pull request's (as a review job does): an app installed again has a new id.
   seen.stored = await getPullRequest(db, job.ref);
-  const installation = seen.stored?.installation ?? job.installation ?? null;
+  const installation = job.installation ?? seen.stored?.installation ?? null;
   if (installation === null) return { kind: 'finish', status: 'dropped', outcome: 'no_installation' };
   if (COMMANDS.has(job.reason)) return { kind: 'command', installation, settings };
   if (job.reason !== 'sync') return { kind: 'finish', status: 'done', outcome: 'unknown_reason', ask: true };

@@ -56,6 +56,24 @@ export async function lastEvaluations(db: Db): Promise<Array<{ ref: PullRequestR
   return rows.map((r) => ({ ref: { service: r.service, owner: r.owner, repo: r.repo, number: r.number }, mode: r.mode, state: r.state }));
 }
 
+/**
+ * The pull requests the gate recorded an evaluation for and the service stores no row of (opened before the app was
+ * installed), with the state of the newest evaluation and the installation of the newest job of the pull request that
+ * has one (null when none has).
+ */
+export async function evaluatedUnstored(db: Db): Promise<Array<{ ref: PullRequestRef; state: string; installation: string | null }>> {
+  const rows = await db.query<{ service: 'github'; owner: string; repo: string; number: number; state: string; installation: string | null }>(
+    `select distinct on (e.service, e.owner, e.repo, e.number) e.service, e.owner, e.repo, e.number, e.state,
+            (select j.installation from visto_ai.jobs j
+              where j.service = e.service and j.owner = e.owner and j.repo = e.repo and j.number = e.number and j.installation is not null
+              order by j.id desc limit 1) as installation
+     from visto_ai.gate_evaluations e
+     where not exists (select 1 from visto_ai.pull_requests p
+                       where p.service = e.service and p.owner = e.owner and p.repo = e.repo and p.number = e.number)
+     order by e.service, e.owner, e.repo, e.number, e.id desc`);
+  return rows.map((r) => ({ ref: { service: r.service, owner: r.owner, repo: r.repo, number: r.number }, state: r.state, installation: r.installation }));
+}
+
 export interface Skip { ref: PullRequestRef; headSha: string; actor: string; reason: string; commentId: string; at: string }
 
 /** false when this comment's skip was already stored. */

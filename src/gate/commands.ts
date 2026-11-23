@@ -168,7 +168,9 @@ async function end(job: Job, deps: GateJobDeps, ending: Ending, now: string): Pr
       // pull request reviewed only when asked is about to be dropped as gated (call 25).
       const held = deps.reviewing(job.ref);
       const gating = ending.review;
-      const joins = jobs.some((j) => reviewWillRun(j, gating) && (j.status === 'pending' || (j.status === 'running' && held)));
+      // A running review that started over is not joined: if it fails it does not start over again, and the command would be lost.
+      const joins = jobs.some((j) => reviewWillRun(j, gating)
+        && (j.status === 'pending' || (j.status === 'running' && held && !j.reason.endsWith('_retry'))));
       if (joins) {
         outcome = 'coalesced';
       } else {

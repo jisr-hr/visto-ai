@@ -1176,5 +1176,55 @@ test('a /done that joined the review of an older head that then fails is answere
   const reviews = await h.db.query<{ reason: string; outcome: string }>("select reason, outcome from visto_ai.jobs where kind = 'review' order by id");
   assert.deepEqual(reviews, [{ reason: 'done', outcome: 'failed' }, { reason: 'done_retry', outcome: 'published' }]);
   assert.deepEqual(h.inputs.map((i) => i.pullRequest.headSha), ['h1', 'h2']);
-  assert.deepEqual(h.writes.filter((w) => w[0] === 'comment'), [['comment', '@octo-lead The review did not finish (`review_failed`).']]);
+  // The failed review started over and said nothing: the retry's review is the answer.
+  assert.deepEqual(h.writes.filter((w) => w[0] === 'comment'), []);
+});
+test('a pull request whose last sync found it closed, reopened while the service was in dry run, is asked for at the next start', async () => {
+  const options: { gate: boolean; github: boolean; result: ReviewResult; dryRun?: boolean } = { gate: true, github: true, result: majorResult() };
+  const h = await harness(options);
+  const first = await h.start();
+  await first.settled;
+  await greenRound(h);
+  // GitHub has it closed and the close's own event is late: a reply's sync records closed.
+  h.live = { ...LIVE, state: 'closed' };
+  h.now = at(30);
+  await h.webhook(replyOf(h, '8102', 30), 'r30');
+  h.now = at(33);
+  await h.runTimer(TICK_MS);
+  await h.until(async () => (await h.db.query<{ state: string }>('select state from visto_ai.gate_evaluations order by id desc limit 1'))[0]?.state === 'closed');
+  await first.stop();
+  // In dry run: closed, reopened, and the thread unresolved.
+  options.dryRun = true;
+  const dry = await h.start();
+  await dry.settled;
+  await h.webhook(pr('closed', { state: 'closed', closedAt: at(40), updatedAt: at(40) }), 'p40');
+  h.live = LIVE;
+  await h.webhook(pr('reopened', { updatedAt: at(41) }), 'p41');
+  h.threads![0]!.resolved = false;
+  await dry.stop();
+  assert.equal(titleOn(h, 'h1'), '1 finding, none blocking');
+  options.dryRun = false;
+  await (await h.start()).settled;
+  await h.until(() => titleOn(h, 'h1') === '1 blocking finding is open');
+  assert.deepEqual(h.logged.filter((e) => e.event === 'gate_sweep').at(-1), { event: 'gate_sweep', asked: 1 });
+});
+test('a pull request the service stores no row for, whose check the gate wrote in bypass, is asked for at the next start', async () => {
+  const options = { gate: true, github: true, repositoriesYaml: 'repositories:\n  defaults: { gate: { enabled: true, branches: [main], mode: bypass } }\n' };
+  const h = await harness(options);
+  const first = await h.start();
+  await first.settled;
+  h.threads!.push({ id: 't1', path: 'src/a.ts', side: 'RIGHT', line: 1, resolved: false, resolvedByApp: false, comments: [
+    { id: '8001', node: 'n8001', author: 'octo-lead', authorIsBot: false, byApp: false, reviewId: null, body: 'A question.', at: at(0) },
+  ] });
+  h.now = at(10);
+  await h.webhook(replyOf(h, '8101', 10), 'r10');
+  h.now = at(13);
+  await h.runTimer(TICK_MS);
+  await h.until(() => titleOn(h, 'h1') === 'Gate bypassed');
+  await first.stop();
+  assert.equal(await getPullRequest(h.db, REF), null);
+  options.repositoriesYaml = GATE_YAML;
+  await (await h.start()).settled;
+  await h.until(() => titleOn(h, 'h1') === 'Waiting for /done');
+  assert.deepEqual(h.logged.filter((e) => e.event === 'gate_sweep').at(-1), { event: 'gate_sweep', asked: 1 });
 });

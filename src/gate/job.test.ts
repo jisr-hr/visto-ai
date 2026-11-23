@@ -522,7 +522,7 @@ test('a sync that gives up on a write that never succeeds records one failed row
   assert.equal(writes(h).length, 4);
 });
 
-test('a pull request the database holds as open that is closed or gone is asked for at the first start and not again', async () => {
+test('a pull request the database holds as open that is closed or gone is asked for at each start, and recorded once', async () => {
   for (const [live, state] of [[liveOf({ state: 'closed' }), 'closed'], [liveOf({ state: 'merged', head: 'h2' }), 'closed'], [null, 'not_found']] as const) {
     const h = await harness({ live });
     await finishJob(h.db, h.job.id, 'dropped', 'other', at(0));
@@ -532,7 +532,7 @@ test('a pull request the database holds as open that is closed or gone is asked 
       const job = await h.claimNext(at(start));
       if (job !== null) await h.run(job);
     }
-    assert.deepEqual(asked, [1, 0, 0], state);
+    assert.deepEqual(asked, [1, 1, 1], state);
     const head = live === null ? 'h1' : live.info.headSha;
     assert.deepEqual((await rows(h.db)).map((r) => [r.head_sha, r.mode, r.state, r.code, r.blocking, r.findings, r.run]), [[head, 'enforce', state, null, 0, 0, null]], state);
     assert.equal(finds(h).length + writes(h).length, 0, state);

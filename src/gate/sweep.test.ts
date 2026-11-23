@@ -89,20 +89,17 @@ test('the pull requests with a review waiting are asked for, and a running revie
   assert.deepEqual(gate.map((r) => [r.repo, r.number, r.run_at.toISOString()]), [['shop', 3, at(0)], ['shop', 1, at(10)]]);
 });
 
-test('at start every recorded state is asked for again but closed and not_found, under any mode', async () => {
+test('at start every recorded state is asked for again, closed and not_found too, and a pull request stored as closed is not', async () => {
   const d = await db();
   const states: GateState[] = ['failed', 'passed', 'blocked', 'waiting', 'skipped', 'bypassed', 'closed', 'not_found'];
   for (const [i, state] of states.entries()) {
     await savePullRequest(d, facts(refOf(i + 1)));
     await recordEvaluation(d, { ...evaluation(refOf(i + 1), 'enforce', state), code: state === 'failed' ? 'github_500' : null });
   }
-  assert.equal(await sweepGate(d, settingsIn('enforce'), at(10)), 6);
-  assert.deepEqual(await gateJobs(d), [1, 2, 3, 4, 5, 6]);
-  // A closed or gone record outranks a change of mode: its next event asks.
-  const shadow = await db();
-  await savePullRequest(shadow, facts(refOf(1)));
-  await recordEvaluation(shadow, evaluation(refOf(1), 'enforce', 'closed'));
-  assert.equal(await sweepGate(shadow, settingsIn('shadow'), at(10)), 0);
+  await savePullRequest(d, facts(refOf(9), { state: 'closed', closedAt: at(1) }));
+  await recordEvaluation(d, evaluation(refOf(9), 'enforce', 'passed'));
+  assert.equal(await sweepGate(d, settingsIn('enforce'), at(10)), 8);
+  assert.deepEqual(await gateJobs(d), [1, 2, 3, 4, 5, 6, 7, 8]);
 });
 
 test('the sweep renews a sync left waiting from a long stop and gives it the stored installation', async () => {
@@ -114,4 +111,24 @@ test('the sweep renews a sync left waiting from a long stop and gives it the sto
   const row = await d.query<{ id: number; starts: number; created_at: Date; run_at: Date; installation: string | null }>(
     "select id, starts, created_at, run_at, installation from visto_ai.jobs where kind = 'gate' and status = 'pending'");
   assert.deepEqual(row.map((r) => [r.id, r.starts, r.created_at.toISOString(), r.run_at.toISOString(), r.installation]), [[old, 0, at(0), at(0), '42']]);
+});
+
+test('at start a pull request the service stores no row for, but whose check the gate wrote, is asked for with the installation of its newest job', async () => {
+  const d = await db();
+  // 1: a gate job carried installation 42 and wrote its check; no row was ever stored.
+  const first = (await askGate(d, refOf(1), at(0), undefined, { installation: '41' }))!;
+  await d.query("update visto_ai.jobs set status = 'done' where id = $1", [first]);
+  const second = (await askGate(d, refOf(1), at(1), undefined, { installation: '42' }))!;
+  await d.query("update visto_ai.jobs set status = 'done' where id = $1", [second]);
+  await askGate(d, refOf(1), at(2));
+  await d.query("update visto_ai.jobs set status = 'done' where kind = 'gate' and number = 1 and installation is null");
+  await recordEvaluation(d, evaluation(refOf(1), 'bypass', 'bypassed'));
+  // 2: found closed by its last sync; 3: in a repository whose gate is off; 4: stored, open and gated (asked as before).
+  await recordEvaluation(d, evaluation(refOf(2), 'enforce', 'closed'));
+  await recordEvaluation(d, evaluation(refOf(3, 'other'), 'enforce', 'passed'));
+  await savePullRequest(d, facts(refOf(4)));
+  assert.equal(await sweepGate(d, settingsIn('enforce'), at(10)), 2);
+  const asked = await d.query<{ repo: string; number: number; installation: string | null }>(
+    "select repo, number, installation from visto_ai.jobs where kind = 'gate' and status = 'pending' order by number");
+  assert.deepEqual(asked.map((r) => [r.repo, r.number, r.installation]), [['shop', 1, '42'], ['shop', 4, '99']]);
 });
