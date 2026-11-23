@@ -269,3 +269,17 @@ test('a config that names an extension changes nothing of a replay', async () =>
   assert.deepEqual(named, none);
   assert.equal(none.requests.length, 1);
 });
+
+test('a config that names an MCP server changes nothing of a replay', async () => {
+  const run = async (mcpServers: DeploymentConfig['mcpServers']) => {
+    const requests: unknown[] = [];
+    const base = stubDeps();
+    const deps = { ...base, model: { complete: (r: Parameters<typeof base.model.complete>[0]) => { requests.push(r); return base.model.complete(r); } } };
+    const result = await replayCase(caseA, { ...config, mcpServers }, deps);
+    return { result: { ...result, duration_ms: 0 }, requests };
+  };
+  const none = await run([]);
+  const named = await run([{ name: 'docs', url: 'https://docs.example.test/mcp', headers: {}, tools: ['search'] }]);
+  assert.deepEqual(named, none);
+  assert.equal(none.requests.length, 1);
+});

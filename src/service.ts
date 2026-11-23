@@ -23,6 +23,7 @@ import { createExtensionHealth } from './shell/extension-health.ts';
 import { createExtensionRoutes } from './shell/extension-routes.ts';
 import { createListener } from './shell/http.ts';
 import type { RequestLike, ResponseLike } from './shell/http.ts';
+import { createMcpHealth } from './shell/mcp-health.ts';
 import { checkModelKey, createModelHealth } from './shell/model-health.ts';
 import type { KeyCheck } from './shell/model-health.ts';
 import { receive } from './shell/receive.ts';
@@ -125,6 +126,7 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps): Pr
   });
   const health = createModelHealth(alert);
   const extensionHealth = deps.extensions.length === 0 ? null : createExtensionHealth(alert);
+  const mcpHealth = config.mcpServers.length === 0 ? null : createMcpHealth(alert);
   const spend = createSpendGuard({ db, limit: config.limits.spendPerDay, clock, alert });
   const reviewDeps: ReviewJobDeps = {
     db, forge: deps.forge, clock, log: say, sleep: deps.sleep, settingsFor,
@@ -136,6 +138,7 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps): Pr
     commentUrl: deps.commentUrl, canResolve: () => deps.appInfo.canResolve(),
     ...(config.dryRun || notifiers.length === 0 ? {} : { notice: { notifiers, reviewUrl: deps.reviewUrl, pullRequestUrl: deps.pullRequestUrl } }),
     ...(extensionHealth === null ? {} : { extensionHealth }),
+    ...(mcpHealth === null ? {} : { mcpHealth }),
   };
   // gate_check_failed is raised once for each reason in a run of the service.
   const raisedGate = new Set<string>();

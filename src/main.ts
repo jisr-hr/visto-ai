@@ -4,11 +4,13 @@ import { createServer as createHttpServer } from 'node:http';
 import type { Server } from 'node:http';
 import { dirname, join, resolve } from 'node:path';
 import { ConfigError, contractFile, loadConfig, serviceConfig } from './config/load.ts';
+import type { McpServerConfig } from './config/load.ts';
 import { postgresDb, takeInstanceLock } from './db/postgres.ts';
 import type { InstanceLock } from './db/types.ts';
 import { createModelClient } from './engine/model/client.ts';
 import { review } from './engine/review.ts';
 import { createJevScorer } from './engine/scorer/jev.ts';
+import type { McpServer } from './engine/types.ts';
 import { contextProvidersOf, errorNameOf, loadExtensions } from './extensions/load.ts';
 import type { LoadedExtension } from './extensions/types.ts';
 import { createGithubAccess } from './forge/github/access.ts';
@@ -19,6 +21,7 @@ import { createGithubHookDeliveries } from './forge/github/hook-deliveries.ts';
 import { githubCommentUrl, githubLineUrl, githubPullRequestUrl, githubReviewUrl } from './forge/github/links.ts';
 import { createGithubWebhookReader } from './forge/github/webhook.ts';
 import { createGithubWriter } from './forge/github/writer.ts';
+import { createMcpServers } from './mcp/client.ts';
 import { startService } from './service.ts';
 import type { Listening } from './service.ts';
 import { createFeedback } from './shell/feedback.ts';
@@ -32,6 +35,14 @@ export const HEADERS_TIMEOUT_MS = 10_000;
 export const GITHUB_CALL_MS = 60_000;
 
 const NULL_BODY = new Set([101, 103, 204, 205, 304]);
+
+/**
+ * The engine's MCP servers: one for each the config names, on the fetch given, which is the platform's and not GitHub's with its
+ * time limit (the engine has limits of its own for each step). No key at all when the config names none. Nothing is asked here.
+ */
+export function mcpServersOf(configs: McpServerConfig[], fetchFn: typeof fetch): { mcpServers?: McpServer[] } {
+  return configs.length === 0 ? {} : { mcpServers: createMcpServers(configs, { fetch: fetchFn }) };
+}
 
 /**
  * A fetch whose every call ends within `limitMs`, its body included: the answer is read whole inside the limit, so a
@@ -195,7 +206,7 @@ export async function main(argv: string[], env: Record<string, string | undefine
   const code = await runUntilSignal(async () => {
     try {
       const { fetch } = globalThis;
-      // Every GitHub adapter is given the fetch with a time limit; the model, the scorer and the alerts keep their own.
+      // Every GitHub adapter is given the fetch with a time limit; the model, the scorer, the MCP servers and the alerts keep their own.
       const github = boundedFetch(fetch);
       const clock = (): Date => new Date();
       const sleep = (ms: number): Promise<void> => new Promise((done) => { setTimeout(done, ms); });
@@ -210,6 +221,8 @@ export async function main(argv: string[], env: Record<string, string | undefine
         log,
         ...(config.scorer === null ? {} : { scorer: createJevScorer(config.scorer, { fetch, sleep }) }),
         ...(config.model.toolChoice === 'auto' ? { toolChoice: 'auto' as const } : {}),
+        // Opened for each review, in dry run too: a call only reads.
+        ...mcpServersOf(config.mcpServers, fetch),
       };
       // Every adapter is made before the lock is taken: from the lock on, nothing throws before the service holds it.
       const reader = createGithubWebhookReader(config.app.webhookSecret);
