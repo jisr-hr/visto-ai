@@ -10,6 +10,8 @@ import { LAST_OVERVIEW_CHARS, buildMessages, fixedTokens, headerStripCounts, pul
 import { MEASURE_NUMBER, MEASURE_TOKEN } from './section.ts';
 import { EXTENSION_LINE, extensionPart } from './extensions.ts';
 import type { ExtensionContext } from './extensions.ts';
+import { memoryParts, PULL_REQUEST_MEMORY_RULES } from './memory.ts';
+import type { MemoryContext } from './memory.ts';
 import { submitReviewTool, submitToolFor } from '../model/submit-review.ts';
 import type { KeptScores } from '../score/history.ts';
 import type { ChangedFile, PullRequestInfo, Source } from '../types.ts';
@@ -299,4 +301,82 @@ test('the part counts in the fixed tokens', () => {
   const extra = estimateTokens(`\n${extensionPart(ext, MEASURE_TOKEN)}`);
   assert.equal(fixedTokens('CONTRACT', pr, false, undefined, ext) - fixedTokens('CONTRACT', pr), extra);
   assert.equal(fixedTokens('CONTRACT', pr, true, 'Earlier.', ext) - fixedTokens('CONTRACT', pr, true, 'Earlier.'), extra);
+});
+
+// Memory (plan Task 5).
+test('with no memory the messages and the fixed tokens are what they were', () => {
+  const header = 'Repository: acme/shop\nPull request: #7\nBase branch: main\nHead branch: fix-totals\nAuthor: dev-one\nFiles in this review: 3\n' +
+    '<<<data tok title>>>\nFix totals\n<<<end tok>>>\n<<<data tok description>>>\nRounds correctly.\n<<<end tok>>>';
+  const file = (n: number, path: string): string =>
+    `## File ${n}/3: ${path}\nstatus: modified\nadditions: 2\ndeletions: 1\nwhole-file score: allowed\n<<<data tok diff ${path}>>>\nR1 +x\n<<<end tok>>>\n` +
+    `### Full file (kind: full)\n<<<data tok full file ${path}>>>\none\ntwo\nthree\n<<<end tok>>>`;
+  const today = [
+    { role: 'system', content: 'CONTRACT' },
+    { role: 'user', content: header },
+    { role: 'user', content: `Batch 1 of 2.\n\n${ANCHOR_LEGEND}\n\n${file(1, 'src/a.ts')}\n\n${file(2, 'src/b.ts')}` },
+  ];
+  assert.deepEqual(buildMessages(args), today);
+  assert.deepEqual(buildMessages({ ...args, memory: undefined }), today);
+  assert.equal(fixedTokens('CONTRACT', pr), 1525);
+  assert.equal(fixedTokens('CONTRACT', pr, true, 'Earlier.'), 2136);
+  assert.equal(fixedTokens('CONTRACT', pr, false, undefined, undefined, undefined), fixedTokens('CONTRACT', pr));
+  assert.equal(fixedTokens('CONTRACT', pr, true, 'Earlier.', ext, undefined), fixedTokens('CONTRACT', pr, true, 'Earlier.', ext));
+});
+
+const memory: MemoryContext = {
+  directories: [{ name: 'src/billing', pullRequests: 3 }],
+  categories: [{ name: 'business_rule', pullRequests: 2 }],
+  lines: [{ ref: '8:h1:src/billing/tax.ts', near: false, path: 'src/a.ts', day: '2026-03-10', category: 'business_rule', missed: true }],
+};
+const lines: MemoryContext = { directories: [], categories: [], lines: memory.lines };
+test('the repository part is a message of its own between the contract and the header, the same in every batch', () => {
+  const first = buildMessages({ ...args, batchIndex: 0, memory });
+  const second = buildMessages({ ...args, batchIndex: 1, memory });
+  assert.equal(first.length, 4);
+  assert.deepEqual(first[0], msgs[0]);
+  assert.deepEqual(first[1], { role: 'user', content: memoryParts(memory).repository });
+  assert.equal(first[2]!.role, 'user');
+  assert.ok(first[2]!.content.startsWith(pullRequestHeader(pr, 3, 'tok')));
+  assert.deepEqual(first[3], msgs[2]);
+  assert.deepEqual(first.slice(0, 3), second.slice(0, 3));
+  assert.equal(first[1]!.content.includes('tok'), false);
+});
+test('the pull request part stands after the header and before what the providers gave', () => {
+  const shown = buildMessages({ ...args, memory, extension: ext });
+  assert.equal(shown[2]!.content, `${pullRequestHeader(pr, 3, 'tok')}\n${memoryParts(memory).pullRequest}\n${extensionPart(ext, 'tok')}`);
+  assert.equal(buildMessages({ ...args, memory })[2]!.content, `${pullRequestHeader(pr, 3, 'tok')}\n${memoryParts(memory).pullRequest}`);
+  assert.equal(shown[3]!.content.includes(PULL_REQUEST_MEMORY_RULES), false);
+});
+test('with no list to show there is no message for the repository', () => {
+  const shown = buildMessages({ ...args, memory: lines });
+  assert.equal(shown.length, 3);
+  assert.deepEqual([shown[0], shown[2]], [msgs[0], msgs[2]]);
+  assert.equal(shown[1]!.content, `${pullRequestHeader(pr, 3, 'tok')}\n${memoryParts(lines).pullRequest}`);
+});
+test('memory counts in the fixed tokens', () => {
+  const parts = memoryParts(memory);
+  const extra = estimateTokens(parts.repository) + estimateTokens(`\n${parts.pullRequest}`);
+  assert.ok(extra > 0);
+  assert.equal(fixedTokens('CONTRACT', pr, false, undefined, undefined, memory) - fixedTokens('CONTRACT', pr), extra);
+  assert.equal(fixedTokens('CONTRACT', pr, true, 'Earlier.', ext, memory) - fixedTokens('CONTRACT', pr, true, 'Earlier.', ext), extra);
+  assert.equal(fixedTokens('CONTRACT', pr, false, undefined, undefined, lines) - fixedTokens('CONTRACT', pr), estimateTokens(`\n${memoryParts(lines).pullRequest}`));
+});
+test('memory counts its two parts apart in the fixed tokens', () => {
+  // A context for which counting the two texts joined, or without the line feed, gives another number.
+  let found: MemoryContext | undefined;
+  for (let d = 1; d <= 3 && found === undefined; d += 1) {
+    for (let p = 1; p <= 3 && found === undefined; p += 1) {
+      const candidate: MemoryContext = {
+        directories: [{ name: `src/${'d'.repeat(d)}`, pullRequests: 2 }], categories: [],
+        lines: [{ ...memory.lines[0]!, path: `src/${'p'.repeat(p)}.ts` }],
+      };
+      const { repository, pullRequest } = memoryParts(candidate);
+      const apart = estimateTokens(repository) + estimateTokens(`\n${pullRequest}`);
+      if (apart !== estimateTokens(`${repository}\n${pullRequest}`) && apart !== estimateTokens(repository) + estimateTokens(pullRequest)) found = candidate;
+    }
+  }
+  assert.ok(found !== undefined);
+  const { repository, pullRequest } = memoryParts(found);
+  assert.equal(fixedTokens('CONTRACT', pr, false, undefined, undefined, found) - fixedTokens('CONTRACT', pr),
+    estimateTokens(repository) + estimateTokens(`\n${pullRequest}`));
 });

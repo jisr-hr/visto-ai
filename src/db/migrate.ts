@@ -35,3 +35,11 @@ export async function migrate(db: Db, migrations: Migration[]): Promise<string[]
   }
   return applied;
 }
+
+/** Whether that migration is applied. false when the ledger is not there. */
+export async function isApplied(db: Db, name: string): Promise<boolean> {
+  const ledger = await db.query<{ t: string | null }>("select to_regclass('visto_ai.schema_migrations')::text as t");
+  if (ledger[0]?.t === null || ledger[0]?.t === undefined) return false;
+  const rows = await db.query('select 1 from visto_ai.schema_migrations where name = $1', [name]);
+  return rows.length === 1;
+}

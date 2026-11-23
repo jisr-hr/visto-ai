@@ -50,6 +50,14 @@ limits:
 # It is true when not written: the service posts only when this is false.
 dryRun: true
 
+# false: nothing is learned, and no review is shown anything learned. It is false when not written.
+# true: when a pull request closes, the service records where a person with access to the repository, other than
+# the author, commented on the code, and later reviews of that repository are told where people stepped in before,
+# as context for the score. The start of what the person wrote, 200 characters at most, is stored for the UI to come.
+# It is never sent to the model.
+# Until the UI exists a record is switched off only in the database: see "Memory" in the README.
+learning: false
+
 # Optional second scorer: a decision model that scores the changed blocks in place of the review model.
 # Naming one sends the reviewed code to that provider too, and then
 # repositories.defaults.score.threshold must be written below.
@@ -79,7 +87,7 @@ dryRun: true
 #   # The port the service listens on (1 to 65535). It is 8080 when not written.
 #   port: 8080
 # alerts:
-#   # The environment variable that holds the URL (http or https) that gets the alerts: model_error, model_ok, spend_80, spend_limit, cost_unknown, redelivery_failed, feature_off, gate_check_failed, gate_bypass, extension_error, extension_ok, mcp_error and mcp_ok.
+#   # The environment variable that holds the URL (http or https) that gets the alerts: model_error, model_ok, spend_80, spend_limit, cost_unknown, redelivery_failed, feature_off, gate_check_failed, gate_bypass, extension_error, extension_ok, mcp_error, mcp_ok, memory_error, memory_ok and learning_stale.
 #   webhook: { env: ALERT_WEBHOOK_URL }
 
 # Optional extension modules: code of your own that the service loads once, at start. A module can give the reviewer

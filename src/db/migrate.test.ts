@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { loadMigrations, migrate } from './migrate.ts';
+import { isApplied, loadMigrations, MIGRATIONS_DIR, migrate } from './migrate.ts';
 import { pgliteDb } from './pglite.ts';
 import { testDb } from './testing.ts';
 import type { Db } from './types.ts';
@@ -71,6 +71,7 @@ test('testDb resolves with the ledger in place', async () => {
   assert.equal(names.indexOf('0007_score_surroundings'), names.indexOf('0006_publish_tried') + 1);
   assert.equal(names.indexOf('0008_gate'), names.indexOf('0007_score_surroundings') + 1);
   assert.equal(names.indexOf('0009_feedback'), names.indexOf('0008_gate') + 1);
+  assert.equal(names.indexOf('0010_memory'), names.indexOf('0009_feedback') + 1);
   await db.close();
 });
 test('a migration switches the statement timeout off for itself', async () => {
@@ -83,4 +84,32 @@ test('a migration switches the statement timeout off for itself', async () => {
   })) };
   await migrate(spy, [{ name: '0001_x', sql: 'create table visto_ai.x (n integer);' }]);
   assert.equal(seen[0], 'set local statement_timeout = 0');
+});
+test('a migration that is applied says so, and a database with no ledger says no', async () => {
+  const db = await pgliteDb();
+  assert.equal(await isApplied(db, '0001_a'), false);
+  await migrate(db, [one]);
+  assert.equal(await isApplied(db, '0001_a'), true);
+  assert.equal(await isApplied(db, '0002_b'), false);
+  await db.close();
+  const full = await testDb();
+  assert.equal(await isApplied(full, '0010_memory'), true);
+  await full.close();
+});
+test('the memory migration applies over rows of the release before it, and leaves them unlearned', async () => {
+  const db = await pgliteDb();
+  const all = loadMigrations(MIGRATIONS_DIR);
+  await migrate(db, all.filter((m) => m.name < '0010_memory'));
+  await db.query(
+    `insert into visto_ai.pull_requests (service, owner, repo, number, author, author_is_bot, base_branch, head_branch, head_sha, draft, state, updated_at)
+     values ('github', 'acme', 'shop', 7, 'octo-dev', false, 'main', 'feature', 'aaa111', false, 'closed', '2026-03-01T10:00:00Z')`);
+  await db.query(
+    `insert into visto_ai.human_activity (service, owner, repo, number, kind, source_id, author, body, at)
+     values ('github', 'acme', 'shop', 7, 'inline_comment', 'c-1', 'octo-lead', 'check this', '2026-03-01T10:00:00Z')`);
+  assert.deepEqual(await migrate(db, all), ['0010_memory']);
+  assert.deepEqual(await db.query('select learned_at, learn_attempts from visto_ai.pull_requests'), [{ learned_at: null, learn_attempts: 0 }]);
+  assert.deepEqual(await db.query('select learned_at, body from visto_ai.human_activity'), [{ learned_at: null, body: 'check this' }]);
+  assert.deepEqual(await db.query('select count(*)::int as n from visto_ai.memory_records'), [{ n: 0 }]);
+  assert.deepEqual(await db.query('select count(*)::int as n from visto_ai.learning'), [{ n: 0 }]);
+  await db.close();
 });

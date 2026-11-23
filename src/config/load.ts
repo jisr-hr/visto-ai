@@ -44,6 +44,7 @@ export interface DeploymentConfig {
   database: { url: string } | null;
   server: { port: number };
   dryRun: boolean;
+  learning: boolean;
   alerts: { webhook: string } | null;
   extensions: ExtensionConfig[];
   mcpServers: McpServerConfig[];
@@ -298,6 +299,7 @@ export function parseConfig(yamlText: string, env: Record<string, string | undef
     database,
     server: raw.server,
     dryRun: raw.dryRun,
+    learning: raw.learning,
     alerts,
     extensions,
     mcpServers,

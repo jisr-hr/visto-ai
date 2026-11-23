@@ -3,12 +3,12 @@
 // private as the history file.
 import { createHash } from 'node:crypto';
 import { appendFileSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { repoConfigFor } from '../../config/load.ts';
 import type { DeploymentConfig } from '../../config/load.ts';
 import { review } from '../../engine/review.ts';
 import type { FileScore } from '../../engine/score/types.ts';
-import type { ReviewDeps, ReviewInput, Verdict } from '../../engine/types.ts';
+import type { Memory, MemoryStatus, ReviewDeps, ReviewInput, Verdict } from '../../engine/types.ts';
 import { historyKey } from '../history/file.ts';
 import type { HistoryCase } from '../history/file.ts';
 import { runPool } from '../pool.ts';
@@ -28,6 +28,8 @@ export interface BacktestSummary {
   comments: Labels['comments'];
   final_missing: number;
   numbers: Numbers[]; // one per THRESHOLDS entry, then 'own'
+  // Only in a run with memory: the history file memory was built from, and the rows counted by their memory status.
+  memory_file?: string; memory_sha256?: string; memory_cases?: { ok: number; empty: number; skipped: number; error: number; none: number }; // none: rows with no status
 }
 
 interface ResultRow {
@@ -35,7 +37,10 @@ interface ResultRow {
   cost: number; tokens: number; duration_ms: number; calls: number; verdict: Verdict | null;
   blocks: number; blocks_unscored: number; files_flagged_whole: number;
   scorer_failed_files: number; // files the scorer failed on or was not asked about
+  memory?: MemoryStatus | null; // only in a run with memory: how memory did, or null when the review did not say
 }
+/** Memory as of each case, and the file it was built from. */
+export interface BacktestMemory { of(c: HistoryCase): Memory; file: string; sha256: string }
 interface ScoresLine {
   key: string; threshold: number; status: 'ok' | 'failed'; scores: FileScore[];
   labels: { blocks: Record<string, Label>; files: Record<string, Label>; comments: Labels['comments']; final_missing: number };
@@ -79,11 +84,13 @@ function counts(scores: FileScore[], threshold: number): Pick<ResultRow, 'blocks
   };
 }
 
-async function backtestCase(c: HistoryCase, config: DeploymentConfig, deps: ReviewDeps): Promise<Outcome> {
+async function backtestCase(c: HistoryCase, config: DeploymentConfig, deps: ReviewDeps, memory: BacktestMemory | undefined): Promise<Outcome> {
   const started = Date.now();
   const key = historyKey(c);
+  // Without memory the row has no memory key, and the review is given the dependencies as they are.
+  const memoryOf = (s: MemoryStatus | undefined) => (memory === undefined ? {} : { memory: s === undefined ? null : { status: s.status, code: s.code, lines: s.lines } });
   try {
-    const result = await review(toBacktestInput(c, config), deps);
+    const result = await review(toBacktestInput(c, config), memory === undefined ? deps : { ...deps, memory: memory.of(c) });
     const failed = result.status === 'failed';
     const labels = failed ? emptyLabels() : labelCase(c, result.scores);
     return {
@@ -95,6 +102,7 @@ async function backtestCase(c: HistoryCase, config: DeploymentConfig, deps: Revi
         cost: result.usage.cost, tokens: result.usage.inputTokens + result.usage.outputTokens, duration_ms: Date.now() - started,
         calls: result.usage.calls, verdict: result.verdict, ...counts(result.scores, result.verdict.threshold),
         scorer_failed_files: failed ? 0 : result.audit.filter((e) => e.stage === 'scorer' && (e.action === 'file_failed' || e.action === 'file_not_asked')).length,
+        ...memoryOf(result.dependencies.memory),
       },
       scores: { key, threshold: result.verdict.threshold, status: result.status, scores: result.scores, labels },
     };
@@ -107,7 +115,7 @@ async function backtestCase(c: HistoryCase, config: DeploymentConfig, deps: Revi
       models: [],
       row: {
         key, status: 'failed', failure_stage: 'eval', failure_code: code, cost: 0, tokens: 0, duration_ms: Date.now() - started,
-        calls: 0, verdict: null, blocks: 0, blocks_unscored: 0, files_flagged_whole: 0, scorer_failed_files: 0,
+        calls: 0, verdict: null, blocks: 0, blocks_unscored: 0, files_flagged_whole: 0, scorer_failed_files: 0, ...memoryOf(undefined),
       },
       scores: { key, threshold: config.repositories.defaults.scoreThreshold, status: 'failed', scores: [], labels: emptyLabels() },
     };
@@ -149,7 +157,15 @@ function summaryMarkdown(summary: BacktestSummary): string {
   return `${summaryTable(summary.numbers)}\nComments by a person left out because a bot started their thread: ${summary.comments.in_bot_thread}. ` +
     `Labelled blocks and files with no final patch: ${summary.final_missing}.\n` +
     `Scorer: ${summary.scorer ?? 'the review model'}\n` +
-    (summary.scorer === null ? '' : `Files the scorer failed on or was not asked about: ${summary.scorer_failed_files}\n`);
+    (summary.scorer === null ? '' : `Files the scorer failed on or was not asked about: ${summary.scorer_failed_files}\n`) +
+    memoryLine(summary);
+}
+
+function memoryLine(summary: BacktestSummary): string {
+  const counts = summary.memory_cases;
+  if (summary.memory_file === undefined || counts === undefined) return '';
+  return `Memory: as of each case, from ${basename(summary.memory_file)}. Cases shown memory: ${counts.ok} of ${summary.cases}; ` +
+    `with none to show: ${counts.empty}; not shown: ${counts.skipped}; failed: ${counts.error}; not asked: ${counts.none}.\n`;
 }
 
 function summaryTable(numbers: Numbers[]): string {
@@ -159,9 +175,21 @@ function summaryTable(numbers: Numbers[]): string {
   return [header, header.map(() => '---'), ...rows].map((r) => `| ${r.join(' | ')} |`).join('\n') + '\n';
 }
 
+function memoryCases(done: Outcome[]): { ok: number; empty: number; skipped: number; error: number; none: number } {
+  const counts = { ok: 0, empty: 0, skipped: 0, error: 0, none: 0 };
+  for (const o of done) {
+    const status = o.row.memory?.status;
+    // A row with no status, or one of no known state, is counted as not asked: the five always add up to the cases.
+    if (status !== undefined && Object.hasOwn(counts, status)) counts[status] += 1;
+    else counts.none += 1;
+  }
+  return counts;
+}
+
 export async function runBacktest(args: {
   cases: HistoryCase[]; historyFile: string; historySha256: string; label: string; outDir: string;
   maxCases: number; maxCost: number; concurrency: number; config: DeploymentConfig; deps: ReviewDeps;
+  memory?: BacktestMemory;
 }): Promise<BacktestSummary> {
   const keys = new Set<string>();
   for (const c of args.cases) {
@@ -181,7 +209,7 @@ export async function runBacktest(args: {
   const selected = args.cases.slice(0, args.maxCases);
   const outcomes: (Outcome | undefined)[] = new Array<Outcome | undefined>(selected.length).fill(undefined);
   const { stoppedByCost, notStarted } = await runPool(
-    selected, { concurrency: args.concurrency, maxCost: args.maxCost }, (c) => backtestCase(c, args.config, args.deps),
+    selected, { concurrency: args.concurrency, maxCost: args.maxCost }, (c) => backtestCase(c, args.config, args.deps, args.memory),
     (outcome, index) => {
       outcomes[index] = outcome;
       appendFileSync(resultsPath, JSON.stringify(outcome.row) + '\n');
@@ -215,6 +243,7 @@ export async function runBacktest(args: {
     comments,
     final_missing: finalMissing,
     numbers: [...THRESHOLDS, 'own' as const].map((t) => measure(scored, t)),
+    ...(args.memory === undefined ? {} : { memory_file: args.memory.file, memory_sha256: args.memory.sha256, memory_cases: memoryCases(done) }),
   };
   writeFileSync(join(args.outDir, 'summary.json'), JSON.stringify(summary, null, 2) + '\n');
   writeFileSync(join(args.outDir, 'summary.md'), summaryMarkdown(summary));

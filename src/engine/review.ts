@@ -6,10 +6,12 @@ import { extensionPart, gatherContext } from './context/extensions.ts';
 import type { ExtensionContext } from './context/extensions.ts';
 import { changedLines, leftBlocksOf } from './context/increment.ts';
 import type { Changed } from './context/increment.ts';
+import { askMemory } from './context/memory.ts';
+import type { MemoryContext } from './context/memory.ts';
 import { renderAnchoredDiff } from './context/diff.ts';
 import { orderByPriority } from './context/priority.ts';
 import { attachThreads, isDue } from './context/threads.ts';
-import { stripControl } from './context/untrusted.ts';
+import { inlineText, stripControl } from './context/untrusted.ts';
 import type { ShownThread } from './context/threads.ts';
 import { buildMessages, fixedTokens, headerStripCounts } from './context/prompt.ts';
 import { MEASURE_TOKEN } from './context/section.ts';
@@ -33,8 +35,8 @@ import { shownOf } from './score/shown.ts';
 import type { ScoredBy, ScoreEntry, ScoreHistory } from './score/types.ts';
 import { askScorer, summariesOf } from './scorer/ask.ts';
 import type {
-  AcceptanceRow, AuditEntry, ChangedFile, Discussed, EarlierThread, Effort, ExtensionStatus, Finding, NotReviewed, PullRequestInfo, RepoConfig, ReviewDeps, ReviewInput, ReviewResult, Severity, Side, Source,
-  ToolDefinition, Usage,
+  AcceptanceRow, AuditEntry, ChangedFile, Discussed, EarlierThread, Effort, ExtensionStatus, Finding, MemoryStatus, NotReviewed, PullRequestInfo, RepoConfig, ReviewDeps, ReviewInput, ReviewResult,
+  Severity, Side, Source, ToolDefinition, Usage,
 } from './types.ts';
 
 const CONCURRENCY = 2;
@@ -125,6 +127,7 @@ interface Run {
   extension: ExtensionContext | undefined; // what the context providers gave, as it is shown in every call's header; undefined when nothing is
   withAcceptance: boolean; // the criteria are shown: the run's calls take the tool with rows
   tools: Offered | undefined; // the servers' tools, when the review offers them; undefined when it offers none
+  memory: MemoryContext | undefined; // where people stepped in before, as it is shown in every call; undefined when nothing is
 }
 
 // The tools a review offers, shared by its batches: one count of calls for the whole review (5.4, 12).
@@ -159,6 +162,7 @@ async function oneCall(run: Run, files: FileContext[], firstFileNumber: number, 
     contract: offered === undefined ? run.deps.contract : offered.system, pr: run.pr, fileCount: run.fileCount, firstFileNumber, batch,
     batchIndex, batchCount: run.batchCount, token: run.token, ...(run.lastOverview === undefined ? {} : { lastOverview: run.lastOverview }),
     ...(run.extension === undefined ? {} : { extension: run.extension }),
+    ...(run.memory === undefined ? {} : { memory: run.memory }),
   });
   const answer = await callBatch(
     { messages, effort: run.effort, timeoutMs: run.limits.modelTimeoutSeconds * 1000, prPaths: files.map((f) => f.file.path), ...(run.withThreads ? { withThreads: true } : {}),
@@ -358,8 +362,46 @@ function chooseRoom(
   return { packed, shown, audit };
 }
 
-// What a review asked of its dependencies: the providers' statuses once they are asked, and the servers' tools once they are opened.
-interface Asked { statuses?: Record<string, ExtensionStatus>; tools?: ReviewTools }
+// What a review asked of its dependencies: the providers' statuses once they are asked, the servers' tools once they are
+// opened, and how memory did once it was asked or passed over.
+interface Asked { statuses?: Record<string, ExtensionStatus>; tools?: ReviewTools; memory?: MemoryStatus }
+
+const memorySkipped = (code: string): MemoryStatus => ({ status: 'skipped', code, lines: 0 });
+
+/**
+ * Asks memory once, for the files of the first packing, and shows it only when packing the files with it counted cuts
+ * nothing more and leaves nothing more unreviewed than the first packing (5.3, call 23). Never rejects, never fails a review.
+ */
+async function chooseMemory(
+  deps: ReviewDeps, first: Packing, asOf: Date, budgetWith: (shown: MemoryContext) => number, pack: (budget: number) => Packing,
+): Promise<{ packed: Packing; shown: MemoryContext | undefined; status: MemoryStatus | undefined; audit: AuditEntry[] }> {
+  const memory = deps.memory;
+  if (memory === undefined) return { packed: first, shown: undefined, status: undefined, audit: [] };
+  // With a second scorer the review model gives no block scores: memory could move only findings (call 4).
+  if (deps.scorer !== undefined) return { packed: first, shown: undefined, status: memorySkipped('second_scorer'), audit: [] };
+  if (first.batches.length === 0) return { packed: first, shown: undefined, status: memorySkipped('no_model_call'), audit: [] };
+  const files = first.batches.flatMap((b) => b.files).map((c) => ({ path: c.file.path, previousPath: c.file.previousPath }));
+  let asked: Awaited<ReturnType<typeof askMemory>>;
+  try {
+    asked = await askMemory(memory, files, asOf);
+  } catch {
+    // askMemory never rejects; guarded all the same, as the providers' call is.
+    asked = { context: undefined, status: { status: 'error', code: 'lookup_failed', lines: 0 }, audit: [{ stage: 'context', action: 'memory_failed', subject: 'memory', reason: 'lookup_failed' }] };
+  }
+  const audit = [...asked.audit];
+  const context = asked.context;
+  if (context === undefined) return { packed: first, shown: undefined, status: asked.status, audit };
+  const budget = budgetWith(context);
+  const again = budget > 0 ? pack(budget) : null;
+  if (again === null || JSON.stringify([again.notReviewed, again.audit]) !== JSON.stringify([first.notReviewed, first.audit])) {
+    audit.push({ stage: 'context', action: 'memory_cut', subject: 'memory', reason: 'over_call_budget' });
+    return { packed: first, shown: undefined, status: memorySkipped('no_room'), audit };
+  }
+  for (const line of context.lines) {
+    audit.push({ stage: 'context', action: 'memory_shown', subject: inlineText(line.ref), reason: line.near ? 'near' : 'changed' });
+  }
+  return { packed: again, shown: context, status: asked.status, audit };
+}
 
 export async function review(input: ReviewInput, deps: ReviewDeps): Promise<ReviewResult> {
   // Set once the providers are asked, or the servers opened: every result returned from then on says how each of them did.
@@ -380,6 +422,7 @@ export async function review(input: ReviewInput, deps: ReviewDeps): Promise<Revi
   if (asked.statuses !== undefined) result = { ...result, dependencies: { ...result.dependencies, extensions: asked.statuses } };
   // Read once the sessions are closed: a call ended by the close changes no status.
   if (asked.tools !== undefined) result = { ...result, dependencies: { ...result.dependencies, mcp: asked.tools.statuses() } };
+  if (asked.memory !== undefined) result = { ...result, dependencies: { ...result.dependencies, memory: asked.memory } };
   return result;
 }
 
@@ -483,11 +526,18 @@ async function reviewOnce(input: ReviewInput, deps: ReviewDeps, asked: Asked): P
       if (budget <= 0) return failedResult('context', 'budget_too_small', usage, audit, 'ok', threshold, due, said);
     }
     const firstPacking = packBatches(plan.send, budget, input.limits.batchesPerReview);
+    // Memory is fitted before extension context and the tools, which then count it (5.3, call 23).
+    const remembered = await chooseMemory(
+      deps, firstPacking, input.asOf,
+      (shown) => input.limits.inputTokensPerCall - fixedTokens(deps.contract, pr, withThreads, lastOverview, undefined, shown),
+      (b) => packBatches(plan.send, b, input.limits.batchesPerReview),
+    );
+    if (remembered.status !== undefined) asked.memory = remembered.status;
     const room = extension === undefined
-      ? { packed: firstPacking, shown: undefined, audit: [] }
+      ? { packed: remembered.packed, shown: undefined, audit: [] }
       : chooseRoom(
-        extension, firstPacking,
-        (shown) => input.limits.inputTokensPerCall - fixedTokens(deps.contract, pr, withThreads, lastOverview, shown),
+        extension, remembered.packed,
+        (shown) => input.limits.inputTokensPerCall - fixedTokens(deps.contract, pr, withThreads, lastOverview, shown, remembered.shown),
         (b) => packBatches(plan.send, b, input.limits.batchesPerReview),
       );
     let packed = room.packed;
@@ -502,7 +552,7 @@ async function reviewOnce(input: ReviewInput, deps: ReviewDeps, asked: Asked): P
       toolsAudit.push(...opened.audit);
       if (opened.definitions.length > 0) {
         const system = `${deps.contract}\n\n${TOOL_RULES}`;
-        const withTools = input.limits.inputTokensPerCall - fixedTokens(system, pr, withThreads, lastOverview, room.shown) - toolRoomTokens(opened.definitions);
+        const withTools = input.limits.inputTokensPerCall - fixedTokens(system, pr, withThreads, lastOverview, room.shown, remembered.shown) - toolRoomTokens(opened.definitions);
         const again = withTools > 0 ? packBatches(plan.send, withTools, input.limits.batchesPerReview) : null;
         if (again !== null && JSON.stringify([again.notReviewed, again.audit]) === JSON.stringify([packed.notReviewed, packed.audit])) {
           packed = again;
@@ -516,7 +566,7 @@ async function reviewOnce(input: ReviewInput, deps: ReviewDeps, asked: Asked): P
       // `review`'s finally then has nothing left to end.
       if (offered === undefined) await opened.close();
     }
-    audit.push(...built.audit, ...reuseAudit, ...attached.audit, ...leftOutAudit, ...packed.audit, ...room.audit, ...toolsAudit);
+    audit.push(...built.audit, ...reuseAudit, ...attached.audit, ...leftOutAudit, ...packed.audit, ...remembered.audit, ...room.audit, ...toolsAudit);
     // A covered file that found no room was read, as it is, by an earlier review: it is left out too.
     const roomless = plan.send.filter((c) => c.kept?.covered === true && packed.notReviewed.some((n) => n.path === c.file.path && n.reason === 'over_batch_limit'));
     audit.push(...roomless.flatMap(leaveOut));
@@ -544,7 +594,7 @@ async function reviewOnce(input: ReviewInput, deps: ReviewDeps, asked: Asked): P
       contexts: built.contexts, limits: input.limits,
       effort: chooseEffort(pr, files, input.repoConfig), token: deps.token(), pr, deps,
       fileCount: packed.batches.reduce((n, b) => n + b.files.length, 0), batchCount: packed.batches.length, withThreads, lastOverview,
-      extension: room.shown, withAcceptance: (room.shown?.criteria.length ?? 0) > 0, tools: offered,
+      extension: room.shown, withAcceptance: (room.shown?.criteria.length ?? 0) > 0, tools: offered, memory: remembered.shown,
     };
     const firsts: number[] = [];
     let seen = 0;

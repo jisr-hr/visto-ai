@@ -13,7 +13,7 @@ import { renderReview } from '../engine/render/body.ts';
 import type { InlineComment } from '../engine/render/body.ts';
 import { renderNotes } from '../engine/render/notes.ts';
 import type { Category, ScoredBy, Span } from '../engine/score/types.ts';
-import type { EarlierState, Limits, ReviewDeps, ReviewInput, ReviewResult, ThreadVerdict, Usage } from '../engine/types.ts';
+import type { EarlierState, Limits, Memory, MemoryState, ReviewDeps, ReviewInput, ReviewResult, ThreadVerdict, Usage } from '../engine/types.ts';
 import type { ForgeAccess, ForgeWriter, LivePullRequest, PullRequestInfo, PullRequestRef, ReviewThread, Source } from '../forge/types.ts';
 import type { ReviewNotice } from '../extensions/types.ts';
 import { PAUSE_MS } from './model-health.ts';
@@ -21,6 +21,7 @@ import type { ModelHealth } from './model-health.ts';
 import { codeOf, isShortCode } from './codes.ts';
 import type { ExtensionHealth } from './extension-health.ts';
 import type { McpHealth } from './mcp-health.ts';
+import type { MemoryHealth } from './memory-health.ts';
 import { sendNotice } from './notify.ts';
 import type { Notifier } from './notify.ts';
 import { failureText, mayCommand, refusalText } from './commands.ts';
@@ -78,6 +79,10 @@ export interface ReviewJobDeps {
   extensionHealth?: Pick<ExtensionHealth, 'noted'>;
   /** Told how each MCP server did; absent when the deployment names none. */
   mcpHealth?: Pick<McpHealth, 'noted'>;
+  /** The memory of a pull request's repository, for a review of it; absent when learning is off. */
+  memoryFor?: (ref: PullRequestRef) => Memory;
+  /** Told how memory did in each review; absent when learning is off. */
+  memoryHealth?: Pick<MemoryHealth, 'noted'>;
 }
 
 /** The newest published run of these, or null. */
@@ -171,6 +176,21 @@ function mcpOf(result: unknown): Record<string, { status: 'ok' | 'skipped' | 'er
     out[name] = { status, code, calls };
   }
   return out;
+}
+
+/**
+ * How memory did in an engine result, or in a stored one: its status when that is ok, empty, skipped or error, its code a short code
+ * and its count of lines a whole number from 0 up, as { status, code, lines }. null when the result has none, or one that cannot be read.
+ */
+function memoryOf(result: unknown): { status: MemoryState; code: string; lines: number } | null {
+  const dependencies = (result as { dependencies?: unknown } | null | undefined)?.dependencies;
+  const entry = typeof dependencies === 'object' && dependencies !== null ? (dependencies as { memory?: unknown }).memory : undefined;
+  if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) return null;
+  const { status, code, lines } = entry as { status?: unknown; code?: unknown; lines?: unknown };
+  if (status !== 'ok' && status !== 'empty' && status !== 'skipped' && status !== 'error') return null;
+  if (typeof code !== 'string' || !isShortCode(code)) return null;
+  if (typeof lines !== 'number' || !Number.isInteger(lines) || lines < 0) return null;
+  return { status, code, lines };
 }
 
 /** The findings of an engine result, or of a stored one, counted by severity; 0 each when they cannot be read. */
@@ -583,7 +603,8 @@ export async function runReviewJob(job: Job, deps: ReviewJobDeps): Promise<void>
             repoConfig: { primaryBranches: settings.primaryBranches, scoreThreshold: settings.scoreThreshold },
             limits: deps.limits, asOf: now, earlier,
           };
-          const engine = deps.engineDeps(source);
+          // With learning on, the review is given its repository's memory, in dry run too; with it off the object is what it was.
+          const engine = deps.memoryFor === undefined ? deps.engineDeps(source) : { ...deps.engineDeps(source), memory: deps.memoryFor(job.ref) };
           if (deps.dryRun) {
             result = await deps.review(input, engine);
           } else {
@@ -654,6 +675,17 @@ export async function runReviewJob(job: Job, deps: ReviewJobDeps): Promise<void>
         if (status.status === 'skipped') continue;
         try {
           deps.mcpHealth?.noted(name, status.status === 'ok', status.code);
+        } catch {
+          // a health that fails changes nothing
+        }
+      }
+      // How memory did; in dry run too. Memory the engine skipped did nothing.
+      const memory = memoryOf(result);
+      if (memory !== null && memory.status !== 'skipped') {
+        try {
+          const out: unknown = deps.memoryHealth?.noted(memory.status !== 'error', memory.code);
+          // A health that returns a rejected promise changes nothing either.
+          if (typeof out === 'object' && out !== null) Promise.resolve(out).catch(() => {});
         } catch {
           // a health that fails changes nothing
         }
@@ -816,8 +848,9 @@ export async function runReviewJob(job: Job, deps: ReviewJobDeps): Promise<void>
       }
     }
 
-    // 9. The log. The MCP servers' map only when the result has one: with no server the line is what it was.
+    // 9. The log. The MCP servers' map and memory's status only when the result has them: with neither the line is what it was.
     const mcp = mcpOf(result ?? resumed?.result);
+    const memory = memoryOf(result ?? resumed?.result);
     log({
       event: 'review', job: job.id, repo, number: job.ref.number, head: run.headSha, trigger: job.trigger, mode: run.mode, dry_run: deps.dryRun,
       outcome: written ? run.outcome : 'record_failed', failure_stage: run.failureStage, failure_code: run.failureCode,
@@ -831,6 +864,7 @@ export async function runReviewJob(job: Job, deps: ReviewJobDeps): Promise<void>
       notes: endedNothingNew ? 0 : notesOf(run.comments), notes_dropped: publish?.kind === 'published' ? publish.notesDropped : null,
       extensions: extensionsOf(result ?? resumed?.result),
       ...(mcp === null ? {} : { mcp }),
+      ...(memory === null ? {} : { memory }),
     });
     // 10. The notice: the last thing the job does, so the line's duration does not count it.
     if (toTell !== null) await tell(toTell.target, live!.info, toTell.reviewId, toTell.body);

@@ -17,7 +17,7 @@ const config: DeploymentConfig = {
     effort: { default: {}, elevated: {} }, extraBody: {}, extraHeaders: {}, prices: null, timeoutSeconds: 45, toolChoice: 'forced',
   },
   scorer: null,
-  app: null, database: null, server: { port: 8080 }, dryRun: false, alerts: null, extensions: [], mcpServers: [],
+  app: null, database: null, server: { port: 8080 }, dryRun: false, learning: false, alerts: null, extensions: [], mcpServers: [],
   limits: { inputTokensPerCall: 200_000, batchesPerReview: 6, spendPerDay: 50, queueConcurrency: 2 },
   repositories: { defaults: { primaryBranches: ['main'], scoreThreshold: 70, ignoredAuthors: [], baseBranches: [], newHead: null, inlineNotes: false, gate: GATE_OFF }, overrides: {} },
 };

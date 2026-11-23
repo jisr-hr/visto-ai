@@ -4,6 +4,8 @@ import type { Batch } from './batches.ts';
 import { ANCHOR_LEGEND } from './diff.ts';
 import { extensionPart } from './extensions.ts';
 import type { ExtensionContext } from './extensions.ts';
+import { memoryParts } from './memory.ts';
+import type { MemoryContext } from './memory.ts';
 import { submitToolFor } from '../model/submit-review.ts';
 import { MEASURE_NUMBER, MEASURE_TOKEN, fileSection } from './section.ts';
 import { THREAD_HEADING, THREAD_RULES, threadsPart } from './threads.ts';
@@ -48,8 +50,9 @@ export function buildMessages(args: {
   token: string;
   lastOverview?: string;   // the last review's overview, in an incremental review or a re-check that has one
   extension?: ExtensionContext;   // what the context providers gave, the same for every call of a review
+  memory?: MemoryContext;         // where people stepped in before, the same for every call of a review
 }): ChatMessage[] {
-  const { contract, pr, fileCount, firstFileNumber, batch, batchIndex, batchCount, token, lastOverview, extension } = args;
+  const { contract, pr, fileCount, firstFileNumber, batch, batchIndex, batchCount, token, lastOverview, extension, memory } = args;
   const parts: string[] = [];
   if (batchCount > 1) {
     parts.push(`Batch ${batchIndex + 1} of ${batchCount}.`);
@@ -64,17 +67,25 @@ export function buildMessages(args: {
   if (threads !== '') parts.push(threads);
   const header = pullRequestHeader(pr, fileCount, token, lastOverview);
   const part = extension === undefined ? '' : extensionPart(extension, token);
+  // Memory holds no token: the repository part stands before anything about the pull request, so a stable prefix stays
+  // stable, and the pull request part after the header, before what the providers gave (5.3, 5.4).
+  const remembered = memory === undefined ? undefined : memoryParts(memory);
+  const top = remembered === undefined ? header : `${header}\n${remembered.pullRequest}`;
   return [
     { role: 'system', content: contract },
-    { role: 'user', content: part === '' ? header : `${header}\n${part}` },
+    ...(remembered === undefined || remembered.repository === '' ? [] : [{ role: 'user' as const, content: remembered.repository }]),
+    { role: 'user', content: part === '' ? top : `${top}\n${part}` },
     { role: 'user', content: parts.join('\n\n') },
   ];
 }
 
 // Everything in a call except the file sections: the contract, the header, the
-// batch line, the legend, the tool definition, the retry turn, and what the context providers gave.
-export function fixedTokens(contract: string, pr: PullRequestInfo, withThreads = false, lastOverview?: string, extension?: ExtensionContext): number {
+// batch line, the legend, the tool definition, the retry turn, what the context providers gave, and memory.
+export function fixedTokens(
+  contract: string, pr: PullRequestInfo, withThreads = false, lastOverview?: string, extension?: ExtensionContext, memory?: MemoryContext,
+): number {
   const part = extension === undefined ? '' : extensionPart(extension, MEASURE_TOKEN);
+  const remembered = memory === undefined ? undefined : memoryParts(memory);
   return (
     estimateTokens(contract) +
     estimateTokens(pullRequestHeader(pr, MEASURE_NUMBER, MEASURE_TOKEN, lastOverview)) +
@@ -84,6 +95,7 @@ export function fixedTokens(contract: string, pr: PullRequestInfo, withThreads =
     estimateTokens(JSON.stringify(submitToolFor(withThreads, part !== '' && extension!.criteria.length > 0))) +
     (withThreads ? estimateTokens(`${THREAD_HEADING}\n\n${THREAD_RULES}\n\n`) : 0) +
     RETRY_ALLOWANCE_TOKENS +
-    (part === '' ? 0 : estimateTokens(`\n${part}`))
+    (part === '' ? 0 : estimateTokens(`\n${part}`)) +
+    (remembered === undefined ? 0 : estimateTokens(remembered.repository) + estimateTokens(`\n${remembered.pullRequest}`))
   );
 }

@@ -189,3 +189,22 @@ export async function hasOkRun(db: Db, ref: PullRequestRef, headSha: string, bas
       storable(headSha), storable(baseSha), dryRun]);
   return rows.length === 1;
 }
+
+/** For each of those commits, the scores and the threshold of the newest run of the pull request at it whose outcome is ok, a dry run included: `result.scores` and `result.verdict.threshold`, as stored. A commit with no such run is absent.
+ * A commit whose newest ok run holds no list of scores (an older shape, or damaged) is absent too, with no fallback to an older run at that commit: the caller then makes its signal for the file. */
+export async function scoredAt(db: Db, ref: PullRequestRef, commits: string[]): Promise<Array<{ commit: string; scores: unknown; threshold: unknown }>> {
+  if (commits.length === 0) return [];
+  const r = lowered(ref);
+  const rows = await db.query<{ head_sha: string; scores: unknown; threshold: unknown }>(
+    `select head_sha, scores, threshold from (
+       select distinct on (head_sha) head_sha, result -> 'scores' as scores, result #> '{verdict,threshold}' as threshold
+       from visto_ai.review_runs
+       where service = $1 and owner = $2 and repo = $3 and number = $4 and outcome = 'ok'
+         and head_sha in (select jsonb_array_elements_text($5::jsonb))
+       order by head_sha, id desc
+     ) newest
+     where jsonb_typeof(scores) = 'array'
+     order by head_sha`,
+    [r.service, r.owner, r.repo, r.number, JSON.stringify(commits.map(storable))]);
+  return rows.map((x) => ({ commit: x.head_sha, scores: x.scores, threshold: x.threshold }));
+}

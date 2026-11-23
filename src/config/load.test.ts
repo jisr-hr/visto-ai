@@ -775,3 +775,35 @@ test('the example with its mcpServers block switched on names the docs server', 
   ]);
   assert.deepEqual(parseConfig(uncomment(example(), '# extensions:'), { ...exampleEnv, EXAMPLE_FEEDBACK_SECRET: 's' }).mcpServers, []);
 });
+
+test('a config with no learning key has learning off, and so has the example as shipped', () => {
+  assert.equal(parseConfig(minimal, KEY).learning, false);
+  assert.equal(parseConfig(example(), exampleEnv).learning, false);
+  assert.equal(parseConfig(minimal + 'learning: false\n', KEY).learning, false);
+});
+
+test('learning takes true or false and nothing else', () => {
+  assert.equal(parseConfig(minimal + 'learning: true\n', KEY).learning, true);
+  for (const bad of ['on', '1', 'null']) {
+    const issues = mcpIssues(minimal + `learning: ${bad}\n`);
+    assert.equal(issues.length, 1, bad);
+    assert.ok(issues[0]!.startsWith('learning: '), issues.join());
+    assert.ok(!issues[0]!.includes(`'${bad}'`) && !issues[0]!.includes(`"${bad}"`), issues.join());
+  }
+});
+
+test('the example with its learning key written true is read, and the other blocks still uncomment beside it', () => {
+  const on = example().replace('\nlearning: false\n', '\nlearning: true\n');
+  assert.notEqual(on, example());
+  assert.equal(parseConfig(on, exampleEnv).learning, true);
+  assert.equal(parseConfig(uncomment(example(), '# extensions:'), { ...exampleEnv, EXAMPLE_FEEDBACK_SECRET: 's' }).learning, false);
+});
+
+test('learning is not a key of a repository', () => {
+  const defaults = mcpIssues(minimal + 'repositories:\n  defaults:\n    learning: true\n');
+  assert.equal(defaults.length, 1, defaults.join());
+  assert.ok(defaults[0]!.startsWith('repositories.defaults'), defaults.join());
+  const override = mcpIssues(minimal + 'repositories:\n  overrides:\n    acme/shop:\n      learning: true\n');
+  assert.equal(override.length, 1, override.join());
+  assert.ok(override[0]!.startsWith('repositories.overrides.acme/shop'), override.join());
+});

@@ -7,7 +7,7 @@ import { listActivity } from '../db/human-activity.ts';
 import { getPullRequest } from '../db/pull-requests.ts';
 import type { Db } from '../db/types.ts';
 import type {
-  ForgeEvent, GeneralComment, HumanReview, PullRequestFacts, WebhookReader, WebhookReading,
+  ForgeEvent, GeneralComment, HumanInlineComment, HumanReview, PullRequestFacts, WebhookReader, WebhookReading,
 } from '../forge/types.ts';
 
 const ref = { service: 'github' as const, owner: 'acme', repo: 'shop', number: 7 };
@@ -209,4 +209,106 @@ test('a re-run of the check with the gate off is recorded as handled, stores not
     assert.equal((await db.query('select 1 from visto_ai.jobs')).length, 0);
     assert.deepEqual(logs, [{ event: 'webhook', delivery: 'd-1', name: 'check_run', action: 'rerequested', outcome: 'accepted', reason: null }]);
   } finally { await db.close(); }
+});
+
+const inlineEvent = (over: Partial<HumanInlineComment> = {}): ForgeEvent => ({
+  kind: 'inline_comment', ref, installation: '555', comment: {
+    id: 'ic-1', author: 'octo-lead', authorIsBot: false, association: 'member', at: '2026-03-01T10:20:00.000Z',
+    commit: 'aaa111', path: 'src/billing/tax.ts', side: 'RIGHT', line: 12, startLine: null, fileLevel: false, replyTo: null,
+    body: 'check the rounding here', ...over,
+  },
+});
+const closeEvent = (): ForgeEvent => ({ kind: 'pull_request', action: 'closed', facts: facts({ state: 'closed', closedAt: '2026-03-01T12:00:00.000Z', updatedAt: '2026-03-01T12:00:00.000Z' }) });
+const generalEvent: ForgeEvent = {
+  kind: 'general_comment', ref, installation: null,
+  comment: { id: 'g-1', author: 'octo-lead', authorIsBot: false, association: 'member', at: '2026-03-01T10:10:00.000Z', body: 'nice' },
+};
+
+/** A Db over `real` that says whether its last transaction has committed, and keeps each statement made inside one. */
+function watched(real: Db): { db: Db; committed: () => boolean; inside: string[] } {
+  let committed = true;
+  const inside: string[] = [];
+  const db: Db = {
+    query: (t, p) => real.query(t, p),
+    script: (s) => real.script(s),
+    close: () => real.close(),
+    transaction: async (work) => {
+      committed = false;
+      const out = await real.transaction((tx) => work({ ...tx, query: (t, p) => (inside.push(t), tx.query(t, p)) }));
+      committed = true;
+      return out;
+    },
+  };
+  return { db, committed: () => committed, inside };
+}
+
+test('an inline comment by a person and a close each ask for a pass, after the commit', async () => {
+  const real = await testDb();
+  try {
+    const w = watched(real);
+    const calls: Array<{ committed: boolean; rows: Promise<number> }> = [];
+    const onLearn = () => {
+      calls.push({ committed: w.committed(), rows: real.query('select 1 from visto_ai.deliveries').then((r) => r.length) });
+    };
+    const answers = [];
+    for (const [delivery, event, name, action] of [
+      ['d-1', inlineEvent(), 'pull_request_review_comment', 'created'],
+      ['d-2', closeEvent(), 'pull_request', 'closed'],
+    ] as const) {
+      answers.push(await receive({ db: w.db, reader: reader(read(delivery, event, name, action)), clock, log: () => {}, ...NO_JOBS, onLearn }, headers, empty));
+    }
+    assert.deepEqual(answers.map((a) => a.body), ['accepted', 'accepted']);
+    assert.deepEqual(calls.map((c) => c.committed), [true, true]);
+    assert.deepEqual(await Promise.all(calls.map((c) => c.rows)), [1, 2]);
+    assert.equal((await listActivity(real, ref)).filter((a) => a.kind === 'inline_comment').length, 1);
+  } finally { await real.close(); }
+});
+
+test('a duplicate delivery, a general comment, a bot\'s comment and a push ask for none', async () => {
+  const db = await testDb();
+  try {
+    let calls = 0;
+    const onLearn = () => { calls += 1; };
+    const go = (delivery: string, event: ForgeEvent, name: string, action: string | null) =>
+      receive({ db, reader: reader(read(delivery, event, name, action)), clock, log: () => {}, ...NO_JOBS, onLearn }, headers, empty);
+    await go('d-1', inlineEvent(), 'pull_request_review_comment', 'created');
+    assert.equal(calls, 1);
+    assert.deepEqual(await go('d-1', inlineEvent(), 'pull_request_review_comment', 'created'), { status: 202, body: 'duplicate' });
+    assert.deepEqual(await go('d-2', generalEvent, 'issue_comment', 'created'), { status: 202, body: 'accepted' });
+    assert.deepEqual(await go('d-3', inlineEvent({ id: 'ic-2', author: 'lint-bot[bot]', authorIsBot: true }), 'pull_request_review_comment', 'created'), { status: 202, body: 'ignored' });
+    assert.deepEqual(await go('d-4', prEvent(), 'pull_request', 'synchronize'), { status: 202, body: 'accepted' });
+    assert.deepEqual(await go('d-5', reviewEvent, 'pull_request_review', 'submitted'), { status: 202, body: 'accepted' });
+    assert.equal(calls, 1);
+  } finally { await db.close(); }
+});
+
+test('a callback that throws changes nothing, and with no callback a delivery is received as before', async () => {
+  const deliveries = [
+    ['d-1', inlineEvent(), 'pull_request_review_comment', 'created'],
+    ['d-2', closeEvent(), 'pull_request', 'closed'],
+    ['d-1', inlineEvent(), 'pull_request_review_comment', 'created'],
+    ['d-3', generalEvent, 'issue_comment', 'created'],
+  ] as const;
+  const runAll = async (onLearn?: () => void) => {
+    const real = await testDb();
+    try {
+      const w = watched(real);
+      const logs: Record<string, unknown>[] = [];
+      const answers = [];
+      for (const [delivery, event, name, action] of deliveries) {
+        answers.push(await receive({
+          db: w.db, reader: reader(read(delivery, event, name, action)), clock, log: (e) => logs.push(e), ...NO_JOBS,
+          ...(onLearn === undefined ? {} : { onLearn }),
+        }, headers, empty));
+      }
+      const rows = await real.query('select id, outcome, reason from visto_ai.deliveries order by id');
+      const activity = (await listActivity(real, ref)).length;
+      return { answers, logs, rows, activity, inside: w.inside };
+    } finally { await real.close(); }
+  };
+  let thrown = 0;
+  const without = await runAll();
+  const throwing = await runAll(() => { thrown += 1; throw new Error('wake down'); });
+  assert.equal(thrown, 2);
+  assert.deepEqual(throwing, without);
 });

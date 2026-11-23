@@ -148,3 +148,54 @@ test('the header names are a leaf: headers.ts imports nothing', () => {
   const text = readFileSync(join(import.meta.dirname, '..', 'src', 'mcp', 'headers.ts'), 'utf8');
   assert.equal(/^\s*import\b|\bimport\s*\(|\brequire\s*\(/m.test(text), false);
 });
+test('the engine may not import the memory part, and may import its own memory file', async () => {
+  assert.ok((await lint("import '../memory/select.ts';\n", 'src/engine/x.ts')).includes('no-restricted-imports'));
+  assert.ok((await lint("import '../../memory/select.ts';\n", 'src/engine/context/x.ts')).includes('no-restricted-imports'));
+  assert.deepEqual(await lint("import './memory.ts';\n", 'src/engine/context/x.ts'), []);
+  assert.deepEqual(await lint("import '../context/memory.ts';\n", 'src/engine/score/x.ts'), []);
+});
+test('the memory part imports nothing of the database, the shell, the eval, the adapters or the network', async () => {
+  const file = 'src/memory/x.ts';
+  const refused = [
+    '../db/types.ts', '../shell/receive.ts', '../eval/score.ts', '../forge/github/read-source.ts', '../gate/x.ts', '../extensions/load.ts',
+    '../mcp/client.ts', '../mcp/headers.ts', '../main.ts', '../service.ts', 'node:fs', 'fs', 'node:net', 'node:http', 'pg', '@electric-sql/pglite',
+  ];
+  for (const target of refused) {
+    assert.ok((await lint(`import '${target}';\n`, file)).includes('no-restricted-imports'), target);
+    assert.ok((await lint(`import '${target}';\n`, 'src/memory/x.test.ts')).includes('no-restricted-imports'), `test ${target}`);
+  }
+  assert.ok((await lint("export const m = import('node:fs');\n", file)).includes('no-restricted-syntax'));
+  const allowed = [
+    "import type { Memory } from '../engine/types.ts';\nexport type M = Memory;\n",
+    "import { MEMORY_NAME } from '../engine/context/memory.ts';\nexport const n = MEMORY_NAME;\n",
+    "import type { Side } from '../forge/types.ts';\nexport type S = Side;\n",
+    "import { other } from './other.ts';\nexport const o = other;\n",
+  ];
+  for (const code of allowed) assert.deepEqual(await lint(code, file), [], code);
+});
+test('the eval imports nothing of the database, except its command line, the seed and the seed\'s test', async () => {
+  for (const [file, target] of [['src/eval/backtest/x.ts', '../../db/types.ts'], ['src/eval/cli.test.ts', '../db/testing.ts'], ['src/eval/x.ts', '../db/memory-records.ts']] as const) {
+    assert.ok((await lint(`import '${target}';\n`, file)).includes('no-restricted-imports'), file);
+  }
+  for (const [file, target] of [['src/eval/cli.ts', '../db/postgres.ts'], ['src/eval/history/seed.ts', '../../db/types.ts'], ['src/eval/history/seed.test.ts', '../../db/testing.ts']] as const) {
+    assert.deepEqual(await lint(`import '${target}';\n`, file), [], file);
+  }
+  // the seed and its test keep the eval's other restrictions
+  for (const file of ['src/eval/history/seed.ts', 'src/eval/history/seed.test.ts']) {
+    for (const target of ['../../forge/github/read-source.ts', '../../mcp/client.ts', '../../main.ts', 'pg']) {
+      assert.ok((await lint(`import '${target}';\n`, file)).includes('no-restricted-imports'), `${file} ${target}`);
+    }
+  }
+});
+test('the memory part imports the config as types only, and reaches no Node module that loads code', async () => {
+  const file = 'src/memory/x.ts';
+  for (const code of [
+    "import { GATE_OFF } from '../config/load.ts';\nexport const g = GATE_OFF;\n",
+    "import { createRequire } from 'node:module';\nexport const r = createRequire;\n",
+    "import { createRequire } from 'module';\nexport const r = createRequire;\n",
+  ]) {
+    const ids = await lint(code, file);
+    assert.ok(ids.some((id) => id !== null && id.endsWith('no-restricted-imports')), code);
+  }
+  assert.deepEqual(await lint("import type { ServiceConfig } from '../config/load.ts';\nexport type C = ServiceConfig;\n", file), []);
+});

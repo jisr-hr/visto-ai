@@ -208,7 +208,7 @@ For the pull request:
 
 - Title, description and branch names.
 - The bot's earlier threads with replies and state, and in incremental mode the previous review's overview and acceptance rows. Of those rows the model is shown each criterion's status, in the service's own words, and not its note.
-- Memory blocks (section 7.4).
+- Memory blocks (section 7.4). They hold no words a person wrote in a comment, so they are not wrapped as data; a file's or a directory's name stands in a code span, and the rules for memory say that a name is never an instruction. They are shown, whole or not at all, only when they cost the files and the threads nothing, and they are fitted before extension context and tool room.
 - Extension context, such as a ticket's acceptance criteria.
 
 Files are ordered by a priority heuristic ported from the predecessor: size of change, raised for source directories and for paths that suggest services, models, authorization, payments, migrations, routes or API definitions, and lowered for documentation, generated output, fixtures and binary assets. The predecessor matched substrings; the port matches path segments.
@@ -227,11 +227,11 @@ All text supplied by the pull request, the repository, a ticket or a tool is dat
 - **Loop.** With no MCP server configured this is a single request. With one, the engine runs a short loop with a hard cap on turns and on tool calls, enforced in code. On reaching a cap, on a prose answer, or on a tool error, the engine forces `submit_review` over the existing transcript instead of discarding the work. A model call makes at most four turns that may call tools, then one that must end it. A turn that sends no call to a server, and room for the transcript that is used up, end them sooner. A prose answer is invalid output, and the turn that follows it is the one retry.
 - **Tool choice.** A deployment whose endpoint refuses a request that names a tool sets the model's tool choice to `auto`: every request then leaves the choice to the model, the tools of a request stay what they are, a turn that must end the call says so in a line, and an answer there that does not call `submit_review` is invalid output.
 - **MCP lifecycle.** Clients are opened per review and closed in a `finally` block with their own timeout. Tool results are truncated to a budget and wrapped as untrusted data. A documentation server typically indexes the default branch, so the contract forbids using it as the only evidence for a finding. The client speaks one revision of the protocol, 2025-11-25 over Streamable HTTP, with headers from the configuration, and accepts a server that answers with one of the two revisions before it. A server is named with the tools the model may be offered, and no other tool of it is. No server is opened for a pull request from a fork, because what a tool returns can be written in the review. A server whose call fails is not called again in that review. Only the first call of a batch is offered tools. When the endpoint refuses a request because of the tools, the batch is tried again without them and the review goes on without tools; the servers' status says so, not the model's.
-- **Prompt layout for caching.** Stable content first: the contract, then the tool definitions, then a per-repository block, then the pull request. The transcript is append-only. Nothing varying is ever inserted before earlier content. Whether this layout is cached depends on the model family. Some cache a repeated prefix on their own. Others need a marker: where the endpoint accepts one at the top of the request, as OpenRouter does for some families, the deployment sets it through the request extras. Markers on single blocks are not sent in the first version, so a model that needs those is reviewed without caching.
+- **Prompt layout for caching.** Stable content first: the contract, then the tool definitions, then a per-repository block, then the pull request. The per-repository block is a message of its own after the system message, and is there only when the review shows a record of memory. The transcript is append-only. Nothing varying is ever inserted before earlier content. Whether this layout is cached depends on the model family. Some cache a repeated prefix on their own. Others need a marker: where the endpoint accepts one at the top of the request, as OpenRouter does for some families, the deployment sets it through the request extras. Markers on single blocks are not sent in the first version, so a model that needs those is reviewed without caching.
 - **Retries.** Invalid output gets one retry, with the validation reason appended. A timeout on a batch of several files splits the batch in two and retries once. A provider error moves to the next model in the configured fallback list. The model that answered is read from the response and recorded.
 - **What counts as a provider error.** Any status outside 2xx. Also a 200 response that carries an `error` object, has no choices, or ends a choice with `finish_reason: "error"`: OpenRouter reports failures of the upstream model this way. Two errors are not retried on another model, because the next model would fail the same way: a rejected key (401) and a key with no credit left (402). On either, reviews pause, gated checks say why, and an alert fires. A rate limit (429) is retried after the delay the response names.
 
-The contract is one file in git, and a test asserts its key rules, so a careless edit fails the build. The rules for tools are a text in the code, added to the system message only when a tool is offered, and the same test pins that text whole.
+The contract is one file in git, and a test asserts its key rules, so a careless edit fails the build. The rules for tools are a text in the code, added to the system message only when a tool is offered, and the same test pins that text whole. So are the rules for memory, shown only with its blocks.
 
 ### 5.5 What the model returns
 
@@ -417,7 +417,7 @@ Where a repository requires code-owner review, GitHub still waits for a person o
 Once the bot approves a kind of change, no person looks at it, so nothing would ever record that it needed one. Two outside signals break that loop:
 
 - **Audit sample (D9).** A share of approvable pull requests is sent to a human anyway and labelled as an audit. The share is set in the deployment config, as a default and per repository, and is 5% unless changed. At 0% the audit is off, and reverts are the only outside signal left. Selection is a hash of the pull request's identity, keyed with the deployment's audit key (section 11.1). Pushing again does not re-roll it, and an author cannot work out beforehand whether a pull request will be drawn. Opening a new pull request for the same change does give a new draw. That gap is accepted.
-- **Reverts.** When a pull request is reverted, its files are recorded as having needed more attention. A revert is recognised nightly: a merged pull request whose description or commit messages carry the git service's standard revert reference to an earlier pull request or to its merge commit. Reverts enter none of the three numbers in section 6.6. The UI shows them as their own count, with how many of the reverted pull requests the bot had approved.
+- **Reverts.** When a pull request is reverted, its files are recorded as having needed more attention. A revert is recognised nightly: a merged pull request whose description or commit messages carry the git service's standard revert reference to an earlier pull request or to its merge commit. Reverts enter none of the three numbers in section 6.6. The UI shows them as their own count, with how many of the reverted pull requests the bot had approved. Reverts are not recorded yet: recognising one needs a read of the git service at night, which arrives with the lessons.
 
 ### 6.6 Measuring the score
 
@@ -431,13 +431,13 @@ Safety is also reported per file, using each file's final score. Both views come
 
 A block **needed a human** when a person who is not the author left an inline comment on one of its lines, context lines included, that is not a reply inside one of the bot's finding threads. A reply inside a human-review note does count, for the block the note is on. A file needed a human when one of its blocks did, or when such a comment was left on the file as a whole. The stricter form, used for the headline number, also requires that the block's lines, or for a file its diff, changed in a later commit of the same pull request. Both are stored.
 
-Any account that is not a bot and not the author counts here, with or without access to the repository. A human signal can only raise a score (D8), so a stranger can make the bot more careful and never less. The rules that can loosen something count only people with access (D23).
+Any account that is not a bot and not the author counts here, with or without access to the repository. A human signal can only raise a score (D8), so a stranger can make the bot more careful and never less. The rules that can loosen something count only people with access (D23). A record of memory (section 7.2) is narrower than this label: it is made only from a comment by a person with access, because its place and its counts reach every review of the repository.
 
 **Matching a comment to a block.** A person's inline comment is stored with its path, side, line and the commit it was made on (section 7.1). It is matched by line to the blocks of the run that scored that commit. When no run scored that commit, the comment counts for its file only. A block with no score of its own is measured with its file's score.
 
 This label is a floor. A block that needed a person but was waved through looks safe in the data. The audit sample and reverts are there to catch part of what it misses. Labels per block are also fewer than labels per file, so the block numbers need more history before they mean much. Every number is shown with the count behind it.
 
-**Backtest.** For a repository with history, a command builds cases from merged pull requests (the head a person first reviewed, plus the labels), replays the engine on them, and reports the three numbers with counts. Memory lookups use the case's own date as "as of", so a case never learns from its own outcome or from later ones. Block labels come from comments made on the replayed head, and comments made on other commits count for the file only. The stricter label checks whether each block's hash is still in the diff at the last head before the merge.
+**Backtest.** For a repository with history, a command builds cases from merged pull requests (the head a person first reviewed, plus the labels), replays the engine on them, and reports the three numbers with counts. Memory lookups use the case's own date as "as of", so a case never learns from its own outcome or from later ones. The date is that of the first review by a person. A pull request is never shown a record made from itself, in the backtest as in the service. Block labels come from comments made on the replayed head, and comments made on other commits count for the file only. The stricter label checks whether each block's hash is still in the diff at the last head before the merge.
 
 **Noise.** The model does not score the same code the same way twice. Every backtest on a new case file, and after every change of model or contract, is run twice. It reports, for each threshold, the share of blocks and the share of pull requests whose two scores fall on opposite sides of it. A difference in Safety or Benefit smaller than that band means nothing.
 
@@ -459,7 +459,7 @@ The first scorer supported is a decision model reached through its provider's de
 - **Category and reason.** Both come from the answer that set the score: a fixed sentence with the probability, and a category from the list in section 6.1 when the score is 50% or more. Below that the category is `test` for test code and `other` otherwise. The scorer writes no text, so nothing it returns is printed.
 - **Failure.** A file the scorer cannot answer for, and a block it leaves out, count as not scored (100%). A review does not fail because the scorer failed: the findings stand. Every file the scorer failed on, and every file it was not asked about after a failure that stops the rest (a refused key, no credit), is recorded in the audit list. The backtest counts them per pull request and in total: each one is scored 100%, so a run with many of them would otherwise look safer than the scorer is.
 - **The scale.** These scores are probabilities turned into percentages. They are not placed on the bands of section 6.1, and the default threshold was not chosen for them. A config that names a scorer must therefore write its threshold, and is refused otherwise; the example config ships with the default threshold commented out, so that writing it is a choice. The threshold is chosen from a backtest run with the scorer on (section 6.6).
-- **What it costs.** One more provider, and more calls per review. The reviewed code is sent to that provider as well. The review model is not asked for block scores, so its answer should carry none that go unused. The tool definition it is sent is the same with and without a scorer. The scorer's cost is counted only when its provider reports a cost with each answer.
+- **What it costs.** One more provider, and more calls per review. The reviewed code is sent to that provider as well. The review model is not asked for block scores, so its answer should carry none that go unused. The tool definition it is sent is the same with and without a scorer. The scorer's cost is counted only when its provider reports a cost with each answer. A deployment that names a scorer is shown no record of memory. How a record should reach a decision model is open.
 
 ## 7. Memory
 
@@ -484,15 +484,17 @@ A record is one learned item, scoped to a repository:
 | Kind | Made from | Used for |
 |---|---|---|
 | `lesson` | A reply, by someone with access to the repository, that correctly showed a finding was wrong | Findings |
-| `human_signal` | A block that needed a human (section 6.6), with its file's path and directory and a short excerpt of what the person wrote. When the bot had scored that block, also its category and reason | Score |
+| `human_signal` | A block that needed a human (section 6.6), with its file's path and directory and a short excerpt of what the person wrote. When the bot had scored that block, also its category and reason | Score. The model is told where and when a person stepped in, the category and whether it was a miss; it is shown no words a person wrote. The excerpt is stored for the UI. |
 | `revert` | A reverted pull request's files | Score |
 
-Every record has a source reference, a status (`active` or `disabled`), a creation time and an expiry. Lessons expire after 90 days, as in the predecessor. Signals and reverts expire after 180 days.
+A signal is one for each pull request, file and block, or for the file when the comment cannot be matched to a block. Its excerpt is at most 200 characters, with quoted lines and fenced blocks left out. It is made only from a comment by a person with access who is not the author.
+
+Every record has a source reference, a status (`active`, `disabled`, or `expired` once it is retired), a creation time and an expiry. Lessons expire after 90 days, as in the predecessor. Signals and reverts expire after 180 days.
 
 ### 7.3 Learning
 
 - **When a pull request closes:** its human signals are derived. This needs no model call.
-- **When a person comments inside a block the bot scored below the threshold:** the miss is recorded immediately.
+- **When a person comments inside a block the bot scored below the threshold:** the miss is recorded immediately. Both are done by one pass inside the process, every five minutes and when a comment or a close arrives. A miss is recorded at the comment when the review had already scored that commit; otherwise at the close. The scores of a dry run count. A pull request whose signals cannot be made in three passes of the timer running, at least ten minutes, is given up and logged; a pass a delivery woke tries it again but does not count.
 - **Nightly:** replies to the bot's findings are judged by a model call into `confirmed_fix`, `valid_pushback`, `invalid_pushback`, `question` or `noise`. A valid pushback may become a lesson. Reverts are detected and expired records are retired.
 
 Guardrails on lessons, inherited, because lessons edit the reviewer's own prompt:
@@ -504,16 +506,16 @@ Guardrails on lessons, inherited, because lessons edit the reviewer's own prompt
 - At most 10 new lessons per run.
 - Every judged reply is marked, whatever the outcome, so the queue moves forward. A reply the judge keeps omitting is retired after 3 attempts.
 
-Every record has a kill switch in the UI, and learning can be turned off in configuration.
+Every record has a kill switch in the UI, and learning is off unless the configuration switches it on; off, nothing is derived and no review is shown a record.
 
-The learning job reports when it last ran and how many records it added. If it has not run for 36 hours an alert fires. The predecessor's version of this loop was deployed and did nothing for weeks before anyone noticed.
+The learning job reports when it last ran and how many records it added. It keeps running totals in one row for each kind of work. Whether it is stale is checked at every tick of its timer, whether or not a pass completes. If it has not run for 36 hours an alert fires. The predecessor's version of this loop was deployed and did nothing for weeks before anyone noticed.
 
 ### 7.4 Retrieval
 
-Retrieval is deterministic lookups in Postgres. Every lookup takes an "as of" time.
+Retrieval is deterministic lookups in Postgres. Every lookup takes an "as of" time. The database is asked for a repository's live records, at most 5,000, and the choice is made in code the eval shares. The two blocks hold only what the service computes: the model is shown no words a person wrote, and a path or a directory only when it is made of letters, digits and the marks ordinary in file names (dot, underscore, slash, hyphen, square brackets, parentheses, `@`, `+`, `$`, `~`), never one with a space, a colon, a quote or a backtick. A name stands in a code span. A pull request is not shown a record made from itself.
 
-- **Repository block.** Stable for a day, so it sits in the cached part of the prompt. It lists the directories and categories where people most often had to step in, with counts.
-- **Pull request block.** For each changed file: records on the same path, newest first, otherwise records from the nearest directory that has any. Lessons are chosen by shared directory or file type with the changed files first, then by recency.
+- **Repository block.** Stable for a day, so it sits in the cached part of the prompt. It lists the directories and categories where people most often had to step in, with counts. It is counted from the records live at 00:00 UTC of the day, lists at most 10 directories and 8 categories, each from two pull requests up, and is shown only when the pull request block has a line.
+- **Pull request block.** For each changed file: records on the same path, newest first, otherwise records from the nearest directory that has any. Lessons are chosen by shared directory or file type with the changed files first, then by recency. At most 3 records on a file, 2 from the nearest directory, 30 in all. The nearest directory is the deepest one above the file under which a record's file lies, never the repository's root. A record on a file the review sends to the model is never a near line of another file.
 
 Each block has a fixed size. What is cut is named in the audit list. The predecessor injected lessons newest-first within a size limit, so most of a large repository's lessons never reached the reviewer.
 
@@ -528,7 +530,7 @@ A repository with history should not start empty. One importer reads a repositor
 It has two outputs:
 
 - **A local history file**, which is both the case file for the score backtest and the source of "as of" memory during it.
-- **On request, rows in the database**: the human activity and the human signals derived from it. This seeds a new deployment's memory.
+- **On request, rows in the database**: the human activity and the human signals derived from it. This seeds a new deployment's memory. It is a second command, which reads the history file and writes nothing for a signal of a pull request the service already stores.
 
 Imported signals have no category or reason, because the bot never scored those blocks. They carry path, directory and the excerpt.
 
@@ -665,7 +667,7 @@ One file, owned by whoever runs the deployment and kept in their own git reposit
 - Repository defaults and per-repository overrides: primary branches, ignored authors, base filter, how a new head is reviewed (D4), the gate block, and the score block (threshold, automatic approval, audit share, the thread rule for approval, and inline notes).
 - MCP servers and extension modules.
 - The alert webhook.
-- Learning, on or off.
+- Learning, on or off; off unless written.
 - Who may open the UI: named accounts or one team.
 - The audit key, by reference: the secret that keys the audit draw (section 6.5).
 - Dry run, for the whole deployment. Reviews are computed and recorded, nothing is written to the git service (no review, reply, note, check, approval or dismissal) and no notifier is called. Capture and learning run as normal. A dry run never counts as an earlier run: not as the last published review, not for scores and not for coverage.
@@ -743,6 +745,8 @@ The schema is designed fresh. Identity everywhere is the git service, the reposi
 | `gate_evaluations`, `gate_overrides` | Gate history and skips |
 | `review_feedback` | Thumbs up or down per run and person, with the reason (section 11.3) |
 
+Stage 8 adds a table `learning` for the learning work's own record, and on `human_activity` and `pull_requests` markers of what was learned and of how often learning a pull request failed. `file_scores` and `thread_verdicts` are still not built: their content is in each run's stored result.
+
 Finished jobs are deleted after 14 days. Nothing else is pruned in the first version.
 
 A deployment that ran the predecessor brings its history across with a one-off migration script kept in its private repository. Its open pull requests need a decision of their own. Threads the predecessor verified carry the predecessor's hidden marker, which this app does not read, so on a gated pull request they block again until the next review. That deployment's migration either converts the markers or its plan tells engineers to expect it.
@@ -750,13 +754,13 @@ A deployment that ran the predecessor brings its history across with a one-off m
 ## 14. Observability
 
 - **One structured log line per review** with stage, outcome, failure stage and a short failure code.
-- **A status per dependency on every review:** the model, each extension, each MCP server, memory. A review that makes no model call records none for the MCP servers, and neither does the eval.
+- **A status per dependency on every review:** the model, each extension, each MCP server, memory. A review that makes no model call records none for the MCP servers, and neither does the eval. Memory's is recorded when the review was given a memory.
 - **Usage per review:** calls, tokens, cached tokens, cost.
 - **Model connection check.** At start-up, and then on a timer, the app checks that its key reaches the model endpoint. For OpenRouter that is the key endpoint (`GET /api/v1/key`), which also returns the key's limit and what is left of it. The result is the model's dependency status. A failure raises an alert and does not stop start-up: webhooks are still stored, and reviews wait.
 - **Health.** The public health route returns liveness only. Queue state, recent reviews and configuration are served only behind the UI's sign-in. Assume every route is reachable from the internet.
 - **Alerts**, posted as JSON to one configured webhook and shown in the UI:
   - the publish rate falls;
-  - a dependency's status changes between working and failing; for an extension that is when it starts to answer with an error and when it stops, and an answer that there was nothing to look up, or nothing found, is no failure; for an MCP server that is when it cannot be opened, when a tool the config names is not offered, when a call fails or when the model's endpoint refuses the tools, and when a review next records it as working;
+  - a dependency's status changes between working and failing; for an extension that is when it starts to answer with an error and when it stops, and an answer that there was nothing to look up, or nothing found, is no failure; for an MCP server that is when it cannot be opened, when a tool the config names is not offered, when a call fails or when the model's endpoint refuses the tools, and when a review next records it as working; for memory that is when a lookup fails and when a review next records it as working;
   - cached tokens stay at zero across reviews that made more than one request in sequence. A single-request review at low volume misses the cache legitimately and is not counted;
   - the learning job is stale;
   - spend reaches 80% of the daily limit;
@@ -767,7 +771,7 @@ A deployment that ran the predecessor brings its history across with a one-off m
 
 ## 15. Evaluation
 
-Two commands. The findings replay arrives with stage 2 of the build order and the score backtest with stage 3. Memory joins both in stage 8. Neither can write: the eval builds its source in a read-only mode in which any write call throws.
+Two commands. The findings replay arrives with stage 2 of the build order and the score backtest with stage 3. Memory joins both in stage 8. The score backtest first, after a count that calls no model; the findings replay with the lessons. Neither can write: the eval builds its source in a read-only mode in which any write call throws.
 
 ### 15.1 Findings replay
 
@@ -824,7 +828,7 @@ Each stage ends with something that can be measured or shown.
 5. **Gate.**
 6. **Extensions and MCP tools,** including feedback routes.
 7. **Shadow at the first deployment, then cut-over.** Tracked in that deployment's private repository. From here the first deployment runs on this project: findings, the gate, and the score shown in every review, with automatic approval off and no learned records yet. Capture is already storing the human activity that memory and the live numbers need.
-8. **Memory.** Records, learning, retrieval, and the importer's database output. Both evals are re-run with memory "as of" each case. Until the UI exists, a record can be disabled only in the database. A deployment may leave learning off in configuration until stage 10.
+8. **Memory.** Records, learning, retrieval, and the importer's database output. Both evals are re-run with memory "as of" each case. Until the UI exists, a record can be disabled only in the database. A deployment may leave learning off in configuration until stage 10. Cut in two plans: memory for the score, which is built, and lessons, which is next.
 9. **Automatic approval and withdrawal.**
 10. **UI.** Three screens: score numbers per repository, learned records with their kill switch, recent reviews with failures, feedback and dependency health. Sign-in is through the same app, and access is limited to the accounts or the one team named in the deployment config. With neither named, the UI is off.
 

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { testDb } from './testing.ts';
-import { adoptableRun, hasOkRun, hasRun, lastPublishedRun, listRuns, claimNotice, markPublished, markPublishTried, recordRun, spentSince, unpublishedRun } from './review-runs.ts';
+import { adoptableRun, hasOkRun, hasRun, lastPublishedRun, listRuns, claimNotice, markPublished, markPublishTried, recordRun, scoredAt, spentSince, unpublishedRun } from './review-runs.ts';
 import type { RunRecord } from './review-runs.ts';
 import { enqueueJob, finishJob } from './jobs.ts';
 
@@ -205,5 +205,42 @@ test('the notice of a dry run cannot be claimed, even when it was stamped as pub
   const id = await recordRun(db, run({ dryRun: true }));
   await markPublished(db, id, { reviewId: 'r1', publishedAt: at(1), body: 'text', inlineDropped: false });
   assert.equal(await claimNotice(db, id, at(2)), false);
+  await db.close();
+});
+test('the scores at a commit are those of its newest run that ended ok, a dry run included', async () => {
+  const db = await testDb();
+  const scored = (tag: string, threshold: number): unknown => ({
+    findings: [{ body: 'not read' }], scores: [{ path: 'src/billing/tax.ts', blocks: [], tag }], verdict: { threshold, needsHuman: false, highest: 10 },
+  });
+  await recordRun(db, run({ headSha: 'h1', dryRun: false, result: scored('first', 40) }));
+  await recordRun(db, run({ headSha: 'h1', dryRun: false, outcome: 'failed', failureStage: 'model', failureCode: 'timeout', result: scored('failed', 40) }));
+  await recordRun(db, run({ headSha: 'h1', dryRun: true, result: scored('third', 50) }));
+  await recordRun(db, run({ headSha: 'h2', outcome: 'failed', failureStage: 'model', failureCode: 'timeout', result: scored('h2', 40) }));
+  await recordRun(db, run({ ref: { ...REF, number: 8 }, headSha: 'h3', result: scored('other', 40) }));
+  assert.deepEqual(await scoredAt(db, { ...REF, owner: 'Acme', repo: 'Shop' }, ['h1', 'h2', 'h3', 'h4']), [
+    { commit: 'h1', scores: [{ path: 'src/billing/tax.ts', blocks: [], tag: 'third' }], threshold: 50 },
+  ]);
+  assert.deepEqual(await scoredAt(db, REF, []), []);
+  await db.close();
+});
+test('the scores at a commit are read only from a result that holds a list of scores, and a damaged result throws nothing', async () => {
+  const db = await testDb();
+  const heads: Array<[string, unknown]> = [
+    ['null', null], ['text', 'a result'], ['number', 5], ['list', [1, 2]], ['old', { findings: [] }],
+    ['scores-text', { scores: 'x', verdict: { threshold: 40 } }], ['verdict-text', { scores: [], verdict: 'x' }],
+    ['no-verdict', { scores: [{ path: 'a.ts' }] }],
+  ];
+  for (const [headSha, result] of heads) await recordRun(db, run({ headSha, result }));
+  assert.deepEqual(await scoredAt(db, REF, heads.map(([h]) => h)), [
+    { commit: 'no-verdict', scores: [{ path: 'a.ts' }], threshold: null },
+    { commit: 'verdict-text', scores: [], threshold: null },
+  ]);
+  await db.close();
+});
+test('a commit whose newest ok run holds no list of scores is absent, and an older run at it is not read instead', async () => {
+  const db = await testDb();
+  await recordRun(db, run({ headSha: 'h1', result: { scores: [{ path: 'a.ts' }], verdict: { threshold: 40 } } }));
+  await recordRun(db, run({ headSha: 'h1', result: { findings: [] } }));
+  assert.deepEqual(await scoredAt(db, REF, ['h1']), []);
   await db.close();
 });

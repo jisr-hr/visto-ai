@@ -5,6 +5,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ConfigError, contractFile, loadConfig } from '../config/load.ts';
 import type { DeploymentConfig } from '../config/load.ts';
+import { postgresDb } from '../db/postgres.ts';
 import { createModelClient } from '../engine/model/client.ts';
 import { createJevScorer } from '../engine/scorer/jev.ts';
 import type { ReviewDeps } from '../engine/types.ts';
@@ -12,13 +13,16 @@ import { createGithubHistorySource } from '../forge/github/history-source.ts';
 import { createGithubReadSource } from '../forge/github/read-source.ts';
 import { compareSummaries } from './compare.ts';
 import { loadCases } from './cases.ts';
-import { THRESHOLDS } from './backtest/metrics.ts';
+import { historyMemory, memoryCount } from './backtest/memory.ts';
+import { THRESHOLDS, measure, share as shareOf } from './backtest/metrics.ts';
 import type { CaseScores } from './backtest/metrics.ts';
-import { scoreNoise } from './backtest/noise.ts';
+import { scoreMoves, scoreNoise } from './backtest/noise.ts';
+import type { MoveRow } from './backtest/noise.ts';
 import { readCaseScores, runBacktest } from './backtest/run.ts';
 import type { BacktestSummary } from './backtest/run.ts';
 import { loadHistory } from './history/file.ts';
 import { runImport } from './history/import.ts';
+import { seedCommand } from './history/seed.ts';
 import { assertOutsideProject, runReplay } from './replay.ts';
 import type { SummaryFile } from './replay.ts';
 
@@ -61,11 +65,13 @@ function outsideProject(path: string, projectRoot: string, name: string): void {
 interface RunSetup {
   inputPath: string; outDir: string; label: string; maxCases: number; maxCost: number; concurrency: number;
   config: DeploymentConfig; deps: ReviewDeps;
+  options: Record<string, string>; // the values given of the command's own options
 }
 
 // What `replay` and `backtest` share: the same options, the same checks, and the same real clients.
-export function prepareRun(command: string, inputName: string, argv: string[], env: Record<string, string | undefined>): RunSetup {
-  const parsed = parse(argv, [inputName, 'out', 'label', 'config', 'max-cases', 'max-cost', 'concurrency'], ['force']);
+// `own`: the options with a value that the command takes beside the shared ones.
+export function prepareRun(command: string, inputName: string, argv: string[], env: Record<string, string | undefined>, own: string[] = []): RunSetup {
+  const parsed = parse(argv, [inputName, 'out', 'label', 'config', 'max-cases', 'max-cost', 'concurrency', ...own], ['force']);
   if (parsed.positional.length > 0) throw new UsageError(`usage: ${command} takes no positional arguments`);
   const get = (name: string): string => {
     const v = parsed.options.get(name);
@@ -101,23 +107,40 @@ export function prepareRun(command: string, inputName: string, argv: string[], e
     ...(config.scorer === null ? {} : { scorer: createJevScorer(config.scorer, { fetch: globalThis.fetch, sleep }) }),
     ...(config.model.toolChoice === 'auto' ? { toolChoice: 'auto' as const } : {}),
   };
-  return { inputPath, outDir, label, maxCases, maxCost, concurrency, config, deps };
+  const options: Record<string, string> = {};
+  for (const name of own) {
+    const value = parsed.options.get(name);
+    if (value !== undefined) options[name] = value;
+  }
+  return { inputPath, outDir, label, maxCases, maxCost, concurrency, config, deps, options };
 }
+
+const projectFolder = (): string => resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 
 async function replay(argv: string[], env: Record<string, string | undefined>, out: (line: string) => void): Promise<void> {
   const setup = prepareRun('replay', 'cases', argv, env);
   const { cases, sha256 } = readable('cases', () => loadCases(setup.inputPath));
-  const { inputPath, ...rest } = setup;
-  const file = await runReplay({ ...rest, cases, casesFile: inputPath, casesSha256: sha256 });
+  const { inputPath, outDir, label, maxCases, maxCost, concurrency, config, deps } = setup;
+  const file = await runReplay({ outDir, label, maxCases, maxCost, concurrency, config, deps, cases, casesFile: inputPath, casesSha256: sha256 });
   out(`cases ${file.summary.cases}, failed ${file.summary.failed_cases}, not started ${file.cases_not_started}, total_cost ${file.summary.total_cost}`);
   if (file.stopped_reason !== null) out(`stopped: ${file.stopped_reason}`);
 }
 
 async function backtest(argv: string[], env: Record<string, string | undefined>, out: (line: string) => void): Promise<void> {
-  const setup = prepareRun('backtest', 'history', argv, env);
+  const setup = prepareRun('backtest', 'history', argv, env, ['memory']);
+  const memoryPath = setup.options.memory;
+  if (memoryPath !== undefined) {
+    outsideProject(memoryPath, projectFolder(), 'memory');
+    // With a scorer memory is not asked: every case would be skipped (call 4).
+    if (setup.config.scorer !== null) throw new UsageError('usage: --memory cannot be used with a scorer in the config');
+  }
   const { cases, sha256 } = readable('history', () => loadHistory(setup.inputPath));
-  const { inputPath, ...rest } = setup;
-  const summary = await runBacktest({ ...rest, cases, historyFile: inputPath, historySha256: sha256 });
+  const memoryFile = memoryPath === undefined ? undefined : readable('memory', () => loadHistory(memoryPath));
+  const { inputPath, outDir, label, maxCases, maxCost, concurrency, config, deps } = setup;
+  const memory = memoryPath === undefined || memoryFile === undefined
+    ? {}
+    : { memory: { of: historyMemory(memoryFile.cases).of, file: memoryPath, sha256: memoryFile.sha256 } };
+  const summary = await runBacktest({ outDir, label, maxCases, maxCost, concurrency, config, deps, cases, historyFile: inputPath, historySha256: sha256, ...memory });
   out(`cases ${summary.cases}, failed ${summary.failed_cases}, not started ${summary.cases_not_started}, total_cost ${summary.total_cost}`);
   if (summary.stopped_reason !== null) out(`stopped: ${summary.stopped_reason}`);
 }
@@ -128,23 +151,171 @@ function readRun(dir: string): { summary: BacktestSummary; scores: CaseScores[] 
   return { summary, scores: readableAs('the run directory', () => readCaseScores(join(dir, 'scores.jsonl'))) };
 }
 
+interface RunRow { key: string; status: string; calls: number; memory: string | null }
+
+// A run's results.jsonl: the key, the status, the model calls and the memory status of each case.
+function readRows(dir: string): RunRow[] {
+  const text = readableAs('the run directory', () => readFileSync(join(dir, 'results.jsonl'), 'utf8'));
+  const rows: RunRow[] = [];
+  text.split('\n').forEach((line, index) => {
+    if (line.trim() === '') return;
+    let data: unknown;
+    try { data = JSON.parse(line); } catch { throw new Error(`bad_results_line_${index + 1}`); }
+    const row = data as { key?: unknown; status?: unknown; calls?: unknown; memory?: unknown };
+    if (typeof data !== 'object' || data === null || typeof row.key !== 'string' || typeof row.status !== 'string' || typeof row.calls !== 'number') {
+      throw new Error(`bad_results_line_${index + 1}`);
+    }
+    const memory = typeof row.memory === 'object' && row.memory !== null && typeof (row.memory as { status?: unknown }).status === 'string'
+      ? (row.memory as { status: string }).status : null;
+    rows.push({ key: row.key, status: row.status, calls: row.calls, memory });
+  });
+  return rows;
+}
+
+const modelsOf = (s: BacktestSummary): string => (Array.isArray(s.models) ? s.models.join(', ') : '');
+
+// The refusals two runs share before their scores are compared; returns the warning on their models, or null.
+function sameRuns(first: BacktestSummary, second: BacktestSummary, memory: boolean): string | null {
+  if (first.history_sha256 !== second.history_sha256) throw new Error('different_history_files');
+  if (first.contract_sha256 !== second.contract_sha256) throw new Error('different_contracts');
+  if ((first.scorer ?? null) !== (second.scorer ?? null)) throw new Error('different_scorers');
+  // A run with memory against one without, or two built from different memory files, measure memory and not noise.
+  if (memory && (first.memory_sha256 ?? null) !== (second.memory_sha256 ?? null)) throw new Error('different_memory');
+  return modelsOf(first) === modelsOf(second) ? null : `warning: the runs were answered by different models: ${modelsOf(first)}; ${modelsOf(second)}`;
+}
+
 function scoreNoiseCommand(argv: string[], out: (line: string) => void): void {
   const parsed = parse(argv, [], []);
   if (parsed.positional.length !== 2) throw new UsageError('usage: score-noise <run dir> <run dir>');
   const first = readRun(parsed.positional[0]!);
   const second = readRun(parsed.positional[1]!);
-  if (first.summary.history_sha256 !== second.summary.history_sha256) throw new Error('different_history_files');
-  if (first.summary.contract_sha256 !== second.summary.contract_sha256) throw new Error('different_contracts');
-  if ((first.summary.scorer ?? null) !== (second.summary.scorer ?? null)) throw new Error('different_scorers');
-  const models = (s: BacktestSummary): string => (Array.isArray(s.models) ? s.models.join(', ') : '');
-  if (models(first.summary) !== models(second.summary)) {
-    out(`warning: the runs were answered by different models: ${models(first.summary)}; ${models(second.summary)}`);
-  }
+  const warning = sameRuns(first.summary, second.summary, true);
+  if (warning !== null) out(warning);
   const rows = scoreNoise(first.scores, second.scores, THRESHOLDS);
   const share = (value: number | null): string => (value === null ? EM_DASH : String(value));
   out('| threshold | blocks_flipped | blocks_n | prs_flipped | prs_n |');
   out('| --- | --- | --- | --- | --- |');
   for (const r of rows) out(`| ${r.threshold} | ${share(r.blocks_flipped)} | ${r.blocks_n} | ${share(r.prs_flipped)} | ${r.prs_n} |`);
+}
+
+const MOVES_HEADER = ['| threshold | blocks_raised | blocks_lowered | blocks_n | prs_raised | prs_lowered | prs_n |', '| --- | --- | --- | --- | --- | --- | --- |'];
+const moveLines = (rows: MoveRow[]): string[] => [
+  ...MOVES_HEADER,
+  ...rows.map((r) => `| ${r.threshold} | ${r.blocks_raised} | ${r.blocks_lowered} | ${r.blocks_n} | ${r.prs_raised} | ${r.prs_lowered} | ${r.prs_n} |`),
+];
+const NUMBER_NAMES = ['safety_blocks', 'safety_blocks_loose', 'safety_files', 'safety_files_loose', 'benefit', 'focus'] as const;
+const dash = (value: number | null): string => (value === null ? EM_DASH : String(value));
+// A number with its count and its step: the smallest difference that count can show.
+const counted = (value: number | null, n: number): string => `${dash(value)} (n=${n}, step ${dash(shareOf(1, n))})`;
+// focus is a share of lines, and its count is of pull requests: a step from that count would mislead, so none is printed.
+const cellOf = (name: typeof NUMBER_NAMES[number], value: number | null, n: number): string => (name === 'focus' ? `${dash(value)} (n=${n})` : counted(value, n));
+const hasMemory = (s: BacktestSummary): boolean => typeof s.memory_sha256 === 'string';
+
+const COMPARE_USAGE = 'usage: score-compare <baseline run dir> <candidate run dir> [--noise <second baseline run dir>]';
+
+function scoreCompareCommand(argv: string[], out: (line: string) => void): void {
+  const parsed = parse(argv, ['noise'], []);
+  if (parsed.positional.length !== 2) throw new UsageError(COMPARE_USAGE);
+  const base = readRun(parsed.positional[0]!);
+  const cand = readRun(parsed.positional[1]!);
+  const baseRows = readRows(parsed.positional[0]!);
+  const candRows = readRows(parsed.positional[1]!);
+  const noisePath = parsed.options.get('noise');
+  const noise = noisePath === undefined ? null : readRun(noisePath);
+  // The two runs differ in memory by design; the second baseline must be a run of the baseline's kind.
+  const warnings = [sameRuns(base.summary, cand.summary, false), noise === null ? null : sameRuns(base.summary, noise.summary, true)];
+  // The candidate is the run with memory, the baseline the one without; two runs with memory are compared by score-noise.
+  if (!hasMemory(cand.summary)) throw new Error('candidate_without_memory');
+  if (hasMemory(base.summary)) throw new Error('baseline_with_memory');
+
+  const first = new Map(baseRows.map((r) => [r.key, r]));
+  const second = new Map(candRows.map((r) => [r.key, r]));
+  const both: RunRow[] = [];
+  let oneOnly = 0;
+  let notOk = 0;
+  for (const [key, row] of first) {
+    const other = second.get(key);
+    if (other === undefined) { oneOnly += 1; continue; }
+    if (row.status !== 'ok' || other.status !== 'ok') { notOk += 1; continue; }
+    both.push(other);
+  }
+  for (const key of second.keys()) if (!first.has(key)) oneOnly += 1;
+  const shown = new Set(both.filter((r) => r.memory === 'ok').map((r) => r.key));
+  const empty = new Set(both.filter((r) => r.memory === 'empty').map((r) => r.key));
+  const otherCount = both.length - shown.size - empty.size;
+  const otherCalls = both.filter((r) => shown.has(r.key) && first.get(r.key)!.calls !== r.calls).length;
+  const only = (scores: CaseScores[], keys: Set<string>): CaseScores[] => scores.filter((c) => keys.has(c.key));
+
+  out(`compared: ${both.length} cases that both runs hold with the status ok; in one run only: ${oneOnly}; in both runs but not ok in one: ${notOk}`);
+  for (const warning of warnings) if (warning !== null) out(warning);
+  out(`shown memory: ${shown.size}; none to show: ${empty.size}; other: ${otherCount}; of the cases shown memory, with another number of model calls: ${otherCalls}`);
+  out('Cases shown memory: the numbers of each run, each with its count n and its step, the smallest difference that count can show (focus, a share of lines, has its count of pull requests and no step):');
+  out(`| threshold | run | ${NUMBER_NAMES.join(' | ')} |`);
+  out(`| ${['threshold', 'run', ...NUMBER_NAMES].map(() => '---').join(' | ')} |`);
+  for (const t of [...THRESHOLDS, 'own' as const]) {
+    for (const [name, run] of [['baseline', base], ['candidate', cand]] as const) {
+      const m = measure(only(run.scores, shown), t);
+      out(`| ${t} | ${name} | ${NUMBER_NAMES.map((x) => cellOf(x, m[x], m[`${x}_n`])).join(' | ')} |`);
+    }
+  }
+  out('Cases shown memory: moves from the baseline to the candidate:');
+  for (const line of moveLines(scoreMoves(only(base.scores, shown), only(cand.scores, shown), THRESHOLDS))) out(line);
+  if (noise !== null) {
+    out('Noise: moves from the baseline to the second baseline on the cases shown memory:');
+    for (const line of moveLines(scoreMoves(only(base.scores, shown), only(noise.scores, shown), THRESHOLDS))) out(line);
+  }
+  out('Cases with none to show: their requests were the same in both runs, so what moved is noise:');
+  for (const line of moveLines(scoreMoves(only(base.scores, empty), only(cand.scores, empty), THRESHOLDS))) out(line);
+}
+
+async function memoryCountCommand(argv: string[], out: (line: string) => void): Promise<void> {
+  const parsed = parse(argv, ['history', 'memory', 'max-cases'], []);
+  if (parsed.positional.length > 0) throw new UsageError('usage: memory-count takes no positional arguments');
+  const get = (name: string): string => {
+    const v = parsed.options.get(name);
+    if (v === undefined) throw new UsageError(`usage: memory-count needs --${name}`);
+    return v;
+  };
+  const historyPath = get('history');
+  const memoryPath = get('memory');
+  const maxCases = positive(parsed, 'max-cases', Number.POSITIVE_INFINITY);
+  outsideProject(historyPath, projectFolder(), 'history');
+  outsideProject(memoryPath, projectFolder(), 'memory');
+  const history = readable('history', () => loadHistory(historyPath));
+  const memory = readable('memory', () => loadHistory(memoryPath));
+  const count = await memoryCount(history.cases.slice(0, maxCases), historyMemory(memory.cases));
+  out(`cases ${count.cases}, with a line ${count.with_lines}, with a labelled file that got a line ${count.with_labelled_line}`);
+  for (const r of count.rows) {
+    out(`${r.key}: records ${r.records}, lines ${r.lines}, changed ${r.changed}, near ${r.near}, labelled files ${r.labelled_files}, labelled with a line ${r.labelled_with_line}`);
+  }
+}
+
+// The importer's database output (7.5, call 29): reads a history file, never the git service, and never migrates.
+async function seedMemoryCommand(argv: string[], env: Record<string, string | undefined>, out: (line: string) => void): Promise<void> {
+  const parsed = parse(argv, ['history', 'config'], []);
+  if (parsed.positional.length > 0) throw new UsageError('usage: seed-memory takes no positional arguments');
+  const get = (name: string): string => {
+    const v = parsed.options.get(name);
+    if (v === undefined) throw new UsageError(`usage: seed-memory needs --${name}`);
+    return v;
+  };
+  const historyPath = get('history');
+  const configPath = get('config');
+  outsideProject(historyPath, projectFolder(), 'history');
+  const config = readable('config', () => loadConfig(configPath, env));
+  if (config.database === null) throw new UsageError('usage: seed-memory needs a database in the config');
+  const { cases } = readable('history', () => loadHistory(historyPath));
+  const db = postgresDb(config.database.url, (entry) => { process.stderr.write(JSON.stringify(entry) + '\n'); });
+  try {
+    out(await seedCommand(db, cases, new Date()));
+    // The close after a failure is not tested in the suite, which opens no database here: the real run under Docker checks it.
+  } finally {
+    try {
+      await db.close();
+    } catch {
+      // a close that fails changes nothing of what was written
+    }
+  }
 }
 
 // A file that cannot be read is a usage error; one that is read but invalid is not.
@@ -235,7 +406,10 @@ export async function main(argv: string[], env: Record<string, string | undefine
     else if (command === 'backtest') await backtest(rest, env, out);
     else if (command === 'score-noise') scoreNoiseCommand(rest, out);
     else if (command === 'import-history') await importHistory(rest, env, out);
-    else throw new UsageError('usage: cli <replay|compare|import-history|backtest|score-noise> ...');
+    else if (command === 'memory-count') await memoryCountCommand(rest, out);
+    else if (command === 'score-compare') scoreCompareCommand(rest, out);
+    else if (command === 'seed-memory') await seedMemoryCommand(rest, env, out);
+    else throw new UsageError('usage: cli <replay|compare|import-history|backtest|score-noise|memory-count|score-compare|seed-memory> ...');
     return 0;
   } catch (error) {
     if (error instanceof UsageError) { out(error.message); return 2; }

@@ -23,6 +23,8 @@ export interface ReceiveDeps {
   dryRun: boolean;
   /** The service's own app id: a re-run of any other app's check is not ours. */
   appId: string;
+  /** Called after the commit, once for a delivery that stored an inline comment by a person, or a pull request event whose action is `closed`; absent when learning is off. */
+  onLearn?: () => void;
 }
 
 /** job: the review job; gate: a gate job was stored or took this delivery's time. */
@@ -185,6 +187,14 @@ export async function receive(
       note(who, 'ignored', capture.reason, gate);
       wake();
       return { status: 202, body: 'ignored' };
+    }
+    // A comment a pass may learn from, or a close: the pass is asked for, after the commit.
+    if (deps.onLearn !== undefined && (capture.activity?.kind === 'inline_comment' || (reading.event.kind === 'pull_request' && reading.event.action === 'closed'))) {
+      try {
+        deps.onLearn();
+      } catch {
+        // a wake-up that fails changes nothing
+      }
     }
     if (reading.event.kind === 'pull_request') note(who, 'accepted', null, { job: stored.job, skip: stored.skip, ...gate });
     else if (stored.command !== null) note(who, 'accepted', null, { command: stored.command, job: stored.job, ...gate });

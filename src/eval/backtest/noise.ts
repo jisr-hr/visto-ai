@@ -43,3 +43,31 @@ export function scoreNoise(a: CaseScores[], b: CaseScores[], thresholds: number[
     };
   });
 }
+
+export interface MoveRow { threshold: number; blocks_raised: number; blocks_lowered: number; blocks_n: number; prs_raised: number; prs_lowered: number; prs_n: number }
+
+/** How many blocks and pull requests present in both runs cross each threshold from `a` to `b`: upward, and downward. */
+export function scoreMoves(a: CaseScores[], b: CaseScores[], thresholds: number[]): MoveRow[] {
+  const second = new Map(b.filter((c) => c.status === 'ok').map((c) => [c.key, c]));
+  const prs: [number, number][] = [];
+  const hunks: [number, number][] = [];
+  for (const first of a) {
+    const other = second.get(first.key);
+    if (first.status !== 'ok' || other === undefined) continue;
+    const y = hunkScores(other.scores);
+    for (const [key, score] of hunkScores(first.scores)) {
+      const match = y.get(key);
+      if (match !== undefined) hunks.push([score, match]);
+    }
+    prs.push([highestScore(first.scores), highestScore(other.scores)]);
+  }
+  return thresholds.map((t) => {
+    const raised = ([x, y]: [number, number]): boolean => x < t && y >= t;
+    const lowered = ([x, y]: [number, number]): boolean => x >= t && y < t;
+    return {
+      threshold: t,
+      blocks_raised: hunks.filter(raised).length, blocks_lowered: hunks.filter(lowered).length, blocks_n: hunks.length,
+      prs_raised: prs.filter(raised).length, prs_lowered: prs.filter(lowered).length, prs_n: prs.length,
+    };
+  });
+}

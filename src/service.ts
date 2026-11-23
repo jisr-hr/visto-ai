@@ -26,6 +26,9 @@ import type { RequestLike, ResponseLike } from './shell/http.ts';
 import { createMcpHealth } from './shell/mcp-health.ts';
 import { checkModelKey, createModelHealth } from './shell/model-health.ts';
 import type { KeyCheck } from './shell/model-health.ts';
+import { createLearning, LEARN_MS } from './shell/learning.ts';
+import { createMemoryHealth } from './shell/memory-health.ts';
+import { recordsMemory } from './shell/memory.ts';
 import { receive } from './shell/receive.ts';
 import { recoverJobs } from './shell/recovery.ts';
 import { runRedelivery } from './shell/redelivery.ts';
@@ -102,7 +105,7 @@ export function gateForge(dryRun: boolean, checks: ForgeChecks, writer: ForgeWri
 
 /**
  * Takes the lock, migrates, recovers, then listens; the work that follows listening is not waited for.
- * `settled` resolves when the work that follows listening has had its first try: the key check, the app check, the redelivery attempt and, when that worked, the first beat.
+ * `settled` resolves when the work that follows listening has had its first try: the key check, the app check, with learning on the learning work's start (its first pass is not waited for), the redelivery attempt and, when that worked, the first beat.
  * `stop` drains both runners (at most DRAIN_WAIT_MS between them), closes the listener and waits for requests in flight (at most STOP_WAIT_MS),
  * beats once more, waits for alerts, closes the database and releases the lock. It never rejects.
  */
@@ -128,6 +131,9 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps): Pr
   const extensionHealth = deps.extensions.length === 0 ? null : createExtensionHealth(alert);
   const mcpHealth = config.mcpServers.length === 0 ? null : createMcpHealth(alert);
   const spend = createSpendGuard({ db, limit: config.limits.spendPerDay, clock, alert });
+  // With learning off none of it is made: no pass, no memory, no health (call 17). In dry run it runs (11.1).
+  const learning = config.learning ? createLearning({ db, clock, log: say, alert }) : null;
+  const memory = config.learning ? { memoryFor: (ref: PullRequestRef) => recordsMemory(db, ref), memoryHealth: createMemoryHealth(alert) } : null;
   const reviewDeps: ReviewJobDeps = {
     db, forge: deps.forge, clock, log: say, sleep: deps.sleep, settingsFor,
     limits: {
@@ -139,6 +145,7 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps): Pr
     ...(config.dryRun || notifiers.length === 0 ? {} : { notice: { notifiers, reviewUrl: deps.reviewUrl, pullRequestUrl: deps.pullRequestUrl } }),
     ...(extensionHealth === null ? {} : { extensionHealth }),
     ...(mcpHealth === null ? {} : { mcpHealth }),
+    ...(memory === null ? {} : memory),
   };
   // gate_check_failed is raised once for each reason in a run of the service.
   const raisedGate = new Set<string>();
@@ -211,6 +218,7 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps): Pr
   const { listener, idle } = createListener({
     webhook: (headers, body) => receive({
       db, reader: deps.reader, clock, log: say, settingsFor, onQueued: tickBoth, dryRun: config.dryRun, appId: config.app.id,
+      ...(learning === null ? {} : { onLearn: () => { learning.wake(); } }),
     }, headers, body),
     // With no module that has a route the map is empty, and every address under /extensions/ is answered as any unknown one.
     extensions: createExtensionRoutes(deps.extensions, {
@@ -342,6 +350,14 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps): Pr
     await beatOnce(event);
     every(BEAT_MS, async () => { if (!ending) await beatOnce('beat_failed'); });
   }
+  /** The learning work's row and its first pass, which is not waited for; then its own timer, whether or not the row could be made. */
+  async function startLearning(): Promise<void> {
+    if (learning === null || ending) return;
+    await guarded('start_step_failed', 'learning', () => learning.start());
+    if (ending) return;
+    learning.wake();
+    every(LEARN_MS, () => learning.tick());
+  }
   async function upkeep(): Promise<void> {
     if (ending) return;
     await guarded('upkeep_failed', 'key_check', keyCheck);
@@ -358,11 +374,13 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps): Pr
   const settled = (async () => {
     await guarded('start_step_failed', 'key_check', keyCheck);
     await guarded('start_step_failed', 'app_check', appCheck);
+    await startLearning();
     await redeliveryThenBeat('start_step_failed');
   })();
 
   async function stopOnce(): Promise<void> {
     ending = true;
+    learning?.stop();
     for (const cancel of cancels) {
       try {
         cancel();
@@ -386,6 +404,14 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps): Pr
       await within(STOP_WAIT_MS, idle());
     } catch {
       // idle never rejects
+    }
+    // A pass under way must not meet a closed database, and one that hangs must not hold the stop.
+    if (learning !== null) {
+      try {
+        await within(CLOSE_WAIT_MS, learning.idle());
+      } catch {
+        // idle never rejects
+      }
     }
     if (beating) {
       try {
