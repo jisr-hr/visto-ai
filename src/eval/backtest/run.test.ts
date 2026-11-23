@@ -8,6 +8,7 @@ import { GATE_OFF, type DeploymentConfig } from '../../config/load.ts';
 import { SUBMIT_REVIEW } from '../../engine/model/submit-review.ts';
 import type { ChangedFile, ModelClient, ModelResponse, ReviewDeps, ScoreAnswer, Scorer, Source } from '../../engine/types.ts';
 import type { HistoryCase } from '../history/file.ts';
+import { historyMemory } from './memory.ts';
 import { readCaseScores, runBacktest, toBacktestInput } from './run.ts';
 import type { BacktestSummary } from './run.ts';
 
@@ -265,4 +266,105 @@ test('reviewed_by_person counts only cases that ran', async () => {
   const args = baseArgs({ cases: [caseA, mkCase(3, 'src/a.ts'), caseB], deps: stubDeps([3]) });
   const s = await runBacktest(args);
   assert.deepEqual([s.cases, s.failed_cases, s.reviewed_by_person], [3, 1, 2]);
+});
+
+const sha = (text: string): string => createHash('sha256').update(text).digest('hex');
+// The rows with their one varying field, the time a case took, set aside.
+const steadyRows = (path: string): string => readFileSync(path, 'utf8').trim().split('\n')
+  .map((l) => { const row = JSON.parse(l) as Record<string, unknown>; delete row.duration_ms; return JSON.stringify(row); }).sort().join('\n');
+
+test('without --memory the requests, the rows and the summary are those of before', async () => {
+  const base = stubDeps();
+  const requests: string[] = [];
+  const memoryReads: unknown[] = [];
+  const model: ModelClient = { complete: (r) => { requests.push(JSON.stringify(r)); return base.model.complete(r); } };
+  const deps = new Proxy({ ...base, model }, {
+    get(target, name, receiver) {
+      if (name === 'memory') memoryReads.push(Reflect.get(target, name, receiver));
+      return Reflect.get(target, name, receiver) as unknown;
+    },
+  });
+  const args = baseArgs({ deps });
+  const s = await runBacktest(args);
+  const read = (name: string): string => readFileSync(join(args.outDir, name), 'utf8');
+  assert.deepEqual(memoryReads.filter((m) => m !== undefined), []);
+  assert.equal('memory' in deps, false);
+  assert.deepEqual(requests.map((r) => (JSON.parse(r) as { messages: unknown[] }).messages.length), [3, 3]);
+  assert.deepEqual(requests.map(sha).sort(), ['1b57c5c8af593b09ad8fc0b3e5d73e4ebd1ed1f0b353d2f669b912d3e6d45e76', '8459b96a458b389e370ca534f3bb2990e392e02fd013de57a023f908b2ddd196']);
+  assert.equal(sha(steadyRows(join(args.outDir, 'results.jsonl'))), 'dcfb5517a6dffcda4a420b8b2f59cb96fc8065b46b98b0f01e8de6e6e769ad3d');
+  assert.equal(sha(read('scores.jsonl').trim().split('\n').sort().join('\n')), 'c4a582364f4cfc864eba26d420e46c83cad867db6de2513cf649facf3330fbfa');
+  assert.equal(sha(read('summary.json')), '9bb30f6b1fa3829d9edaf4e5c439c5dbe24e63752093076178de366bd961ba81');
+  assert.equal(sha(read('summary.md')), '025d84cfe9713ecc44f1945da2369b0c552d71cbf05d8bd0ff4c3873fcad03ff');
+  assert.deepEqual(Object.keys(s).filter((k) => k.startsWith('memory')), []);
+  for (const row of lines(join(args.outDir, 'results.jsonl'))) assert.equal('memory' in (row as object), false);
+});
+
+const TAX = 'src/billing/tax.ts';
+const SENTENCE = 'Octopus ledgers never round toward the harbour.';
+const lead = (pr: number, path: string, at: string, body = 'x') => ({
+  kind: 'inline' as const, id: `m${pr}`, author: 'octo-lead', bot: false, association: 'member' as const, at, body,
+  commit: `head${pr}`.padEnd(12, '0'), path, side: 'RIGHT' as const, line: 5,
+});
+const memCase = (pr: number, path: string, mergedAt: string, activity: HistoryCase['activity'] = []): HistoryCase =>
+  mkCase(pr, path, { merged_at: mergedAt, review_at: mergedAt, author: 'octo-dev', activity });
+
+// A model that names the file of the pull request its header names, and a source that lists each case's own file.
+function memoryDeps(paths: Record<number, string>, requests: string[] = []): ReviewDeps {
+  const model: ModelClient = {
+    complete: (request): Promise<ModelResponse> => {
+      requests.push(JSON.stringify(request));
+      const number = Number(/Pull request: #(\d+)/.exec(request.messages.map((m) => m.content).join('\n'))![1]);
+      const path = paths[number]!;
+      const answer = { overview: `${path} is changed.`, findings: [], files: [{ path, change_summary: 'Changes.', blocks: [{ id: 'B1', score: 30, category: 'other', reason: 'Plain change.' }] }] };
+      return Promise.resolve({
+        toolName: SUBMIT_REVIEW, toolArguments: JSON.stringify(answer), text: null, model: 'm', provider: null,
+        usage: { calls: 1, inputTokens: 100, outputTokens: 10, cachedTokens: 0, cost: 0.5 },
+      });
+    },
+  };
+  const source: Source = {
+    listFiles: (pr) => Promise.resolve([fileAt(paths[pr.ref.number]!)]),
+    getFileContent: () => Promise.resolve(null), getDefaultBranchFile: () => Promise.resolve(null),
+  };
+  return { source, model, contract: 'You review pull requests.', clock: () => new Date(0), token: () => 'abcdef0123456789', log: () => {} };
+}
+
+test('a run with memory names its file in the summary, counts how memory did, and each row carries its status', async () => {
+  const a = memCase(7, TAX, '2026-03-01T12:00:00Z', [lead(7, TAX, '2026-03-01T10:00:00Z')]);
+  const b = memCase(8, TAX, '2026-03-10T12:00:00Z');
+  const c = memCase(9, 'lib/other.ts', '2026-03-11T12:00:00Z');
+  const broken = mkCase(10, TAX, { repo: 'shop' });
+  const cases = [a, b, c, broken];
+  const memory = historyMemory(cases);
+  const args = baseArgs({
+    cases, concurrency: 1, deps: memoryDeps({ 7: TAX, 8: TAX, 9: 'lib/other.ts', 10: TAX }),
+    memory: { of: memory.of, file: '/elsewhere/memory-history.jsonl', sha256: 'b'.repeat(64) },
+  });
+  const s = await runBacktest(args);
+  assert.deepEqual([s.memory_file, s.memory_sha256, s.memory_cases], ['/elsewhere/memory-history.jsonl', 'b'.repeat(64), { ok: 1, empty: 2, skipped: 0, error: 0 }]);
+  const rows = lines(join(args.outDir, 'results.jsonl')) as { key: string; memory: unknown }[];
+  const byPr = (n: number): unknown => rows.find((r) => r.key.includes(`#${n}@`))!.memory;
+  assert.deepEqual([byPr(7), byPr(8), byPr(9), byPr(10)], [
+    { status: 'empty', code: 'no_records', lines: 0 }, { status: 'ok', code: 'ok', lines: 1 }, { status: 'empty', code: 'no_records', lines: 0 }, null,
+  ]);
+  assert.match(readFileSync(join(args.outDir, 'summary.md'), 'utf8'),
+    /\nScorer: the review model\nMemory: as of each case, from memory-history\.jsonl\. Cases shown memory: 1 of 4; with none to show: 2; not shown: 0; failed: 0\.\n$/);
+  assert.deepEqual(JSON.parse(readFileSync(join(args.outDir, 'summary.json'), 'utf8')), s);
+});
+
+test('nothing a person wrote reaches the model through the memory of a backtest', async () => {
+  const a = memCase(7, TAX, '2026-03-01T12:00:00Z', [lead(7, TAX, '2026-03-01T10:00:00Z', `${SENTENCE}\n\nAnd ${SENTENCE.toLowerCase()}`)]);
+  const b = memCase(8, TAX, '2026-03-10T12:00:00Z');
+  const requests: string[] = [];
+  const memory = historyMemory([a, b]);
+  const args = baseArgs({ cases: [a, b], deps: memoryDeps({ 7: TAX, 8: TAX }, requests), memory: { of: memory.of, file: '/elsewhere/h.jsonl', sha256: 'c'.repeat(64) } });
+  await runBacktest(args);
+  const rows = lines(join(args.outDir, 'results.jsonl')) as { key: string; memory: { status: string; lines: number } }[];
+  assert.deepEqual(rows.find((r) => r.key.includes('#8@'))!.memory, { status: 'ok', code: 'ok', lines: 1 });
+  assert.equal(requests.length, 2);
+  assert.ok(requests.some((r) => r.includes('2026-03-01')), 'the line itself is shown');
+  for (const r of requests) {
+    assert.equal(r.includes('Octopus'), false);
+    assert.equal(r.toLowerCase().includes('harbour'), false);
+  }
 });

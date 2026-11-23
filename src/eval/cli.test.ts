@@ -1,11 +1,17 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
+import { measure, share, THRESHOLDS } from './backtest/metrics.ts';
+import type { CaseScores } from './backtest/metrics.ts';
+import { scoreMoves } from './backtest/noise.ts';
+import { A, B, block, C, file } from './backtest/test-cases.ts';
 import { main, prepareRun } from './cli.ts';
+import { serializeCase } from './history/file.ts';
+import type { HistoryCase } from './history/file.ts';
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const dir = mkdtempSync(tmpdir() + '/');
@@ -110,7 +116,7 @@ test('backtest usage errors exit 2 with one exact line', async () => {
   }
 });
 
-function runDir(name: string, sha: string, scores: string, extra: { contract_sha256?: string; models?: string[]; scorer?: string | null } = {}): string {
+function runDir(name: string, sha: string, scores: string, extra: { contract_sha256?: string; models?: string[]; scorer?: string | null; memory_file?: string; memory_sha256?: string } = {}): string {
   const d = join(dir, name);
   mkdirSync(d);
   writeFileSync(join(d, 'summary.json'), JSON.stringify({ label: name, history_sha256: sha, contract_sha256: 'd'.repeat(64), models: ['m'], ...extra }));
@@ -209,4 +215,216 @@ test('the eval commands build no MCP client', () => {
   assert.equal(/from '\.\.\/mcp\//.test(text), false);
   // the variable a header names is still needed
   assert.throws(() => prepareRun('replay', 'cases', argv, { GITHUB_TOKEN: 't', MODEL_KEY: 'k' }));
+});
+
+test('backtest takes --memory with a file, refuses it with a scorer in the config, and replay does not take it', async () => {
+  writeFileSync(join(dir, 'config.yml'), 'model:\n  apiKey: { env: MODEL_KEY }\n  model: vendor/model-a\n');
+  const scorerConfig = join(dir, 'scorer-config.yml');
+  writeFileSync(scorerConfig, 'model:\n  apiKey: { env: MODEL_KEY }\n  model: vendor/model-a\nscorer:\n  apiKey: { env: SCORER_KEY }\n  model: vendor/decider\n' +
+    'repositories:\n  defaults:\n    score:\n      threshold: 80\n');
+  const memoryFile = join(dir, 'memory-none.jsonl');
+  const cases: [string, string[], Record<string, string | undefined>, string][] = [
+    ['no value', [...backtestArgs(), '--memory'], backtestEnv, 'usage: option --memory needs a value'],
+    ['inside the project', [...backtestArgs(), '--memory', join(projectRoot, 'm.jsonl')], backtestEnv, 'usage: --memory must be outside the project folder'],
+    ['a scorer in the config', [...backtestArgs({ config: scorerConfig }), '--memory', memoryFile], { ...backtestEnv, SCORER_KEY: 's' }, 'usage: --memory cannot be used with a scorer in the config'],
+    ['history that does not exist', [...backtestArgs(), '--memory', memoryFile], backtestEnv, 'usage: cannot read --history'],
+    ['replay', ['replay', '--cases', join(dir, 'c.yml'), '--memory', memoryFile], backtestEnv, 'usage: unknown option --memory'],
+  ];
+  for (const [name, argv, env, message] of cases) {
+    const [code, lines] = await run(argv, env);
+    assert.equal(code, 2, name);
+    assert.deepEqual(lines, [message], name);
+  }
+  writeFileSync(join(dir, 'h-present.jsonl'), '');
+  const [code, lines] = await run([...backtestArgs({ history: join(dir, 'h-present.jsonl'), out: join(dir, 'run-memory-out') }), '--memory', memoryFile], backtestEnv);
+  assert.deepEqual([code, lines], [2, ['usage: cannot read --memory']]);
+  const setup = prepareRun('backtest', 'history', [...backtestArgs().slice(1), '--memory', memoryFile], backtestEnv, ['memory']);
+  assert.deepEqual(setup.options, { memory: memoryFile });
+  assert.deepEqual(prepareRun('backtest', 'history', backtestArgs().slice(1), backtestEnv, ['memory']).options, {});
+});
+
+const TAX = 'src/billing/tax.ts';
+function historyCase(pr: number, mergedAt: string, activity: HistoryCase['activity'] = []): HistoryCase {
+  return {
+    version: 1, repo: 'acme/shop', pr_number: pr, title: 'Change', body: 'Changes.', author: 'octo-dev', branch: 'topic', base_branch: 'main',
+    merged_at: mergedAt, review_head: `head${pr}`.padEnd(12, '0'), review_base: 'base0000', review_at: mergedAt, reviewed_by_person: true,
+    final_head: 'final000', final_base: 'base0000', final_files: [{ path: TAX, previous_path: null, status: 'modified', patch: null }], activity,
+  };
+}
+
+test('memory-count needs its two files, outside the project, and no token', async () => {
+  const folder = mkdtempSync(tmpdir() + '/');
+  const history = join(folder, 'history.jsonl');
+  const memory = join(folder, 'memory.jsonl');
+  const lead = { kind: 'inline' as const, id: 'm1', author: 'octo-lead', bot: false, association: 'member' as const, at: '2026-03-01T10:00:00Z', body: 'x', commit: 'head10000000', path: TAX, side: 'RIGHT' as const, line: 2 };
+  writeFileSync(memory, [historyCase(1, '2026-03-01T12:00:00Z', [lead]), historyCase(2, '2026-03-05T12:00:00Z')].map(serializeCase).join('\n') + '\n');
+  writeFileSync(history, [historyCase(2, '2026-03-05T12:00:00Z'), historyCase(3, '2026-03-06T12:00:00Z', [{ ...lead, id: 'm3', commit: 'head30000000' }])].map(serializeCase).join('\n') + '\n');
+  const args = (over: Record<string, string> = {}, drop: string[] = []): string[] => {
+    const options: Record<string, string> = { history, memory, ...over };
+    for (const name of drop) delete options[name];
+    return ['memory-count', ...Object.entries(options).flatMap(([k, v]) => [`--${k}`, v])];
+  };
+  const bad: [string, string[], string][] = [
+    ['no arguments', ['memory-count'], 'usage: memory-count needs --history'],
+    ['missing memory', args({}, ['memory']), 'usage: memory-count needs --memory'],
+    ['history inside the project', args({ history: join(projectRoot, 'h.jsonl') }), 'usage: --history must be outside the project folder'],
+    ['memory inside the project', args({ memory: join(projectRoot, 'm.jsonl') }), 'usage: --memory must be outside the project folder'],
+    ['history that does not exist', args({ history: join(folder, 'none.jsonl') }), 'usage: cannot read --history'],
+    ['memory that does not exist', args({ memory: join(folder, 'none.jsonl') }), 'usage: cannot read --memory'],
+    ['max-cases 0', [...args(), '--max-cases', '0'], 'usage: --max-cases must be a positive number'],
+    ['positional argument', [...args(), 'extra'], 'usage: memory-count takes no positional arguments'],
+    ['unknown option', [...args(), '--config', 'x'], 'usage: unknown option --config'],
+  ];
+  for (const [name, argv, message] of bad) {
+    const [code, lines] = await run(argv, {});
+    assert.equal(code, 2, name);
+    assert.deepEqual(lines, [message], name);
+  }
+  const before = readdirSync(folder).sort();
+  const [code, lines] = await run(args(), {});
+  assert.equal(code, 0);
+  assert.deepEqual(lines, [
+    'cases 2, with a line 2, with a labelled file that got a line 1',
+    'acme/shop#2@head20000000: records 1, lines 1, changed 1, near 0, labelled files 0, labelled with a line 0',
+    'acme/shop#3@head30000000: records 1, lines 1, changed 1, near 0, labelled files 1, labelled with a line 1',
+  ]);
+  const [, one] = await run([...args(), '--max-cases', '1'], {});
+  assert.deepEqual(one, [
+    'cases 1, with a line 1, with a labelled file that got a line 0',
+    'acme/shop#2@head20000000: records 1, lines 1, changed 1, near 0, labelled files 0, labelled with a line 0',
+  ]);
+  assert.deepEqual(readdirSync(folder).sort(), before);
+});
+
+const scoresLine = (c: CaseScores): string => JSON.stringify({
+  key: c.key, threshold: c.threshold, status: c.status, scores: c.scores,
+  labels: { blocks: Object.fromEntries(c.labels.blocks), files: Object.fromEntries(c.labels.files), comments: c.labels.comments, final_missing: c.labels.final_missing },
+});
+interface Row { key: string; status: 'ok' | 'failed'; calls: number; memory?: { status: string; code: string; lines: number } | null }
+const resultLine = (r: Row): string => JSON.stringify({ failure_stage: null, failure_code: null, cost: 0, tokens: 0, duration_ms: 1, verdict: null, ...r });
+
+function compareDir(name: string, cases: CaseScores[], rows: Row[], extra: Record<string, unknown> = {}): string {
+  const d = join(dir, name);
+  mkdirSync(d);
+  writeFileSync(join(d, 'summary.json'), JSON.stringify({ label: name, history_sha256: 'f'.repeat(64), contract_sha256: 'd'.repeat(64), models: ['m'], scorer: null, ...extra }));
+  writeFileSync(join(d, 'scores.jsonl'), cases.map(scoresLine).join('\n') + '\n');
+  writeFileSync(join(d, 'results.jsonl'), rows.map(resultLine).join('\n') + '\n');
+  return d;
+}
+
+const shown = { status: 'ok', code: 'ok', lines: 2 };
+const nothing = { status: 'empty', code: 'no_records', lines: 0 };
+const skipped = { status: 'skipped', code: 'no_room', lines: 0 };
+const k = (c: CaseScores, key: string, scores = c.scores): CaseScores => ({ ...c, key, scores });
+const baseline = [k(A, 'k1'), k(B, 'k2'), k(C, 'k3'), k(A, 'k4')];
+const candidate = [
+  k(A, 'k1', [file('a.ts', [block('B1', 80, 10), block('B2', 75, 5)], 15)]),
+  k(B, 'k2', [file('b.ts', [block('B1', 45, 10), block('B2', 50, 10)], 20)]),
+  k(C, 'k3', [file('c1.ts', [block('B1', 20, 8)], 8, 100), file('c2.ts', [block('B2', 80, 12)], 12)]),
+  k(A, 'k4'),
+];
+const baseRows: Row[] = ['k1', 'k2', 'k3', 'k4'].map((key) => ({ key, status: 'ok', calls: 1 }));
+const candRows: Row[] = [
+  { key: 'k1', status: 'ok', calls: 1, memory: shown }, { key: 'k2', status: 'ok', calls: 2, memory: shown },
+  { key: 'k3', status: 'ok', calls: 1, memory: nothing }, { key: 'k4', status: 'ok', calls: 1, memory: skipped },
+];
+const EM = '\u2014';
+const cellOf = (value: number | null, n: number): string => `${value ?? EM} (n=${n}, step ${share(1, n) ?? EM})`;
+const movesTable = (rows: ReturnType<typeof scoreMoves>): string[] => [
+  '| threshold | blocks_raised | blocks_lowered | blocks_n | prs_raised | prs_lowered | prs_n |',
+  '| --- | --- | --- | --- | --- | --- | --- |',
+  ...rows.map((r) => `| ${r.threshold} | ${r.blocks_raised} | ${r.blocks_lowered} | ${r.blocks_n} | ${r.prs_raised} | ${r.prs_lowered} | ${r.prs_n} |`),
+];
+
+test('score-compare reports the cases shown memory apart, with their counts and the smallest step they can show', async () => {
+  const noiseRun = [k(A, 'k1', [file('a.ts', [block('B1', 60, 10), block('B2', 30, 5)], 15)]), k(B, 'k2'), k(C, 'k3'), k(A, 'k4')];
+  const a = compareDir('cmp-base', baseline, baseRows);
+  const b = compareDir('cmp-cand', candidate, candRows, { memory_file: '/elsewhere/h.jsonl', memory_sha256: 'e'.repeat(64) });
+  const n = compareDir('cmp-noise', noiseRun, baseRows);
+  const names = ['safety_blocks', 'safety_blocks_loose', 'safety_files', 'safety_files_loose', 'benefit', 'focus'] as const;
+  const numbers: string[] = [];
+  for (const t of [...THRESHOLDS, 'own' as const]) {
+    for (const [run, cases] of [['baseline', baseline], ['candidate', candidate]] as const) {
+      const m = measure(cases.slice(0, 2), t);
+      numbers.push(`| ${t} | ${run} | ${names.map((x) => cellOf(m[x], m[`${x}_n`])).join(' | ')} |`);
+    }
+  }
+  const head = [
+    'compared: 4 cases that both runs hold with the status ok; in one run only: 0; in both runs but not ok in one: 0',
+    'shown memory: 2; none to show: 1; other: 1; of the cases shown memory, with another number of model calls: 1',
+    'Cases shown memory: the numbers of each run, each with its count n and its step, the smallest difference that count can show:',
+    '| threshold | run | safety_blocks | safety_blocks_loose | safety_files | safety_files_loose | benefit | focus |',
+    '| --- | --- | --- | --- | --- | --- | --- | --- |',
+    ...numbers,
+    'Cases shown memory: moves from the baseline to the candidate:',
+    ...movesTable(scoreMoves(baseline.slice(0, 2), candidate.slice(0, 2), THRESHOLDS)),
+  ];
+  const tail = [
+    'Cases with none to show: their requests were the same in both runs, so what moved is noise:',
+    ...movesTable(scoreMoves([baseline[2]!], [candidate[2]!], THRESHOLDS)),
+  ];
+  const [code, lines] = await run(['score-compare', a, b]);
+  assert.equal(code, 0);
+  assert.deepEqual(lines, [...head, ...tail]);
+  // the numbers are not all the same in both runs: the test compares something
+  assert.notEqual(numbers[4], numbers[5]);
+  assert.equal(lines.includes('| 70 | 0 | 0 | 0 | 0 | 0 | 0 |'), false);
+  const noise = [
+    'Noise: moves from the baseline to the second baseline on the cases shown memory:',
+    ...movesTable(scoreMoves(baseline.slice(0, 2), noiseRun.slice(0, 2), THRESHOLDS)),
+  ];
+  const [withCode, withNoise] = await run(['score-compare', a, b, '--noise', n]);
+  assert.equal(withCode, 0);
+  assert.deepEqual(withNoise, [...head, ...noise, ...tail]);
+});
+
+test('score-compare compares only the cases both runs hold, and says how many are in one only', async () => {
+  const a = compareDir('only-base', [...baseline, k(A, 'k5')], [...baseRows, { key: 'k5', status: 'ok', calls: 1 }]);
+  const failedK2 = candidate.map((c) => (c.key === 'k2' ? { ...c, status: 'failed' as const, scores: [] } : c));
+  const rows = candRows.map((r) => (r.key === 'k2' ? { ...r, status: 'failed' as const, memory: null } : r));
+  const b = compareDir('only-cand', [...failedK2, k(B, 'k6')], [...rows, { key: 'k6', status: 'ok', calls: 1, memory: shown }]);
+  const [code, lines] = await run(['score-compare', a, b]);
+  assert.equal(code, 0);
+  assert.equal(lines[0], 'compared: 3 cases that both runs hold with the status ok; in one run only: 2; in both runs but not ok in one: 1');
+  assert.equal(lines[1], 'shown memory: 1; none to show: 1; other: 1; of the cases shown memory, with another number of model calls: 0');
+  const own = lines.find((l) => l.startsWith('| own | baseline |'))!;
+  const m = measure([k(A, 'k1')], 'own');
+  assert.equal(own.split(' | ')[2], cellOf(m.safety_blocks, m.safety_blocks_n));
+});
+
+test('score-compare refuses different history files, contracts and scorers', async () => {
+  const a = compareDir('ref-base', baseline, baseRows);
+  const cases: [string, Record<string, unknown>, string][] = [
+    ['ref-history', { history_sha256: '0'.repeat(64) }, 'different_history_files'],
+    ['ref-contract', { contract_sha256: '0'.repeat(64) }, 'different_contracts'],
+    ['ref-scorer', { scorer: 'vendor/decider' }, 'different_scorers'],
+  ];
+  for (const [name, extra, message] of cases) {
+    const [code, lines] = await run(['score-compare', a, compareDir(name, candidate, candRows, extra)]);
+    assert.equal(code, 1, name);
+    assert.deepEqual(lines, [message], name);
+  }
+  const [warned, warning] = await run(['score-compare', a, compareDir('ref-models', candidate, candRows, { models: ['m', 'fallback-m'] })]);
+  assert.equal(warned, 0);
+  assert.equal(warning[0], 'warning: the runs were answered by different models: m; m, fallback-m');
+  for (const argv of [['score-compare'], ['score-compare', a], ['score-compare', a, a, a], ['score-compare', a, join(dir, 'nowhere')]]) {
+    const [code, lines] = await run(argv);
+    assert.equal(code, 2, argv.join(' '));
+    assert.equal(lines.length, 1);
+    assert.match(lines[0]!, /^usage: /);
+  }
+});
+
+test('score-noise refuses a run with memory against one without, and two runs with different memory files', async () => {
+  const sha = 'c'.repeat(64);
+  const memoryA = { memory_file: '/elsewhere/a.jsonl', memory_sha256: '1'.repeat(64) };
+  const memoryB = { memory_file: '/elsewhere/b.jsonl', memory_sha256: '2'.repeat(64) };
+  for (const [x, y] of [[{}, memoryA], [memoryA, {}], [memoryA, memoryB]]) {
+    const [code, lines] = await run(['score-noise', runDir(`mem-${Math.random().toString(16).slice(2)}`, sha, '', x), runDir(`mem-${Math.random().toString(16).slice(2)}`, sha, '', y)]);
+    assert.equal(code, 1);
+    assert.deepEqual(lines, ['different_memory']);
+  }
+  const [code, lines] = await run(['score-noise', runDir('mem-same-1', sha, '', memoryA), runDir('mem-same-2', sha, '', memoryA)]);
+  assert.equal(code, 0);
+  assert.equal(lines.length, 6);
 });
