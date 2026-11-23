@@ -1,4 +1,4 @@
-import { eventData } from './sse.ts';
+import { ByteBuffer, eventData } from './sse.ts';
 
 export const MCP_ANSWER_BYTES = 1_048_576; // one answer, as JSON or as a whole event stream; and the body read of a 400
 export const SERVER_REQUESTS_MAX = 8; // requests of the server's own answered during one exchange
@@ -31,10 +31,20 @@ function release(body: ReadableStream<Uint8Array> | null): void {
   }
 }
 
+const OWN_HEADERS: Record<string, string> = { Accept: 'application/json, text/event-stream', 'Content-Type': 'application/json' };
+const OWN_NAMES = new Set(Object.keys(OWN_HEADERS).map((name) => name.toLowerCase()));
+
+/** The given headers, then the client's own, each of which replaces a given one of the same name in any letter case. */
+function requestHeaders(given: Record<string, string>): Record<string, string> {
+  const headers: Record<string, string> = {};
+  for (const [name, value] of Object.entries(given)) if (!OWN_NAMES.has(name.toLowerCase())) headers[name] = value;
+  return { ...headers, ...OWN_HEADERS };
+}
+
 function post(target: RpcTarget, message: Record<string, unknown>, signal: AbortSignal): Promise<Response> {
   return target.fetch(target.url, {
     method: 'POST',
-    headers: { ...target.headers, Accept: 'application/json, text/event-stream', 'Content-Type': 'application/json' },
+    headers: requestHeaders(target.headers),
     body: JSON.stringify(message),
     redirect: 'manual',
     signal,
@@ -44,8 +54,9 @@ function post(target: RpcTarget, message: Record<string, unknown>, signal: Abort
 const failure = (signal: AbortSignal): string => (signal.aborted ? 'timeout' : 'network');
 
 /**
- * A view of a body that ends when the signal aborts: the body is then cancelled at once, and a read under way rejects.
- * It pulls from the body only when it is read itself. Cancelling it cancels the body.
+ * A view of a body that ends when the signal aborts: the body is then cancelled at once, which ends a read under way, and that
+ * read, and every later one, rejects. It pulls from the body only when it is read itself. Cancelling it cancels the body.
+ * No promise outlives a pull: a read is awaited alone, never raced against a promise that lives as long as the exchange.
  */
 function guarded(body: ReadableStream<Uint8Array>, signal: AbortSignal): { stream: ReadableStream<Uint8Array>; dispose: () => void } {
   const reader = body.getReader();
@@ -56,21 +67,16 @@ function guarded(body: ReadableStream<Uint8Array>, signal: AbortSignal): { strea
       // already gone
     }
   };
-  let onAbort = () => {};
-  const aborted = new Promise<never>((_, reject) => {
-    onAbort = () => {
-      reject(new Error('timeout'));
-      cancelBody();
-    };
-  });
-  aborted.catch(() => {});
+  const onAbort = () => cancelBody();
   if (signal.aborted) onAbort();
   else signal.addEventListener('abort', onAbort, { once: true });
   const dispose = () => signal.removeEventListener('abort', onAbort);
   const stream = new ReadableStream<Uint8Array>(
     {
       async pull(controller) {
-        const step = await Promise.race([reader.read(), aborted]);
+        if (signal.aborted) throw new Error('timeout');
+        const step = await reader.read();
+        // a read ended by the abort's cancel comes back done: it is the abort, not the end of the answer
         if (signal.aborted) throw new Error('timeout');
         if (step.done) controller.close();
         else controller.enqueue(step.value);
@@ -114,20 +120,18 @@ function parse(text: string): { ok: true; value: unknown } | { ok: false } {
 /** Reads a whole body within maxBytes. Throws Error('answer_too_large') past it, and cancels the body on every early end. */
 async function readText(body: ReadableStream<Uint8Array>, maxBytes: number): Promise<string> {
   const reader = body.getReader();
-  const decoder = new TextDecoder('utf-8');
+  const bytes = new ByteBuffer();
   let finished = false;
-  let read = 0;
-  let text = '';
   try {
     for (;;) {
       const step = await reader.read();
       if (step.done) {
         finished = true;
-        return text + decoder.decode();
+        const text = bytes.text();
+        return text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
       }
-      read += step.value.byteLength;
-      if (read > maxBytes) throw new Error(TOO_LARGE);
-      text += decoder.decode(step.value, { stream: true });
+      if (bytes.length + step.value.byteLength > maxBytes) throw new Error(TOO_LARGE);
+      bytes.append(step.value);
     }
   } finally {
     if (!finished) {
@@ -196,7 +200,8 @@ async function readRefusal(body: ReadableStream<Uint8Array> | null, status: numb
   return { ok: false, code };
 }
 
-const contentType = (headers: Headers): string => (headers.get('content-type') ?? '').toLowerCase();
+/** The media type alone: the text before any ';', trimmed, in lower case. */
+const mediaType = (headers: Headers): string => (headers.get('content-type') ?? '').split(';')[0]!.trim().toLowerCase();
 
 /** Sends one request and reads its answer. Never rejects. */
 export async function rpcRequest(target: RpcTarget, id: number, method: string, params: Record<string, unknown> | undefined, signal: AbortSignal): Promise<RpcAnswer> {
@@ -211,9 +216,9 @@ export async function rpcRequest(target: RpcTarget, id: number, method: string, 
   try {
     const { status, headers, body } = response;
     if (status < 200 || status > 299) return await readRefusal(body, status, signal);
-    const type = contentType(headers);
-    const json = type.startsWith('application/json');
-    if (body === null || (!json && !type.startsWith('text/event-stream'))) {
+    const type = mediaType(headers);
+    const json = type === 'application/json';
+    if (body === null || (!json && type !== 'text/event-stream')) {
       release(body);
       return { ok: false, code: 'bad_answer' };
     }
@@ -224,7 +229,11 @@ export async function rpcRequest(target: RpcTarget, id: number, method: string, 
       dispose();
     }
   } catch {
-    release(response.body);
+    try {
+      release(response.body);
+    } catch {
+      // a body that cannot even be reached
+    }
     return { ok: false, code: failure(signal) };
   }
 }

@@ -1,5 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { getEventListeners } from 'node:events';
+import { setFlagsFromString } from 'node:v8';
+import { runInNewContext } from 'node:vm';
 import { MCP_ANSWER_BYTES, rpcRequest, rpcSend, type RpcTarget } from './rpc.ts';
 
 const URL_ = 'https://docs.example.test/mcp';
@@ -148,6 +151,7 @@ test('an answer over the size limit is answer_too_large and is not read whole', 
   const got = await rpcRequest(target(fakeFetch(new Response(json.stream, { headers: JSON_TYPE })).fetch), 3, 'tools/call', {}, signal());
   assert.deepEqual(got, { ok: false, code: 'answer_too_large' });
   assert.equal(json.pulled(), MCP_ANSWER_BYTES / size + 1);
+  assert.ok(json.pulled() < chunks);
   assert.equal(json.cancelled(), true);
   const note = event({ jsonrpc: '2.0', method: 'notifications/progress', params: { pad: '' } });
   const padded = note.replace('"pad":""', `"pad":"${'x'.repeat(size - note.length)}"`);
@@ -156,6 +160,7 @@ test('an answer over the size limit is answer_too_large and is not read whole', 
   const got2 = await rpcRequest(target(fakeFetch(new Response(sse.stream, { headers: SSE })).fetch), 3, 'tools/call', {}, signal());
   assert.deepEqual(got2, { ok: false, code: 'answer_too_large' });
   assert.equal(sse.pulled(), MCP_ANSWER_BYTES / size + 1);
+  assert.ok(sse.pulled() < chunks);
   assert.equal(sse.cancelled(), true);
 });
 
@@ -252,4 +257,144 @@ test('a notification is one POST, and any 2xx is accepted', async () => {
   controller.abort();
   assert.equal(await rpcSend(target(fakeFetch(new DOMException('aborted', 'AbortError')).fetch), message, controller.signal), 'timeout');
   assert.equal(await rpcSend(target(fakeFetch(new Error('reset')).fetch), message, signal()), 'network');
+});
+
+setFlagsFromString('--expose-gc');
+const gc = runInNewContext('gc') as () => void;
+
+/**
+ * A stream of `count` chunks of `width` spaces each (width 0: empty chunks), then `last`, then the end, or a pull that never
+ * settles when `close` is false. At the last chunk it measures how far the live heap grew since the stream was made, and runs `atLast`.
+ */
+function drip(count: number, width: number, last: string, close: boolean, atLast = () => {}) {
+  const filler = new TextEncoder().encode(' '.repeat(width));
+  const tail = new TextEncoder().encode(last);
+  let pulled = 0;
+  let cancelled = false;
+  let grown = Number.NaN;
+  gc();
+  const before = process.memoryUsage().heapUsed;
+  const stream = new ReadableStream<Uint8Array>(
+    {
+      pull(controller) {
+        if (pulled < count) {
+          pulled += 1;
+          controller.enqueue(filler.slice());
+          return;
+        }
+        if (pulled === count) {
+          pulled += 1;
+          gc();
+          grown = process.memoryUsage().heapUsed - before;
+          controller.enqueue(tail);
+          atLast();
+          return;
+        }
+        if (close) {
+          controller.close();
+          return;
+        }
+        return new Promise<void>(() => {});
+      },
+      cancel() {
+        cancelled = true;
+      },
+    },
+    { highWaterMark: 0 },
+  );
+  return { stream, grown: () => grown, cancelled: () => cancelled };
+}
+
+test('an answer that drips in tiny chunks or in empty ones holds no memory for each chunk', async () => {
+  const count = 200_000;
+  const limit = 4 * 1024 * 1024;
+  const message = { jsonrpc: '2.0', id: 3, result: { done: true } };
+  const answer = JSON.stringify(message);
+  const cases = [
+    { width: 1, headers: JSON_TYPE, last: answer, close: true },
+    { width: 0, headers: JSON_TYPE, last: answer, close: true },
+    { width: 1, headers: SSE, last: `\n\n${event(message)}`, close: false },
+    { width: 0, headers: SSE, last: event(message), close: false },
+  ];
+  // a short run of each kind first, so that what the first run of the code costs once is not counted
+  for (const { width, headers, last, close } of cases) {
+    await rpcRequest(target(fakeFetch(new Response(drip(1000, width, last, close).stream, { headers })).fetch), 3, 'tools/call', {}, signal());
+  }
+  for (const { width, headers, last, close } of cases) {
+    const label = `${headers['Content-Type']}, width ${width}`;
+    const s = drip(count, width, last, close);
+    const got = await rpcRequest(target(fakeFetch(new Response(s.stream, { headers })).fetch), 3, 'tools/call', {}, signal());
+    assert.ok(got.ok, label);
+    assert.deepEqual(got.result, { done: true }, label);
+    assert.ok(s.grown() < limit, `${label}: the live heap grew ${Math.round(s.grown() / 1e6)} MB`);
+  }
+  for (const headers of [JSON_TYPE, SSE]) {
+    const controller = new AbortController();
+    const s = drip(count, 1, ':', false, () => controller.abort());
+    const got = await rpcRequest(target(fakeFetch(new Response(s.stream, { headers })).fetch), 3, 'tools/call', {}, controller.signal);
+    assert.deepEqual(got, { ok: false, code: 'timeout' }, headers['Content-Type']);
+    assert.equal(s.cancelled(), true);
+    assert.ok(s.grown() < limit, `${headers['Content-Type']}: the live heap grew ${Math.round(s.grown() / 1e6)} MB`);
+  }
+});
+
+test('a given header of the client own names, in any letter case, is replaced by the client one', async () => {
+  const fake = fakeFetch(() => Response.json({ jsonrpc: '2.0', id: 3, result: {} }), () => new Response(null, { status: 202 }));
+  await rpcRequest(target(fake.fetch, { accept: 'text/html', 'CONTENT-TYPE': 'text/plain', Authorization: 'Bearer t0k' }), 3, 'tools/list', undefined, signal());
+  await rpcSend(target(fake.fetch, { accept: 'text/html' }), { jsonrpc: '2.0', method: 'notifications/initialized' }, signal());
+  assert.deepEqual(fake.calls[0]![1].headers, { Authorization: 'Bearer t0k', Accept: 'application/json, text/event-stream', 'Content-Type': 'application/json' });
+  assert.deepEqual(fake.calls[1]![1].headers, { Accept: 'application/json, text/event-stream', 'Content-Type': 'application/json' });
+  assert.equal(new Headers(fake.calls[0]![1].headers).get('accept'), 'application/json, text/event-stream');
+});
+
+test('the content type is judged by its media type alone', async () => {
+  const message = { jsonrpc: '2.0', id: 3, result: { content: [] } };
+  for (const type of ['application/json-seq', 'application/jsonx; charset=utf-8', 'text/event-streamed', 'application/problem+json']) {
+    const got = await rpcRequest(target(fakeFetch(new Response(JSON.stringify(message), { headers: { 'Content-Type': type } })).fetch), 3, 'tools/list', undefined, signal());
+    assert.deepEqual(got, { ok: false, code: 'bad_answer' }, type);
+  }
+  for (const [type, body] of [[' Application/JSON ; charset=utf-8', JSON.stringify(message)], ['text/event-stream ;charset=utf-8', event(message)]] as const) {
+    const got = await rpcRequest(target(fakeFetch(new Response(body, { headers: { 'Content-Type': type } })).fetch), 3, 'tools/list', undefined, signal());
+    assert.ok(got.ok, type);
+  }
+});
+
+test('a result whose body cannot be read is a short code, never a rejection', async () => {
+  const broken = {
+    status: 200,
+    headers: new Headers(JSON_TYPE),
+    get body(): never {
+      throw new Error('secret t0k at docs.example.test');
+    },
+  } as unknown as Response;
+  const got = await rpcRequest(target(fakeFetch(() => broken).fetch), 3, 'tools/list', undefined, signal());
+  assert.deepEqual(got, { ok: false, code: 'network' });
+  assert.equal(await rpcSend(target(fakeFetch(() => broken).fetch), { jsonrpc: '2.0', method: 'notifications/initialized' }, signal()), 'network');
+});
+
+test('the abort listener is removed after every kind of end', async () => {
+  const message = { jsonrpc: '2.0', id: 3, result: {} };
+  const answers: [string, () => Response][] = [
+    ['json', () => Response.json(message)],
+    ['stream', () => new Response(event(message), { headers: SSE })],
+    ['stream ended', () => new Response(': only a comment\n\n', { headers: SSE })],
+    ['http 500', () => new Response('x', { status: 500 })],
+    ['http 400', () => Response.json({ error: { code: 1 } }, { status: 400 })],
+    ['not json', () => new Response('x', { headers: JSON_TYPE })],
+  ];
+  for (const [label, answer] of answers) {
+    const s = signal();
+    await rpcRequest(target(fakeFetch(answer).fetch), 3, 'tools/list', undefined, s);
+    assert.equal(getEventListeners(s, 'abort').length, 0, label);
+  }
+  for (const headers of [JSON_TYPE, SSE]) {
+    const controller = new AbortController();
+    const s = source([' '], false);
+    const pending = rpcRequest(target(fakeFetch(new Response(s.stream, { headers })).fetch), 3, 'tools/list', undefined, controller.signal);
+    await new Promise((resolve) => setTimeout(resolve, 2));
+    assert.equal(getEventListeners(controller.signal, 'abort').length, 1, 'listening while it reads');
+    controller.abort();
+    assert.deepEqual(await pending, { ok: false, code: 'timeout' });
+    assert.equal(getEventListeners(controller.signal, 'abort').length, 0, headers['Content-Type']);
+  }
 });

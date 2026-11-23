@@ -78,3 +78,8 @@ test('a consumer that stops early cancels the stream', async () => {
   }
   assert.equal(s.cancelled(), true);
 });
+
+test('a byte order mark is dropped at the start of the stream only', async () => {
+  const text = '\ufeffdata: a\n\n\ufeffdata: b\n\ndata: c\n\n';
+  assert.deepEqual(await collect(source([text]).stream), ['a', 'c']);
+});
