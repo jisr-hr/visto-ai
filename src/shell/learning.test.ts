@@ -80,6 +80,7 @@ function held(): { promise: Promise<void>; release: () => void } {
 const FIRST_BATCH = (text: string, params?: unknown[]): boolean => text.includes('learn_attempts < $1') && params?.[1] === true;
 const ANY_BATCH = (text: string): boolean => text.includes('learn_attempts < $1');
 const READ_ROW = (text: string): boolean => text.includes('select since, ran_at');
+const WRITE_ROW = (text: string): boolean => text.includes('insert into visto_ai.learning') && text.includes('ran_at = greatest');
 
 /** A Db that passes everything to `db`, with some of it replaced. */
 function wrap(db: Db, over: Partial<Db>): Db {
@@ -732,11 +733,14 @@ test('after stop not one statement reaches the database', async () => {
   const db = await testDb();
   await savePullRequest(db, closed());
   const gate = held();
+  // Every count starts here, before any pass: a pass started after stop would read no batch, but would still write the row.
   let statements = 0;
   let batches = 0;
+  let rowWrites = 0;         // writes of visto_ai.learning's ran_at: one per pass that ran
   const counted = wrap(db, {
     query: async <R,>(text: string, params?: unknown[]) => {
       statements += 1;
+      if (WRITE_ROW(text)) rowWrites += 1;
       if (ANY_BATCH(text)) {
         batches += 1;
         if (batches === 1) await gate.promise;
@@ -755,12 +759,15 @@ test('after stop not one statement reaches the database', async () => {
   learning.stop();
   gate.release();
   await bounded(learning.idle(), 1_000);
+  // Exactly one pass ran in all: the one under way at stop. The wake that came during it made none after it.
   assert.equal(batches, 1);
+  assert.equal(rowWrites, 1);
   const before = statements;
   learning.wake();
   await bounded(learning.tick(), 1_000);
   await bounded(learning.idle(), 1_000);
   assert.equal(statements, before);
+  assert.equal(rowWrites, 1);
   await db.close();
 });
 
