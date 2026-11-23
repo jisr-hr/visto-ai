@@ -20,6 +20,7 @@ import { PAUSE_MS } from './model-health.ts';
 import type { ModelHealth } from './model-health.ts';
 import { codeOf, isShortCode } from './codes.ts';
 import type { ExtensionHealth } from './extension-health.ts';
+import type { McpHealth } from './mcp-health.ts';
 import { sendNotice } from './notify.ts';
 import type { Notifier } from './notify.ts';
 import { failureText, mayCommand, refusalText } from './commands.ts';
@@ -75,6 +76,8 @@ export interface ReviewJobDeps {
   };
   /** Told how each module did; absent when the deployment has none. */
   extensionHealth?: Pick<ExtensionHealth, 'noted'>;
+  /** Told how each MCP server did; absent when the deployment names none. */
+  mcpHealth?: Pick<McpHealth, 'noted'>;
 }
 
 /** The newest published run of these, or null. */
@@ -145,6 +148,27 @@ function extensionsOf(result: unknown): Record<string, { status: string; code: s
     if (!isShortCode(name) || typeof entry !== 'object' || entry === null) continue;
     const { status, code } = entry as { status?: unknown; code?: unknown };
     if (typeof status === 'string' && typeof code === 'string' && isShortCode(status) && isShortCode(code)) out[name] = { status, code };
+  }
+  return out;
+}
+
+/**
+ * The MCP servers' statuses of an engine result, or of a stored one: each entry whose name and code are short codes, whose status is
+ * ok, skipped or error, and whose count of calls is a whole number from 0 up, as { status, code, calls }. null when the result has no such
+ * map or it is not one.
+ */
+function mcpOf(result: unknown): Record<string, { status: 'ok' | 'skipped' | 'error'; code: string; calls: number }> | null {
+  const dependencies = (result as { dependencies?: unknown } | null | undefined)?.dependencies;
+  const map = typeof dependencies === 'object' && dependencies !== null ? (dependencies as { mcp?: unknown }).mcp : undefined;
+  if (typeof map !== 'object' || map === null || Array.isArray(map)) return null;
+  const out: Record<string, { status: 'ok' | 'skipped' | 'error'; code: string; calls: number }> = {};
+  for (const [name, entry] of Object.entries(map)) {
+    if (!isShortCode(name) || typeof entry !== 'object' || entry === null) continue;
+    const { status, code, calls } = entry as { status?: unknown; code?: unknown; calls?: unknown };
+    if (status !== 'ok' && status !== 'skipped' && status !== 'error') continue;
+    if (typeof code !== 'string' || !isShortCode(code)) continue;
+    if (typeof calls !== 'number' || !Number.isInteger(calls) || calls < 0) continue;
+    out[name] = { status, code, calls };
   }
   return out;
 }
@@ -625,6 +649,15 @@ export async function runReviewJob(job: Job, deps: ReviewJobDeps): Promise<void>
           // a health that fails changes nothing
         }
       }
+      // How each MCP server did; in dry run too. A server the engine skipped, for whatever reason, did nothing.
+      for (const [name, status] of Object.entries(mcpOf(result) ?? {})) {
+        if (status.status === 'skipped') continue;
+        try {
+          deps.mcpHealth?.noted(name, status.status === 'ok', status.code);
+        } catch {
+          // a health that fails changes nothing
+        }
+      }
     }
 
     // 7. The record.
@@ -783,7 +816,8 @@ export async function runReviewJob(job: Job, deps: ReviewJobDeps): Promise<void>
       }
     }
 
-    // 9. The log.
+    // 9. The log. The MCP servers' map only when the result has one: with no server the line is what it was.
+    const mcp = mcpOf(result ?? resumed?.result);
     log({
       event: 'review', job: job.id, repo, number: job.ref.number, head: run.headSha, trigger: job.trigger, mode: run.mode, dry_run: deps.dryRun,
       outcome: written ? run.outcome : 'record_failed', failure_stage: run.failureStage, failure_code: run.failureCode,
@@ -796,6 +830,7 @@ export async function runReviewJob(job: Job, deps: ReviewJobDeps): Promise<void>
       blocking_on_unchanged: blockingOnUnchangedOf(result ?? resumed?.result), nothing_new: endedNothingNew,
       notes: endedNothingNew ? 0 : notesOf(run.comments), notes_dropped: publish?.kind === 'published' ? publish.notesDropped : null,
       extensions: extensionsOf(result ?? resumed?.result),
+      ...(mcp === null ? {} : { mcp }),
     });
     // 10. The notice: the last thing the job does, so the line's duration does not count it.
     if (toTell !== null) await tell(toTell.target, live!.info, toTell.reviewId, toTell.body);

@@ -1396,3 +1396,34 @@ test('with no module the service starts, reviews and logs as before, and an addr
   assert.equal(h.logged.some((e) => typeof e.event === 'string' && (e.event.startsWith('extension') || e.event.startsWith('notice'))), false);
   assert.equal(h.logged.find((e) => e.event === 'review')!.extensions, null);
 });
+const DOCS_YAML = 'mcpServers:\n  - name: docs\n    url: https://docs.example.test/mcp\n    tools: [search]\n';
+/** Three reviews, one for each head, each answered with the MCP map given for it. */
+async function threeReviews(h: Awaited<ReturnType<typeof harness>>, maps: Array<Record<string, { status: 'ok' | 'skipped' | 'error'; code: string; calls: number }>>): Promise<void> {
+  h.resultFor = (input) => ({ ...okResult(), dependencies: { model: 'ok', mcp: maps[h.inputs.indexOf(input)]! } });
+  await (await h.start()).settled;
+  for (const [i, head] of ['h1', 'h2', 'h3'].entries()) {
+    h.live = { ...LIVE, info: { ...LIVE.info, headSha: head } };
+    h.now = at(i * 3600);
+    await h.webhook(pr(i === 0 ? 'opened' : 'synchronize', { headSha: head, updatedAt: at(i * 3600) }), `d${i + 1}`);
+    h.now = at(i * 3600 + 600);
+    await h.runTimer(TICK_MS);
+    await h.until(() => h.logged.filter((e) => e.event === 'review').length === i + 1);
+  }
+}
+test('a server that starts failing raises one alert, and one more when it works again', async () => {
+  const h = await harness({ repositoriesYaml: DOCS_YAML });
+  const failing = { docs: { status: 'error' as const, code: 'tool_not_listed', calls: 0 } };
+  await threeReviews(h, [failing, failing, { docs: { status: 'ok', code: 'ok', calls: 1 } }]);
+  assert.deepEqual(alertsOf(h, 'mcp_error', 'mcp_ok'), [
+    { event: 'alert', code: 'mcp_error', server: 'docs', reason: 'tool_not_listed' },
+    { event: 'alert', code: 'mcp_ok', server: 'docs' },
+  ]);
+  assert.deepEqual(h.logged.filter((e) => e.event === 'review').map((e) => (e.mcp as { docs: { code: string } }).docs.code), ['tool_not_listed', 'tool_not_listed', 'ok']);
+});
+test('with no server named the service makes no server health', async () => {
+  const h = await harness();
+  const failing = { docs: { status: 'error' as const, code: 'tool_not_listed', calls: 0 } };
+  await threeReviews(h, [failing, failing, { docs: { status: 'ok', code: 'ok', calls: 1 } }]);
+  assert.deepEqual(alertsOf(h, 'mcp_error', 'mcp_ok'), []);
+  assert.deepEqual(h.logged.filter((e) => e.event === 'review').map((e) => e.mcp), [failing, failing, { docs: { status: 'ok', code: 'ok', calls: 1 } }]);
+});

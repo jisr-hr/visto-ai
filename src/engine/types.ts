@@ -6,11 +6,21 @@ export type Severity = 'blocker' | 'major' | 'minor';
 export interface AuditEntry { stage: string; action: string; subject: string; reason: string }
 export interface Usage { calls: number; inputTokens: number; outputTokens: number; cachedTokens: number; cost: number }
 
-export interface ChatMessage { role: 'system' | 'user' | 'assistant'; content: string }
+export interface ToolCall { id: string; name: string; arguments: string | null }   // arguments: the JSON text as the model wrote it; null when the endpoint gave no text
+export interface ChatMessage {
+  role: 'system' | 'user' | 'assistant' | 'tool';
+  content: string;
+  toolCallId?: string;                  // on a 'tool' message: the id of the call it answers
+  wire?: Record<string, unknown>;       // on an 'assistant' message that called tools: the message as the endpoint gave it; it is sent in place of this one
+}
 export interface ToolDefinition { type: 'function'; function: { name: string; description: string; parameters: Record<string, unknown> } }
 export type Effort = 'default' | 'elevated';
-export interface ModelRequest { messages: ChatMessage[]; tools: ToolDefinition[]; forcedTool: string; effort: Effort; timeoutMs: number }
-export interface ModelResponse { toolName: string | null; toolArguments: string | null; text: string | null; model: string; provider: string | null; usage: Usage }
+export interface ModelRequest { messages: ChatMessage[]; tools: ToolDefinition[]; forcedTool: string | null; effort: Effort; timeoutMs: number }   // forcedTool null: the model chooses
+export interface ModelResponse {
+  toolName: string | null; toolArguments: string | null; text: string | null; model: string; provider: string | null; usage: Usage;   // as today
+  toolCalls?: ToolCall[];                   // the calls of the answer that have a name and an id of their own, in order; absent: none
+  assistant?: Record<string, unknown>;      // present with toolCalls: the answer's message, to be sent back unchanged before its calls are answered
+}
 export interface ModelClient { complete(request: ModelRequest): Promise<ModelResponse> }
 
 export interface Limits { inputTokensPerCall: number; batchesPerReview: number; modelTimeoutSeconds: number }
@@ -86,6 +96,23 @@ export interface ContextProvider {
   provide(pr: PullRequestInfo, signal: AbortSignal): Promise<ContextAnswer>;
 }
 
+/** One tool as a server lists it. Only `name` is checked by the client; the rest is as the server sent it. */
+export interface McpTool { name: string; description?: unknown; inputSchema?: unknown }
+/** What a call gave: the `result` of tools/call as the server sent it, or the short code of a tool error. */
+export type McpAnswer = { ok: true; result: unknown } | { ok: false; code: string };
+export interface McpSession {
+  tools: McpTool[];                                                                                 // every tool the server listed
+  call(name: string, args: Record<string, unknown>, signal: AbortSignal): Promise<McpAnswer>;      // never rejects
+  close(signal: AbortSignal): Promise<void>;                                                        // never rejects
+}
+export interface McpServer {
+  name: string;                                    // the config's name
+  tools: string[];                                 // the names the model may be offered, in the config's order
+  open(signal: AbortSignal): Promise<McpSession>;  // rejects with Error(<short code>)
+}
+export type McpState = 'ok' | 'skipped' | 'error';
+export interface McpStatus { status: McpState; code: string; calls: number }   // code: a short code; calls: the calls sent to the server in this review
+
 export interface ReviewDeps {
   source: Source;
   model: ModelClient;
@@ -97,6 +124,8 @@ export interface ReviewDeps {
   /** The highest scores other pull requests of the repository stored for these blocks, among the same lines, in the last 30 days. May reject. */
   reusableScores?: (blocks: Array<{ path: string; hash: string; around: string }>) => Promise<Array<{ path: string; hash: string; around: string; entry: ScoreEntry }>>;
   contextProviders?: ContextProvider[]; // asked once for each review; absent reads as none
+  toolChoice?: 'forced' | 'auto';       // how the model is made to call submit_review; absent reads as 'forced'
+  mcpServers?: McpServer[];             // opened once for each review; absent reads as none
 }
 
 export interface RawFinding { path: string; side: Side; line: number; severity: Severity; body: string; quote: string; beyond_diff: boolean }
@@ -119,7 +148,7 @@ export interface ReviewResult {
   usage: Usage;
   models: string[];           // models that answered, distinct, in first-seen order
   providers: string[];        // upstream providers that answered, distinct, in first-seen order
-  dependencies: { model: 'ok' | 'error'; extensions?: Record<string, ExtensionStatus> }; // extensions: absent when no provider was asked
+  dependencies: { model: 'ok' | 'error'; extensions?: Record<string, ExtensionStatus>; mcp?: Record<string, McpStatus> }; // extensions: absent when no provider was asked; mcp: absent when no server was considered
   audit: AuditEntry[];
   scores: FileScore[];        // one per changed file; empty when the review failed
   verdict: Verdict;

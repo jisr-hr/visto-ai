@@ -4,14 +4,14 @@ import type { ModelConfig } from '../../config/load.ts';
 import type { ModelRequest } from '../types.ts';
 import { ProviderError, classify, createModelClient } from './client.ts';
 
-interface Call { url: string; method: string | undefined; headers: Record<string, string>; raw: Headers; body: Record<string, unknown>; signal: AbortSignal | null | undefined }
+interface Call { url: string; method: string | undefined; headers: Record<string, string>; raw: Headers; body: Record<string, unknown>; text: string; signal: AbortSignal | null | undefined }
 type Step = Response | Error;
 
 const baseConfig: ModelConfig = {
   baseUrl: 'https://openrouter.ai/api/v1', apiKey: 'k', model: 'vendor/model-a', fallbacks: ['vendor/model-b'],
   effort: { default: {}, elevated: { reasoning: { effort: 'high' } } },
   extraBody: { provider: { require_parameters: true } }, extraHeaders: { 'X-Title': 'synthetic' },
-  prices: null, timeoutSeconds: 60,
+  prices: null, timeoutSeconds: 60, toolChoice: 'forced',
 };
 const req: ModelRequest = {
   messages: [{ role: 'user', content: 'hi' }],
@@ -34,7 +34,7 @@ function setup(config: ModelConfig = baseConfig) {
   const fetchStub = (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
     const headers: Record<string, string> = {};
     for (const [k, v] of Object.entries((init?.headers ?? {}) as Record<string, string>)) headers[k.toLowerCase()] = v;
-    calls.push({ url: String(url), method: init?.method, headers, raw: new Headers(init?.headers), body: JSON.parse(String(init?.body)) as Record<string, unknown>, signal: init?.signal });
+    calls.push({ url: String(url), method: init?.method, headers, raw: new Headers(init?.headers), body: JSON.parse(String(init?.body)) as Record<string, unknown>, text: String(init?.body), signal: init?.signal });
     const next = steps.shift();
     if (next === undefined) throw new Error('stub fetch: queue empty');
     return next instanceof Error ? Promise.reject(next) : Promise.resolve(next);
@@ -277,4 +277,158 @@ test('configuration cannot override the request headers or streaming', async () 
   assert.equal(calls[0]!.raw.get('content-type'), 'application/json');
   assert.equal(calls[0]!.raw.get('x-title'), 'synthetic');
   assert.equal(calls[0]!.body.stream, false);
+});
+
+test('a forced request is sent the bytes it was sent before', async () => {
+  const { client, calls, queue } = setup();
+  queue(json(200, success('vendor/model-a')));
+  await client.complete(req);
+  assert.equal(
+    calls[0]!.text,
+    '{"provider":{"require_parameters":true},"model":"vendor/model-a","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"submit_review","description":"d","parameters":{}}}],"tool_choice":{"type":"function","function":{"name":"submit_review"}},"stream":false}',
+  );
+});
+test('a request with no forced tool asks with tool_choice auto, and nothing else of the body changes', async () => {
+  const { client, calls, queue } = setup();
+  queue(json(200, success('vendor/model-a')), json(200, success('vendor/model-a')));
+  await client.complete(req);
+  await client.complete({ ...req, forcedTool: null });
+  assert.equal(calls[1]!.body.tool_choice, 'auto');
+  const without = (body: Record<string, unknown>): Record<string, unknown> => Object.fromEntries(Object.entries(body).filter(([k]) => k !== 'tool_choice'));
+  assert.deepEqual(without(calls[1]!.body), without(calls[0]!.body));
+  assert.deepEqual(Object.keys(calls[1]!.body), Object.keys(calls[0]!.body));
+});
+test('a tool message and an echoed assistant message are sent in the endpoint\'s shape, and a plain message as it is', async () => {
+  const { client, calls, queue } = setup();
+  const wire = {
+    role: 'assistant', content: null,
+    tool_calls: [{ id: 'call_1', type: 'function', function: { name: 'docs__search', arguments: '{"query":"cart"}' } }],
+    reasoning_details: [{ type: 'reasoning.text', text: 't', signature: 's' }],
+  };
+  queue(json(200, success('vendor/model-a')));
+  await client.complete({
+    ...req,
+    messages: [{ role: 'user', content: 'hi' }, { role: 'assistant', content: '', wire }, { role: 'tool', content: 'r', toolCallId: 'call_1' }],
+  });
+  assert.deepEqual(calls[0]!.body.messages, [{ role: 'user', content: 'hi' }, wire, { role: 'tool', tool_call_id: 'call_1', content: 'r' }]);
+  assert.equal(JSON.stringify((calls[0]!.body.messages as unknown[])[2]), '{"role":"tool","tool_call_id":"call_1","content":"r"}');
+});
+
+const answer = (message: Record<string, unknown>): unknown => ({
+  model: 'vendor/model-a', choices: [{ finish_reason: 'tool_calls', message }], usage: { prompt_tokens: 10, completion_tokens: 5, cost: 0.001 },
+});
+const usable = (n: number, name = (i: number): string => `docs__search_${i}`): Record<string, unknown>[] =>
+  Array.from({ length: n }, (_, i) => ({ id: `c${i + 1}`, type: 'function', function: { name: name(i + 1), arguments: '{}' } }));
+
+test('every call of an answer is read with its id, and the message to send back keeps its reasoning as received, once', async () => {
+  const a = { type: 'reasoning.text', text: 'first', signature: 'sig' };
+  const b = { type: 'reasoning.encrypted', data: 'opaque' };
+  const first = { id: 'call_1', type: 'function', function: { name: 'docs__search', arguments: '{"query":"cart"}' } };
+  const second = { id: 'call_2', type: 'function', index: 1, function: { name: 'docs__get_page', arguments: '{"id":"p1"}' } };
+  const message = { role: 'assistant', content: 'Looking.', reasoning: 'r', reasoning_details: [a, b], refusal: null, tool_calls: [first, second] };
+  const { client, queue } = setup();
+  queue(
+    json(200, answer(message)),
+    json(200, answer({ ...message, reasoning_details: undefined })),
+    json(200, answer({ ...message, reasoning_details: 'x', reasoning: 5 })),
+    json(200, answer({ ...message, content: null })),
+  );
+  const r = await client.complete(req);
+  assert.deepEqual(r.toolCalls, [
+    { id: 'call_1', name: 'docs__search', arguments: '{"query":"cart"}' },
+    { id: 'call_2', name: 'docs__get_page', arguments: '{"id":"p1"}' },
+  ]);
+  assert.equal(r.toolName, 'docs__search');
+  assert.equal(r.toolArguments, '{"query":"cart"}');
+  assert.equal(r.text, 'Looking.');
+  assert.deepEqual(r.assistant, { role: 'assistant', content: 'Looking.', tool_calls: [first, second], reasoning_details: [a, b] });
+  assert.equal('reasoning' in r.assistant!, false);
+  assert.equal('refusal' in r.assistant!, false);
+
+  const noList = await client.complete(req);
+  assert.deepEqual(noList.assistant, { role: 'assistant', content: 'Looking.', tool_calls: [first, second], reasoning: 'r' });
+  assert.equal('reasoning_details' in noList.assistant!, false);
+
+  const neither = await client.complete(req);
+  assert.deepEqual(neither.assistant, { role: 'assistant', content: 'Looking.', tool_calls: [first, second] });
+
+  const nullContent = await client.complete(req);
+  assert.equal(nullContent.assistant!.content, null);
+});
+test('an answer with no usable call has neither of the two new keys', async () => {
+  const { client, queue } = setup();
+  queue(
+    json(200, answer({ role: 'assistant', content: 'Just prose.' })),
+    json(200, success('vendor/model-a')),
+  );
+  const prose = await client.complete(req);
+  assert.equal('toolCalls' in prose, false);
+  assert.equal('assistant' in prose, false);
+  assert.equal(prose.text, 'Just prose.');
+  const noId = await client.complete(req);
+  assert.equal('toolCalls' in noId, false);
+  assert.equal('assistant' in noId, false);
+  assert.equal(noId.toolName, 'submit_review');
+  assert.equal(noId.toolArguments, '{"a": 1}');
+});
+test('a call with no id, no name or an id already used is passed over, and more than sixteen are not read', async () => {
+  const kept = { id: 'c2', function: { name: 'docs__search', arguments: '{}' } };
+  const { client, queue } = setup();
+  queue(
+    json(200, answer({ content: null, tool_calls: [null, 'x', { id: '', function: { name: 'a' } }, { id: 'c1', function: {} }, kept, { id: 'c2', function: { name: 'docs__get_page', arguments: '{}' } }] })),
+    json(200, answer({ content: null, tool_calls: usable(20) })),
+  );
+  const r = await client.complete(req);
+  assert.deepEqual(r.toolCalls, [{ id: 'c2', name: 'docs__search', arguments: '{}' }]);
+  assert.deepEqual(r.assistant!.tool_calls, [kept]);
+  const many = await client.complete(req);
+  assert.equal(many.toolCalls!.length, 16);
+  assert.equal((many.assistant!.tool_calls as unknown[]).length, 16);
+  assert.deepEqual(many.assistant!.tool_calls, usable(16));
+});
+test('an entry that cannot be used does not block its id: a later call with the same id is kept', async () => {
+  const later = { id: 'a', function: { name: 'n', arguments: '{}' } };
+  const { client, queue } = setup();
+  queue(json(200, answer({ content: null, tool_calls: [{ id: 'a', function: {} }, later] })));
+  const r = await client.complete(req);
+  assert.deepEqual(r.toolCalls, [{ id: 'a', name: 'n', arguments: '{}' }]);
+  assert.deepEqual(r.assistant!.tool_calls, [later]);
+});
+test('an answer whose content is a list of parts, beside tool calls, is echoed with null content', async () => {
+  const call = { id: 'c1', function: { name: 'docs__search', arguments: '{}' } };
+  const { client, queue } = setup();
+  queue(json(200, answer({ content: [{ type: 'text', text: 'Looking.' }], tool_calls: [call] })));
+  const r = await client.complete(req);
+  assert.equal(r.text, null);
+  assert.deepEqual(r.assistant, { role: 'assistant', content: null, tool_calls: [call] });
+});
+test('arguments that are no text are kept as null', async () => {
+  const { client, queue } = setup();
+  queue(json(200, answer({
+    content: null,
+    tool_calls: [
+      { id: 'c1', function: { name: 'docs__search', arguments: 5 } },
+      { id: 'c2', function: { name: 'docs__search', arguments: { query: 'cart' } } },
+      { id: 'c3', function: { name: 'docs__search', arguments: null } },
+      { id: 'c4', function: { name: 'docs__search' } },
+      { id: 'c5', function: { name: 'docs__search', arguments: '' } },
+    ],
+  })));
+  const r = await client.complete(req);
+  assert.deepEqual(r.toolCalls!.map((c) => c.arguments), [null, null, null, null, '']);
+});
+test('a call to submit_review beyond the sixteenth is still read', async () => {
+  const { client, queue } = setup();
+  queue(
+    json(200, answer({ content: null, tool_calls: usable(20, (i) => (i === 18 ? 'submit_review' : `docs__search_${i}`)) })),
+    json(200, answer({ content: null, tool_calls: usable(20, (i) => (i === 3 || i === 18 ? 'submit_review' : `docs__search_${i}`)) })),
+  );
+  const r = await client.complete(req);
+  assert.equal(r.toolCalls!.length, 17);
+  assert.deepEqual(r.toolCalls![16], { id: 'c18', name: 'submit_review', arguments: '{}' });
+  assert.equal((r.assistant!.tool_calls as unknown[]).length, 17);
+  assert.deepEqual((r.assistant!.tool_calls as unknown[])[16], usable(20, (i) => (i === 18 ? 'submit_review' : `docs__search_${i}`))[17]);
+  const within = await client.complete(req);
+  assert.equal(within.toolCalls!.length, 16);
+  assert.equal(within.toolCalls!.some((c) => c.id === 'c18'), false);
 });

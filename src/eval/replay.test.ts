@@ -14,10 +14,10 @@ import type { CaseScore, ReplayFinding } from './score.ts';
 const config: DeploymentConfig = {
   model: {
     baseUrl: 'https://models.example.test/v1', apiKey: 'k', model: 'm', fallbacks: [],
-    effort: { default: {}, elevated: {} }, extraBody: {}, extraHeaders: {}, prices: null, timeoutSeconds: 45,
+    effort: { default: {}, elevated: {} }, extraBody: {}, extraHeaders: {}, prices: null, timeoutSeconds: 45, toolChoice: 'forced',
   },
   scorer: null,
-  app: null, database: null, server: { port: 8080 }, dryRun: false, alerts: null, extensions: [],
+  app: null, database: null, server: { port: 8080 }, dryRun: false, alerts: null, extensions: [], mcpServers: [],
   limits: { inputTokensPerCall: 200_000, batchesPerReview: 6, spendPerDay: 50, queueConcurrency: 2 },
   repositories: { defaults: { primaryBranches: ['main'], scoreThreshold: 70, ignoredAuthors: [], baseBranches: [], newHead: null, inlineNotes: false, gate: GATE_OFF }, overrides: {} },
 };
@@ -266,6 +266,20 @@ test('a config that names an extension changes nothing of a replay', async () =>
   };
   const none = await run([]);
   const named = await run([{ name: 'tickets', module: './nowhere.ts', options: {} }]);
+  assert.deepEqual(named, none);
+  assert.equal(none.requests.length, 1);
+});
+
+test('a config that names an MCP server changes nothing of a replay', async () => {
+  const run = async (mcpServers: DeploymentConfig['mcpServers']) => {
+    const requests: unknown[] = [];
+    const base = stubDeps();
+    const deps = { ...base, model: { complete: (r: Parameters<typeof base.model.complete>[0]) => { requests.push(r); return base.model.complete(r); } } };
+    const result = await replayCase(caseA, { ...config, mcpServers }, deps);
+    return { result: { ...result, duration_ms: 0 }, requests };
+  };
+  const none = await run([]);
+  const named = await run([{ name: 'docs', url: 'https://docs.example.test/mcp', headers: {}, tools: ['search'] }]);
   assert.deepEqual(named, none);
   assert.equal(none.requests.length, 1);
 });

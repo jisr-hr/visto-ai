@@ -1,6 +1,7 @@
 import type { ModelConfig } from '../../config/load.ts';
-import type { ModelClient, ModelRequest, ModelResponse, Usage } from '../types.ts';
+import type { ChatMessage, ModelClient, ModelRequest, ModelResponse, ToolCall, Usage } from '../types.ts';
 import { ProviderError, classify, isTimeout } from './errors.ts';
+import { SUBMIT_REVIEW } from './submit-review.ts';
 
 export { ProviderError, classify } from './errors.ts';
 export type { ProviderErrorKind } from './errors.ts';
@@ -32,18 +33,60 @@ function readUsage(body: unknown, prices: ModelConfig['prices']): Usage | null {
 // Header names the engine sets itself; configuration cannot replace them.
 const OWN_HEADERS = new Set(['authorization', 'content-type']);
 
-function readChoice(body: Json, requested: string): Pick<ModelResponse, 'toolName' | 'toolArguments' | 'text' | 'model' | 'provider'> {
+/** Calls of one answer that are read. */
+export const TOOL_CALLS_READ = 16;
+
+// A message as the endpoint takes it: an echoed assistant message as received, a tool answer in its own shape,
+// and any other message as the object it is, so its bytes are today's.
+function onWire(message: ChatMessage): unknown {
+  if (message.wire !== undefined) return message.wire;
+  if (message.role === 'tool') return { role: 'tool', tool_call_id: message.toolCallId, content: message.content };
+  return message;
+}
+
+// The entries of tool_calls that have an id of their own and a name: the first TOOL_CALLS_READ, and the first
+// call to submit_review after them when none of those is one.
+function keptCalls(calls: unknown[]): { entry: Json; call: ToolCall }[] {
+  const seen = new Set<string>();
+  const kept: { entry: Json; call: ToolCall }[] = [];
+  let submitKept = false;
+  for (const entry of calls) {
+    if (!isRecord(entry) || typeof entry.id !== 'string' || entry.id === '' || seen.has(entry.id)) continue;
+    const fn = entry.function;
+    if (!isRecord(fn) || typeof fn.name !== 'string' || fn.name === '') continue;
+    seen.add(entry.id);
+    const isSubmit = fn.name === SUBMIT_REVIEW;
+    if (kept.length < TOOL_CALLS_READ || (isSubmit && !submitKept)) {
+      kept.push({ entry, call: { id: entry.id, name: fn.name, arguments: typeof fn.arguments === 'string' ? fn.arguments : null } });
+      if (isSubmit) submitKept = true;
+      if (kept.length >= TOOL_CALLS_READ && submitKept) break;
+    }
+  }
+  return kept;
+}
+
+function readChoice(body: Json, requested: string): Omit<ModelResponse, 'usage'> {
   const choice = (body.choices as unknown[])[0];
   const message = isRecord(choice) && isRecord(choice.message) ? choice.message : {};
   const calls = Array.isArray(message.tool_calls) ? (message.tool_calls as unknown[]) : [];
   const fn = isRecord(calls[0]) && isRecord(calls[0].function) ? calls[0].function : null;
-  return {
+  const read: Omit<ModelResponse, 'usage'> = {
     toolName: fn !== null && typeof fn.name === 'string' ? fn.name : null,
     toolArguments: fn !== null && typeof fn.arguments === 'string' ? fn.arguments : null,
     text: typeof message.content === 'string' ? message.content : null,
     model: typeof body.model === 'string' ? body.model : requested,
     provider: typeof body.provider === 'string' ? body.provider : null,
   };
+  const kept = keptCalls(calls);
+  if (kept.length === 0) return read;
+  const assistant: Json = {
+    role: 'assistant',
+    content: typeof message.content === 'string' ? message.content : null,
+    tool_calls: kept.map((k) => k.entry),
+  };
+  if (Array.isArray(message.reasoning_details)) assistant.reasoning_details = message.reasoning_details;
+  else if (typeof message.reasoning === 'string') assistant.reasoning = message.reasoning;
+  return { ...read, toolCalls: kept.map((k) => k.call), assistant };
 }
 
 export function createModelClient(config: ModelConfig, io: Io): ModelClient {
@@ -55,9 +98,9 @@ export function createModelClient(config: ModelConfig, io: Io): ModelClient {
       ...config.effort[request.effort],
       ...config.extraBody,
       model,
-      messages: request.messages,
+      messages: request.messages.map(onWire),
       tools: request.tools,
-      tool_choice: { type: 'function', function: { name: request.forcedTool } },
+      tool_choice: request.forcedTool === null ? 'auto' : { type: 'function', function: { name: request.forcedTool } },
       stream: false,
     };
     let res: Response;

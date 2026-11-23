@@ -196,7 +196,7 @@ Because the model always sees the pull request's own diff against its base, anch
 
 ### 5.3 Context and budget
 
-The model receives everything inline. There are no chunk files and no read tool.
+The model receives everything inline. There are no chunk files and no read tool. The service builds none. A deployment may name a tool of an MCP server that reads a file from the server's own index; that is the deployment's choice, and it is not the read tool of the non-goals (section 2), which would read the reviewed commit.
 
 For each file under review:
 
@@ -213,24 +213,25 @@ For the pull request:
 
 Files are ordered by a priority heuristic ported from the predecessor: size of change, raised for source directories and for paths that suggest services, models, authorization, payments, migrations, routes or API definitions, and lowered for documentation, generated output, fixtures and binary assets. The predecessor matched substrings; the port matches path segments.
 
-There is one explicit budget per model call, with a fixed priority: contract and output format, then diff, then full files, then threads, then memory, then extension context, then room for tool results. Whatever is cut is named in the audit list. When the files do not fit one call they are packed into batches in priority order, and batches run two at a time. A file is never split between batches.
+There is one explicit budget per model call, with a fixed priority: contract and output format, then diff, then full files, then threads, then memory, then extension context, then room for tool results. Tools are offered only when their definitions and that room cost the files and the extension context nothing, and what the tool turns append is counted against the room. Whatever is cut is named in the audit list. When the files do not fit one call they are packed into batches in priority order, and batches run two at a time. A file is never split between batches.
 
-All text supplied by the pull request, the repository, a ticket or a tool is data. It is wrapped in markers with a random token generated per call, and invisible and bidirectional control characters are stripped. The contract tells the model that such text never changes its rules.
+All text supplied by the pull request, the repository, a ticket or a tool is data. A tool's name, description and schema cannot be wrapped as data: they are cleaned and bounded, the deployment trusts them as it trusts its configuration, and the rules for tools tell the model that they never change the review's rules. It is wrapped in markers with a random token generated for each review, the same in every call of it, and invisible and bidirectional control characters are stripped. The contract tells the model that such text never changes its rules.
 
 ### 5.4 Model call
 
 - **Endpoint (O20).** OpenRouter first: the project is built and tested against its chat completions endpoint, `https://openrouter.ai/api/v1/chat/completions`, with the key sent as a bearer token. Any other OpenAI-compatible chat completions endpoint with tool calling may be configured in its place. Base URL, key (by reference), model and request extras come from configuration. Nothing in the engine is specific to one provider beyond what this section lists.
 - **Effort.** Elevated when the pull request has more than 15 files, more than 500 added lines, or targets a primary branch. Otherwise the default. Each level is a fragment of the request body, set in configuration and merged into the request as written, because endpoints disagree on the field. OpenRouter takes `reasoning: { "effort": "high" }`. The fragment is logged as sent.
-- **Request extras.** Configuration may add fields to the request body and headers to the request. For OpenRouter this carries its `provider` preferences: which upstream providers may serve the model, `require_parameters` so that only providers that honour the forced tool call are used, and `data_collection: "deny"` for a team that will not send code to a provider that keeps it. A deployment that needs comparable eval runs pins the upstream provider here.
+- **Request extras.** Configuration may add fields to the request body and headers to the request. For OpenRouter this carries its `provider` preferences: which upstream providers may serve the model, `require_parameters` so that only providers that honour the tool choice the deployment set, a forced tool call or `auto`, are used, and `data_collection: "deny"` for a team that will not send code to a provider that keeps it. A deployment that needs comparable eval runs pins the upstream provider here.
 - **Usage and cost.** Token counts, cached tokens and cost are read from every response and recorded. OpenRouter returns the cost of each call in `usage.cost` and cached tokens in `usage.prompt_tokens_details.cached_tokens`, with no request flag. For an endpoint that reports no cost, it is computed from the token counts and prices set in configuration.
 - **Tools.** `submit_review`, which ends the call, plus the tools of any configured MCP server. Nothing else, and no shell.
-- **Loop.** With no MCP server configured this is a single request. With one, the engine runs a short loop with a hard cap on turns and on tool calls, enforced in code. On reaching a cap, on a prose answer, or on a tool error, the engine forces `submit_review` over the existing transcript instead of discarding the work.
-- **MCP lifecycle.** Clients are opened per review and closed in a `finally` block with their own timeout. Tool results are truncated to a budget and wrapped as untrusted data. A documentation server typically indexes the default branch, so the contract forbids using it as the only evidence for a finding.
+- **Loop.** With no MCP server configured this is a single request. With one, the engine runs a short loop with a hard cap on turns and on tool calls, enforced in code. On reaching a cap, on a prose answer, or on a tool error, the engine forces `submit_review` over the existing transcript instead of discarding the work. A model call makes at most four turns that may call tools, then one that must end it. A turn that sends no call to a server, and room for the transcript that is used up, end them sooner. A prose answer is invalid output, and the turn that follows it is the one retry.
+- **Tool choice.** A deployment whose endpoint refuses a request that names a tool sets the model's tool choice to `auto`: every request then leaves the choice to the model, the tools of a request stay what they are, a turn that must end the call says so in a line, and an answer there that does not call `submit_review` is invalid output.
+- **MCP lifecycle.** Clients are opened per review and closed in a `finally` block with their own timeout. Tool results are truncated to a budget and wrapped as untrusted data. A documentation server typically indexes the default branch, so the contract forbids using it as the only evidence for a finding. The client speaks one revision of the protocol, 2025-11-25 over Streamable HTTP, with headers from the configuration, and accepts a server that answers with one of the two revisions before it. A server is named with the tools the model may be offered, and no other tool of it is. No server is opened for a pull request from a fork, because what a tool returns can be written in the review. A server whose call fails is not called again in that review. Only the first call of a batch is offered tools. When the endpoint refuses a request because of the tools, the batch is tried again without them and the review goes on without tools; the servers' status says so, not the model's.
 - **Prompt layout for caching.** Stable content first: the contract, then the tool definitions, then a per-repository block, then the pull request. The transcript is append-only. Nothing varying is ever inserted before earlier content. Whether this layout is cached depends on the model family. Some cache a repeated prefix on their own. Others need a marker: where the endpoint accepts one at the top of the request, as OpenRouter does for some families, the deployment sets it through the request extras. Markers on single blocks are not sent in the first version, so a model that needs those is reviewed without caching.
 - **Retries.** Invalid output gets one retry, with the validation reason appended. A timeout on a batch of several files splits the batch in two and retries once. A provider error moves to the next model in the configured fallback list. The model that answered is read from the response and recorded.
 - **What counts as a provider error.** Any status outside 2xx. Also a 200 response that carries an `error` object, has no choices, or ends a choice with `finish_reason: "error"`: OpenRouter reports failures of the upstream model this way. Two errors are not retried on another model, because the next model would fail the same way: a rejected key (401) and a key with no credit left (402). On either, reviews pause, gated checks say why, and an alert fires. A rate limit (429) is retried after the delay the response names.
 
-The contract is one file in git. A test asserts its key rules, so a careless edit fails the build.
+The contract is one file in git, and a test asserts its key rules, so a careless edit fails the build. The rules for tools are a text in the code, added to the system message only when a tool is offered, and the same test pins that text whole.
 
 ### 5.5 What the model returns
 
@@ -658,7 +659,7 @@ All configuration is typed and validated at start-up. An unknown key, a bad valu
 One file, owned by whoever runs the deployment and kept in their own git repository. It holds:
 
 - The app's identity (id, key and webhook secret, by reference).
-- The model: endpoint and key (by reference), model, the request fragment for each effort level, fallbacks, request extras (body fields and headers), and prices per token for an endpoint that reports no cost.
+- The model: endpoint and key (by reference), model, the request fragment for each effort level, fallbacks, request extras (body fields and headers), prices per token for an endpoint that reports no cost, and how the answer is asked for (`forced` or `auto`).
 - The second scorer (section 6.7), optional: endpoint and key (by reference), model and time limit.
 - Limits and cost guards (section 12).
 - Repository defaults and per-repository overrides: primary branches, ignored authors, base filter, how a new head is reviewed (D4), the gate block, and the score block (threshold, automatic approval, audit share, the thread rule for approval, and inline notes).
@@ -709,6 +710,8 @@ Initial values, to be tuned with the eval:
 
 **These are starting values for a small team.** The input limit starts high on purpose. Files in different batches cannot see each other. The predecessor's reviews peaked at a median a little under half of this limit, and about one in ten went above it. The eval decides where the limit ends up. The daily spend limit and the concurrency must be set for the deployment's own volume. Concurrency has to be at least the reviews requested in the busiest hour, times the minutes one review takes, divided by 60. The predecessor outgrew both of the values in this table.
 
+The limit of MCP tool calls is a constant in the code, like the limit of notes and the days of reuse. It counts the calls sent to a server, across every batch of one review. With tools a review makes at most 50 requests to the model, where it makes at most 36 without.
+
 **What "oversized" means (D5).** There is no limit on files or lines. A pull request is oversized when its files, packed in priority order with their context, need more batches than the limit allows: with the values above, more than 6 calls of 200,000 input tokens each. Both values are settings, and the input limit must fit the configured model with room for its answer. As a rough guide, that is somewhere between 100 and 200 ordinary source files with their full contents. This is an estimate and has not been measured.
 
 When that happens, files are reviewed in priority order until the limit. The rest are named in a `Coverage` section written by the service and score 100%. The pull request goes to human review, and is not approved automatically while any file is uncovered (O15). This replaces the predecessor's rule that size is never a reason to review less, under which one very large pull request could spend most of a day's budget.
@@ -747,13 +750,13 @@ A deployment that ran the predecessor brings its history across with a one-off m
 ## 14. Observability
 
 - **One structured log line per review** with stage, outcome, failure stage and a short failure code.
-- **A status per dependency on every review:** the model, each extension, each MCP server, memory.
+- **A status per dependency on every review:** the model, each extension, each MCP server, memory. A review that makes no model call records none for the MCP servers, and neither does the eval.
 - **Usage per review:** calls, tokens, cached tokens, cost.
 - **Model connection check.** At start-up, and then on a timer, the app checks that its key reaches the model endpoint. For OpenRouter that is the key endpoint (`GET /api/v1/key`), which also returns the key's limit and what is left of it. The result is the model's dependency status. A failure raises an alert and does not stop start-up: webhooks are still stored, and reviews wait.
 - **Health.** The public health route returns liveness only. Queue state, recent reviews and configuration are served only behind the UI's sign-in. Assume every route is reachable from the internet.
 - **Alerts**, posted as JSON to one configured webhook and shown in the UI:
   - the publish rate falls;
-  - a dependency's status changes between working and failing; for an extension that is when it starts to answer with an error and when it stops, and an answer that there was nothing to look up, or nothing found, is no failure;
+  - a dependency's status changes between working and failing; for an extension that is when it starts to answer with an error and when it stops, and an answer that there was nothing to look up, or nothing found, is no failure; for an MCP server that is when it cannot be opened, when a tool the config names is not offered, when a call fails or when the model's endpoint refuses the tools, and when a review next records it as working;
   - cached tokens stay at zero across reviews that made more than one request in sequence. A single-request review at low volume misses the cache legitimately and is not counted;
   - the learning job is stale;
   - spend reaches 80% of the daily limit;
@@ -842,7 +845,7 @@ Each of these comes from documentation or third-party reports, not from a test.
 1. An app's approving review counts toward a repository's required approvals.
 2. An app can dismiss its own approval on a protected branch. The docs suggest it may need to be on the dismissal allowlist.
 3. The app manifest flow accepts the permission set in section 10.
-4. Through OpenRouter, with the chosen model: a forced tool call is honoured, the `reasoning` fragment is accepted, cost and cached tokens come back on every response, one credit of reported cost is one US dollar, and the response names the upstream provider that served the call. OpenRouter's documentation states the first three and not the last two.
+4. Through OpenRouter, with the chosen model: a forced tool call is honoured, the `reasoning` fragment is accepted, cost and cached tokens come back on every response, one credit of reported cost is one US dollar, and the response names the upstream provider that served the call. OpenRouter's documentation states the first three and not the last two. Measured on 2026-11-23: for two recent models the endpoint refused a request that names a tool, and accepted `auto` (section 5.4).
 5. The in-process Postgres used for tests behaves like the real one for the queries the queue uses.
 6. A `/review` comment posted by a tool's own account carries a repository association that the command check (D15) accepts. A comment posted by another app probably does not.
 7. The association the git service reports for a commenter (owner, member, collaborator) is right for a member of an organisation whose membership is private. If it is not, D15 and D23 need a lookup of the commenter's permission on the repository instead.
@@ -851,8 +854,9 @@ Each of these comes from documentation or third-party reports, not from a test.
 10. The decisions endpoint the second scorer uses (section 6.7) is marked alpha by its provider: its path, request and response may change.
 11. That a decision model's answer to one question does not depend on which other questions travel in the same request. The question set was reduced after it was first tried.
 12. That the review model's findings are the same under the contract it gets when a scorer is named (section 6.7) as under the review contract. The findings rules are the same text in both; the replay eval run with a scorer named is what shows it.
+13. That the endpoint accepts a request that names a tool after turns whose reasoning was sent back. Where it does not, the batch is reviewed without tools (section 5.4).
 
-Items 1 to 3 and 6 to 9 need a scratch repository and the owner's go-ahead. Items 4 and 12 need an OpenRouter key and the owner's go-ahead, because they spend money.
+Items 1 to 3 and 6 to 9 need a scratch repository and the owner's go-ahead. Items 4, 12 and 13 need an OpenRouter key and the owner's go-ahead, because they spend money.
 
 ## 21. Open points for the owner
 

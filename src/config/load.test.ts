@@ -624,3 +624,154 @@ test('a module name holds no control character, no space and no DEL', () => {
     );
   }
 });
+
+const mcp = (body: string): string => `${minimal}mcpServers:\n${body}`;
+const mcpIssues = (text: string, env: Record<string, string | undefined> = KEY): string[] => {
+  try {
+    parseConfig(text, env);
+  } catch (e) {
+    return (e as ConfigError).issues;
+  }
+  return [];
+};
+
+test('a config with no mcpServers block has none, and the tool choice is forced', () => {
+  const c = parseConfig(minimal, KEY);
+  assert.deepEqual(c.mcpServers, []);
+  assert.equal(c.model.toolChoice, 'forced');
+  const shipped = parseConfig(example(), exampleEnv);
+  assert.deepEqual(shipped.mcpServers, []);
+  assert.equal(shipped.model.toolChoice, 'forced');
+  assert.deepEqual(parseConfig(mcp('  []\n'), KEY).mcpServers, []);
+});
+
+test('toolChoice takes forced or auto and nothing else', () => {
+  assert.equal(parseConfig(minimal + '  toolChoice: auto\n', KEY).model.toolChoice, 'auto');
+  assert.equal(parseConfig(minimal + '  toolChoice: forced\n', KEY).model.toolChoice, 'forced');
+  for (const bad of ['required', "''", 'true']) {
+    const issues = mcpIssues(minimal + `  toolChoice: ${bad}\n`);
+    assert.equal(issues.length, 1, bad);
+    assert.ok(issues[0]!.startsWith('model.toolChoice: '), issues.join());
+    assert.ok(!issues[0]!.includes('required') && !issues[0]!.includes('true'), issues.join());
+  }
+});
+
+test('a server has a name, an address, headers and tools, and headers not written are empty', () => {
+  const c = parseConfig(
+    mcp(
+      '  - name: docs\n    url: https://docs.example.test/mcp\n    headers: { X-Team: shop }\n    tools: [search, get_page]\n' +
+        '  - name: wiki\n    url: http://wiki.example.test:8080/mcp?x=1\n    tools: [find]\n',
+    ),
+    KEY,
+  );
+  assert.deepEqual(c.mcpServers, [
+    { name: 'docs', url: 'https://docs.example.test/mcp', headers: { 'X-Team': 'shop' }, tools: ['search', 'get_page'] },
+    { name: 'wiki', url: 'http://wiki.example.test:8080/mcp?x=1', headers: {}, tools: ['find'] },
+  ]);
+});
+
+test('a header value is plain text or a reference, and a reference is replaced by its variable', () => {
+  const c = parseConfig(
+    mcp('  - name: docs\n    url: https://docs.example.test/mcp\n    headers:\n      Authorization: { env: DOCS_MCP_AUTHORIZATION }\n      X-Team: shop\n    tools: [search]\n'),
+    { ...KEY, DOCS_MCP_AUTHORIZATION: 'Bearer t0k' },
+  );
+  assert.deepEqual(c.mcpServers[0]!.headers, { Authorization: 'Bearer t0k', 'X-Team': 'shop' });
+});
+
+test('a server that is badly written is refused by key, and no issue holds a value', () => {
+  const ok = 'url: https://docs.example.test/mcp\n    tools: [search]\n';
+  const entry = (extra: string): string => `  - ${extra}\n`;
+  const withName = (name: string): string => entry(`name: '${name}'\n    ${ok}`);
+  const NAME = 'mcpServers.0.name: must be a short code of at most 20 characters (a lower-case letter, then lower-case letters, digits or underscores)';
+  for (const bad of ['Docs', '9a', 'a-b', '', 'a'.repeat(21)]) assert.deepEqual(mcpIssues(mcp(withName(bad))), [NAME], bad);
+  assert.deepEqual(mcpIssues(mcp(withName('a'.repeat(20)))), []);
+  assert.deepEqual(
+    mcpIssues(mcp(`  - { name: docs, url: https://a.example.test/m, tools: [x] }\n  - { name: docs, url: https://b.example.test/m, tools: [x] }\n`)),
+    ['mcpServers.1.name: is already used by another server'],
+  );
+  const unknown = mcpIssues(mcp(entry(`name: docs\n    token: sk-secret-1\n    ${ok}`)));
+  assert.ok(unknown.some((i) => i.startsWith('mcpServers.0') && i.includes('token')), unknown.join());
+  const URL_ISSUE = 'mcpServers.0.url: must be an http or https URL with no user name and no password';
+  for (const bad of ['', 'ftp://docs.example.test', 'docs.example.test/mcp', 'https://user:pw@docs.example.test/mcp', 'https://user@docs.example.test/mcp']) {
+    const issues = mcpIssues(mcp(entry(`name: docs\n    url: '${bad}'\n    tools: [search]\n`)));
+    assert.deepEqual(issues, [URL_ISSUE], bad);
+  }
+  for (const bad of ["' https://docs.example.test/mcp'", "'https://docs.example.test/mcp '", '"https://docs.example.test/\\nmcp"', '"https://docs.example.test/\\tmcp"', '"https://docs.example.test/m\\x01cp"']) {
+    assert.deepEqual(mcpIssues(mcp(entry(`name: docs\n    url: ${bad}\n    tools: [search]\n`))), [URL_ISSUE], bad);
+  }
+  const TOOLS_MESSAGE = 'must name 1 to 20 tools';
+  const TOOLS = 'mcpServers.0.tools: must name 1 to 20 tools';
+  assert.deepEqual(mcpIssues(mcp(entry('name: docs\n    url: https://docs.example.test/mcp\n'))), ['mcpServers.0.tools: ' + TOOLS_MESSAGE]);
+  assert.deepEqual(mcpIssues(mcp(entry('name: docs\n    url: https://docs.example.test/mcp\n    tools: []\n'))), [TOOLS]);
+  const tools = (list: string): string[] => mcpIssues(mcp(entry(`name: docs\n    url: https://docs.example.test/mcp\n    tools: ${list}\n`)));
+  assert.deepEqual(tools(JSON.stringify(Array.from({ length: 21 }, (_, i) => `t${i}`))), [TOOLS]);
+  assert.deepEqual(tools(JSON.stringify(Array.from({ length: 20 }, (_, i) => `t${i}`))), []);
+  const TOOL = 'must be 1 to 128 characters with no control character';
+  assert.deepEqual(tools("['']"), [`mcpServers.0.tools.0: ${TOOL}`]);
+  assert.deepEqual(tools(JSON.stringify(['x'.repeat(129)])), [`mcpServers.0.tools.0: ${TOOL}`]);
+  assert.deepEqual(tools(JSON.stringify(['x'.repeat(128)])), []);
+  assert.deepEqual(tools(JSON.stringify(['a', 'b\nc'])), [`mcpServers.0.tools.1: ${TOOL}`]);
+  assert.deepEqual(tools(JSON.stringify(['a\u007fb'])), [`mcpServers.0.tools.0: ${TOOL}`]);
+  assert.deepEqual(tools('[a, b, a]'), ['mcpServers.0.tools.2: is named twice']);
+  const six = Array.from({ length: 6 }, (_, i) => `  - { name: s${i}, url: 'https://s${i}.example.test/m', tools: [x] }\n`).join('');
+  const sixIssues = mcpIssues(mcp(six));
+  assert.ok(sixIssues.length > 0 && sixIssues.every((i) => i.startsWith('mcpServers')), sixIssues.join());
+  assert.deepEqual(mcpIssues(mcp(six.split('\n').slice(0, 5).join('\n') + '\n')), []);
+  const headers = (h: string): string[] => mcpIssues(mcp(entry(`name: docs\n    url: https://docs.example.test/mcp\n    tools: [search]\n    headers: ${h}\n`)));
+  const NAMEH = 'must be a header name of letters, digits and hyphens, at most 100';
+  assert.deepEqual(headers("{ 'X Team': a }"), [`mcpServers.0.headers.X Team: ${NAMEH}`]);
+  const control = headers('{ "X\\r\\nA": v }');
+  assert.equal(control.length, 1);
+  assert.ok(!/[\x00-\x1f\x7f]/.test(control[0]!), 'one line, no raw control character');
+  assert.equal(control[0], `mcpServers.0.headers."X\\r\\nA": ${NAMEH}`);
+  assert.deepEqual(headers(JSON.stringify({ ['x'.repeat(101)]: 'a' })), [`mcpServers.0.headers.${'x'.repeat(101)}: ${NAMEH}`]);
+  for (const reserved of ['Content-Type', 'ACCEPT', 'Host', 'content-length', 'Connection', 'Transfer-Encoding', 'Mcp-Session-Id', 'mcp-protocol-version']) {
+    assert.deepEqual(headers(`{ ${reserved}: a }`), [`mcpServers.0.headers.${reserved}: is set by the service`], reserved);
+  }
+  assert.deepEqual(headers('{ Authorization: a, authorization: b }'), ['mcpServers.0.headers.authorization: is written twice']);
+  const many = (n: number): string => `{ ${Array.from({ length: n }, (_, i) => `H${i}: v`).join(', ')} }`;
+  assert.ok(headers(many(21)).length > 0 && headers(many(21)).every((i) => i.startsWith('mcpServers.0.headers')));
+  assert.deepEqual(headers(many(20)), []);
+  assert.deepEqual(headers("{ A: '' }"), ['mcpServers.0.headers.A: must be 1 to 4,000 printable ASCII characters']);
+  assert.deepEqual(headers('{ A: "a\\nb" }'), ['mcpServers.0.headers.A: must be 1 to 4,000 printable ASCII characters']);
+  assert.deepEqual(headers(`{ A: '${'x'.repeat(4001)}' }`), ['mcpServers.0.headers.A: must be 1 to 4,000 printable ASCII characters']);
+  assert.deepEqual(headers(`{ A: '${'x'.repeat(4000)}' }`), []);
+  // No issue holds a value, an address or a secret.
+  const all = [
+    ...mcpIssues(mcp(entry(`name: docs\n    url: 'https://user:pw@docs.example.test/mcp'\n    tools: [search]\n    headers: { A: "sk-val-9\\n" }\n`))),
+    ...unknown,
+  ];
+  for (const issue of all) assert.ok(!/pw|sk-val-9|docs\.example\.test|sk-secret-1/.test(issue), issue);
+});
+
+test('a reference to a variable that is not set stops the config, and a value read from a variable is checked like a written one', () => {
+  const text = mcp('  - name: docs\n    url: https://docs.example.test/mcp\n    headers:\n      Authorization: { env: DOCS_MCP_AUTHORIZATION }\n    tools: [search]\n');
+  const NOT_SET = ['mcpServers.0.headers.Authorization: environment variable DOCS_MCP_AUTHORIZATION is not set'];
+  assert.deepEqual(mcpIssues(text, KEY), NOT_SET);
+  assert.deepEqual(mcpIssues(text, { ...KEY, DOCS_MCP_AUTHORIZATION: '' }), NOT_SET);
+  const bad = mcpIssues(text, { ...KEY, DOCS_MCP_AUTHORIZATION: 'Bearer sk-line-1\nsecond' });
+  assert.deepEqual(bad, ['mcpServers.0.headers.Authorization: must be 1 to 4,000 printable ASCII characters']);
+  assert.ok(!bad.join().includes('sk-line-1'));
+  assert.deepEqual(mcpIssues(text, { ...KEY, DOCS_MCP_AUTHORIZATION: 'x'.repeat(4001) }).length, 1);
+  assert.deepEqual(mcpIssues(text, { ...KEY, DOCS_MCP_AUTHORIZATION: 'x'.repeat(4000) }), []);
+  const two = mcp('  - name: docs\n    url: https://docs.example.test/mcp\n    headers: { A: { env: ONE }, B: { env: TWO } }\n    tools: [search]\n');
+  assert.deepEqual(mcpIssues(two, KEY), [
+    'mcpServers.0.headers.A: environment variable ONE is not set',
+    'mcpServers.0.headers.B: environment variable TWO is not set',
+  ]);
+});
+
+test('a server may carry the name of an extension', () => {
+  const text = `${minimal}extensions:\n  - { name: docs, module: ./a.ts }\nmcpServers:\n  - { name: docs, url: 'https://docs.example.test/mcp', tools: [search] }\n`;
+  const c = parseConfig(text, KEY);
+  assert.equal(c.extensions[0]!.name, 'docs');
+  assert.equal(c.mcpServers[0]!.name, 'docs');
+});
+
+test('the example with its mcpServers block switched on names the docs server', () => {
+  const c = parseConfig(uncomment(example(), '# mcpServers:'), { ...exampleEnv, DOCS_MCP_AUTHORIZATION: 'Bearer ex-1' });
+  assert.deepEqual(c.mcpServers, [
+    { name: 'docs', url: 'https://docs.example.test/mcp', headers: { Authorization: 'Bearer ex-1' }, tools: ['search'] },
+  ]);
+  assert.deepEqual(parseConfig(uncomment(example(), '# extensions:'), { ...exampleEnv, EXAMPLE_FEEDBACK_SECRET: 's' }).mcpServers, []);
+});

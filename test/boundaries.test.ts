@@ -1,5 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { ESLint } from 'eslint';
 
 const lint = async (code: string, filePath: string) =>
@@ -66,4 +68,83 @@ test('the extensions part may not import the GitHub adapter or a Postgres client
 });
 test('the engine may not import the extensions part', async () => {
   assert.ok((await lint("import '../extensions/load.ts';\n", 'src/engine/x.ts')).includes('no-restricted-imports'));
+});
+test('the engine may not import the mcp part', async () => {
+  assert.ok((await lint("import '../mcp/client.ts';\n", 'src/engine/x.ts')).includes('no-restricted-imports'));
+});
+test('the mcp part may not import the GitHub adapter or a Postgres client', async () => {
+  assert.ok((await lint("import '../forge/github/read-source.ts';\n", 'src/mcp/x.ts')).includes('no-restricted-imports'));
+  for (const name of ['pg', '@electric-sql/pglite']) {
+    assert.ok((await lint(`import '${name}';\n`, 'src/mcp/x.ts')).includes('no-restricted-imports'), name);
+  }
+});
+test('the eval may not import the mcp part or the service entry, its command line included', async () => {
+  for (const file of ['src/eval/x.ts', 'src/eval/cli.ts', 'src/eval/backtest/x.ts']) {
+    const up = file.split('/').length - 2;
+    const prefix = '../'.repeat(up);
+    for (const target of ['mcp/client.ts', 'mcp/headers.ts', 'main.ts']) {
+      assert.ok((await lint(`import '${prefix}${target}';\n`, file)).includes('no-restricted-imports'), `${file} ${target}`);
+    }
+  }
+});
+test('the MCP client may be imported only by the service entry and by the mcp part', async () => {
+  const refused: Array<[string, string]> = [
+    ['src/service.ts', './mcp/client.ts'], ['src/shell/x.ts', '../mcp/client.ts'], ['src/config/x.ts', '../mcp/client.ts'],
+    ['src/extensions/x.ts', '../mcp/client.ts'], ['src/forge/github/x.ts', '../../mcp/client.ts'], ['src/db/x.ts', '../mcp/client.ts'],
+    ['src/engine/x.ts', '../mcp/client.ts'],
+  ];
+  for (const [file, target] of refused) {
+    assert.ok((await lint(`import '${target}';\n`, file)).includes('no-restricted-imports'), file);
+  }
+  assert.deepEqual(await lint("import './mcp/client.ts';\n", 'src/main.ts'), []);
+  assert.deepEqual(await lint("import './client.ts';\n", 'src/mcp/x.ts'), []);
+  assert.deepEqual(await lint("import '../mcp/headers.ts';\n", 'src/config/x.ts'), []);
+});
+test('the mcp part may not import the service entry', async () => {
+  assert.ok((await lint("import '../main.ts';\n", 'src/mcp/x.ts')).includes('no-restricted-imports'));
+  assert.ok((await lint("import '../main.ts';\n", 'src/mcp/x.test.ts')).includes('no-restricted-imports'));
+});
+test('no part of the MCP client but the header names may be imported outside the mcp part and the service entry', async () => {
+  for (const target of ['client.ts', 'rpc.ts', 'sse.ts', 'x/y.ts']) {
+    for (const [file, prefix] of [['src/service.ts', './mcp/'], ['src/shell/x.ts', '../mcp/'], ['src/config/x.ts', '../mcp/'], ['src/extensions/x.ts', '../mcp/'],
+      ['src/forge/github/x.ts', '../../mcp/'], ['src/db/x.ts', '../mcp/'], ['src/gate/x.ts', '../mcp/']] as const) {
+      assert.ok((await lint(`import '${prefix}${target}';\n`, file)).includes('no-restricted-imports'), `${file} ${target}`);
+    }
+  }
+  assert.deepEqual(await lint("import { SET_BY_SERVICE } from '../mcp/headers.ts';\nexport const s = SET_BY_SERVICE;\n", 'src/config/x.ts'), []);
+  for (const target of ['./mcp/client.ts', './mcp/rpc.ts']) assert.deepEqual(await lint(`import '${target}';\n`, 'src/main.ts'), [], target);
+});
+test('the mcp part imports nothing of the project but types of the engine and the config, and its own files', async () => {
+  const file = 'src/mcp/x.ts';
+  const refused = [
+    "import '../shell/alerts.ts';\n", "import '../db/types.ts';\n", "import '../extensions/load.ts';\n", "import '../service.ts';\n",
+    "import '../main.ts';\n", "import '../engine/review.ts';\n", "import '../engine/context/untrusted.ts';\n", "import '../forge/github/read-source.ts';\n",
+    "import { GATE_OFF } from '../config/load.ts';\nexport const g = GATE_OFF;\n", "import { NOT_A_TYPE } from '../engine/types.ts';\nexport const n = NOT_A_TYPE;\n",
+    "import 'pg';\n",
+  ];
+  for (const code of refused) {
+    const ids = await lint(code, file);
+    assert.ok(ids.some((id) => id !== null && id.endsWith('no-restricted-imports')), code);
+  }
+  const allowed = [
+    "import type { McpServer } from '../engine/types.ts';\nexport type S = McpServer;\n",
+    "import type { McpServerConfig } from '../config/load.ts';\nexport type C = McpServerConfig;\n",
+    "import { eventData } from './sse.ts';\nexport const e = eventData;\n",
+    "import { setFlagsFromString } from 'node:v8';\nexport const f = setFlagsFromString;\n",
+  ];
+  for (const code of allowed) assert.deepEqual(await lint(code, file), [], code);
+  // a test file of the part may also run a review end to end: the engine's review and its submit tool, and nothing more
+  for (const target of ['../engine/review.ts', '../engine/model/submit-review.ts']) {
+    assert.deepEqual(await lint(`import '${target}';\n`, 'src/mcp/x.test.ts'), [], target);
+    const ids = await lint(`import '${target}';\n`, file);
+    assert.ok(ids.some((id) => id !== null && id.endsWith('no-restricted-imports')), target);
+  }
+  for (const code of ["import '../main.ts';\n", "import '../db/types.ts';\n", "import '../engine/model/call.ts';\n"]) {
+    const ids = await lint(code, 'src/mcp/x.test.ts');
+    assert.ok(ids.some((id) => id !== null && id.endsWith('no-restricted-imports')), code);
+  }
+});
+test('the header names are a leaf: headers.ts imports nothing', () => {
+  const text = readFileSync(join(import.meta.dirname, '..', 'src', 'mcp', 'headers.ts'), 'utf8');
+  assert.equal(/^\s*import\b|\bimport\s*\(|\brequire\s*\(/m.test(text), false);
 });

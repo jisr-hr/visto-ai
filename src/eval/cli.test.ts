@@ -5,7 +5,7 @@ import { dirname, join, resolve } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { main } from './cli.ts';
+import { main, prepareRun } from './cli.ts';
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const dir = mkdtempSync(tmpdir() + '/');
@@ -177,4 +177,36 @@ test('the eval commands load no module', () => {
   assert.equal(/from '\.\.\/extensions\//.test(text), false);
   assert.equal(text.includes('loadExtensions'), false);
   assert.equal(text.includes('contextProviders'), false);
+});
+
+test('the eval commands pass the tool choice of the config on', () => {
+  const folder = mkdtempSync(tmpdir() + '/');
+  const config = join(folder, 'config.yml');
+  const argv = ['--cases', join(folder, 'cases.yml'), '--out', join(folder, 'out'), '--label', 'one', '--config', config];
+  const env = { GITHUB_TOKEN: 't', MODEL_KEY: 'k' };
+  const base = 'model:\n  apiKey: { env: MODEL_KEY }\n  model: vendor/model-a\n';
+  writeFileSync(config, `${base}  toolChoice: auto\n`);
+  assert.equal(prepareRun('replay', 'cases', argv, env).deps.toolChoice, 'auto');
+  writeFileSync(config, `${base}  toolChoice: forced\n`);
+  assert.equal('toolChoice' in prepareRun('replay', 'cases', argv, env).deps, false);
+  writeFileSync(config, base);
+  assert.equal('toolChoice' in prepareRun('replay', 'cases', argv, env).deps, false);
+});
+
+test('the eval commands build no MCP client', () => {
+  const folder = mkdtempSync(tmpdir() + '/');
+  const config = join(folder, 'config.yml');
+  const argv = ['--cases', join(folder, 'cases.yml'), '--out', join(folder, 'out'), '--label', 'one', '--config', config];
+  const env = { GITHUB_TOKEN: 't', MODEL_KEY: 'k', DOCS_KEY: 'Bearer t0k' };
+  writeFileSync(config, [
+    'model:\n  apiKey: { env: MODEL_KEY }\n  model: vendor/model-a\n',
+    'mcpServers:\n  - name: docs\n    url: https://docs.example.test/mcp\n    headers:\n      Authorization: { env: DOCS_KEY }\n    tools: [search]\n',
+  ].join(''));
+  const setup = prepareRun('replay', 'cases', argv, env);
+  assert.equal(setup.config.mcpServers.length, 1);
+  assert.equal('mcpServers' in setup.deps, false);
+  const text = readFileSync(join(projectRoot, 'src', 'eval', 'cli.ts'), 'utf8');
+  assert.equal(/from '\.\.\/mcp\//.test(text), false);
+  // the variable a header names is still needed
+  assert.throws(() => prepareRun('replay', 'cases', argv, { GITHUB_TOKEN: 't', MODEL_KEY: 'k' }));
 });

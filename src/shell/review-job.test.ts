@@ -23,6 +23,7 @@ import { runReviewJob } from './review-job.ts';
 import type { ReviewJobDeps } from './review-job.ts';
 import type { Notifier } from './notify.ts';
 import { createExtensionHealth } from './extension-health.ts';
+import { createMcpHealth } from './mcp-health.ts';
 import type { ReviewNotice } from '../extensions/types.ts';
 
 const REF = { service: 'github', owner: 'acme', repo: 'shop', number: 7 } as const;
@@ -178,6 +179,8 @@ async function harness(options: Options = {}) {
   const logged: Array<Record<string, unknown>> = [];
   /** What the health of the modules was told, as ['noted', extension, part, ok, code]. */
   const noted: unknown[][] = [];
+  /** What the health of the MCP servers was told, as ['noted', server, ok, code]. */
+  const mcpNoted: unknown[][] = [];
   const live = options.live === undefined ? (head === 'h1' ? LIVE : { ...LIVE, info: { ...LIVE.info, headSha: head } }) : options.live;
   let reads = 0;
   const writes: unknown[][] = [];
@@ -293,11 +296,12 @@ async function harness(options: Options = {}) {
     health: { reviewed: (code, when) => { healthCalls.push(code); healthTimes.push(when.toISOString()); } },
     spend: { noteRun: (usage) => { spendCalls.push(usage); } },
     extensionHealth: { noted: (...args) => { noted.push(['noted', ...args]); } },
+    mcpHealth: { noted: (...args) => { mcpNoted.push(['noted', ...args]); } },
   };
   if (options.notifiers !== undefined) {
     deps.notice = { notifiers: options.notifiers, reviewUrl: reviewUrlOf, pullRequestUrl: pullRequestUrlOf, timeoutMs: options.noticeTimeoutMs };
   }
-  return { job, deps, inputs, engines, healthCalls, healthTimes, spendCalls, slept, logged, writes, drafts, noted, get reads() { return reads; } };
+  return { job, deps, inputs, engines, healthCalls, healthTimes, spendCalls, slept, logged, writes, drafts, noted, mcpNoted, get reads() { return reads; } };
 }
 const live = (options: Options = {}) => harness({ dryRun: false, ...options });
 /** A job a /review comment stored: by octo-lead, comment 31, through installation 99; out of dry run unless given. */
@@ -2255,4 +2259,102 @@ test('a notice carries the body that was published and stored, also when GitHub 
   assert.equal(stored!.inlineDropped, true);
   assert.notEqual(stored!.body, first);
   assert.deepEqual(calls.map((c) => [(c[2] as ReviewNotice).body, (c[2] as ReviewNotice).reviewUrl]), [[stored!.body, reviewUrlOf(REF, '502')]]);
+});
+
+const MCP = {
+  docs: { status: 'ok' as const, code: 'ok', calls: 3 },
+  wiki: { status: 'error' as const, code: 'call_timeout', calls: 1 },
+  notes: { status: 'skipped' as const, code: 'no_room', calls: 0 },
+};
+/** The keys of the review line as they are with no MCP server, in order. */
+const REVIEW_LINE_KEYS = [
+  'event', 'job', 'repo', 'number', 'head', 'trigger', 'mode', 'dry_run', 'outcome', 'failure_stage', 'failure_code', 'needs_human', 'highest', 'findings',
+  'calls', 'cost', 'duration_ms', 'requeued', 'published', 'review', 'publish', 'publish_code', 'resumed', 'adopted', 'threads_due', 'verdicts', 'duplicates',
+  'blocking_on_unchanged', 'nothing_new', 'notes', 'notes_dropped', 'extensions',
+];
+test('with no server the review line and the alerts are those of before', async () => {
+  const alerts: unknown[][] = [];
+  const health = createMcpHealth((code, details) => { alerts.push([code, details]); });
+  for (const [number, dryRun] of [[7, true], [8, false]] as const) {
+    const h = await harness({ pullRequest: number, dryRun });
+    await runReviewJob(h.job, h.deps);
+    assert.deepEqual([Object.keys(reviewLine(h)), h.mcpNoted], [REVIEW_LINE_KEYS, []], String(number));
+    const real = await harness({ pullRequest: number + 10, dryRun });
+    await runReviewJob(real.job, { ...real.deps, mcpHealth: health });
+    // with no health at all, as the service builds the job when no server is named
+    const none = await harness({ pullRequest: number + 20, dryRun });
+    delete none.deps.mcpHealth;
+    await runReviewJob(none.job, none.deps);
+    const same = (x: Harness): Record<string, unknown> => ({ ...reviewLine(x), job: 0, number: 0, duration_ms: 0 });
+    assert.deepEqual([same(real), same(none)], [same(h), same(h)], String(number));
+  }
+  // a stored result written before this plan, read by a later start
+  await recorded({ ref: { ...REF, number: 30 }, result: okResult() });
+  const resumed = await live({ pullRequest: 30 });
+  await runReviewJob(resumed.job, resumed.deps);
+  assert.deepEqual([Object.keys(reviewLine(resumed)), resumed.mcpNoted, reviewLine(resumed).resumed], [REVIEW_LINE_KEYS, [], true]);
+  assert.deepEqual(alerts, []);
+});
+test('the health is told how each server did, in dry run too, and the review line carries the map', async () => {
+  const result = okResult({ dependencies: { model: 'ok', mcp: MCP } });
+  const told = [['noted', 'docs', true, 'ok'], ['noted', 'wiki', false, 'call_timeout']];
+  const dry = await harness({ result });
+  await runReviewJob(dry.job, dry.deps);
+  assert.deepEqual([dry.mcpNoted, reviewLine(dry).mcp], [told, MCP]);
+  const keys = Object.keys(reviewLine(dry));
+  assert.deepEqual(keys.slice(keys.indexOf('extensions')), ['extensions', 'mcp']);
+  const out = await live({ pullRequest: 8, result });
+  await runReviewJob(out.job, out.deps);
+  assert.deepEqual([out.mcpNoted, reviewLine(out).mcp, (await getJob(db, out.job.id))?.outcome], [told, MCP, 'published']);
+  // a review an earlier start recorded tells nothing, and its line carries what it stored
+  await recorded({ ref: { ...REF, number: 9 }, result });
+  const resumed = await live({ pullRequest: 9 });
+  await runReviewJob(resumed.job, resumed.deps);
+  assert.deepEqual([resumed.inputs.length, resumed.mcpNoted, reviewLine(resumed).mcp, reviewLine(resumed).resumed], [0, [], MCP, true]);
+});
+test('a skipped server tells the health nothing: a failing server stays failing across a fork', async () => {
+  const alerts: unknown[][] = [];
+  const health = createMcpHealth((code, details) => { alerts.push([code, details]); });
+  const steps: Array<[number, Record<string, { status: 'ok' | 'skipped' | 'error'; code: string; calls: number }>]> = [
+    [41, { docs: { status: 'error', code: 'tool_not_listed', calls: 0 } }],
+    [42, { docs: { status: 'skipped', code: 'from_fork', calls: 0 } }],
+    [43, { docs: { status: 'skipped', code: 'no_room', calls: 0 } }],
+    [44, { docs: { status: 'error', code: 'model_refused_tools', calls: 0 } }],
+    [45, { docs: { status: 'ok', code: 'ok', calls: 1 } }],
+  ];
+  for (const [number, mcp] of steps) {
+    const h = await harness({ pullRequest: number, result: okResult({ dependencies: { model: 'ok', mcp } }) });
+    await runReviewJob(h.job, { ...h.deps, mcpHealth: health });
+  }
+  assert.deepEqual(alerts, [['mcp_error', { server: 'docs', reason: 'tool_not_listed' }], ['mcp_ok', { server: 'docs' }]]);
+});
+test('a damaged map tells the health nothing it cannot read', async () => {
+  const damaged = {
+    docs: 5, wiki: { status: 'ok', code: 'ok' }, 'Bad Name': { status: 'ok', code: 'ok', calls: 0 }, ok1: { status: 'fine', code: 'ok', calls: 0 },
+    ok2: { status: 'error', code: 'Not A Code', calls: 0 }, ok3: { status: 'ok', code: 'ok', calls: -1 }, ok4: { status: 'ok', code: 'ok', calls: 1.5 },
+    ok5: null, ok6: [],
+  };
+  const cases: Array<[unknown, boolean, unknown, number]> = [['x', false, undefined, 7], [null, false, undefined, 8], [[], false, undefined, 9], [damaged, true, {}, 10]];
+  for (const [mcp, present, expected, number] of cases) {
+    const dependencies = { model: 'ok', mcp } as unknown as ReviewResult['dependencies'];
+    const h = await harness({ pullRequest: number, result: okResult({ dependencies }) });
+    await runReviewJob(h.job, h.deps);
+    assert.deepEqual([h.mcpNoted, 'mcp' in reviewLine(h), reviewLine(h).mcp], [[], present, expected], String(number));
+  }
+  // a stored result that is damaged
+  await recorded({ ref: { ...REF, number: 11 }, result: okResult({ dependencies: { model: 'ok', mcp: 'x' } as unknown as ReviewResult['dependencies'] }) });
+  const stored = await live({ pullRequest: 11 });
+  await runReviewJob(stored.job, stored.deps);
+  assert.deepEqual([stored.mcpNoted, 'mcp' in reviewLine(stored)], [[], false]);
+});
+test('a health that throws changes nothing of the job', async () => {
+  const result = okResult({ dependencies: { model: 'ok', mcp: MCP } });
+  const plain = await live({ pullRequest: 7, result });
+  await runReviewJob(plain.job, plain.deps);
+  const throwing = await live({ pullRequest: 8, result });
+  throwing.deps.mcpHealth = { noted: () => { throw new Error('health_down'); } };
+  await runReviewJob(throwing.job, throwing.deps);
+  const same = (x: Harness): Record<string, unknown> => ({ ...reviewLine(x), job: 0, number: 0, duration_ms: 0 });
+  assert.deepEqual(same(throwing), same(plain));
+  assert.equal((await getJob(db, throwing.job.id))?.outcome, 'published');
 });

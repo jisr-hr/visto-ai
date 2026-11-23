@@ -3,9 +3,10 @@ import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
+import { parseConfig } from './config/load.ts';
 import type { InstanceLock } from './db/types.ts';
 import type { LoadedExtension } from './extensions/types.ts';
-import { boundedFetch, createServer, describeFailure, GITHUB_CALL_MS, guardRejections, HEADERS_TIMEOUT_MS, lockThenLoad, main, rejectionHandler, REQUEST_TIMEOUT_MS, runUntilSignal } from './main.ts';
+import { boundedFetch, createServer, describeFailure, engineBase, GITHUB_CALL_MS, guardRejections, HEADERS_TIMEOUT_MS, lockThenLoad, main, mcpServersOf, rejectionHandler, REQUEST_TIMEOUT_MS, runUntilSignal } from './main.ts';
 
 async function run(argv: string[], env: Record<string, string | undefined> = {}): Promise<{ code: number; lines: string[] }> {
   const lines: string[] = [];
@@ -175,4 +176,33 @@ test('the handler is registered only when a module was loaded', () => {
   const modules: LoadedExtension[] = [{ name: 'chat', parts: { notify: async () => {} } }];
   const handler = guardRejections(modules, () => {}, (h) => { registered.push(h); });
   assert.deepEqual([typeof handler, registered.length, registered[0] === handler], ['function', 1, true]);
+});
+
+test('the engine is given MCP servers only when the config names some, and nothing is asked until one is opened', async () => {
+  const asked: string[] = [];
+  const fetchFn = ((url: string | URL | Request) => { asked.push(String(url)); return Promise.reject(new Error('refused')); }) as typeof fetch;
+  assert.deepEqual(mcpServersOf([], fetchFn), {});
+  const { mcpServers } = mcpServersOf([{ name: 'docs', url: 'https://docs.example.test/mcp', headers: {}, tools: ['search', 'get_page'] }], fetchFn);
+  assert.deepEqual(mcpServers!.map((s) => [s.name, s.tools]), [['docs', ['search', 'get_page']]]);
+  assert.deepEqual(asked, []);
+  await assert.rejects(mcpServers![0]!.open(new AbortController().signal));
+  assert.deepEqual(asked, ['https://docs.example.test/mcp']);
+});
+
+test('the engine\'s dependencies carry the tool choice and the MCP servers only when the config writes them', async () => {
+  const yaml = 'model:\n  apiKey: { env: K }\n  model: vendor/model-a\n';
+  const asked: string[] = [];
+  const plain = ((url: string | URL | Request) => { asked.push(String(url)); return Promise.reject(new Error('refused')); }) as typeof fetch;
+  const io = { fetch: plain, sleep: () => Promise.resolve(), clock: () => new Date(0), log: () => {} };
+  const neither = engineBase(parseConfig(yaml, { K: 'k' }), io);
+  assert.deepEqual(Object.keys(neither), ['model', 'contract', 'clock', 'token', 'log']);
+  const servers = 'mcpServers:\n  - name: docs\n    url: https://docs.example.test/mcp\n    tools: [search]\n';
+  const both = engineBase(parseConfig(`${yaml}  toolChoice: auto\n${servers}`, { K: 'k' }), io);
+  assert.deepEqual(Object.keys(both), ['model', 'contract', 'clock', 'token', 'log', 'toolChoice', 'mcpServers']);
+  assert.equal(both.toolChoice, 'auto');
+  assert.deepEqual(both.mcpServers!.map((s) => s.name), ['docs']);
+  // built on the plain fetch it was given, which nothing has asked yet
+  assert.deepEqual(asked, []);
+  await assert.rejects(both.mcpServers![0]!.open(new AbortController().signal));
+  assert.deepEqual(asked, ['https://docs.example.test/mcp']);
 });

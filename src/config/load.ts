@@ -10,6 +10,8 @@ export interface ModelConfig {
   extraBody: Record<string, unknown>; extraHeaders: Record<string, string>;
   prices: { inputPerMillion: number; cachedInputPerMillion: number; outputPerMillion: number } | null;
   timeoutSeconds: number;
+  /** How the model is made to answer through submit_review: every request names the tool, or the model is asked to call it. */
+  toolChoice: 'forced' | 'auto';
 }
 
 /** One module the deployment names (section 11.3). Nothing is loaded here: `module` is kept as written. */
@@ -22,6 +24,18 @@ export interface ExtensionConfig {
   options: Record<string, unknown>;
 }
 
+/** One MCP server the deployment names (section 5.4). Nothing is opened here. */
+export interface McpServerConfig {
+  /** A short code of at most 20 characters, unique in the list. */
+  name: string;
+  /** http or https, as written. */
+  url: string;
+  /** As written, with every { env: NAME } replaced by that variable's value. */
+  headers: Record<string, string>;
+  /** The names the model may be offered, in the order written; never empty. */
+  tools: string[];
+}
+
 export interface ScorerConfig { baseUrl: string; apiKey: string; model: string; timeoutSeconds: number }
 export interface DeploymentConfig {
   model: ModelConfig;
@@ -32,6 +46,7 @@ export interface DeploymentConfig {
   dryRun: boolean;
   alerts: { webhook: string } | null;
   extensions: ExtensionConfig[];
+  mcpServers: McpServerConfig[];
   limits: { inputTokensPerCall: number; batchesPerReview: number; spendPerDay: number; queueConcurrency: number };
   repositories: { defaults: RepoSettings; overrides: Record<string, RepoOverride> };
 }
@@ -167,7 +182,8 @@ export function parseConfig(yamlText: string, env: Record<string, string | undef
   if (!result.success) {
     throw new ConfigError(
       result.error.issues.map((i) => {
-        const where = i.path.map(String).join('.');
+        // A key outside printable ASCII is shown escaped, so an issue stays one line.
+        const where = i.path.map((k) => (/^[\x20-\x7E]*$/.test(String(k)) ? String(k) : JSON.stringify(String(k)))).join('.');
         const unknown = i.code === 'unrecognized_keys' ? ` (${i.keys.join(', ')})` : '';
         return `${where === '' ? '(root)' : where}: ${i.message}${unknown}`;
       }),
@@ -242,6 +258,31 @@ export function parseConfig(yamlText: string, env: Record<string, string | undef
     ),
   }));
   if (extensionIssues.length > 0) throw new ConfigError(extensionIssues);
+  const mcpIssues: string[] = [];
+  const mcpServers: McpServerConfig[] = raw.mcpServers.map((s, i) => ({
+    name: s.name,
+    url: s.url,
+    headers: Object.fromEntries(
+      Object.entries(s.headers).map(([header, v]): [string, string] => {
+        const path = `mcpServers.${i}.headers.${header}`;
+        let value: string;
+        if (typeof v === 'string') value = v;
+        else {
+          const found = env[v.env];
+          if (found === undefined || found === '') {
+            mcpIssues.push(`${path}: environment variable ${v.env} is not set`);
+            return [header, ''];
+          }
+          value = found;
+        }
+        // A value read from a variable is held to the same rule as one written here; no issue quotes it.
+        if (!/^[\x20-\x7E]{1,4000}$/.test(value)) mcpIssues.push(`${path}: must be 1 to 4,000 printable ASCII characters`);
+        return [header, value];
+      }),
+    ),
+    tools: s.tools,
+  }));
+  if (mcpIssues.length > 0) throw new ConfigError(mcpIssues);
   const { defaults, overrides } = raw.repositories;
   // Repository names are case-insensitive on the git service, so two such keys name one repository.
   const seen = new Map<string, string>();
@@ -259,6 +300,7 @@ export function parseConfig(yamlText: string, env: Record<string, string | undef
     dryRun: raw.dryRun,
     alerts,
     extensions,
+    mcpServers,
     limits: raw.limits,
     repositories: {
       defaults: {

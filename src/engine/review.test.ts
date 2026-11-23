@@ -5,7 +5,9 @@ import { buildFileContexts, hunksOf } from './context/build.ts';
 import { ACCEPTANCE_HEADING, ACCEPTANCE_RULES, EXTENSION_LINE, extensionPart } from './context/extensions.ts';
 import type { ExtensionContext } from './context/extensions.ts';
 import { buildMessages, fixedTokens } from './context/prompt.ts';
+import { FINAL_LINE } from './model/call.ts';
 import { ProviderError } from './model/errors.ts';
+import { NOT_RUN_CAP, NOT_RUN_CLOSED, TOOL_RULES, toolRoomTokens } from './model/tools.ts';
 import { SUBMIT_REVIEW, submitReviewTool, submitReviewWithThreadsTool, submitToolFor } from './model/submit-review.ts';
 import { NOTHING_READ } from './plan.ts';
 import { chooseEffort, review } from './review.ts';
@@ -13,8 +15,8 @@ import { blocksOf, fileDiffHash } from './score/blocks.ts';
 import { shownOf } from './score/shown.ts';
 import type { BlockScore, ScoreEntry, ScoreHistory } from './score/types.ts';
 import type {
-  ChangedFile, ContextProvider, EarlierThread, ModelClient, ModelRequest, ModelResponse, PullRequestInfo, RepoConfig, ReviewDeps, ReviewInput, ReviewResult, ScoreAnswer, ScoreRequest, Scorer,
-  Severity, Source, Usage,
+  ChangedFile, ContextProvider, EarlierThread, McpAnswer, McpServer, McpSession, ModelClient, ModelRequest, ModelResponse, PullRequestInfo, RepoConfig, ReviewDeps, ReviewInput, ReviewResult,
+  ScoreAnswer, ScoreRequest, Scorer, Severity, Source, ToolCall, ToolDefinition, Usage,
 } from './types.ts';
 
 const CONTRACT = 'You review pull requests.';
@@ -53,10 +55,17 @@ const usage = (): Usage => ({ calls: 1, inputTokens: 100, outputTokens: 10, cach
 const respond = (answer: unknown): ModelResponse =>
   ({ toolName: SUBMIT_REVIEW, toolArguments: JSON.stringify(answer), text: null, model: 'm', provider: null, usage: usage() });
 
-type Step = unknown | ProviderError;
+// A step is the arguments of a submit_review answer, a ProviderError to throw, a response as it is (`Raw`), or a
+// function of the request that gives one of those.
+class Raw {
+  readonly response: ModelResponse;
+  constructor(response: ModelResponse) { this.response = response; }
+}
+type Step = unknown | ProviderError | Raw | ((request: ModelRequest) => unknown);
+const resolveStep = (step: Step, request: ModelRequest): Step => (typeof step === 'function' ? resolveStep((step as (r: ModelRequest) => unknown)(request), request) : step);
 function deps(spec: {
   files: ChangedFile[]; answers?: Step[]; answerFor?: Record<string, Step>; delayMs?: number; listError?: Error; scorer?: Scorer;
-  contextProviders?: ContextProvider[];
+  contextProviders?: ContextProvider[]; toolChoice?: 'forced' | 'auto'; mcpServers?: McpServer[];
 }):
   ReviewDeps & { model: ModelClient & { requests: ModelRequest[]; maxInFlight: number }; logged: Array<Record<string, unknown>>; tokens: number } {
   const requests: ModelRequest[] = [];
@@ -79,8 +88,10 @@ function deps(spec: {
         } else {
           step = (spec.answers ?? [])[requests.length - 1];
         }
+        step = resolveStep(step, request);
         if (step === undefined) throw new Error('stub model exhausted');
         if (step instanceof ProviderError) throw step;
+        if (step instanceof Raw) return step.response;
         return respond(step);
       } finally {
         inFlight -= 1;
@@ -98,6 +109,8 @@ function deps(spec: {
     log: (e: Record<string, unknown>) => { logged.push(e); },
     ...(spec.scorer === undefined ? {} : { scorer: spec.scorer }),
     ...(spec.contextProviders === undefined ? {} : { contextProviders: spec.contextProviders }),
+    ...(spec.toolChoice === undefined ? {} : { toolChoice: spec.toolChoice }),
+    ...(spec.mcpServers === undefined ? {} : { mcpServers: spec.mcpServers }),
   };
   return d;
 }
@@ -2135,4 +2148,449 @@ test('a provider whose list of criteria is hostile fails no review', async () =>
   const r = await review(own, d);
   assert.deepEqual([r.status, r.failure, r.findings], [expected.status, expected.failure, expected.findings]);
   assert.deepEqual(r.dependencies.extensions, { tickets: { status: 'ok', code: 'ok' }, chat: { status: 'ok', code: 'ok' } });
+});
+
+test('the tool choice of the dependencies reaches every call of a review, a retry and the halves of a split batch included', async () => {
+  const split = (toolChoice?: 'forced' | 'auto') =>
+    deps({ files: [fileA, fileB], answers: [new ProviderError('timeout', 't', null, null), answerOnA, answerOnB], ...(toolChoice === undefined ? {} : { toolChoice }) });
+  const auto = split('auto');
+  const r = await review(input, auto);
+  assert.deepEqual(r.coverage.reviewed, ['src/a.ts', 'src/b.ts']);
+  assert.deepEqual(auto.model.requests.map((q) => q.forcedTool), [null, null, null]);
+  const forced = split();
+  await review(input, forced);
+  assert.deepEqual(forced.model.requests.map((q) => q.forcedTool), [SUBMIT_REVIEW, SUBMIT_REVIEW, SUBMIT_REVIEW]);
+  assert.deepEqual(auto.model.requests.map((q) => [q.messages, q.tools]), forced.model.requests.map((q) => [q.messages, q.tools]));
+  // a second try after a time-out, then the retry of an invalid answer
+  const retried = deps({ files: [fileA], answers: [new ProviderError('timeout', 't', null, null), ungrounded, answerOnA], toolChoice: 'auto' });
+  const again = await review(input, retried);
+  assert.deepEqual([again.status, again.coverage.reviewed], ['ok', ['src/a.ts']]);
+  assert.deepEqual(retried.model.requests.map((q) => q.forcedTool), [null, null, null]);
+});
+
+// MCP servers (stage 6, Task 9). A fake server is a literal whose open gives a literal session; each pushes
+// [name, ...args] for its calls into one log, which the model's requests join when a test asks for the order.
+const SYSTEM_WITH_TOOLS = `${CONTRACT}\n\n${TOOL_RULES}`;
+const searchSchema = { type: 'object', properties: { query: { type: 'string' } } };
+const listedTool = (name: string) => ({ name, description: `Does ${name}.`, inputSchema: searchSchema });
+const docsSearch: ToolDefinition = { type: 'function', function: { name: 'docs__search', description: 'Does search.', parameters: searchSchema } };
+const textResult = (text: string): McpAnswer => ({ ok: true, result: { content: [{ type: 'text', text }] } });
+interface FakeServer { server: McpServer; log: unknown[][] }
+function fakeServer(opts: {
+  name?: string; tools?: string[]; listed?: string[];
+  answer?: (tool: string, args: Record<string, unknown>) => Promise<McpAnswer>;
+  open?: (session: McpSession) => Promise<McpSession>;
+} = {}): FakeServer {
+  const log: unknown[][] = [];
+  const tools = opts.tools ?? ['search'];
+  const session: McpSession = {
+    tools: (opts.listed ?? tools).map(listedTool),
+    call(tool, args) { log.push(['call', tool, args]); return opts.answer ? opts.answer(tool, args) : Promise.resolve(textResult(`${tool} result`)); },
+    close() { log.push(['close']); return Promise.resolve(); },
+  };
+  const server: McpServer = {
+    name: opts.name ?? 'docs', tools,
+    open() { log.push(['open']); return opts.open ? opts.open(session) : Promise.resolve(session); },
+  };
+  return { server, log };
+}
+const kinds = (f: FakeServer, kind: string): unknown[][] => f.log.filter((e) => e[0] === kind);
+// The model's requests join the server's log, so that the order of the two can be read.
+const logRequests = (d: ReturnType<typeof deps>, f: FakeServer): void => {
+  const complete = d.model.complete.bind(d.model);
+  d.model.complete = (request) => { f.log.push(['request']); return complete(request); };
+};
+const toolCallOf = (id: string, name: string, args: string | null): ToolCall => ({ id, name, arguments: args });
+const searchCall = (id: string, query = 'cart'): ToolCall => toolCallOf(id, 'docs__search', JSON.stringify({ query }));
+const callsTools = (...calls: ToolCall[]): Raw => new Raw({
+  toolName: calls[0]!.name, toolArguments: calls[0]!.arguments, text: null, model: 'm', provider: null, usage: usage(),
+  toolCalls: calls,
+  assistant: { role: 'assistant', content: null, tool_calls: calls.map((c) => ({ id: c.id, type: 'function', function: { name: c.name, arguments: c.arguments } })) },
+});
+// The steps of one batch, one for each request it makes, in order.
+const inTurn = (...steps: Step[]): ((request: ModelRequest) => Step) => {
+  let i = 0;
+  return () => { i += 1; return steps[i - 1]; };
+};
+// Limits under which, with the tools of docs/search offered, each batch holds `files` units of the file given.
+const roomFor = async (units: number): Promise<ReviewInput> =>
+  limitsOf(fixedTokens(SYSTEM_WITH_TOOLS, own.pullRequest) + toolRoomTokens([docsSearch]) + Math.floor(units * (await unitOf(fileA, false))));
+const toolMessages = (q: ModelRequest) => q.messages.filter((m) => m.role === 'tool');
+
+test('with no server, with an empty list, and with the tool choice not given, the requests, the result and the log are those of before', async () => {
+  const lim: ReviewInput = { ...smallLimits, pullRequest: own.pullRequest };
+  const spec = () => ({ files: [fileA, fileB], answerFor: { 'src/a.ts': answerOnA, 'src/b.ts': answerOnB } });
+  const today = deps(spec());
+  const expected = await review(lim, today);
+  // Each request is the literal of before: the contract, the header and the files, and submit_review forced.
+  const built = await buildFileContexts(own.pullRequest, [fileA, fileB], today.source);
+  assert.equal(today.model.requests.length, 2);
+  today.model.requests.forEach((q, i) => {
+    assert.deepEqual(q, {
+      messages: buildMessages({
+        contract: CONTRACT, pr: own.pullRequest, fileCount: 2, firstFileNumber: i + 1,
+        batch: { files: [built.contexts[i]!], tokens: 0 }, batchIndex: i, batchCount: 2, token: TOKEN,
+      }),
+      tools: [submitReviewTool], forcedTool: 'submit_review', effort: 'default', timeoutMs: 30_000,
+    });
+    assert.deepEqual([q.messages.length, q.messages[0]], [3, { role: 'system', content: CONTRACT }]);
+    assert.deepEqual(Object.keys(q).sort(), ['effort', 'forcedTool', 'messages', 'timeoutMs', 'tools']);
+  });
+  assert.deepEqual(today.logged, [0, 1].map(() => ({
+    event: 'model_call', files: 1, effort: 'default', code: 'ok', usage: usage(), model: 'm', provider: null,
+  })));
+  assert.deepEqual([expected.status, expected.dependencies, expected.coverage.reviewed], ['ok', { model: 'ok' }, ['src/a.ts', 'src/b.ts']]);
+  const variants: Array<{ mcpServers?: McpServer[]; toolChoice?: 'forced' }> = [{}, { mcpServers: [] }, { toolChoice: 'forced' }, { mcpServers: [], toolChoice: 'forced' }];
+  for (const variant of variants) {
+    const d = deps({ ...spec(), ...variant });
+    const r = await review(lim, d);
+    assert.equal('mcp' in r.dependencies, false);
+    assert.deepEqual(d.model.requests, today.model.requests);
+    assert.deepEqual(r, expected);
+    assert.deepEqual(d.logged, today.logged);
+  }
+});
+
+test('the system message with no tool offered is the contract, character for character', async () => {
+  const docs = fakeServer({ tools: ['get_page'], listed: ['search'] });
+  const d = deps({ files: [fileA], answers: [answerOnA], mcpServers: [docs.server] });
+  const r = await review(own, d);
+  const plain = deps({ files: [fileA], answers: [answerOnA] });
+  await review(own, plain);
+  assert.equal(d.model.requests[0]!.messages[0]!.content, CONTRACT);
+  assert.deepEqual([d.model.requests[0]!.tools, d.model.requests[0]!.forcedTool], [[submitReviewTool], 'submit_review']);
+  assert.deepEqual(d.model.requests, plain.model.requests);
+  assert.deepEqual(r.dependencies.mcp, { docs: { status: 'error', code: 'tool_not_listed', calls: 0 } });
+  assert.deepEqual(kinds(docs, 'close').length, 1);
+});
+
+test('servers are opened once for a review of two batches and closed once, and both batches are sent the same rules and tools', async () => {
+  const docs = fakeServer();
+  const d = deps({ files: [fileA, fileB], answerFor: { 'src/a.ts': answerOnA, 'src/b.ts': answerOnB }, mcpServers: [docs.server] });
+  logRequests(d, docs);
+  const r = await review(await roomFor(1.5), d);
+  assert.equal(d.model.requests.length, 2);
+  assert.deepEqual(docs.log, [['open'], ['request'], ['request'], ['close']]);
+  for (const q of d.model.requests) {
+    assert.equal(q.messages[0]!.content, SYSTEM_WITH_TOOLS);
+    assert.deepEqual([q.tools, q.forcedTool], [[submitReviewTool, docsSearch], null]);
+  }
+  assert.deepEqual(r.dependencies, { model: 'ok', mcp: { docs: { status: 'ok', code: 'ok', calls: 0 } } });
+  assert.deepEqual(r.coverage.reviewed, ['src/a.ts', 'src/b.ts']);
+});
+
+test('a tool call of the model reaches the server, and its result reaches the model wrapped with the review\'s token', async () => {
+  const docs = fakeServer();
+  const d = deps({ files: [fileA], answers: [callsTools(searchCall('c1')), answerOnA], mcpServers: [docs.server] });
+  const r = await review(own, d);
+  assert.deepEqual(kinds(docs, 'call'), [['call', 'search', { query: 'cart' }]]);
+  assert.equal(d.model.requests.length, 2);
+  assert.deepEqual(d.model.requests[1]!.messages.at(-1), {
+    role: 'tool', toolCallId: 'c1', content: `<<<data ${TOKEN} tool result docs__search>>>\nsearch result\n<<<end ${TOKEN}>>>`,
+  });
+  assert.equal(r.dependencies.mcp!.docs!.calls, 1);
+  assert.ok(r.audit.some((e) => e.stage === 'tools' && e.action === 'tool_call' && e.subject === 'docs__search' && e.reason === 'ok:13'));
+  assert.deepEqual([r.status, r.usage.calls, r.findings.length], ['ok', 2, 1]);
+});
+
+test('the sessions are closed when the review fails, when a model call throws, and when every batch fails', async () => {
+  // Each case makes a tool call first, so that the log holds requests, a call and the close, in the order they happened.
+  const cases: Step[][] = [
+    [callsTools(searchCall('c1')), new ProviderError('auth', 'c', 401, null)],
+    [callsTools(searchCall('c1')), () => { throw new Error('boom'); }],
+    [callsTools(searchCall('c1')), ungrounded, ungrounded],
+  ];
+  for (const answers of cases) {
+    const docs = fakeServer();
+    const d = deps({ files: [fileA], answers, mcpServers: [docs.server] });
+    logRequests(d, docs);
+    const r = await review(own, d);
+    assert.equal(r.status, 'failed');
+    assert.equal(kinds(docs, 'close').length, 1);
+    assert.equal(kinds(docs, 'call').length, 1);
+    assert.equal(kinds(docs, 'request').length, answers.length);
+    assert.deepEqual(docs.log.at(-1), ['close']);
+    assert.ok(r.dependencies.mcp !== undefined);
+  }
+  // reviewOnce turns every error into a failed result, an error whose name throws when it is read included: it ends
+  // as the same failed result as any other unexpected error, and the session is closed all the same, last.
+  const hostile = new Error('boom');
+  Object.defineProperty(hostile, 'name', { get() { throw new Error('trap'); } });
+  const docs = fakeServer();
+  const d = deps({ files: [fileA], answers: [callsTools(searchCall('c1')), () => { throw hostile; }], mcpServers: [docs.server] });
+  logRequests(d, docs);
+  const r = await review(own, d);
+  const plainDocs = fakeServer();
+  const plain = await review(own, deps({ files: [fileA], answers: [callsTools(searchCall('c1')), () => { throw new Error('boom'); }], mcpServers: [plainDocs.server] }));
+  assert.deepEqual([r.status, r.failure, r.usage, r.dependencies], [plain.status, plain.failure, plain.usage, plain.dependencies]);
+  assert.equal(r.status, 'failed');
+  assert.ok(d.logged.some((e) => e.event === 'internal_error' && e.name === 'unknown'));
+  assert.deepEqual(docs.log, [['open'], ['request'], ['call', 'search', { query: 'cart' }], ['request'], ['close']]);
+});
+
+test('a review that calls no model opens nothing and says nothing of servers', async () => {
+  for (const [files, inp] of [[[], own], [[binaryNoPatch], own], [[fileA], limitsOf(10)]] as Array<[ChangedFile[], ReviewInput]>) {
+    const docs = fakeServer();
+    const d = deps({ files, mcpServers: [docs.server] });
+    const r = await review(inp, d);
+    assert.deepEqual(docs.log, []);
+    assert.equal('mcp' in r.dependencies, false);
+    assert.equal(d.model.requests.length, 0);
+  }
+});
+
+test('a pull request from a fork is reviewed with no tool, and the result says why', async () => {
+  for (const [fromFork, code] of [[true, 'from_fork'], [undefined, 'origin_unknown']] as Array<[boolean | undefined, string]>) {
+    const pr: PullRequestInfo = { ...input.pullRequest };
+    if (fromFork !== undefined) pr.fromFork = fromFork;
+    const docs = fakeServer();
+    const d = deps({ files: [fileA], answers: [answerOnA], mcpServers: [docs.server] });
+    const r = await review({ ...input, pullRequest: pr }, d);
+    const plain = deps({ files: [fileA], answers: [answerOnA] });
+    await review({ ...input, pullRequest: pr }, plain);
+    assert.deepEqual(docs.log, []);
+    assert.deepEqual(d.model.requests, plain.model.requests);
+    assert.deepEqual(r.dependencies.mcp, { docs: { status: 'skipped', code, calls: 0 } });
+  }
+});
+
+test('tools that would cost a file its contents are not offered for the whole review, and the audit says so', async () => {
+  const full = await unitOf(fileA, true);
+  const bare = await unitOf(fileA, false);
+  // With the room the file loses its contents; without it, it keeps them. Then a budget that leaves no room at all.
+  const limits = [fixedTokens(SYSTEM_WITH_TOOLS, own.pullRequest) + toolRoomTokens([docsSearch]) + bare, fixedTokens(CONTRACT, own.pullRequest) + full];
+  for (const inputTokensPerCall of limits) {
+    assert.ok(inputTokensPerCall - fixedTokens(CONTRACT, own.pullRequest) >= full);
+    const docs = fakeServer();
+    const d = withContent(deps({ files: [fileA], answers: [answerOnA], mcpServers: [docs.server] }));
+    const r = await review(limitsOf(inputTokensPerCall), d);
+    const plain = withContent(deps({ files: [fileA], answers: [answerOnA] }));
+    await review(limitsOf(inputTokensPerCall), plain);
+    assert.deepEqual(d.model.requests, plain.model.requests);
+    assert.ok(d.model.requests[0]!.messages[2]!.content.includes('### Full file'));
+    assert.deepEqual(r.audit.filter((e) => e.action === 'tools_cut'), [{ stage: 'context', action: 'tools_cut', subject: 'tools', reason: 'over_call_budget' }]);
+    assert.equal(r.audit.some((e) => e.action === 'full_file_cut'), false);
+    assert.deepEqual(r.dependencies.mcp, { docs: { status: 'skipped', code: 'no_room', calls: 0 } });
+    assert.deepEqual([kinds(docs, 'open').length, kinds(docs, 'close').length], [1, 1]);
+  }
+});
+
+test('a file that is cut with or without the tools does not cost the tools their place', async () => {
+  // Larger than the room the tools take: its full contents are cut with them and without them.
+  const huge = Array.from({ length: 1_000 }, (_, i) => `const line${i} = '${'x'.repeat(110)}';`).join('\n');
+  const docs = fakeServer();
+  const d = deps({ files: [fileA], answers: [answerOnA], mcpServers: [docs.server] });
+  d.source.getFileContent = async (_p, path) => (path === 'src/a.ts' ? huge : null);
+  const r = await review(await roomFor(1), d);
+  const plain = deps({ files: [fileA], answers: [answerOnA] });
+  plain.source.getFileContent = d.source.getFileContent;
+  const without = await review(await roomFor(1), plain);
+  assert.ok(without.audit.some((e) => e.action === 'full_file_cut' && e.subject === 'src/a.ts'));
+  assert.ok(r.audit.some((e) => e.action === 'full_file_cut' && e.subject === 'src/a.ts'));
+  assert.equal(r.audit.some((e) => e.action === 'tools_cut'), false);
+  assert.deepEqual(d.model.requests[0]!.tools, [submitReviewTool, docsSearch]);
+  assert.deepEqual(r.coverage, { reviewed: ['src/a.ts'], notReviewed: [] });
+  assert.deepEqual(r.dependencies.mcp, { docs: { status: 'ok', code: 'ok', calls: 0 } });
+});
+
+test('tools never cost the extension context its place', async () => {
+  // Room for everything: the text is shown and the tools are offered.
+  const roomy = deps({ files: [fileA], answers: [answerOnA], contextProviders: [ticketProvider()], mcpServers: [fakeServer().server] });
+  await review(own, roomy);
+  assert.equal(roomy.model.requests[0]!.messages[1]!.content.endsWith(extensionPart(ticketContext, TOKEN)), true);
+  assert.deepEqual(roomy.model.requests[0]!.tools, [submitReviewTool, docsSearch]);
+  // Room for the text and the file's contents, not for the tools: the text is shown and the tools are not offered.
+  const full = await unitOf(fileA, true);
+  const tight = limitsOf(fixedTokens(CONTRACT, own.pullRequest, false, undefined, ticketContext) + full);
+  const d = withContent(deps({ files: [fileA], answers: [answerOnA], contextProviders: [ticketProvider()], mcpServers: [fakeServer().server] }));
+  const r = await review(tight, d);
+  const plain = withContent(deps({ files: [fileA], answers: [answerOnA], contextProviders: [ticketProvider()] }));
+  await review(tight, plain);
+  assert.equal(d.model.requests[0]!.messages[1]!.content.endsWith(extensionPart(ticketContext, TOKEN)), true);
+  assert.deepEqual(d.model.requests, plain.model.requests);
+  assert.equal(r.audit.some((e) => e.action === 'extension_context_cut'), false);
+  assert.deepEqual(r.dependencies.mcp, { docs: { status: 'skipped', code: 'no_room', calls: 0 } });
+});
+
+test('the batches of a review share the eight calls', async () => {
+  // Each call asks for its own id, so that the server's log says which batch sent it.
+  const five = (prefix: string): Raw => callsTools(...[1, 2, 3, 4, 5].map((n) => searchCall(`${prefix}${n}`, `${prefix}${n}`)));
+  const docs = fakeServer();
+  const d = deps({
+    files: [fileA, fileB], mcpServers: [docs.server],
+    answerFor: { 'src/a.ts': inTurn(five('a'), answerOnA), 'src/b.ts': inTurn(five('b'), answerOnB) },
+  });
+  const r = await review(await roomFor(1.5), d);
+  assert.equal(kinds(docs, 'call').length, 8);
+  // Whichever order the two batches' calls take, eight are sent and two are not run: the first call refused for
+  // the cap is NOT_RUN_CAP, and a call after it in the same turn is NOT_RUN_CLOSED.
+  const notRun = (c: string): boolean => c === NOT_RUN_CAP || c === NOT_RUN_CLOSED;
+  const lasts = d.model.requests.filter((q) => toolMessages(q).length > 0);
+  assert.equal(lasts.length, 2);
+  const answered = lasts.flatMap(toolMessages);
+  assert.equal(answered.length, 10);
+  assert.equal(answered.filter((m) => !notRun(m.content)).length, 8);
+  assert.equal(answered.filter((m) => notRun(m.content)).length, 2);
+  assert.ok(answered.some((m) => m.content === NOT_RUN_CAP));
+  for (const prefix of ['a', 'b']) {
+    const own = answered.filter((m) => m.toolCallId!.startsWith(prefix));
+    assert.deepEqual(own.map((m) => m.toolCallId), [1, 2, 3, 4, 5].map((n) => `${prefix}${n}`));
+    const sent = kinds(docs, 'call').filter((e) => (e[2] as { query: string }).query.startsWith(prefix)).length;
+    assert.equal(sent, own.filter((m) => !notRun(m.content)).length);
+    assert.equal(sent + own.filter((m) => notRun(m.content)).length, 5);
+  }
+  assert.equal(r.dependencies.mcp!.docs!.calls, 8);
+  assert.deepEqual([r.status, r.coverage.reviewed.length], ['ok', 2]);
+});
+
+test('two batches racing for the last call: one call reaches the server', async () => {
+  const docs = fakeServer({ answer: (tool) => new Promise((resolve) => setTimeout(() => resolve(textResult(`${tool} result`)), 5)) });
+  const d = deps({
+    files: [fileA, fileB], mcpServers: [docs.server], delayMs: 2,
+    answerFor: {
+      'src/a.ts': inTurn(callsTools(searchCall('a1'), searchCall('a2'), searchCall('a3'), searchCall('a4')), callsTools(searchCall('a5')), answerOnA),
+      'src/b.ts': inTurn(callsTools(searchCall('b1'), searchCall('b2'), searchCall('b3')), callsTools(searchCall('b4')), answerOnB),
+    },
+  });
+  const r = await review(await roomFor(1.5), d);
+  assert.equal(kinds(docs, 'call').length, 8);
+  const last = d.model.requests.flatMap((q) => toolMessages(q).filter((m) => m.toolCallId === 'a5' || m.toolCallId === 'b4'));
+  const byId = new Map(last.map((m) => [m.toolCallId, m.content]));
+  assert.deepEqual([...byId.values()].filter((c) => c === NOT_RUN_CAP).length, 1);
+  assert.equal(byId.size, 2);
+  assert.deepEqual([r.status, r.coverage.reviewed], ['ok', ['src/a.ts', 'src/b.ts']]);
+  assert.equal(r.audit.filter((e) => e.action === 'batch_failed').length, 0);
+});
+
+test('a second try is sent no tools', async () => {
+  const docs = fakeServer();
+  const timeout = new ProviderError('timeout', 't', null, null);
+  const d = deps({ files: [fileA, fileB], answers: [callsTools(searchCall('c1')), timeout, answerOnA, answerOnB], mcpServers: [docs.server] });
+  const r = await review(own, d);
+  const plain = deps({ files: [fileA, fileB], answers: [timeout, answerOnA, answerOnB] });
+  await review(own, plain);
+  assert.equal(d.model.requests.length, 4);
+  const halves = d.model.requests.slice(2);
+  for (const q of halves) {
+    assert.equal(q.messages[0]!.content, CONTRACT);
+    assert.deepEqual([q.tools, q.forcedTool, toolMessages(q)], [[submitReviewTool], 'submit_review', []]);
+  }
+  assert.deepEqual(halves, plain.model.requests.slice(1));
+  assert.equal(d.logged.filter((e) => e.event === 'model_call').length, 3);
+  assert.deepEqual(r.coverage.reviewed, ['src/a.ts', 'src/b.ts']);
+  assert.deepEqual(r.dependencies, { model: 'ok', mcp: { docs: { status: 'ok', code: 'ok', calls: 1 } } });
+  // a first call that ends rate_limited: its retry is sent no tools either, and nothing is withheld
+  const limited = deps({ files: [fileA], answers: [new ProviderError('rate_limited', 'r', 429, null), answerOnA], mcpServers: [fakeServer().server] });
+  const again = await review(own, limited);
+  assert.deepEqual(limited.model.requests.map((q) => [q.messages[0]!.content, q.tools.length]), [[SYSTEM_WITH_TOOLS, 2], [CONTRACT, 1]]);
+  assert.deepEqual(again.dependencies, { model: 'ok', mcp: { docs: { status: 'ok', code: 'ok', calls: 0 } } });
+  assert.equal(again.audit.some((e) => e.action === 'tools_refused'), false);
+});
+
+test('an endpoint that refuses a request with tools costs the tools, not the review', async () => {
+  const fileC = fileAt('src/c.ts');
+  const refuse = (answer: unknown) => (q: ModelRequest): Step => (q.tools.length > 1 ? new ProviderError('provider', 'p', 400, null) : answer);
+  const docs = fakeServer();
+  const d = deps({
+    files: [fileA, fileB, fileC], mcpServers: [docs.server],
+    answerFor: { 'src/a.ts': refuse(answerOnA), 'src/b.ts': refuse(answerOnB), 'src/c.ts': refuse(okFor(fileC)) },
+  });
+  const r = await review(await roomFor(1.5), d);
+  assert.equal(d.model.requests.length, 5);
+  assert.deepEqual(d.model.requests.map((q) => q.tools.length), [2, 2, 1, 1, 1]);
+  for (const q of d.model.requests.slice(2)) assert.deepEqual([q.messages[0]!.content, q.forcedTool], [CONTRACT, 'submit_review']);
+  assert.equal(r.status, 'ok');
+  assert.deepEqual([...r.coverage.reviewed].sort(), ['src/a.ts', 'src/b.ts', 'src/c.ts']);
+  assert.deepEqual(r.dependencies, { model: 'ok', mcp: { docs: { status: 'error', code: 'model_refused_tools', calls: 0 } } });
+  assert.deepEqual(r.audit.filter((e) => e.action === 'tools_refused'), [{ stage: 'model', action: 'tools_refused', subject: 'batch', reason: 'provider' }]);
+  assert.equal(kinds(docs, 'close').length, 1);
+});
+
+test('a second try that fails too is the model\'s failure, as today', async () => {
+  const down = new ProviderError('provider', 'p', 502, null);
+  const r = await review(own, deps({ files: [fileA], answers: [down, down], mcpServers: [fakeServer().server] }));
+  assert.deepEqual([r.status, r.failure, r.dependencies.model], ['failed', { stage: 'model', code: 'provider' }, 'error']);
+  assert.deepEqual(r.dependencies.mcp, { docs: { status: 'ok', code: 'ok', calls: 0 } });
+  assert.equal(r.audit.some((e) => e.action === 'tools_refused'), false);
+});
+
+test('a model that only makes up tools costs each batch one more request, and no call reaches a server', async () => {
+  const docs = fakeServer();
+  const nope = () => callsTools(toolCallOf('c1', 'docs__nope', '{}'));
+  const d = deps({
+    files: [fileA, fileB], mcpServers: [docs.server],
+    answerFor: { 'src/a.ts': inTurn(nope(), answerOnA), 'src/b.ts': inTurn(nope(), answerOnB) },
+  });
+  const r = await review(await roomFor(1.5), d);
+  assert.equal(d.model.requests.length, 4);
+  assert.equal(kinds(docs, 'call').length, 0);
+  assert.deepEqual(r.audit.filter((e) => e.action === 'tool_call_refused').map((e) => [e.subject, e.reason]), [['unknown', 'unknown_tool'], ['unknown', 'unknown_tool']]);
+  assert.deepEqual(r.audit.filter((e) => e.action === 'tools_closed').map((e) => e.reason), ['nothing_sent', 'nothing_sent']);
+  assert.equal(r.status, 'ok');
+  assert.doesNotMatch(JSON.stringify(r), /docs__nope/);
+});
+
+test('a server that cannot be opened never fails the review, and with no tool offered the requests are those of a review with no server', async () => {
+  const docs = fakeServer({ open: () => Promise.reject(new Error('http_401')) });
+  const d = deps({ files: [fileA], answers: [answerOnA], mcpServers: [docs.server] });
+  const r = await review(own, d);
+  const plain = deps({ files: [fileA], answers: [answerOnA] });
+  const expected = await review(own, plain);
+  assert.equal(r.status, 'ok');
+  assert.deepEqual(r.findings, expected.findings);
+  assert.deepEqual(d.model.requests, plain.model.requests);
+  assert.deepEqual(r.dependencies.mcp, { docs: { status: 'error', code: 'open_http_401', calls: 0 } });
+  assert.deepEqual(kinds(docs, 'close'), []);
+});
+
+test('a server that fails in the middle of a review does not fail it', async () => {
+  const docs = fakeServer({ answer: () => Promise.resolve({ ok: false, code: 'timeout' }) });
+  const d = deps({ files: [fileA], answers: [callsTools(searchCall('c1')), answerOnA], mcpServers: [docs.server] });
+  const r = await review(own, d);
+  assert.equal(d.model.requests.length, 2);
+  const closing = d.model.requests[1]!;
+  assert.deepEqual([closing.forcedTool, closing.messages.at(-1)], ['submit_review', { role: 'user', content: FINAL_LINE }]);
+  assert.equal(r.status, 'ok');
+  assert.deepEqual(r.dependencies.mcp, { docs: { status: 'error', code: 'call_timeout', calls: 1 } });
+});
+
+test('the model_call line counts the tool calls only for a call that was given tools', async () => {
+  const d = deps({ files: [fileA], answers: [callsTools(searchCall('c1')), answerOnA], mcpServers: [fakeServer().server] });
+  await review(own, d);
+  assert.deepEqual(d.logged, [{
+    event: 'model_call', files: 1, effort: 'default', code: 'ok', usage: { ...usage(), calls: 2, inputTokens: 200, outputTokens: 20, cachedTokens: 10, cost: 1 },
+    model: 'm', provider: null, tool_calls: 1,
+  }]);
+  const retried = deps({ files: [fileA], answers: [new ProviderError('rate_limited', 'r', 429, null), answerOnA], mcpServers: [fakeServer().server] });
+  await review(own, retried);
+  assert.deepEqual(retried.logged.map((e) => ['tool_calls' in e, e.tool_calls]), [[true, 0], [false, undefined]]);
+  const plain = deps({ files: [fileA], answers: [answerOnA] });
+  await review(own, plain);
+  assert.equal('tool_calls' in plain.logged[0]!, false);
+});
+
+test('with a scorer the scorer is sent no tool and no result', async () => {
+  const withTools = scorerStub(() => ({ blocks: { B1: refunds } }));
+  await review(own, deps({ files: [fileA], answers: [callsTools(searchCall('c1')), scored('src/a.ts', 20)], scorer: withTools, mcpServers: [fakeServer().server] }));
+  const without = scorerStub(() => ({ blocks: { B1: refunds } }));
+  await review(own, deps({ files: [fileA], answers: [scored('src/a.ts', 20)], scorer: without }));
+  assert.equal(withTools.requests.length, 1);
+  assert.deepEqual(withTools.requests, without.requests);
+  assert.doesNotMatch(JSON.stringify(withTools.requests), /search result|docs__search/);
+});
+
+test('the sessions are closed at once when no tool can be called: no room, and no named tool offered', async () => {
+  const bare = await unitOf(fileA, false);
+  const noRoom = limitsOf(fixedTokens(SYSTEM_WITH_TOOLS, own.pullRequest) + toolRoomTokens([docsSearch]) + bare);
+  const cases: Array<[FakeServer, ReviewInput, string]> = [
+    [fakeServer(), noRoom, 'no_room'],
+    [fakeServer({ tools: ['get_page'], listed: ['search'] }), own, 'tool_not_listed'],
+  ];
+  for (const [docs, inp, code] of cases) {
+    const d = withContent(deps({ files: [fileA], answers: [answerOnA], mcpServers: [docs.server] }));
+    logRequests(d, docs);
+    const r = await review(inp, d);
+    assert.deepEqual(docs.log, [['open'], ['close'], ['request']], code);
+    assert.equal(r.dependencies.mcp!.docs!.code, code);
+  }
 });

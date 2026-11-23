@@ -43,7 +43,7 @@ export function cutText(text: string, limit: number): string {
 
 // Deletion can join the pieces around an occurrence into a new one, so repeat
 // until none is left. Each pass shortens the text, so this terminates.
-function deleteToken(text: string, token: string): string {
+export function deleteToken(text: string, token: string): string {
   let result = text;
   while (result.includes(token)) {
     result = result.replaceAll(token, '');
