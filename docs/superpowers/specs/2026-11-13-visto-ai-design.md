@@ -231,7 +231,7 @@ All text supplied by the pull request, the repository, a ticket or a tool is dat
 - **Retries.** Invalid output gets one retry, with the validation reason appended. A timeout on a batch of several files splits the batch in two and retries once. A provider error moves to the next model in the configured fallback list. The model that answered is read from the response and recorded.
 - **What counts as a provider error.** Any status outside 2xx. Also a 200 response that carries an `error` object, has no choices, or ends a choice with `finish_reason: "error"`: OpenRouter reports failures of the upstream model this way. Two errors are not retried on another model, because the next model would fail the same way: a rejected key (401) and a key with no credit left (402). On either, reviews pause, gated checks say why, and an alert fires. A rate limit (429) is retried after the delay the response names.
 
-The contract is one file in git. The rules for tools are a text in the code, added to the system message only when a tool is offered, and the contract's test pins them. A test asserts its key rules, so a careless edit fails the build.
+The contract is one file in git, and a test asserts its key rules, so a careless edit fails the build. The rules for tools are a text in the code, added to the system message only when a tool is offered, and the same test pins that text whole.
 
 ### 5.5 What the model returns
 
@@ -856,7 +856,7 @@ Each of these comes from documentation or third-party reports, not from a test.
 12. That the review model's findings are the same under the contract it gets when a scorer is named (section 6.7) as under the review contract. The findings rules are the same text in both; the replay eval run with a scorer named is what shows it.
 13. That the endpoint accepts a request that names a tool after turns whose reasoning was sent back. Where it does not, the batch is reviewed without tools (section 5.4).
 
-Items 1 to 3 and 6 to 9 need a scratch repository and the owner's go-ahead. Items 4 and 12 need an OpenRouter key and the owner's go-ahead, because they spend money.
+Items 1 to 3 and 6 to 9 need a scratch repository and the owner's go-ahead. Items 4, 12 and 13 need an OpenRouter key and the owner's go-ahead, because they spend money.
 
 ## 21. Open points for the owner
 

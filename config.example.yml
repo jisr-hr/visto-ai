@@ -35,7 +35,8 @@ model:
   toolChoice: forced
 
 limits:
-  # Input tokens allowed in one model call.
+  # Input tokens allowed in one model call. With MCP servers named, under about 34,000 the tools never fit:
+  # every review then records each server as skipped with no_room, and nothing alerts.
   inputTokensPerCall: 200000
   # Batches of files allowed in one review.
   batchesPerReview: 6
