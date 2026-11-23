@@ -104,16 +104,22 @@ function readSchema(schema: unknown): SchemaRead {
 }
 
 function readDescription(server: string, tool: string, description: unknown): { text: string; removed: number; cut: boolean } {
-  const fallback = `Tool ${tool} of the MCP server ${server}.`;
-  if (typeof description !== 'string') return { text: fallback, removed: 0, cut: false };
-  // A huge one is cut first, so that it costs nothing to clean; that cut counts as a cut.
-  const first = cutAt(description, 4 * TOOL_DESCRIPTION_CHARS);
-  const clean = cleanString(first);
-  const trimmed = clean.text.trim();
-  if (trimmed === '') return { text: fallback, removed: clean.removed, cut: false };
-  const body = cutAt(trimmed, TOOL_DESCRIPTION_CHARS);
-  const cut = body.length < trimmed.length || first.length < description.length;
-  return { text: cut ? `${body}${CUT_MARK}` : body, removed: clean.removed, cut };
+  let removed = 0;
+  // Cleaned, then cut. A huge one is cut first, so that it costs nothing to clean; that cut counts as a cut.
+  const clean = (raw: string): { text: string; cut: boolean } => {
+    const first = cutAt(raw, 4 * TOOL_DESCRIPTION_CHARS);
+    const cleaned = cleanString(first);
+    removed += cleaned.removed;
+    const trimmed = cleaned.text.trim();
+    const body = cutAt(trimmed, TOOL_DESCRIPTION_CHARS);
+    const cut = body !== '' && (body.length < trimmed.length || first.length < raw.length);
+    return { text: cut ? `${body}${CUT_MARK}` : body, cut };
+  };
+  const given = typeof description === 'string' ? clean(description) : { text: '', cut: false };
+  if (given.text !== '') return { ...given, removed };
+  // The stand-in holds the config's tool name, which may hold what the config check lets through: it is cleaned too.
+  const fallback = clean(`Tool ${tool} of the MCP server ${server}.`);
+  return { ...fallback, removed };
 }
 
 /**
@@ -150,9 +156,20 @@ export function offerTools(server: string, allowed: string[], listed: unknown, t
   return { offered, audit, problem };
 }
 
+// Deletion can join the pieces around an occurrence into a new one, so it is repeated until none is left.
+function deleteToken(text: string, token: string): string {
+  let result = text;
+  while (result.includes(token)) result = result.replaceAll(token, '');
+  return result;
+}
+
+// A result's text as it is shown, before it is cut: stripped first, since an invisible character can hide a token
+// that stripping then joins; made well formed; the token deleted; trimmed.
+const cleanResult = (text: string, token: string): string => deleteToken(stripControl(text).text.toWellFormed(), token).trim();
+
 // The raw text of a result and whether it was cut on the way, or null when it has no shape this reads.
 // May throw, when the result throws as it is read: the caller's guard makes that no result.
-function readResult(result: unknown): { text: string; cut: boolean; isError: boolean } | null {
+function readResult(result: unknown, token: string): { text: string; cut: boolean; isError: boolean } | null {
   if (!isPlainObject(result)) return null;
   const { content, structuredContent, isError } = result;
   const limit = 4 * TOOL_RESULT_CHARS;
@@ -173,9 +190,10 @@ function readResult(result: unknown): { text: string; cut: boolean; isError: boo
         const type: unknown = (item as { type: unknown }).type;
         const text: unknown = type === 'text' ? (item as { text: unknown }).text : undefined;
         if (typeof text === 'string') {
-          if (text !== '') anyText = true;
+          // Cut before anything else, so that a huge item costs nothing; an item empty once cleaned is no text.
           line = cutAt(text, limit + 1);
           if (line.length < text.length) cut = true;
+          if (cleanResult(line, token) !== '') anyText = true;
         } else {
           line = `[${typeof type === 'string' && PLACEHOLDERS.has(type) ? type : 'item'} omitted]`;
         }
@@ -189,7 +207,7 @@ function readResult(result: unknown): { text: string; cut: boolean; isError: boo
   }
   const failed = isError === true;
   if (!anyText && structuredContent !== undefined && structuredContent !== null) {
-    // No text item gave any text, so nothing was cut above.
+    // No text item gave any text once cleaned. What was cut above is replaced, so it is no cut of this text.
     const written: unknown = JSON.stringify(structuredContent);
     if (typeof written === 'string') return { text: written, cut: false, isError: failed };
   }
@@ -203,13 +221,15 @@ function readResult(result: unknown): { text: string; cut: boolean; isError: boo
  */
 export function resultMessage(fn: string, result: unknown, token: string): { content: string; reason: string } | null {
   try {
-    const read = readResult(result);
+    if (token === '') return null;
+    const read = readResult(result, token);
     if (read === null) return null;
     const limit = 4 * TOOL_RESULT_CHARS;
     const first = cutAt(read.text, limit);
-    const trimmed = stripControl(first).text.toWellFormed().trim();
-    const body = cutAt(trimmed, TOOL_RESULT_CHARS);
-    const cut = read.cut || first.length < read.text.length || body.length < trimmed.length;
+    // The token is gone from the text before it is cut, so the body is what the markers hold and n counts it.
+    const cleaned = cleanResult(first, token);
+    const body = cutAt(cleaned, TOOL_RESULT_CHARS);
+    const cut = read.cut || first.length < read.text.length || body.length < cleaned.length;
     const n = `${body.length}${cut ? ':cut' : ''}`;
     const shown = cut ? `${body}${CUT_MARK}` : body;
     if (read.isError) {

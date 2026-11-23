@@ -294,6 +294,69 @@ test('a huge result costs nothing to clean', () => {
   assert.ok(performance.now() - started < 2_000);
 });
 
+test('a stand-in description is cleaned as a server\'s is', () => {
+  const name = 'se\u200barch\ud800';
+  const answer = offerTools('docs', [name], [tool(name, { description: undefined })], none);
+  const offered = answer.offered[0]!.definition.function;
+  assert.equal(offered.name, 'docs__se_arch_');
+  assert.equal(offered.description, 'Tool search\ufffd of the MCP server docs.');
+  assert.equal(offered.description, offered.description.toWellFormed());
+  assert.ok(!offered.description.includes('\u200b'));
+  assert.deepEqual(answer.audit, [{ stage: 'tools', action: 'control_characters_stripped', subject: 'tool docs__se_arch_', reason: '1' }]);
+});
+
+test('a result is stripped before the token is deleted, and its count is what is shown', () => {
+  const nested = resultMessage('docs__search', { content: [{ type: 'text', text: 'abcdef01abcdef012345678923456789' }] }, TOKEN);
+  assert.deepEqual(nested, { content: RESULT_EMPTY, reason: 'empty' });
+  assert.deepEqual(resultMessage('docs__search', { isError: true, content: [{ type: 'text', text: ` ${TOKEN} ` }] }, TOKEN), { content: ERROR_EMPTY, reason: 'is_error:0' });
+
+  const hidden = resultMessage('docs__search', { content: [{ type: 'text', text: `before abcdef01\u200b23456789 after` }] }, TOKEN)!;
+  const inside = hidden.content.split('\n').slice(1, -1).join('\n');
+  assert.equal(inside, 'before  after');
+  assert.equal(hidden.content.split(TOKEN).length, 3);
+
+  const held = resultMessage('docs__search', { content: [{ type: 'text', text: `one ${TOKEN} two` }] }, TOKEN)!;
+  const shown = held.content.split('\n').slice(1, -1).join('\n');
+  assert.equal(shown, 'one  two');
+  assert.equal(held.reason, `ok:${shown.length}`);
+
+  const cutHeld = resultMessage('docs__search', { content: [{ type: 'text', text: `${TOKEN}${'y'.repeat(9_000)}` }] }, TOKEN)!;
+  const cutShown = cutHeld.content.split('\n').slice(1, -1).join('\n');
+  assert.equal(cutHeld.reason, `ok:${cutShown.length - ' [cut]'.length}:cut`);
+  assert.equal(cutShown, `${'y'.repeat(8_000)} [cut]`);
+});
+
+test('a text item that is empty once cleaned is no text, and structured content is used', () => {
+  const answer = resultMessage('docs__search', { content: [{ type: 'text', text: '\u200b' }], structuredContent: { hits: 1 } }, TOKEN)!;
+  assert.equal(answer.content, `<<<data ${TOKEN} tool result docs__search>>>\n{"hits":1}\n<<<end ${TOKEN}>>>`);
+  assert.equal(answer.reason, 'ok:10');
+  const token = resultMessage('docs__search', { content: [{ type: 'text', text: TOKEN }], structuredContent: { hits: 1 } }, TOKEN)!;
+  assert.equal(token.reason, 'ok:10');
+});
+
+test('no more than the items read are read, and a large item is cut before it is joined', () => {
+  const read = new Set<number>();
+  const items = Array.from({ length: 60 }, (_, i) => ({ type: 'text', text: `t${i}` }));
+  const counted = new Proxy(items, {
+    get(target, key, receiver) {
+      if (typeof key === 'string' && /^\d+$/.test(key)) read.add(Number(key));
+      return Reflect.get(target, key, receiver) as unknown;
+    },
+  });
+  const answer = resultMessage('docs__search', { content: counted }, TOKEN)!;
+  assert.ok(read.size <= TOOL_ITEMS_READ, String(read.size));
+  assert.ok(Math.max(...read) < TOOL_ITEMS_READ);
+  assert.ok(answer.content.includes('[more items omitted]'));
+
+  // The tail of a large item lies past what is read of it, so it is never seen: not as text, and not as a reason to
+  // pass over the structured content.
+  const large = resultMessage('docs__search', {
+    content: [{ type: 'text', text: `${'\u200b'.repeat(4 * TOOL_RESULT_CHARS + 1)}TAIL` }], structuredContent: { hits: 1 },
+  }, TOKEN)!;
+  assert.ok(!large.content.includes('TAIL'));
+  assert.equal(large.content, `<<<data ${TOKEN} tool result docs__search>>>\n{"hits":1}\n<<<end ${TOKEN}>>>`);
+});
+
 // ---- Opening, calling and closing under limits
 
 const pr: PullRequestInfo = {
