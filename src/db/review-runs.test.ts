@@ -237,3 +237,10 @@ test('the scores at a commit are read only from a result that holds a list of sc
   ]);
   await db.close();
 });
+test('a commit whose newest ok run holds no list of scores is absent, and an older run at it is not read instead', async () => {
+  const db = await testDb();
+  await recordRun(db, run({ headSha: 'h1', result: { scores: [{ path: 'a.ts' }], verdict: { threshold: 40 } } }));
+  await recordRun(db, run({ headSha: 'h1', result: { findings: [] } }));
+  assert.deepEqual(await scoredAt(db, REF, ['h1']), []);
+  await db.close();
+});

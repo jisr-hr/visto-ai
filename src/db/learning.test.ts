@@ -196,3 +196,11 @@ test('a failed attempt is counted, a pull request at the limit of attempts is le
   assert.equal(await noteLearnFailure(db, { ...REF, number: 99 }), 0);
   await db.close();
 });
+
+test('two passes noted out of order leave the later time, and the totals still add up', async () => {
+  const db = await testDb();
+  await noteLearning(db, 'signals', '2026-03-02T10:00:00.010Z', { examined: 1, added: 1, retired: 0, failed: 0 });
+  await noteLearning(db, 'signals', '2026-03-02T10:00:00.005Z', { examined: 2, added: 0, retired: 1, failed: 1 });
+  assert.deepEqual(await readLearning(db, 'signals'), { since: '2026-03-02T10:00:00.010Z', ranAt: '2026-03-02T10:00:00.010Z', examined: 3, added: 1, retired: 1, failed: 1 });
+  await db.close();
+});

@@ -190,7 +190,8 @@ export async function hasOkRun(db: Db, ref: PullRequestRef, headSha: string, bas
   return rows.length === 1;
 }
 
-/** For each of those commits, the scores and the threshold of the newest run of the pull request at it whose outcome is ok, a dry run included: `result.scores` and `result.verdict.threshold`, as stored. A commit with no such run is absent, and so is one whose newest such run holds no list of scores (a result of an older shape, or damaged). Ordered by commit. */
+/** For each of those commits, the scores and the threshold of the newest run of the pull request at it whose outcome is ok, a dry run included: `result.scores` and `result.verdict.threshold`, as stored. A commit with no such run is absent.
+ * A commit whose newest ok run holds no list of scores (an older shape, or damaged) is absent too, with no fallback to an older run at that commit: the caller then makes its signal for the file. */
 export async function scoredAt(db: Db, ref: PullRequestRef, commits: string[]): Promise<Array<{ commit: string; scores: unknown; threshold: unknown }>> {
   if (commits.length === 0) return [];
   const r = lowered(ref);

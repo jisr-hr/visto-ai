@@ -24,13 +24,13 @@ export async function startLearning(db: Db, work: string, now: string): Promise<
   return (await readLearning(db, work))!;
 }
 
-/** A pass completed: `ran_at = now`, and each total raised by its count. Makes the row when it is not there. */
+/** A pass completed: `ran_at = now`, and each total raised by its count. Makes the row when it is not there. ran_at never moves backwards: the later of the stored time and `now` is kept. */
 export async function noteLearning(db: Db, work: string, now: string, counts: { examined: number; added: number; retired: number; failed: number }): Promise<void> {
   await db.query(
     `insert into visto_ai.learning (work, since, ran_at, examined, added, retired, failed)
      values ($1, $2::timestamptz, $2::timestamptz, $3, $4, $5, $6)
      on conflict (work) do update set
-       ran_at = excluded.ran_at,
+       ran_at = greatest(visto_ai.learning.ran_at, excluded.ran_at),
        examined = visto_ai.learning.examined + excluded.examined,
        added = visto_ai.learning.added + excluded.added,
        retired = visto_ai.learning.retired + excluded.retired,
