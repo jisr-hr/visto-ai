@@ -1768,7 +1768,7 @@ test('at the daily limit the judge makes no call, and what the judge spends paus
   await learnTimer(k).work();
   await k.until(() => lessonsLine(k).length === 1);
   assert.equal(k.modelRequests.length, 1);
-  assert.deepEqual(lessonsLine(k)[0], { event: 'lessons', judged: 1, lessons: 1, given_up: 0, failed: 0, calls: 1, cost: 50, more: false, end: 'spend_limit' });
+  assert.deepEqual(lessonsLine(k)[0], { event: 'lessons', judged: 1, lessons: 1, given_up: 0, failed: 0, calls: 1, cost: 50, more: true, end: 'spend_limit' });
   assert.deepEqual((await judgeRows(k)).verdicts, [{ reply: 'r-1', outcome: 'lesson' }]);
   assert.deepEqual(await k.webhook(pr('opened', { updatedAt: at(86_400) }), 'd-open'), { status: 202, body: 'accepted' });
   await k.runTimer(TICK_MS);
