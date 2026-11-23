@@ -7,7 +7,7 @@ These notes record what happened while `2026-11-22-the-merge-gate.md` was built:
 - The plan was drafted from the design, a map of the code it builds on and a private map of the predecessor's gate, and reviewed by another model before anything was built. That review found one critical defect, seven important ones and ten minor; all were ruled on and applied before the first line of code (decisions 1 to 7).
 - Tasks 1 to 12 were built one at a time, each by one implementer, tests first, and each reviewed by an independent reviewer working in a separate checkout of the task's commit. Four tasks needed a fix round (3, 5, 9, and the small points of 1 and 2), each re-reviewed. The points the reviews called minor were kept in a ledger and applied in two fix waves at the end of the tasks.
 - Task 13's documents were written by an implementer; its run on a real Postgres was made by the controller.
-- Then a review of the whole branch by the strongest model. It drove the real listener, both runners, the review job and the gate job through more than ten thousand random lives of gated pull requests, with deliveries reordered, held and repeated, calls to GitHub failing, restarts, pauses and changes of mode, and judged each life by reading only the fake GitHub and the database. It also sent the same deliveries through this branch with no gate and through `main`, and the rows, the writes to GitHub, the answers and the log lines were the same. It found no check written green that should not be, four important gaps in which a check was kept stale or missing or a command was lost, and smaller points. One fix wave followed (decisions 17 to 20), and a re-review by the same model.
+- Then a review of the whole branch by the strongest model. It drove the real listener, both runners, the review job and the gate job through more than ten thousand random lives of gated pull requests, with deliveries reordered, held and repeated, calls to GitHub failing, restarts, pauses and changes of mode, and judged each life by reading only the fake GitHub and the database. It also sent the same deliveries through this branch with no gate and through `main`, and the rows, the writes to GitHub, the answers and the log lines were the same. It found no check written green that should not be, four important gaps in which a check was kept stale or missing or a command was lost, and smaller points. One fix wave followed (decisions 17 to 20). The same model then re-reviewed the fix wave with five thousand more random lives and nineteen sequences. It found nothing critical; two narrow ways a green check survived a restart, one regression of the fix wave and three flaws in the start-over. A second fix wave followed (decisions 21 to 24) and was run through the same simulator again.
 - The owner granted the trial app the gate's permissions, and the gate was tried once against it, in part. What that showed, and the one fix it led to, are below.
 
 ## Decisions taken while building
@@ -33,7 +33,7 @@ Each is the builder's, taken without the owner, and listed so he can overrule it
 12. **A skip's reason is shown inside a code span** (call 42), so that nothing in it is live.
 13. **Every call to GitHub has a time limit of 60 seconds** (call 50). This also changes the review lane: a call that hangs fails after a minute.
 14. **A review posted without its inline comments whose stored result cannot be read blocks** (call 51).
-15. **A check the service gave up on is asked for again at the next start, and a pull request found closed is recorded as such** (call 52), so that the sweep at start neither forgets the first nor asks for the second for ever.
+15. **A check the service gave up on is asked for again at the next start, and a pull request found closed is recorded as such** (call 52), so that the sweep at start does not forget the first. The second row now keeps only a pull request with no stored row out of the sweep (decision 22); a stored one is asked for whatever its rows say (decision 21).
 
 **From the trial with a real app**
 
@@ -42,13 +42,21 @@ Each is the builder's, taken without the owner, and listed so he can overrule it
 **From the review of the whole branch**
 
 17. **The sweep at start asks for every stored open gated pull request** (call 38, rewritten). As first built it asked only where the last recorded check was missing, of another mode, unfinished or failed. A thread unresolved, a push, or clearing by reply switched off while the service was down or in dry run then left a green check, or no check, until an event.
-18. **A `sync` carries the installation it was asked with** (call 53). Before, a pull request opened before the app was installed never got a check from a `/done`, a reply or a start.
-19. **A manual review that fails while the stored head moved starts over once** (call 54), also with no gate. Before, a `/done` that had joined the running review of an older head was lost when that review failed.
+18. **A `sync` carries the installation it was asked with** (call 53). Before, a pull request opened before the app was installed never got a check from a `/done`, a reply or a start. The job's own installation comes first, then the stored pull request's (decision 23).
+19. **A manual review that fails while the pull request moved on starts over once** (call 54), also with no gate. Before, a `/done` that had joined the running review of an older head was lost when that review failed. How it starts over was changed by decision 24.
 20. **Only a review that will run counts as under way** (calls 25 and 43). Before, a stranger's waiting `/review` made a green check say that a review was waiting.
+
+**From the re-review of the fix wave**
+
+21. **The sweep at start asks for every stored open gated pull request, whatever its newest recorded evaluation says** (calls 38 and 52). Before, one whose newest evaluation said closed or gone was left alone; a pull request closed, then reopened and changed while the service was in dry run kept a green check.
+22. **The sweep also asks for a pull request the service stores no row for, once the gate recorded an evaluation for it** (call 38), in a repository whose gate is enabled, with the installation of its newest job that has one. Before, such a pull request waited for its next event. Only for these, a newest evaluation of closed or gone leaves it alone, since nothing else would stop the sweep from reading it at every start; a reopening stores a row.
+23. **A gate job uses its own installation first, then the stored pull request's** (call 53), as a review job does. Before, the stored one came first; an app installed again has a new id that the stored row may not have yet.
+24. **A failed manual review starts over once, and quietly** (call 54). Before, it started over whenever the stored head differed, so a head the service had only fallen behind on could start a review, and the requester was told `review_failed` and then got the retry's answer too. Now it starts over only when the stored row was updated after the job started and its head is not the one reviewed, and the job that starts over says nothing. A `/done` or a re-run no longer joins a running review that has started over, since that one does not start over again and the command would be lost; a waiting one is still joined (call 25).
 
 ## What the reviews found that the plan had wrong
 
 - **The plan's review.** Decisions 1 to 7; a start sweep that would ask again at every start; an alert that an outage with steady events could keep from ever being raised; texts that named the skip team, told the public about the operator's account, or promised a retry after the service had given up.
+- **The re-review of the fix wave.** Decisions 21 to 24: the sweep left a green check on a pull request reopened in dry run, and one the service never stored; a gate job read a stale installation first; and the start-over answered twice and could start on a head the service had only fallen behind on.
 - **The review of the whole branch.** Decisions 17 to 20; that the README's sentence on an unwritten `newHead` was wrong for a gated pull request; and that the cost of two pull requests sharing one head commit was understated (see "For the owner to decide").
 - **The reviews of the tasks.** Two ways a merge could pass that should be held, each found by a reviewer running the code rather than reading it: a list of statuses cut short (decision 8), and a damaged verdict entry skipped in favour of a later one (decision 9; the reviewer compared the rule with its own reading of the plan on several hundred thousand generated inputs). One way a member's `/done` did nothing while it was told accepted (decision 11). And that no call to GitHub had a time limit (decision 13).
 
@@ -73,6 +81,7 @@ On 2026-11-22 and 23, after the owner had granted the trial app `Checks` write, 
 - `GET /app` gives the permissions as `checks`, `statuses` and `members`: the names the service looks for.
 - The app created a check run on a head commit, and the service found it again by its name and the app's id.
 - An update from queued to in progress, from either to completed, and from one conclusion to another (blocked to passed and back) was accepted as built.
+- An update from in progress back to queued was accepted: the status read queued afterwards, and went forward again. This was tried on the code's behalf with a probe, not through the service, and nothing was changed for it.
 - **An update that asks a completed run to be in progress or queued was answered 200 and changed neither its status nor its conclusion;** it did take the new title, so the check read as completed with the title of a review under way. Sending no conclusion with it was refused. The service's own check on the answer caught it, the job was put back, and the check was right again once the review ended.
 - **A new run of the same name on the same commit was accepted and replaced the old one:** GitHub's listing of the commit's check runs showed the new one alone unless asked for all, and the pull request's own status counted the new one alone.
 
@@ -110,7 +119,11 @@ On 2026-11-22 and 23, after the owner had granted the trial app `Checks` write, 
 
 - A read or a write of GitHub that fails leaves the check GitHub already shows, which can be a stale green one (call 49).
 - A pause of reviews that begins while every place of the review runner is busy brings the waiting checks up to date only when a place frees.
-- A pull request the service has no stored row for gets its check at its next event or command, not at start.
+- A pull request the service has no stored row for is asked for at start once the gate wrote its check, while a job newer than 14 days carries its installation (decision 22); jobs are deleted after 14 days, after which it waits for its next event or command.
+- A pull request the database still holds as open though it was closed costs one read of GitHub at each start.
+- The start-over of a failed review compares GitHub's time of the update with the service's clock (decision 24).
+- A push whose event arrives only after a manual review failed does not start the review over.
+- With hundreds of open gated pull requests at a start, a command typed right after it waits behind the sweep's evaluations.
 - At each start every stored open gated pull request is evaluated once: reads of GitHub, and a write only where the check differs.
 - A gate job the runner gives up on records nothing; the next start asks again.
 - A pull request whose check can never be written, as after the app is removed from the repository, is tried three times at each start, with one alert for each code (call 52).
