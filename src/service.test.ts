@@ -99,6 +99,8 @@ interface Options {
   extensions?: LoadedExtension[];
   /** true to switch learning on; the config's own value (off) when not given. */
   learning?: boolean;
+  /** The model's tool choice; the config's own (forced) when not given. */
+  toolChoice?: 'auto' | 'forced';
 }
 interface Timer { ms: number; work: () => Promise<void>; cancelled: boolean }
 
@@ -199,7 +201,8 @@ async function harness(options: Options = {}) {
       const yaml = options.repositoriesYaml ?? (options.gate === true ? GATE_YAML : undefined);
       const base = yaml === undefined ? config : serviceConfig(parseConfig(BASE_YAML + yaml, ENV));
       const dry = options.dryRun ?? options.gate !== true;
-      const learned = options.learning === true ? { ...base, learning: true } : base;
+      const chosen = options.toolChoice === undefined ? base : { ...base, model: { ...base.model, toolChoice: options.toolChoice } };
+      const learned = options.learning === true ? { ...chosen, learning: true } : chosen;
       const service = await startService(dry ? learned : { ...learned, dryRun: false }, {
       db, appInfo,
       reader: { read: () => ({ ok: true as const, delivery: delivered, name: current.kind, action: current.kind === 'pull_request' ? current.action : null, event: current }) },
@@ -1786,8 +1789,16 @@ test('stop tells the run under way, waits for it at most CLOSE_WAIT_MS, and noth
   h.beforeClose = () => { statementsAtClose ??= h.allQueries.length; };
   const service = await h.start();
   await service.settled;
-  await learnTimer(h).work();
+  // The timer's work starts the run and does not wait for it: it settles while the model's answer is still held.
+  let worked = false;
+  void learnTimer(h).work().then(() => { worked = true; });
   await h.until(() => h.modelRequests.length === 1);
+  try {
+    await h.until(() => worked);
+  } catch {
+    answer();
+    assert.fail('the timer\'s work waited for the run');
+  }
   t.mock.timers.enable({ apis: ['setTimeout'] });
   let ended = false;
   void service.stop().then(() => { ended = true; });
@@ -1826,4 +1837,65 @@ test('in dry run the judge runs as it does out of it', async () => {
   assert.equal(h.modelRequests.length, 1);
   assert.deepEqual(await judgeRows(h), { verdicts: [{ reply: 'r-1', outcome: 'lesson' }], calls: [{ reply: 'r-1' }], lessons: [{ source_ref: '7:r-1' }] });
   assert.equal(lessonsLine(h)[0]!.end, 'done');
+});
+
+test('the stop tells the judge first: a call that returns after it ends the run, and the stop does not wait out its limit', async (t) => {
+  const h = await harness({ learning: true, now: at(86_400) });
+  await queueReplies(h, 2);
+  let answer!: () => void;
+  const answered = new Promise<void>((done) => { answer = done; });
+  // The first answer is held; any later one comes at once.
+  h.answer = async () => { if (h.modelRequests.length === 1) await answered; return pushback(); };
+  const service = await h.start();
+  await service.settled;
+  // Not awaited: the first answer is held until the stop has begun.
+  void learnTimer(h).work();
+  await h.until(() => h.modelRequests.length === 1);
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let ended = false;
+  void service.stop().then(() => { ended = true; });
+  try {
+    for (let i = 0; i < 20; i += 1) await h.flush();
+    assert.equal(ended, false);
+    // The mocked time does not move: the stop can end only because the run ended.
+    answer();
+    for (let i = 0; i < 50 && !ended; i += 1) await h.flush();
+    assert.equal(ended, true, 'the stop did not end when the run under way ended');
+  } finally {
+    answer();
+    for (let i = 0; i < 20 && !ended; i += 1) {
+      t.mock.timers.tick(CLOSE_WAIT_MS);
+      await h.flush();
+    }
+  }
+  t.mock.timers.reset();
+  assert.equal(h.modelRequests.length, 1);
+  // A stopped run logs its line, with what it did before the stop and no statement after it.
+  assert.deepEqual(lessonsLine(h), [{ event: 'lessons', judged: 0, lessons: 0, given_up: 0, failed: 0, calls: 1, cost: 0.25, more: true, end: 'stopped' }]);
+  assert.deepEqual(await judgeRows(h), { verdicts: [], calls: [], lessons: [] });
+});
+
+test('the judge\'s usage reaches the spend guard: tokens with no cost raise cost_unknown', async () => {
+  const h = await harness({ learning: true, now: at(86_400) });
+  await queueReplies(h, 1);
+  h.answer = async () => pushback(0);
+  await (await h.start()).settled;
+  await learnTimer(h).work();
+  await h.until(() => lessonsLine(h).length === 1);
+  assert.equal(h.modelRequests.length, 1);
+  assert.deepEqual(alertsOf(h, 'cost_unknown'), [{ event: 'alert', code: 'cost_unknown' }]);
+});
+
+test('the judge has the configured tool choice: under auto it names no tool to call, under forced submit_verdict', async () => {
+  for (const [choice, forced] of [['auto', null], ['forced', 'submit_verdict']] as const) {
+    const h = await harness({ learning: true, now: at(86_400), toolChoice: choice });
+    await queueReplies(h, 1);
+    h.answer = async () => pushback();
+    await (await h.start()).settled;
+    await learnTimer(h).work();
+    await h.until(() => lessonsLine(h).length === 1);
+    assert.equal(h.modelRequests.length, 1, choice);
+    assert.equal(h.modelRequests[0]!.forcedTool, forced, choice);
+    assert.deepEqual(h.modelRequests[0]!.tools.map((tool) => tool.function.name), ['submit_verdict'], choice);
+  }
 });

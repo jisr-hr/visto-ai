@@ -110,7 +110,7 @@ export function gateForge(dryRun: boolean, checks: ForgeChecks, writer: ForgeWri
 
 /**
  * Takes the lock, migrates, recovers, then listens; the work that follows listening is not waited for.
- * `settled` resolves when the work that follows listening has had its first try: the key check, the app check, with learning on the learning work's start (its first pass is not waited for), the redelivery attempt and, when that worked, the first beat.
+ * `settled` resolves when the work that follows listening has had its first try: the key check, the app check, with learning on the learning work's start and the judge's row (the first pass is not waited for, and no run of the judge starts), the redelivery attempt and, when that worked, the first beat.
  * `stop` drains both runners (at most DRAIN_WAIT_MS between them), closes the listener and waits for requests in flight (at most STOP_WAIT_MS),
  * beats once more, waits for alerts, closes the database and releases the lock. It never rejects.
  */
