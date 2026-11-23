@@ -29,8 +29,9 @@ model:
   timeoutSeconds: 240
   # How the model is made to answer through submit_review.
   # forced: every request names the tool. It is what you get when this is not written.
-  # auto: for a model whose endpoint refuses a request that names a tool. The model is asked to call the tool
-  # and may answer in prose instead, which costs one more request; two such answers fail that part of the review.
+  # auto: for a model whose endpoint refuses a request that names a tool, as some newer models' endpoints do (every review
+  # then fails with a provider error). The model is asked to call the tool and may answer in prose instead, which costs
+  # one more request; two such answers fail that part of the review. The eval commands honour this key too.
   toolChoice: forced
 
 limits:
@@ -77,7 +78,7 @@ dryRun: true
 #   # The port the service listens on (1 to 65535). It is 8080 when not written.
 #   port: 8080
 # alerts:
-#   # The environment variable that holds the URL (http or https) that gets the alerts: model_error, model_ok, spend_80, spend_limit, cost_unknown, redelivery_failed, feature_off, gate_check_failed, gate_bypass, extension_error and extension_ok.
+#   # The environment variable that holds the URL (http or https) that gets the alerts: model_error, model_ok, spend_80, spend_limit, cost_unknown, redelivery_failed, feature_off, gate_check_failed, gate_bypass, extension_error, extension_ok, mcp_error and mcp_ok.
 #   webhook: { env: ALERT_WEBHOOK_URL }
 
 # Optional extension modules: code of your own that the service loads once, at start. A module can give the reviewer
@@ -97,11 +98,14 @@ dryRun: true
 #       secret: { env: EXAMPLE_FEEDBACK_SECRET }
 
 # Optional MCP servers: tools the review model may call while it reviews, for example a search in your documentation.
-# The service speaks revision 2025-11-25 of the protocol, over Streamable HTTP, with the headers written here.
+# The service speaks revision 2025-11-25 of the protocol (a server may answer with 2025-06-18 or 2025-03-26), over
+# Streamable HTTP, with the headers written here. A server started as a local process (stdio), OAuth and the newest
+# revision are not supported. Nothing is asked at start: a wrong address or key shows at the first review.
 # A review makes at most 8 calls in all. What a tool returns is shown to the model as data, cut at 8,000 characters.
 # What the model sends as arguments goes to the server, and what a tool returns can be written in the review:
 # name only a server you trust with the reviewed code, and only tools that read.
-# A server's tool descriptions are trusted like this file. No server is asked for a pull request from a fork.
+# A server's tool names, descriptions and schemas are trusted like this file. No server is asked for a pull request from a fork.
+# Servers are asked in dry run too; the eval commands ask none. The README's section "MCP tools (optional)" says what it costs.
 # mcpServers:
 #     # The server's name in records, alerts and tool names: a lower-case letter, then lower-case letters, digits or underscores, at most 20.
 #   - name: docs
