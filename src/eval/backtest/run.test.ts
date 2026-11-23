@@ -341,14 +341,16 @@ test('a run with memory names its file in the summary, counts how memory did, an
     memory: { of: memory.of, file: '/elsewhere/memory-history.jsonl', sha256: 'b'.repeat(64) },
   });
   const s = await runBacktest(args);
-  assert.deepEqual([s.memory_file, s.memory_sha256, s.memory_cases], ['/elsewhere/memory-history.jsonl', 'b'.repeat(64), { ok: 1, empty: 2, skipped: 0, error: 0 }]);
+  assert.deepEqual([s.memory_file, s.memory_sha256, s.memory_cases], ['/elsewhere/memory-history.jsonl', 'b'.repeat(64), { ok: 1, empty: 2, skipped: 0, error: 0, none: 1 }]);
+  // the five counts add up to the cases, the one that failed before memory was asked included
+  assert.equal(Object.values(s.memory_cases!).reduce((x, y) => x + y, 0), s.cases);
   const rows = lines(join(args.outDir, 'results.jsonl')) as { key: string; memory: unknown }[];
   const byPr = (n: number): unknown => rows.find((r) => r.key.includes(`#${n}@`))!.memory;
   assert.deepEqual([byPr(7), byPr(8), byPr(9), byPr(10)], [
     { status: 'empty', code: 'no_records', lines: 0 }, { status: 'ok', code: 'ok', lines: 1 }, { status: 'empty', code: 'no_records', lines: 0 }, null,
   ]);
   assert.match(readFileSync(join(args.outDir, 'summary.md'), 'utf8'),
-    /\nScorer: the review model\nMemory: as of each case, from memory-history\.jsonl\. Cases shown memory: 1 of 4; with none to show: 2; not shown: 0; failed: 0\.\n$/);
+    /\nScorer: the review model\nMemory: as of each case, from memory-history\.jsonl\. Cases shown memory: 1 of 4; with none to show: 2; not shown: 0; failed: 0; not asked: 1\.\n$/);
   assert.deepEqual(JSON.parse(readFileSync(join(args.outDir, 'summary.json'), 'utf8')), s);
 });
 

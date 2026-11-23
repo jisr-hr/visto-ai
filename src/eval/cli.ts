@@ -175,16 +175,14 @@ function readRows(dir: string): RunRow[] {
 
 const modelsOf = (s: BacktestSummary): string => (Array.isArray(s.models) ? s.models.join(', ') : '');
 
-// The refusals two runs share before their scores are compared, and the warning on their models.
-function sameRuns(first: BacktestSummary, second: BacktestSummary, out: (line: string) => void, memory: boolean): void {
+// The refusals two runs share before their scores are compared; returns the warning on their models, or null.
+function sameRuns(first: BacktestSummary, second: BacktestSummary, memory: boolean): string | null {
   if (first.history_sha256 !== second.history_sha256) throw new Error('different_history_files');
   if (first.contract_sha256 !== second.contract_sha256) throw new Error('different_contracts');
   if ((first.scorer ?? null) !== (second.scorer ?? null)) throw new Error('different_scorers');
   // A run with memory against one without, or two built from different memory files, measure memory and not noise.
   if (memory && (first.memory_sha256 ?? null) !== (second.memory_sha256 ?? null)) throw new Error('different_memory');
-  if (modelsOf(first) !== modelsOf(second)) {
-    out(`warning: the runs were answered by different models: ${modelsOf(first)}; ${modelsOf(second)}`);
-  }
+  return modelsOf(first) === modelsOf(second) ? null : `warning: the runs were answered by different models: ${modelsOf(first)}; ${modelsOf(second)}`;
 }
 
 function scoreNoiseCommand(argv: string[], out: (line: string) => void): void {
@@ -192,7 +190,8 @@ function scoreNoiseCommand(argv: string[], out: (line: string) => void): void {
   if (parsed.positional.length !== 2) throw new UsageError('usage: score-noise <run dir> <run dir>');
   const first = readRun(parsed.positional[0]!);
   const second = readRun(parsed.positional[1]!);
-  sameRuns(first.summary, second.summary, out, true);
+  const warning = sameRuns(first.summary, second.summary, true);
+  if (warning !== null) out(warning);
   const rows = scoreNoise(first.scores, second.scores, THRESHOLDS);
   const share = (value: number | null): string => (value === null ? EM_DASH : String(value));
   out('| threshold | blocks_flipped | blocks_n | prs_flipped | prs_n |');
@@ -209,6 +208,9 @@ const NUMBER_NAMES = ['safety_blocks', 'safety_blocks_loose', 'safety_files', 's
 const dash = (value: number | null): string => (value === null ? EM_DASH : String(value));
 // A number with its count and its step: the smallest difference that count can show.
 const counted = (value: number | null, n: number): string => `${dash(value)} (n=${n}, step ${dash(shareOf(1, n))})`;
+// focus is a share of lines, and its count is of pull requests: a step from that count would mislead, so none is printed.
+const cellOf = (name: typeof NUMBER_NAMES[number], value: number | null, n: number): string => (name === 'focus' ? `${dash(value)} (n=${n})` : counted(value, n));
+const hasMemory = (s: BacktestSummary): boolean => typeof s.memory_sha256 === 'string';
 
 const COMPARE_USAGE = 'usage: score-compare <baseline run dir> <candidate run dir> [--noise <second baseline run dir>]';
 
@@ -222,8 +224,10 @@ function scoreCompareCommand(argv: string[], out: (line: string) => void): void 
   const noisePath = parsed.options.get('noise');
   const noise = noisePath === undefined ? null : readRun(noisePath);
   // The two runs differ in memory by design; the second baseline must be a run of the baseline's kind.
-  sameRuns(base.summary, cand.summary, out, false);
-  if (noise !== null) sameRuns(base.summary, noise.summary, out, true);
+  const warnings = [sameRuns(base.summary, cand.summary, false), noise === null ? null : sameRuns(base.summary, noise.summary, true)];
+  // The candidate is the run with memory, the baseline the one without; two runs with memory are compared by score-noise.
+  if (!hasMemory(cand.summary)) throw new Error('candidate_without_memory');
+  if (hasMemory(base.summary)) throw new Error('baseline_with_memory');
 
   const first = new Map(baseRows.map((r) => [r.key, r]));
   const second = new Map(candRows.map((r) => [r.key, r]));
@@ -244,14 +248,15 @@ function scoreCompareCommand(argv: string[], out: (line: string) => void): void 
   const only = (scores: CaseScores[], keys: Set<string>): CaseScores[] => scores.filter((c) => keys.has(c.key));
 
   out(`compared: ${both.length} cases that both runs hold with the status ok; in one run only: ${oneOnly}; in both runs but not ok in one: ${notOk}`);
+  for (const warning of warnings) if (warning !== null) out(warning);
   out(`shown memory: ${shown.size}; none to show: ${empty.size}; other: ${otherCount}; of the cases shown memory, with another number of model calls: ${otherCalls}`);
-  out('Cases shown memory: the numbers of each run, each with its count n and its step, the smallest difference that count can show:');
+  out('Cases shown memory: the numbers of each run, each with its count n and its step, the smallest difference that count can show (focus, a share of lines, has its count of pull requests and no step):');
   out(`| threshold | run | ${NUMBER_NAMES.join(' | ')} |`);
   out(`| ${['threshold', 'run', ...NUMBER_NAMES].map(() => '---').join(' | ')} |`);
   for (const t of [...THRESHOLDS, 'own' as const]) {
     for (const [name, run] of [['baseline', base], ['candidate', cand]] as const) {
       const m = measure(only(run.scores, shown), t);
-      out(`| ${t} | ${name} | ${NUMBER_NAMES.map((x) => counted(m[x], m[`${x}_n`])).join(' | ')} |`);
+      out(`| ${t} | ${name} | ${NUMBER_NAMES.map((x) => cellOf(x, m[x], m[`${x}_n`])).join(' | ')} |`);
     }
   }
   out('Cases shown memory: moves from the baseline to the candidate:');

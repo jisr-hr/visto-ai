@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import type { HistoryActivity, HistoryCase } from '../history/file.ts';
-import { historyMemory, memoryCount } from './memory.ts';
+import { historyMemory, memoryCount, personComments } from './memory.ts';
 
 const TAX = 'src/billing/tax.ts';
 const signal = new AbortController().signal;
@@ -125,4 +125,34 @@ test('memory-count counts without a model and without the network', async () => 
   } finally {
     globalThis.fetch = saved;
   }
+});
+
+test('a pull request\'s signals are dated by its merge, not by its review', async () => {
+  const a = mkCase(7, [TAX], '2026-03-12T12:00:00Z', [comment('a1', TAX, '2026-03-02T10:00:00Z')], { review_at: '2026-03-01T12:00:00Z' });
+  const b = mkCase(8, [TAX], '2026-03-14T12:00:00Z', [], { review_at: '2026-03-10T12:00:00Z' });
+  const memory = historyMemory([a, b]);
+  assert.deepEqual(await linesOf(memory, b, b.review_at), []);
+  assert.equal(memory.records(b), 0);
+  assert.deepEqual((await linesOf(memory, b, '2026-03-13T00:00:00Z')).map((l) => [l.ref, l.day]), [[`7:file:${TAX}`, '2026-03-12']]);
+});
+
+test('a signal made at exactly the time asked is shown, and one a millisecond later is not', async () => {
+  const at = '2026-03-10T12:00:00.000Z';
+  const a = mkCase(7, [TAX], at, [comment('a1', TAX, '2026-03-09T10:00:00Z')]);
+  const later = mkCase(6, ['src/billing/fees.ts'], '2026-03-10T12:00:00.001Z', [comment('l1', 'src/billing/fees.ts', '2026-03-09T10:00:00Z')]);
+  const b = mkCase(8, [TAX, 'src/billing/fees.ts'], at, [], { review_at: at });
+  const memory = historyMemory([a, later, b]);
+  assert.deepEqual((await linesOf(memory, b, at)).map((l) => l.ref), [`7:file:${TAX}`]);
+  assert.equal(memory.records(b), 1);
+});
+
+test('a case\'s inline activity is read as the comments the signal rule takes, the missing fields as null', () => {
+  const bare: HistoryActivity = { kind: 'inline', id: 'p1', author: 'octo-lead', bot: false, association: 'member', at: '2026-03-02T10:00:00Z', body: 'Look here.', path: TAX };
+  const bot: HistoryActivity = { ...comment('p2', TAX, '2026-03-02T10:05:00Z', { author: 'ci-bot', bot: true, association: 'none', file_level: true, start_line: 2, reply_to: 'p1' }) };
+  const review: HistoryActivity = { kind: 'review', id: 'r1', author: 'octo-lead', bot: false, association: 'member', at: '2026-03-02T11:00:00Z', body: 'Fine.', state: 'approved' };
+  const c = mkCase(7, [TAX], '2026-03-03T12:00:00Z', [bare, review, bot]);
+  assert.deepEqual(personComments(c), [
+    { id: 'p1', author: 'octo-lead', bot: false, association: 'member', at: '2026-03-02T10:00:00Z', body: 'Look here.', path: TAX, side: null, line: null, startLine: null, fileLevel: false, commit: null, replyTo: null },
+    { id: 'p2', author: 'ci-bot', bot: true, association: 'none', at: '2026-03-02T10:05:00Z', body: 'Check the rounding here.', path: TAX, side: 'RIGHT', line: 3, startLine: 2, fileLevel: true, commit: 'c0ffee000000', replyTo: 'p1' },
+  ]);
 });

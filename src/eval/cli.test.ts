@@ -330,6 +330,9 @@ const candRows: Row[] = [
 ];
 const EM = '\u2014';
 const cellOf = (value: number | null, n: number): string => `${value ?? EM} (n=${n}, step ${share(1, n) ?? EM})`;
+// focus is a share of lines and its count is of pull requests: no step is printed for it.
+const focusOf = (value: number | null, n: number): string => `${value ?? EM} (n=${n})`;
+const WITH_MEMORY = { memory_file: '/elsewhere/h.jsonl', memory_sha256: 'e'.repeat(64) };
 const movesTable = (rows: ReturnType<typeof scoreMoves>): string[] => [
   '| threshold | blocks_raised | blocks_lowered | blocks_n | prs_raised | prs_lowered | prs_n |',
   '| --- | --- | --- | --- | --- | --- | --- |',
@@ -339,20 +342,20 @@ const movesTable = (rows: ReturnType<typeof scoreMoves>): string[] => [
 test('score-compare reports the cases shown memory apart, with their counts and the smallest step they can show', async () => {
   const noiseRun = [k(A, 'k1', [file('a.ts', [block('B1', 60, 10), block('B2', 30, 5)], 15)]), k(B, 'k2'), k(C, 'k3'), k(A, 'k4')];
   const a = compareDir('cmp-base', baseline, baseRows);
-  const b = compareDir('cmp-cand', candidate, candRows, { memory_file: '/elsewhere/h.jsonl', memory_sha256: 'e'.repeat(64) });
+  const b = compareDir('cmp-cand', candidate, candRows, WITH_MEMORY);
   const n = compareDir('cmp-noise', noiseRun, baseRows);
   const names = ['safety_blocks', 'safety_blocks_loose', 'safety_files', 'safety_files_loose', 'benefit', 'focus'] as const;
   const numbers: string[] = [];
   for (const t of [...THRESHOLDS, 'own' as const]) {
     for (const [run, cases] of [['baseline', baseline], ['candidate', candidate]] as const) {
       const m = measure(cases.slice(0, 2), t);
-      numbers.push(`| ${t} | ${run} | ${names.map((x) => cellOf(m[x], m[`${x}_n`])).join(' | ')} |`);
+      numbers.push(`| ${t} | ${run} | ${names.map((x) => (x === 'focus' ? focusOf : cellOf)(m[x], m[`${x}_n`])).join(' | ')} |`);
     }
   }
   const head = [
     'compared: 4 cases that both runs hold with the status ok; in one run only: 0; in both runs but not ok in one: 0',
     'shown memory: 2; none to show: 1; other: 1; of the cases shown memory, with another number of model calls: 1',
-    'Cases shown memory: the numbers of each run, each with its count n and its step, the smallest difference that count can show:',
+    'Cases shown memory: the numbers of each run, each with its count n and its step, the smallest difference that count can show (focus, a share of lines, has its count of pull requests and no step):',
     '| threshold | run | safety_blocks | safety_blocks_loose | safety_files | safety_files_loose | benefit | focus |',
     '| --- | --- | --- | --- | --- | --- | --- | --- |',
     ...numbers,
@@ -382,7 +385,7 @@ test('score-compare compares only the cases both runs hold, and says how many ar
   const a = compareDir('only-base', [...baseline, k(A, 'k5')], [...baseRows, { key: 'k5', status: 'ok', calls: 1 }]);
   const failedK2 = candidate.map((c) => (c.key === 'k2' ? { ...c, status: 'failed' as const, scores: [] } : c));
   const rows = candRows.map((r) => (r.key === 'k2' ? { ...r, status: 'failed' as const, memory: null } : r));
-  const b = compareDir('only-cand', [...failedK2, k(B, 'k6')], [...rows, { key: 'k6', status: 'ok', calls: 1, memory: shown }]);
+  const b = compareDir('only-cand', [...failedK2, k(B, 'k6')], [...rows, { key: 'k6', status: 'ok', calls: 1, memory: shown }], WITH_MEMORY);
   const [code, lines] = await run(['score-compare', a, b]);
   assert.equal(code, 0);
   assert.equal(lines[0], 'compared: 3 cases that both runs hold with the status ok; in one run only: 2; in both runs but not ok in one: 1');
@@ -400,13 +403,16 @@ test('score-compare refuses different history files, contracts and scorers', asy
     ['ref-scorer', { scorer: 'vendor/decider' }, 'different_scorers'],
   ];
   for (const [name, extra, message] of cases) {
-    const [code, lines] = await run(['score-compare', a, compareDir(name, candidate, candRows, extra)]);
+    const [code, lines] = await run(['score-compare', a, compareDir(name, candidate, candRows, { ...WITH_MEMORY, ...extra })]);
     assert.equal(code, 1, name);
     assert.deepEqual(lines, [message], name);
   }
-  const [warned, warning] = await run(['score-compare', a, compareDir('ref-models', candidate, candRows, { models: ['m', 'fallback-m'] })]);
+  const [warned, warning] = await run(['score-compare', a, compareDir('ref-models', candidate, candRows, { ...WITH_MEMORY, models: ['m', 'fallback-m'] })]);
   assert.equal(warned, 0);
-  assert.equal(warning[0], 'warning: the runs were answered by different models: m; m, fallback-m');
+  // the counts of the cases compared come first, then the warning
+  assert.match(warning[0]!, /^compared: 4 cases /);
+  assert.equal(warning[1], 'warning: the runs were answered by different models: m; m, fallback-m');
+  assert.match(warning[2]!, /^shown memory: /);
   for (const argv of [['score-compare'], ['score-compare', a], ['score-compare', a, a, a], ['score-compare', a, join(dir, 'nowhere')]]) {
     const [code, lines] = await run(argv);
     assert.equal(code, 2, argv.join(' '));
@@ -467,4 +473,71 @@ test('seed-memory needs --history and --config, a database in the config, and a 
 test('the script eval:seed-memory runs the command seed-memory', () => {
   const scripts = (JSON.parse(readFileSync(join(projectRoot, 'package.json'), 'utf8')) as { scripts: Record<string, string> }).scripts;
   assert.equal(scripts['eval:seed-memory'], 'node src/eval/cli.ts seed-memory');
+});
+
+test('score-compare prints the count of focus and no step for it', async () => {
+  const a = compareDir('focus-base', baseline, baseRows);
+  const b = compareDir('focus-cand', candidate, candRows, WITH_MEMORY);
+  const [code, lines] = await run(['score-compare', a, b]);
+  assert.equal(code, 0);
+  const m = measure(baseline.slice(0, 2), 70);
+  const row = lines.find((l) => l.startsWith('| 70 | baseline |'))!;
+  assert.equal(row.split(' | ').at(-1), `${focusOf(m.focus, m.focus_n)} |`);
+  assert.equal(row.includes(`${m.focus} (n=${m.focus_n}, step`), false);
+  assert.equal(row.split(' | ')[6], cellOf(m.benefit, m.benefit_n));
+});
+
+test('score-compare refuses a candidate run without memory and a baseline run with it, before any table', async () => {
+  const plain = compareDir('dir-plain', baseline, baseRows);
+  const plain2 = compareDir('dir-plain-2', candidate, candRows);
+  const withMemory = compareDir('dir-memory', baseline, baseRows, WITH_MEMORY);
+  const withMemory2 = compareDir('dir-memory-2', candidate, candRows, WITH_MEMORY);
+  const cases: [string, string, string, string][] = [
+    ['neither has memory', plain, plain2, 'candidate_without_memory'],
+    ['given the wrong way round', withMemory, plain2, 'candidate_without_memory'],
+    ['both have memory', withMemory, withMemory2, 'baseline_with_memory'],
+  ];
+  for (const [name, x, y, message] of cases) {
+    const [code, lines] = await run(['score-compare', x, y]);
+    assert.equal(code, 1, name);
+    assert.deepEqual(lines, [message], name);
+  }
+});
+
+test('backtest without --memory hands no memory, from the command line to the files it writes', async () => {
+  const folder = mkdtempSync(tmpdir() + '/');
+  const history = join(folder, 'history.jsonl');
+  const lead = { kind: 'inline' as const, id: 'm1', author: 'octo-lead', bot: false, association: 'member' as const, at: '2026-03-01T10:00:00Z', body: 'x', commit: 'head10000000', path: TAX, side: 'RIGHT' as const, line: 2 };
+  // The second case would be shown the first's comment if the history file were made its memory.
+  writeFileSync(history, [historyCase(1, '2026-03-01T12:00:00Z', [lead]), historyCase(2, '2026-03-05T12:00:00Z')].map(serializeCase).join('\n') + '\n');
+  const config = join(folder, 'config.yml');
+  writeFileSync(config, 'model:\n  apiKey: { env: MODEL_KEY }\n  model: vendor/model-a\n');
+  const out = join(folder, 'out');
+  // The suite blocks the network: every case fails at the git service, and the rows and the summary are still written.
+  const [code, lines] = await run(['backtest', '--history', history, '--out', out, '--label', 'plain', '--config', config], { GITHUB_TOKEN: 't', MODEL_KEY: 'k' });
+  assert.equal(code, 0);
+  assert.equal(lines[0], 'cases 2, failed 2, not started 0, total_cost 0');
+  const rows = readFileSync(join(out, 'results.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l) as Record<string, unknown>);
+  assert.equal(rows.length, 2);
+  for (const row of rows) assert.equal('memory' in row, false);
+  const summary = JSON.parse(readFileSync(join(out, 'summary.json'), 'utf8')) as Record<string, unknown>;
+  assert.deepEqual(Object.keys(summary).filter((key) => key.startsWith('memory')), []);
+  assert.equal(readFileSync(join(out, 'summary.md'), 'utf8').includes('Memory:'), false);
+});
+
+test('memory-count reads no config: one that is not valid YAML in its working folder changes nothing', async () => {
+  const folder = mkdtempSync(tmpdir() + '/');
+  const history = join(folder, 'history.jsonl');
+  writeFileSync(history, [historyCase(1, '2026-03-01T12:00:00Z'), historyCase(2, '2026-03-05T12:00:00Z')].map(serializeCase).join('\n') + '\n');
+  writeFileSync(join(folder, 'config.yml'), 'model: [unclosed\n  : : :\n');
+  const before = process.cwd();
+  process.chdir(folder);
+  try {
+    const [code, lines] = await run(['memory-count', '--history', history, '--memory', history], {});
+    assert.equal(code, 0);
+    assert.equal(lines[0], 'cases 2, with a line 0, with a labelled file that got a line 0');
+    assert.equal(lines.length, 3);
+  } finally {
+    process.chdir(before);
+  }
 });

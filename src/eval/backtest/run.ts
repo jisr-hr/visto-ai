@@ -29,7 +29,7 @@ export interface BacktestSummary {
   final_missing: number;
   numbers: Numbers[]; // one per THRESHOLDS entry, then 'own'
   // Only in a run with memory: the history file memory was built from, and the rows counted by their memory status.
-  memory_file?: string; memory_sha256?: string; memory_cases?: { ok: number; empty: number; skipped: number; error: number };
+  memory_file?: string; memory_sha256?: string; memory_cases?: { ok: number; empty: number; skipped: number; error: number; none: number }; // none: rows with no status
 }
 
 interface ResultRow {
@@ -165,7 +165,7 @@ function memoryLine(summary: BacktestSummary): string {
   const counts = summary.memory_cases;
   if (summary.memory_file === undefined || counts === undefined) return '';
   return `Memory: as of each case, from ${basename(summary.memory_file)}. Cases shown memory: ${counts.ok} of ${summary.cases}; ` +
-    `with none to show: ${counts.empty}; not shown: ${counts.skipped}; failed: ${counts.error}.\n`;
+    `with none to show: ${counts.empty}; not shown: ${counts.skipped}; failed: ${counts.error}; not asked: ${counts.none}.\n`;
 }
 
 function summaryTable(numbers: Numbers[]): string {
@@ -175,11 +175,13 @@ function summaryTable(numbers: Numbers[]): string {
   return [header, header.map(() => '---'), ...rows].map((r) => `| ${r.join(' | ')} |`).join('\n') + '\n';
 }
 
-function memoryCases(done: Outcome[]): { ok: number; empty: number; skipped: number; error: number } {
-  const counts = { ok: 0, empty: 0, skipped: 0, error: 0 };
+function memoryCases(done: Outcome[]): { ok: number; empty: number; skipped: number; error: number; none: number } {
+  const counts = { ok: 0, empty: 0, skipped: 0, error: 0, none: 0 };
   for (const o of done) {
     const status = o.row.memory?.status;
+    // A row with no status, or one of no known state, is counted as not asked: the five always add up to the cases.
     if (status !== undefined && Object.hasOwn(counts, status)) counts[status] += 1;
+    else counts.none += 1;
   }
   return counts;
 }

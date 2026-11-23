@@ -37,6 +37,11 @@ function personComment(a: HistoryActivity): PersonComment {
   };
 }
 
+/** A case's inline comments, in the file's order, as the signal rule takes them: a missing field is null, a missing `file_level` false. */
+export function personComments(c: HistoryCase): PersonComment[] {
+  return c.activity.filter((a) => a.kind === 'inline').map(personComment);
+}
+
 const recordOf = (s: Signal): LiveRecord => ({
   ref: s.sourceRef, number: s.number, path: s.path, directory: s.directory, category: s.category, missed: s.missed, createdAt: s.createdAt,
 });
@@ -50,7 +55,7 @@ export function historyMemory(cases: HistoryCase[]): HistoryMemory {
   for (const c of cases) {
     const signals = signalsOf({
       number: c.pr_number, author: c.author, closedAt: c.merged_at,
-      comments: c.activity.filter((a) => a.kind === 'inline').map(personComment),
+      comments: personComments(c),
     });
     const repo = repoOf(c.repo);
     const held = byRepo.get(repo) ?? new Map<string, Held>();
