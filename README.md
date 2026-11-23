@@ -36,7 +36,7 @@ The scored unit is a block: one hunk of the diff. A file with ten changes, of wh
 - **Evidence-backed findings**, tagged `[blocker]`, `[major]` or `[minor]`.
 - **A human-review score** for every changed block, with a reason for each block that needs a person.
 - **Optional automatic approval**, per repository, off by default.
-- **Optional merge gate**: a required check that blocks a merge while a major or blocker finding is unanswered. Built; not tried against a real GitHub App (see [The merge gate](#the-merge-gate-optional)).
+- **Optional merge gate**: a required check that blocks a merge while a major or blocker finding is unanswered. Built; tried once against a real GitHub App, in part (see [The merge gate](#the-merge-gate-optional)).
 - **Learning by retrieval**: what people do on pull requests is stored and retrieved into later reviews. The model is never fine-tuned.
 - **Self-hosted**: `docker compose up` on one machine, with the app and Postgres. You create your own GitHub App and connect it. The project runs no hosted service.
 - **Your choice of model**: built and tested against [OpenRouter](https://openrouter.ai) first. Any OpenAI-compatible endpoint can be configured.
@@ -59,7 +59,7 @@ The full design, with every decision and its reason, is in [docs/superpowers/spe
 | Service: incremental reviews of later heads, `/review` as a re-check, and scores kept across reviews | Built. Tried once against a real GitHub App |
 | Service: inline notes on the blocks listed for a person (off unless switched on) | Built. Tried once against a real GitHub App |
 | A command that creates the GitHub App from a manifest | Built. Not tried against GitHub |
-| Merge gate: a required check, `/done`, a skip by one team, `shadow` and `bypass` (off unless switched on) | Built. Not tried against a real GitHub App |
+| Merge gate: a required check, `/done`, a skip by one team, `shadow` and `bypass` (off unless switched on) | Built. Tried once against a real GitHub App, in part: not the skip by a team, `shadow`, `bypass` or the check as a required one |
 | Extensions and MCP tools | Planned |
 | Memory | Planned |
 | Automatic approval | Planned |
@@ -206,7 +206,7 @@ The merge gate is a check that the service writes on a pull request's head commi
 | `Skipped by @<login>` | completed, `success` | The skip team skipped this commit |
 | `Gate bypassed` | completed, `success` | The repository is in `bypass` |
 
-A check that is already completed is rewritten in place, to `queued` or `in_progress`, when a review is asked for again. **This was not tried against GitHub.** If GitHub refuses it, or answers and keeps the old status, the job gives up with `github_<status>` or `check_not_rewritten` and the check keeps its first conclusion.
+GitHub does not reopen a completed check run: an update that asks for `queued` or `in_progress` is answered and changes neither its status nor its conclusion. So when a completed check must wait or review again (a `/review` or a `/done` on a head whose check is decided, or leaving `bypass`), the service writes a new run of the same name on the commit. GitHub then lists, and the pull request counts, only the newest run of that name; the older one stays on the commit. An update from `queued` or `in_progress` to any state, and from one conclusion to another, is made in place.
 
 **The rule.** After a review, the check is `success` in three cases only: the head has its review and no thread blocks and no review of this head left a blocking finding without a thread; a skip is stored for this head; the mode is `bypass`. The head's review is the newest published review whose head and merge base are the live ones: a re-check counts, and after a retarget the pull request is not reviewed. A read that fails never reads as "nothing blocks".
 
@@ -255,9 +255,17 @@ Every call to GitHub has a time limit of 60 seconds, and one that runs out is re
 - Gate jobs have their own places (see [Running it](#running-it)), so a check is written while a review runs.
 - The gate adds one migration, `0008_gate`, which is applied once: a previous release finds a migration it does not know and refuses to start on that database.
 
-#### What was never tried against GitHub
+#### What was tried against GitHub, and what was not
 
-Nothing of the gate has met GitHub. In particular not tried: that a completed check can be rewritten to `queued` and to `in_progress`; which `check_run` deliveries an app with `checks` write is sent, and how many; that the app can create a check run on a head commit and GitHub lists it by name and app; how a required check holds a merge in each state, and how `action_required` reads on the pull request and whether a re-run is offered there; what a re-run carries, for a fork's pull request too; the names GitHub gives the permissions and whether its manifest flow accepts the set, for an app on a personal account too; the answers to a team membership question for an active member, a pending one, a stranger, a team that does not exist, a secret team and an app without the permission; the status and the check runs of a commit for a required check that is a status and for one that is a check run; that GitHub sends a thread event for a resolve made in the page and for one made through the API, and a review-comment event for a reply the app's own mutation makes; and how a path with odd characters and a skip's reason read in the summary. It was also never run in a repository with the check required, on a whole round (a push, `/done`, a blocked check, a reply, a resolve, a skip, a skip typed after a push, a re-run), nor in `shadow` or `bypass`.
+**Tried once,** with a real GitHub App on a small private repository, a real review model and a real second scorer. The app has no webhook, so each event was built from what GitHub's API answers and sent to the service by hand.
+
+- The names GitHub gives the permissions (`checks`, `statuses`, `members`) are the ones the service looks for.
+- The app created its check run on a head commit and found it again by name and app.
+- A whole round: a gated pull request opened got `Waiting for /done` and no review; `/done` got the eyes reaction, `Reviewing`, a review, and a blocked check that names the threads; a person's reply and a resolve cleared one finding within seconds, with no review; a resolve with no reply cleared nothing, and the summary said so; a reply in that thread turned the check green; `/done` on the green head started no review; an unresolve turned it red again; a push gave the new commit its own waiting check and left the old commit's alone; a re-run, sent as an event built from the real check run, started a review that ended green; and `/ai-review-skip` with no team named was refused with its sentence.
+- At start the service wrote the check of a gated pull request it had stored from before.
+- A completed check run cannot be reopened by an update, and a new run of the same name replaces it (see above). As first built the service tried the update; it noticed that GitHub had kept the old status, tried again, and the check was right once the review ended. It now writes a new run.
+
+**Not tried:** the check as a required one, so not how each state holds a merge; how `action_required` reads on the pull request's page and whether a re-run is offered there; GitHub's own deliveries (which `check_run` deliveries the app is sent and how many, a thread event for a resolve made in the page, what a real re-run carries, for a fork too); a skip by a member of the team, a skip typed after a push, and every answer to a team membership question; the required CI checks of `/done`; `shadow`, and `bypass` across two starts; a review GitHub refuses inline; a pause of reviews; the manifest flow with the new permissions; and how a path with odd characters and a skip's reason read in the summary.
 
 ### Scores kept across reviews
 
