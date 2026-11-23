@@ -7,7 +7,7 @@ import type { ExtensionContext } from './context/extensions.ts';
 import { buildMessages, fixedTokens } from './context/prompt.ts';
 import { FINAL_LINE } from './model/call.ts';
 import { ProviderError } from './model/errors.ts';
-import { NOT_RUN_CAP, TOOL_RULES, toolRoomTokens } from './model/tools.ts';
+import { NOT_RUN_CAP, NOT_RUN_CLOSED, TOOL_RULES, toolRoomTokens } from './model/tools.ts';
 import { SUBMIT_REVIEW, submitReviewTool, submitReviewWithThreadsTool, submitToolFor } from './model/submit-review.ts';
 import { NOTHING_READ } from './plan.ts';
 import { chooseEffort, review } from './review.ts';
@@ -2294,19 +2294,33 @@ test('a tool call of the model reaches the server, and its result reaches the mo
 });
 
 test('the sessions are closed when the review fails, when a model call throws, and when every batch fails', async () => {
+  // Each case makes a tool call first, so that the log holds requests, a call and the close, in the order they happened.
   const cases: Step[][] = [
-    [new ProviderError('auth', 'c', 401, null)],
-    [() => { throw new Error('boom'); }],
-    [ungrounded, ungrounded],
+    [callsTools(searchCall('c1')), new ProviderError('auth', 'c', 401, null)],
+    [callsTools(searchCall('c1')), () => { throw new Error('boom'); }],
+    [callsTools(searchCall('c1')), ungrounded, ungrounded],
   ];
   for (const answers of cases) {
     const docs = fakeServer();
-    const r = await review(own, deps({ files: [fileA], answers, mcpServers: [docs.server] }));
+    const d = deps({ files: [fileA], answers, mcpServers: [docs.server] });
+    logRequests(d, docs);
+    const r = await review(own, d);
     assert.equal(r.status, 'failed');
     assert.equal(kinds(docs, 'close').length, 1);
-    assert.equal(docs.log.at(-1)![0], 'close');
+    assert.equal(kinds(docs, 'call').length, 1);
+    assert.equal(kinds(docs, 'request').length, answers.length);
+    assert.deepEqual(docs.log.at(-1), ['close']);
     assert.ok(r.dependencies.mcp !== undefined);
   }
+  // reviewOnce never closes a session itself, and it turns every error into a failed result. An error whose name
+  // throws when it is read escapes even that, and review rejects: the session is closed all the same, last.
+  const hostile = new Error('boom');
+  Object.defineProperty(hostile, 'name', { get() { throw new Error('trap'); } });
+  const docs = fakeServer();
+  const d = deps({ files: [fileA], answers: [callsTools(searchCall('c1')), () => { throw hostile; }], mcpServers: [docs.server] });
+  logRequests(d, docs);
+  await assert.rejects(review(own, d), /trap/);
+  assert.deepEqual(docs.log, [['open'], ['request'], ['call', 'search', { query: 'cart' }], ['request'], ['close']]);
 });
 
 test('a review that calls no model opens nothing and says nothing of servers', async () => {
@@ -2394,7 +2408,8 @@ test('tools never cost the extension context its place', async () => {
 });
 
 test('the batches of a review share the eight calls', async () => {
-  const five = (prefix: string): Raw => callsTools(...[1, 2, 3, 4, 5].map((n) => searchCall(`${prefix}${n}`)));
+  // Each call asks for its own id, so that the server's log says which batch sent it.
+  const five = (prefix: string): Raw => callsTools(...[1, 2, 3, 4, 5].map((n) => searchCall(`${prefix}${n}`, `${prefix}${n}`)));
   const docs = fakeServer();
   const d = deps({
     files: [fileA, fileB], mcpServers: [docs.server],
@@ -2402,9 +2417,23 @@ test('the batches of a review share the eight calls', async () => {
   });
   const r = await review(await roomFor(1.5), d);
   assert.equal(kinds(docs, 'call').length, 8);
+  // Whichever order the two batches' calls take, eight are sent and two are not run: the first call refused for
+  // the cap is NOT_RUN_CAP, and a call after it in the same turn is NOT_RUN_CLOSED.
+  const notRun = (c: string): boolean => c === NOT_RUN_CAP || c === NOT_RUN_CLOSED;
   const lasts = d.model.requests.filter((q) => toolMessages(q).length > 0);
   assert.equal(lasts.length, 2);
-  assert.equal(lasts.flatMap(toolMessages).filter((m) => m.content === NOT_RUN_CAP).length, 2);
+  const answered = lasts.flatMap(toolMessages);
+  assert.equal(answered.length, 10);
+  assert.equal(answered.filter((m) => !notRun(m.content)).length, 8);
+  assert.equal(answered.filter((m) => notRun(m.content)).length, 2);
+  assert.ok(answered.some((m) => m.content === NOT_RUN_CAP));
+  for (const prefix of ['a', 'b']) {
+    const own = answered.filter((m) => m.toolCallId!.startsWith(prefix));
+    assert.deepEqual(own.map((m) => m.toolCallId), [1, 2, 3, 4, 5].map((n) => `${prefix}${n}`));
+    const sent = kinds(docs, 'call').filter((e) => (e[2] as { query: string }).query.startsWith(prefix)).length;
+    assert.equal(sent, own.filter((m) => !notRun(m.content)).length);
+    assert.equal(sent + own.filter((m) => notRun(m.content)).length, 5);
+  }
   assert.equal(r.dependencies.mcp!.docs!.calls, 8);
   assert.deepEqual([r.status, r.coverage.reviewed.length], ['ok', 2]);
 });
