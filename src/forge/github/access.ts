@@ -11,6 +11,15 @@ function objectAt(v: unknown, key: string): Record<string, unknown> {
   return v[key];
 }
 
+// The head branch lies in the base's own repository only when both name a repository with the same id.
+// Anything else, a fork whose repository was deleted included, reads as a fork.
+function fromForkOf(base: Record<string, unknown>, head: Record<string, unknown>): boolean {
+  const baseRepo = base.repo;
+  const headRepo = head.repo;
+  if (!isObject(baseRepo) || !isObject(headRepo)) return true;
+  return typeof baseRepo.id !== 'number' || baseRepo.id !== headRepo.id;
+}
+
 function textOf(v: unknown): string {
   if (typeof v !== 'string') throw bad();
   return v;
@@ -41,7 +50,7 @@ export function createGithubAccess(opts: { auth: AppAuth; fetch: typeof fetch; a
       const headSha = textOf(head.sha);
       const info = {
         ref, title: textOf(body.title), description: body.body ?? '', author: authorOf(body.user).author,
-        baseBranch: textOf(base.ref), headBranch: textOf(head.ref), baseSha, headSha, draft,
+        baseBranch: textOf(base.ref), headBranch: textOf(head.ref), baseSha, headSha, draft, fromFork: fromForkOf(base, head),
       };
       if (merged || state !== 'open') return { info, state: merged ? 'merged' : 'closed' };
       // The engine reads a file's old side at the merge base, not at the base branch's tip.

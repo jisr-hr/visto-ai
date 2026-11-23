@@ -3,7 +3,7 @@ import test from 'node:test';
 import type { ChatMessage, ModelClient, ModelRequest, ModelResponse, Usage } from '../types.ts';
 import { callBatch } from './call.ts';
 import { ProviderError } from './errors.ts';
-import { SUBMIT_REVIEW, submitReviewTool, submitReviewWithThreadsTool } from './submit-review.ts';
+import { SUBMIT_REVIEW, submitReviewTool, submitReviewWithThreadsTool, submitToolFor } from './submit-review.ts';
 
 const usage = (calls = 1): Usage => ({ calls, inputTokens: 100, outputTokens: 10, cachedTokens: 5, cost: 0.5 });
 const toolCall = (args: unknown, model = 'm', provider: string | null = null): ModelResponse =>
@@ -200,4 +200,23 @@ test('a call of a run with threads is sent the tool that takes verdicts, and its
   assert.deepEqual(plain.requests[0]!.tools, [submitReviewTool]);
   assert.equal(plain.calls, 2);
   assert.ok(refused.reason.includes('unexpected key thread_verdicts'));
+});
+
+test('a call that shows criteria sends the tool with acceptance, and one that does not sends the tool of today', async () => {
+  const rows = { ...valid, acceptance: [{ item: 'A1', status: 'met', note: 'In src/a.ts:3.' }] };
+  for (const withThreads of [false, true]) {
+    const model = stubModel(toolCall(rows));
+    const r = await callBatch({ ...args, withThreads, withAcceptance: true }, model);
+    assert.ok(r.ok);
+    assert.deepEqual(model.requests[0]!.tools, [submitToolFor(withThreads, true)]);
+    assert.deepEqual(r.value.acceptance, rows.acceptance);
+    const plain = stubModel(toolCall(valid));
+    await callBatch({ ...args, withThreads, withAcceptance: false }, plain);
+    assert.deepEqual(plain.requests[0]!.tools, [withThreads ? submitReviewWithThreadsTool : submitReviewTool]);
+    const refusing = stubModel(toolCall(rows), toolCall(rows));
+    const refused = await callBatch({ ...args, withThreads }, refusing);
+    assert.ok(!refused.ok);
+    assert.equal(refusing.calls, 2);
+    assert.ok(refused.reason.includes('unexpected key acceptance'));
+  }
 });

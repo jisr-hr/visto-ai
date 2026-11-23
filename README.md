@@ -4,7 +4,7 @@
 
 An open-source, self-hosted AI reviewer for pull requests. It looks for defects it can demonstrate, and it scores which parts of a change still need a human reviewer.
 
-> **Status: early development.** The review engine and an offline evaluation tool are built. The service receives GitHub's webhooks, reads each pull request and runs the review. In dry run it records what it would have posted and posts nothing; out of dry run it posts a review when a pull request is opened and again when its head or base moves, unless the review would say nothing the newest one does not already say, and follows up the threads of its own earlier reviews. The first review, `/review`, a later review with its threads, an incremental review, a re-check, a push that tells nothing new and scores kept across reviews were each tried once against a real GitHub App, on a small private repository. Inline notes (off unless a repository switches them on) are built and were tried once the same way. The merge gate (a required check, off unless a repository switches it on) is built, and **nothing of it has been tried against a real GitHub App**. A command that creates the app is built and was not tried against GitHub. See [Status](#status).
+> **Status: early development.** The review engine and an offline evaluation tool are built. The service receives GitHub's webhooks, reads each pull request and runs the review. In dry run it records what it would have posted and posts nothing; out of dry run it posts a review when a pull request is opened and again when its head or base moves, unless the review would say nothing the newest one does not already say, and follows up the threads of its own earlier reviews. The first review, `/review`, a later review with its threads, an incremental review, a re-check, a push that tells nothing new and scores kept across reviews were each tried once against a real GitHub App, on a small private repository. Inline notes (off unless a repository switches them on) are built and were tried once the same way. The merge gate (a required check, off unless a repository switches it on) is built and was tried once against a real GitHub App, in part: not as a required check. A command that creates the app is built and was not tried against GitHub. Extension modules (code of your own that gives the reviewer a ticket's text and acceptance criteria, is told of published reviews and alerts, and answers feedback routes; none unless the config names one) are built and were tried once against a real GitHub App with the example module alone, with no real ticket system or chat tool. See [Status](#status).
 
 ## Why
 
@@ -60,7 +60,8 @@ The full design, with every decision and its reason, is in [docs/superpowers/spe
 | Service: inline notes on the blocks listed for a person (off unless switched on) | Built. Tried once against a real GitHub App |
 | A command that creates the GitHub App from a manifest | Built. Not tried against GitHub |
 | Merge gate: a required check, `/done`, a skip by one team, `shadow` and `bypass` (off unless switched on) | Built. Tried once against a real GitHub App, in part: not the skip by a team, `shadow`, `bypass` or the check as a required one |
-| Extensions and MCP tools | Planned |
+| Extension modules: context for the reviewer with acceptance criteria, notices, alerts and feedback routes (none unless the config names one) | Built. Tried once against a real GitHub App with the example module alone: no real ticket system or chat tool |
+| MCP tools | Planned |
 | Memory | Planned |
 | Automatic approval | Planned |
 | UI | Planned |
@@ -72,8 +73,8 @@ What exists today is a library, a command-line tool, and a service that you can 
 The engine is one function, `review(input, deps)`. It reads a pull request and returns a structured review. It writes nowhere: not to GitHub, not to a database. That is what lets the evaluation call it directly.
 
 1. **Read.** The pull request, its changed files and their contents come through a read-only source. The GitHub source only ever sends `GET` requests.
-2. **Build context.** The model gets the diff with an anchor on every line (`R142    |+code`), the full contents of changed files where they fit, and the test file that belongs to a changed file. A large pull request is split into batches, up to a limit; what does not fit is reported as not reviewed, unless an earlier review already covers that file.
-3. **Mark untrusted text.** Everything that comes from the pull request is wrapped in data markers with a random token. The contract tells the model that text inside the markers is data, never instructions.
+2. **Build context.** The model gets the diff with an anchor on every line (`R142    |+code`), the full contents of changed files where they fit, and the test file that belongs to a changed file. When the config names extension modules, it also gets what they supply, such as a ticket's text and its acceptance criteria (see [Extensions](#extensions-optional)). A large pull request is split into batches, up to a limit; what does not fit is reported as not reviewed, unless an earlier review already covers that file.
+3. **Mark untrusted text.** Everything that comes from the pull request, and what an extension module supplies, is wrapped in data markers with a random token. The contract tells the model that text inside the markers is data, never instructions.
 4. **Ask the model.** The model must answer through one forced tool call, `submit_review`, so the answer is structured data and not prose. The rules it follows are in [contract/review-contract.md](contract/review-contract.md).
 5. **Check the answer.** An answer that names no changed file is sent back once, and then rejected. A finding on a file that is not in the pull request is dropped. A finding on a line that cannot take a comment is moved to the nearest line that can, within three lines, or listed separately.
 6. **Render.** The service builds the review text from the structured result. The layout, the severity tags and the lists are the service's. The model supplies the overview, the text of each finding, and a score for each changed block, which the service checks before it counts: a score that is not a whole number from 0 to 100 leaves its block counted as 100.
@@ -93,7 +94,7 @@ Tests never reach the network. The test setup blocks sockets and `fetch`, and cl
 
 ## Run the service
 
-The service receives GitHub's signed webhooks and records each delivery's id and what it says about people and the pull request (the payload itself is not kept). When a pull request is opened, reopened, made ready for review, pushed to or given a new base branch, it queues a review. A push is reviewed after 180 quiet seconds, so several pushes in a row give one review (see [Leaving dry run](#leaving-dry-run) for what a later review does and [Scores kept across reviews](#scores-kept-across-reviews) for how scores are kept). The review runs the engine on the pull request as GitHub has it then. In dry run (`dryRun: true` in the config) it is recorded in the database and **nothing is posted to GitHub**. Out of dry run (`dryRun: false`) it is also posted, and the threads of the app's earlier reviews are followed up, as described below. In a repository that switches on the merge gate, a pull request against a gated branch is not reviewed when it is opened or pushed to: it is reviewed when someone asks (see [The merge gate](#the-merge-gate-optional)).
+The service receives GitHub's signed webhooks and records each delivery's id and what it says about people and the pull request (the payload itself is not kept). When a pull request is opened, reopened, made ready for review, pushed to or given a new base branch, it queues a review. A push is reviewed after 180 quiet seconds, so several pushes in a row give one review (see [Leaving dry run](#leaving-dry-run) for what a later review does and [Scores kept across reviews](#scores-kept-across-reviews) for how scores are kept). The review runs the engine on the pull request as GitHub has it then. In dry run (`dryRun: true` in the config) it is recorded in the database and **nothing is posted to GitHub**; extension modules are still asked for context and serve their routes, and none is told of a review or an alert. Out of dry run (`dryRun: false`) it is also posted, and the threads of the app's earlier reviews are followed up, as described below. In a repository that switches on the merge gate, a pull request against a gated branch is not reviewed when it is opened or pushed to: it is reviewed when someone asks (see [The merge gate](#the-merge-gate-optional)).
 
 To run it you need a GitHub App (its id, its private key and its webhook secret), a model key and a Postgres. [Creating the app](#creating-the-app) below says how to make the app with a command, or by hand.
 
@@ -144,6 +145,8 @@ To create the app in GitHub's own form instead, give it these: permissions `pull
 ### Leaving dry run
 
 Set `dryRun: false` in the config. A config that does not write `dryRun` runs in dry run: the service posts only when the key says `false`. Nothing else changes: from then on the service writes to GitHub, so check the app's permissions first (see [Creating the app](#creating-the-app)).
+
+Extension modules are asked for context in dry run too; from the switch on, their notifiers are told of each published review and their sinks of each alert (see [Extensions](#extensions-optional)).
 
 Nothing is posted at the switch itself. A review recorded in dry run is never posted; each open pull request gets its review at its next event (a push, a reopening, a `/review`). Jobs that were waiting run as before and now post, and after a stop the deliveries GitHub could not make (at most 200) are asked for again, so the pull requests they name are reviewed and posted.
 
@@ -271,6 +274,43 @@ Every call to GitHub has a time limit of 60 seconds, and one that runs out is re
 
 **Not tried:** the check as a required one, so not how each state holds a merge; how `action_required` reads on the pull request's page and whether a re-run is offered there; GitHub's own deliveries (which `check_run` deliveries the app is sent and how many, a thread event for a resolve made in the page, what a real re-run carries, for a fork too); a skip by a member of the team, a skip typed after a push, and every answer to a team membership question; the required CI checks of `/done`; `shadow`, and `bypass` across two starts; a review GitHub refuses inline; a pause of reviews; the manifest flow with the new permissions; and how a path with odd characters and a skip's reason read in the summary.
 
+### Extensions (optional)
+
+An extension module is code of your own that the service loads once, at start. A module can give the reviewer context about a pull request (a ticket's text and its acceptance criteria), be told when a review is published and when an alert is raised, and answer HTTP requests under `/extensions/<name>/`, for example to collect a thumbs up or down on a review. The service ships none, and knows no ticket system or chat tool. With no module named, it does what it does without them. **It was tried only with the example module, [examples/extension-example.ts](examples/extension-example.ts), and with no real ticket system or chat tool.**
+
+Name a module in the config's `extensions` block, with a secret by reference inside its `options`:
+
+```yaml
+extensions:
+  - name: example
+    module: ./extensions/extension-example.ts
+    options:
+      secret: { env: EXAMPLE_FEEDBACK_SECRET }
+```
+
+[docs/extensions.md](docs/extensions.md) states the contract a module is written against, how it is loaded (under Docker its file must be mounted), and what the service guarantees and what the module must do itself. A module runs inside the service, with its secrets, its database connection and its network; the service does not sandbox it.
+
+What an operator sees:
+
+- **The `Acceptance criteria` section.** When a provider returns criteria (at most 30), the review lists each one, after `Human review` and before `Findings`, with a count line and one of three words: `[met]`, `[not met]` or `[not verified]`. A row kept from an earlier review is tagged `_(kept from an earlier review)_`, and a criterion no review judged `_(not judged in this review)_`. The model gives the rows; the service checks them, merges those of several batches (`not met` wins), and writes each criterion inside a code span, so nothing in it takes effect.
+- **Rows decide nothing.** They touch neither the verdict, the score nor the merge gate, and an unmet criterion is not a finding. A pull request that meets none of its criteria can still pass the gate.
+- **A kept row can be stale.** In an incremental review and a re-check, a criterion the model does not judge keeps the row of the newest published review that has rows. A kept `met` can be stale when a later push removed the code that met it.
+- **A criterion is told apart by its text.** Reworded by one character, it starts again as not verified.
+- **Extension text gives way to files.** The text and the criteria are shown only when they cost the files nothing: nothing more cut, no file more left unreviewed. The texts are dropped first, then the criteria; the review's audit says `extension_context_cut`. Every call of a review repeats them.
+- **What is posted is public.** Criteria are written in the review, and the model may quote a provider's text in what it writes there, so both are readable by whoever can read the pull request. A pull request from a fork, or one whose origin the service cannot tell, is given no extension context: its providers are recorded as `skipped`, with `from_fork` or `origin_unknown`.
+- **Limits.** 8,000 characters of text for one provider, 24,000 for all together, 80 for a label, 300 for one criterion, 30 criteria in all. At about three characters to a token that is up to about 11,000 tokens in every call of a review. Each provider has 30 seconds, all are asked at once, so a slow provider adds up to 30 seconds to every review.
+- **Statuses.** Each review records how each provider did (`ok`, `empty`, `skipped` or `error`, with a short code) in `review_runs.result`, under `dependencies.extensions`, and in the `review` log line, as `extensions` (null with no module). A review that ends before the providers are asked, because the pull request has no changed file or its file list cannot be read, records none.
+- **Two alerts.** `extension_error` when a part of a module (`context`, `notify` or `route`) starts failing, and `extension_ok` when it works again. A provider that answers `empty` or `skipped` is not failing. A provider that fails for some pull requests and not for others alerts at every change, and a restart raises the alert again.
+- **The notice.** Each published review is told to the modules' notifiers once, re-checks included, as the last thing its job does (a run adopted late, before the job reviews the live head). The run's row is stamped (`notified_at`) before the call, so a stop or a failed notifier loses the notice, and it is not sent again. Each notifier has 10 seconds; one that hangs holds a place of the queue that long. Not in dry run.
+- **Routes.** Each module holds at most 10 requests at once, apart from the webhook route's 20, and a body of at most 1 MiB. A handler has 10 seconds: its caller is then answered `500`, and the request keeps its place until the handler settles, so a module whose handlers hang answers `503 busy` to its own callers, and to nobody else.
+- **Feedback.** A module reports an answer through one function, and it is stored in `visto_ai.review_feedback`: one row for each run and person (the git login, in lower case), the latest winning. Only a published run can be answered. Whoever passes the module's own check can answer for any login, so the number of rows for one run is not bounded. Nothing shows feedback yet. To read it:
+
+```bash
+docker compose exec db psql -U postgres -d visto -c "select run, owner, repo, number, login, vote, reason, extension, at from visto_ai.review_feedback order by at desc limit 20"
+```
+
+The service adds one migration, `0009_feedback`: the `review_feedback` table and the `notified_at` column. A previous release refuses to start on a database that has it.
+
 ### Scores kept across reviews
 
 Out of dry run, a pull request's score is not given again at each head. The service reads the scores of the pull request's earlier runs (recorded out of dry run and ended ok, published or not, with no age limit) and, for other pull requests, the scores it has stored. In dry run none of this is read or stored: every head is reviewed in full and scored afresh.
@@ -311,14 +351,15 @@ docker compose exec db psql -U postgres -d visto -c "select id, owner, repo, num
 
 ### Running it
 
-- Run one instance per database. A second one stops at once with `another_instance_running`, and the first keeps running.
+- Run one instance per database. A second one stops at once with `another_instance_running`, and the first keeps running. It loads no extension module.
+- An extension module that cannot be loaded stops the start: the log has `extension_failed` with the module's name and a code, then `start_failed`, and the process exits with 1 before it listens (see [docs/extensions.md](docs/extensions.md)).
 - If the database restarts, the service notices that it has lost its lock, exits, and Compose starts it again.
 - Connect to Postgres directly. The lock and the statement timeout do not work through a pooler in transaction mode.
 - Stopping the service (`docker compose stop`) waits up to 10 minutes for the reviews that are running. The Compose file allows 660 seconds for it. A second signal ends it at once.
 - Every review costs money. The cost of a run is what the model endpoint reports with each answer; OpenRouter, the default, reports it in US dollars. For an endpoint that reports no cost, it is computed from `model.prices`, in whatever currency those prices are written in. With neither, the cost is recorded as 0.
 - The daily limit, `limits.spendPerDay` (50 when not written), is a number in the unit of those recorded costs. The service adds up the cost of the runs recorded since the start of the UTC day, so it can only see what is recorded: with an endpoint that reports no cost and no `prices`, it never stops anything, and it raises the alert `cost_unknown`. At 80% of the limit it raises `spend_80`, and at the limit `spend_limit`. Reviews then stop starting until the next UTC day; the ones already running finish. These three alerts are raised once per run of the service, so a restart can raise them again; `spend_80` and `spend_limit` are also raised once per UTC day. At most `limits.queueConcurrency` reviews run at once (2 when not written).
 - The jobs of the merge gate (writing the check, `/done`, a skip, a re-run) run in a second lane of 4 places. It is not paused with the reviews, by the daily limit or by the model's key, and it waits for no review. There are never two review jobs for one pull request at once, and never two gate jobs for one pull request at once; one gate job may run beside a review job of the same pull request. Stopping the service waits for both lanes.
-- When the model's key is refused or its account is out of credit, reviews pause for 5 minutes at a time and the service raises one alert, `model_error`, and `model_ok` when the key works again. The jobs wait, but not for ever: a job that has waited 24 hours is dropped as `too_old`. A review refused after it had already made model calls uses up one of the job's three starts. Alerts go to the log always, and to `alerts.webhook` when you wrote it.
+- When the model's key is refused or its account is out of credit, reviews pause for 5 minutes at a time and the service raises one alert, `model_error`, and `model_ok` when the key works again. The jobs wait, but not for ever: a job that has waited 24 hours is dropped as `too_old`. A review refused after it had already made model calls uses up one of the job's three starts. Alerts go to the log always, to `alerts.webhook` when you wrote it, and, out of dry run, to the extension modules that have a sink. The alerts are `model_error`, `model_ok`, `spend_80`, `spend_limit`, `cost_unknown`, `redelivery_failed`, `feature_off`, `gate_check_failed`, `gate_bypass`, `extension_error` and `extension_ok`.
 - A job ends without a review when its three starts are used up (`attempts_exhausted`), when it is a day old (`too_old`), when no installation is known for the pull request (`no_installation`), when another job for the pull request was already waiting as it was put back (`superseded`), or when the pull request is, by the time the job runs, not one to review: gone (`not_found`), closed, a draft, by an ignored author (`ignored_author`), against a base branch outside the filter (`base_filtered`), gated and reviewed only when asked (`gated`; see [The merge gate](#the-merge-gate-optional)), given a new head (`stale_head`; the new head gets a job of its own), or already reviewed at that head and base (`already_reviewed`; a `/review` is not ended this way, except in dry run). Out of dry run, `nothing_new` ends a push's job, after the engine has run without a model call, when the review would tell a person what the newest published one already tells (see Reviews after the first). A review that fails is recorded and its job ends `failed`; nothing is posted for it. Out of dry run there are more. Before anything is paid: `already_reviewed` when GitHub lists a review of the app's own on the live head that the database does not know of. After the review was computed and recorded: `head_moved` when the head or the base changed meanwhile (the new head gets a job; a command's own job starts over once, see `/review`), `closed` when the pull request was closed meanwhile, `publish_rejected` when GitHub refused the review even without its inline comments, and `render_failed` when its text could not be written.
 - When GitHub cannot be reached, or refuses a read (reading the threads is one), before any model call, the run is recorded as failed and the job is tried again a minute later, and then 15 minutes after that: three starts in all. A pull request whose threads cannot be read (GitHub refuses the query, or the list is too long to read) gets no later review: each of its jobs ends `attempts_exhausted`. The list of the pull request's reviews, which the service reads to find its own, has a cap too (10 pages of 100); a pull request past it gets no review after that, in the same way.
 - Out of dry run, a review that could not be posted for any other reason (GitHub could not be reached, or answered with an error) stays recorded and its job is tried again 15 minutes later, whatever its starts and whatever the error: GitHub may have created the review although it answered with an error, and the later start, which asks GitHub for the app's own reviews first, then adopts it rather than posting it again. A start that comes sooner (after a `/review`, a reopening or a restart) and finds no review of the app's own for that commit does not post the recorded review: GitHub may hold a review it does not list yet. The job waits until 15 minutes have passed since the review was recorded, or since the last later start that set out to post it (each such start writes its time on the recorded review first, and posts nothing when it cannot). A start that waits is not counted, and a `/review` that waits this way is told nothing meanwhile. So each real failure delays the review by up to 15 minutes. A review GitHub created and still does not list by then is posted a second time; this was not seen. The later start posts the recorded review without computing it again, while it is less than a day old.
@@ -333,11 +374,14 @@ What to know before you expose it:
 
 - The service holds a request's body in memory before it can check the signature: at most 25 MB for each of at most 20 requests at once. That is about 500 MB while bodies arrive, and about twice that at the moment a body is joined into one piece.
 - A caller that sends slowly can hold one of the 20 places for up to about a minute. Twenty such callers, none of whom needs the secret, take every place, and real deliveries are answered `503 busy` meanwhile.
+- An extension module's routes are public: the service checks nothing about who calls, and the module must check each request itself. Each module holds at most 10 requests of at most 1 MiB, beside what the webhook route holds. A caller that sends slowly holds one of a module's places for up to 30 seconds. An address under `/extensions/` that names no module with a route is answered `404` without being read.
 - The Compose file publishes port 8080 on every interface of the host. TLS, and any limit on connections or body size per caller, belong to the proxy in front. Firewall the port, or publish it only where the proxy can reach it.
 
 ## Configuration
 
 [config.example.yml](config.example.yml) documents every key. Copy it to `config.local.yml`, which git ignores. A secret is never written in the file; the file names the environment variable that holds it.
+
+The top-level `extensions` block names extension modules, each with a name, a path or package and its options, in which a secret is named by reference as `{ env: VARIABLE }` (see [Extensions](#extensions-optional)).
 
 The merge gate has its own block, `gate`, under `repositories.defaults` and `repositories.overrides` (see [The merge gate](#the-merge-gate-optional)). One repository setting decides how a later head is reviewed: `repositories.defaults.newHead`, which `repositories.overrides` can set for one repository. `incremental` (what you get when it is not written, except on a gated pull request in `enforce` or `bypass`, where not written means `full`) reads only what changed since the last review; `full` reads the whole pull request at every head, and costs what a first review costs. It changes nothing for a first review, for a head on a different base branch (always full), or for a `/review` on the head and base of the last review (always a re-check). See [Reviews after the first](#leaving-dry-run).
 
@@ -393,6 +437,8 @@ npm run eval:compare -- ../runs/baseline/summary.json ../runs/first/summary.json
 
 The case file and the output folder must be outside the project folder, so that private data cannot be committed by accident. A case file is JSON Lines: each line names a pull request at a fixed head and base, with the review comments people left, labelled by whether they were valid. This repository has no command that builds a case file yet.
 
+The replay loads no extension module, so it runs without extension context and without acceptance rows; what rows cost the findings is therefore not measured. A config that names modules still needs the variables their options name to be set.
+
 ## Backtest
 
 The backtest replays the score on past pull requests and measures it against where people actually commented. Like the replay, it reads from GitHub, calls the model, makes paid calls bounded by `--max-cases` and `--max-cost`, and posts nothing. Its input is a history file written by `import-history`, and its files, like the history file, must be outside the project folder: they hold paths and model-written reasons.
@@ -410,6 +456,8 @@ npm run eval:score-noise -- ../runs/score-one ../runs/score-two
 A block or file is labelled **loose** when a person who is not the author left an inline comment on it. It is labelled **strict** when, in addition, its lines (for a file, its diff) changed in a later commit before the merge; Safety is reported for both.
 
 `score-noise` compares two runs of the same history file and prints how often a block, and a whole pull request, falls on a different side of each threshold between them.
+
+Like the replay, the backtest loads no extension module: it runs without extension context and without acceptance rows, and a config that names modules still needs their variables set.
 
 ## The file a team commits
 
@@ -447,10 +495,13 @@ A file that cannot be used (invalid YAML, an unknown key, a refused pattern, con
 | `src/eval/history` | The `import-history` command and the history file it writes |
 | `src/eval/backtest` | The `backtest` and `score-noise` commands: labels, the three numbers and the noise between runs |
 | `src/db` | The Postgres client, migrations, the queue's statements and the recorded runs |
-| `src/shell` | Receiving a webhook, the queue of review jobs, running a review, publishing it, following up its threads, the daily limit and the model's health |
+| `src/shell` | Receiving a webhook, the queue of review jobs, running a review, publishing it, following up its threads, the daily limit and the model's health; the notices, routes, feedback and health of extension modules |
+| `src/extensions` | The contract of an extension module, its loader and its time limit |
+| `examples` | An example extension module |
 | `src/service.ts`, `src/main.ts` | Starting and stopping the service |
 | `src/config` | Loading and validating configuration |
 | `contract` | The rules the model is given |
+| `docs/extensions.md` | The contract an extension module is written against |
 | `docs/superpowers` | The design and the implementation plans |
 
 ## Licence

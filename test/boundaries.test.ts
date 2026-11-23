@@ -58,3 +58,12 @@ test('the gate may not import the GitHub adapter or a Postgres client', async ()
     assert.ok((await lint(`import '${name}';\n`, 'src/gate/x.ts')).includes('no-restricted-imports'), name);
   }
 });
+test('the extensions part may not import the GitHub adapter or a Postgres client', async () => {
+  assert.ok((await lint("import '../forge/github/read-source.ts';\n", 'src/extensions/x.ts')).includes('no-restricted-imports'));
+  for (const name of ['pg', '@electric-sql/pglite']) {
+    assert.ok((await lint(`import '${name}';\n`, 'src/extensions/x.ts')).includes('no-restricted-imports'), name);
+  }
+});
+test('the engine may not import the extensions part', async () => {
+  assert.ok((await lint("import '../extensions/load.ts';\n", 'src/engine/x.ts')).includes('no-restricted-imports'));
+});

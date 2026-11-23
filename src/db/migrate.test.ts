@@ -70,6 +70,7 @@ test('testDb resolves with the ledger in place', async () => {
   assert.equal(names.indexOf('0006_publish_tried'), names.indexOf('0005_notes') + 1);
   assert.equal(names.indexOf('0007_score_surroundings'), names.indexOf('0006_publish_tried') + 1);
   assert.equal(names.indexOf('0008_gate'), names.indexOf('0007_score_surroundings') + 1);
+  assert.equal(names.indexOf('0009_feedback'), names.indexOf('0008_gate') + 1);
   await db.close();
 });
 test('a migration switches the statement timeout off for itself', async () => {

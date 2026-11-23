@@ -1,3 +1,4 @@
+import { isBuiltin } from 'node:module';
 import { z } from 'zod';
 
 /** A secret is never written in the file; it names the environment variable that holds it. */
@@ -61,6 +62,39 @@ const limits = z
     queueConcurrency: z.number().int().min(1).max(20).default(2),
   })
   .strict();
+
+const MODULE_MESSAGE = 'must be a path that starts with ./, ../ or /, or the name of a package';
+
+/** A path starts with ./, ../ or /; anything else must be the name of a package, so a path written without its ./ is refused. */
+function isModuleSpecifier(value: string): boolean {
+  if (value.length < 1 || value.length > 1000) return false;
+  if (/[\x00-\x20\x7f]/.test(value)) return false;
+  if (value.startsWith('./') || value.startsWith('../') || value.startsWith('/')) return true;
+  if (value.startsWith('.') || value.includes(':') || value.includes('\\')) return false;
+  if (/\.(ts|mts|js|mjs|cjs)$/.test(value)) return false;
+  return !isBuiltin(value);
+}
+
+const extension = z
+  .object({
+    name: z.string().regex(/^[a-z][a-z0-9_]{0,39}$/, {
+      message: 'must be a short code (a lower-case letter, then lower-case letters, digits or underscores, at most 40)',
+    }),
+    module: z.string().refine(isModuleSpecifier, { message: MODULE_MESSAGE }),
+    options: z.record(z.string(), z.unknown()).default({}),
+  })
+  .strict();
+
+const extensions = z
+  .array(extension)
+  .max(20)
+  .superRefine((list, ctx) => {
+    const seen = new Set<string>();
+    list.forEach((entry, i) => {
+      if (seen.has(entry.name)) ctx.addIssue({ code: 'custom', path: [i, 'name'], message: 'is already used by another extension' });
+      seen.add(entry.name);
+    });
+  });
 
 const threshold = z.number().int().min(1).max(100);
 
@@ -140,6 +174,7 @@ export const configSchema = z
     server: server.prefault({}),
     dryRun: z.boolean().default(true),
     alerts: alerts.optional(),
+    extensions: extensions.default([]),
     limits: limits.prefault({}),
     repositories: repositories.prefault({}),
   })

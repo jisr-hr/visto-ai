@@ -2,7 +2,9 @@ import type { ChatMessage, PullRequestInfo } from '../types.ts';
 import { estimateTokens } from './batches.ts';
 import type { Batch } from './batches.ts';
 import { ANCHOR_LEGEND } from './diff.ts';
-import { submitReviewTool, submitReviewWithThreadsTool } from '../model/submit-review.ts';
+import { extensionPart } from './extensions.ts';
+import type { ExtensionContext } from './extensions.ts';
+import { submitToolFor } from '../model/submit-review.ts';
 import { MEASURE_NUMBER, MEASURE_TOKEN, fileSection } from './section.ts';
 import { THREAD_HEADING, THREAD_RULES, threadsPart } from './threads.ts';
 import { cutText, inlineText, stripControl, wrapData } from './untrusted.ts';
@@ -45,8 +47,9 @@ export function buildMessages(args: {
   batchCount: number;
   token: string;
   lastOverview?: string;   // the last review's overview, in an incremental review or a re-check that has one
+  extension?: ExtensionContext;   // what the context providers gave, the same for every call of a review
 }): ChatMessage[] {
-  const { contract, pr, fileCount, firstFileNumber, batch, batchIndex, batchCount, token, lastOverview } = args;
+  const { contract, pr, fileCount, firstFileNumber, batch, batchIndex, batchCount, token, lastOverview, extension } = args;
   const parts: string[] = [];
   if (batchCount > 1) {
     parts.push(`Batch ${batchIndex + 1} of ${batchCount}.`);
@@ -59,23 +62,28 @@ export function buildMessages(args: {
     batch.files.flatMap((c) => c.threads ?? []).sort((x, y) => Number(x.key.slice(1)) - Number(y.key.slice(1))), token,
   );
   if (threads !== '') parts.push(threads);
+  const header = pullRequestHeader(pr, fileCount, token, lastOverview);
+  const part = extension === undefined ? '' : extensionPart(extension, token);
   return [
     { role: 'system', content: contract },
-    { role: 'user', content: pullRequestHeader(pr, fileCount, token, lastOverview) },
+    { role: 'user', content: part === '' ? header : `${header}\n${part}` },
     { role: 'user', content: parts.join('\n\n') },
   ];
 }
 
 // Everything in a call except the file sections: the contract, the header, the
-// batch line, the legend, the tool definition and the retry turn.
-export function fixedTokens(contract: string, pr: PullRequestInfo, withThreads = false, lastOverview?: string): number {
+// batch line, the legend, the tool definition, the retry turn, and what the context providers gave.
+export function fixedTokens(contract: string, pr: PullRequestInfo, withThreads = false, lastOverview?: string, extension?: ExtensionContext): number {
+  const part = extension === undefined ? '' : extensionPart(extension, MEASURE_TOKEN);
   return (
     estimateTokens(contract) +
     estimateTokens(pullRequestHeader(pr, MEASURE_NUMBER, MEASURE_TOKEN, lastOverview)) +
     estimateTokens(`Batch ${MEASURE_NUMBER} of ${MEASURE_NUMBER}.\n\n`) +
     estimateTokens(`${ANCHOR_LEGEND}\n\n`) +
-    estimateTokens(JSON.stringify(withThreads ? submitReviewWithThreadsTool : submitReviewTool)) +
+    // A call that shows criteria is sent the tool that takes rows.
+    estimateTokens(JSON.stringify(submitToolFor(withThreads, part !== '' && extension!.criteria.length > 0))) +
     (withThreads ? estimateTokens(`${THREAD_HEADING}\n\n${THREAD_RULES}\n\n`) : 0) +
-    RETRY_ALLOWANCE_TOKENS
+    RETRY_ALLOWANCE_TOKENS +
+    (part === '' ? 0 : estimateTokens(`\n${part}`))
   );
 }

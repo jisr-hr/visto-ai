@@ -72,8 +72,24 @@ dryRun: true
 #   # The port the service listens on (1 to 65535). It is 8080 when not written.
 #   port: 8080
 # alerts:
-#   # The environment variable that holds the URL (http or https) that gets the alerts: model_error, model_ok, spend_80, spend_limit, cost_unknown, redelivery_failed, feature_off, gate_check_failed and gate_bypass.
+#   # The environment variable that holds the URL (http or https) that gets the alerts: model_error, model_ok, spend_80, spend_limit, cost_unknown, redelivery_failed, feature_off, gate_check_failed, gate_bypass, extension_error and extension_ok.
 #   webhook: { env: ALERT_WEBHOOK_URL }
+
+# Optional extension modules: code of your own that the service loads once, at start. A module can give the reviewer
+# context about a pull request (a ticket's text, acceptance criteria), be told when a review is published and when an
+# alert is raised, and answer HTTP requests under /extensions/<name>/, for example to collect a thumbs up or down.
+# docs/extensions.md states the contract, and examples/extension-example.ts is a module that works.
+# A module runs inside the service and can reach whatever the service can: name only code you trust.
+# A module that cannot be loaded stops the start. In dry run a module is asked for context, and it is told of no review and no alert.
+# Under Docker the module's file must be mounted into the container; docs/extensions.md says how.
+# extensions:
+#     # The module's name in logs and in its route: a lower-case letter, then lower-case letters, digits or underscores, at most 40.
+#   - name: example
+#     # A path (relative to this file when it starts with ./ or ../), or the name of a package the service can import.
+#     module: ./examples/extension-example.ts
+#     # Handed to the module as written. A secret is named by reference, anywhere inside: { env: VARIABLE_NAME }.
+#     options:
+#       secret: { env: EXAMPLE_FEEDBACK_SECRET }
 
 repositories:
   # Settings for every repository.

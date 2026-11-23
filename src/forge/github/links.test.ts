@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { githubCommentUrl, githubLineUrl } from './links.ts';
+import { githubCommentUrl, githubLineUrl, githubPullRequestUrl, githubReviewUrl } from './links.ts';
 import type { PullRequestInfo } from '../types.ts';
 
 const pr: PullRequestInfo = {
@@ -26,4 +26,10 @@ test('a comment link names the pull request and the comment, and a comment id th
   const ref = { service: 'github', owner: 'acme', repo: 'shop', number: 7 } as const;
   assert.equal(githubCommentUrl(ref, '9001'), 'https://github.com/acme/shop/pull/7#discussion_r9001');
   assert.throws(() => githubCommentUrl(ref, '9001/x'), /^Error: github_bad_path$/);
+});
+test('a review link and a pull request link', () => {
+  const ref = { service: 'github', owner: 'acme', repo: 'shop', number: 7 } as const;
+  assert.equal(githubReviewUrl(ref, '501'), 'https://github.com/acme/shop/pull/7#pullrequestreview-501');
+  assert.equal(githubPullRequestUrl(ref), 'https://github.com/acme/shop/pull/7');
+  assert.throws(() => githubReviewUrl(ref, '501/x'), /^Error: github_bad_path$/);
 });

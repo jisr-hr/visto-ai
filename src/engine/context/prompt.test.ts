@@ -8,7 +8,9 @@ import { ANCHOR_LEGEND } from './diff.ts';
 import { threadsPart } from './threads.ts';
 import { LAST_OVERVIEW_CHARS, buildMessages, fixedTokens, headerStripCounts, pullRequestHeader } from './prompt.ts';
 import { MEASURE_NUMBER, MEASURE_TOKEN } from './section.ts';
-import { submitReviewTool } from '../model/submit-review.ts';
+import { EXTENSION_LINE, extensionPart } from './extensions.ts';
+import type { ExtensionContext } from './extensions.ts';
+import { submitReviewTool, submitToolFor } from '../model/submit-review.ts';
 import type { KeptScores } from '../score/history.ts';
 import type { ChangedFile, PullRequestInfo, Source } from '../types.ts';
 
@@ -260,4 +262,41 @@ test('the last review overview is shown as data at the end of the header, cut an
   // buildMessages puts it in the header message of the call.
   assert.equal(buildMessages({ ...args, lastOverview: overview })[1]!.content, pullRequestHeader(pr, 3, 'tok', overview));
   assert.deepEqual(buildMessages({ ...args, lastOverview: overview })[2], msgs[2]);
+});
+
+const ext: ExtensionContext = { blocks: [{ name: 'tickets', label: 'ticket SHOP-12', text: 'The total is rounded to cents.' }], criteria: [] };
+test('with no extension, and with one that shows nothing, the messages are what they were', () => {
+  assert.deepEqual(buildMessages({ ...args, extension: { blocks: [], criteria: [] } }), msgs);
+  assert.equal(fixedTokens('CONTRACT', pr, false, undefined, { blocks: [], criteria: [] }), fixedTokens('CONTRACT', pr));
+  assert.equal(fixedTokens('CONTRACT', pr, true, undefined, { blocks: [], criteria: [] }), fixedTokens('CONTRACT', pr, true));
+});
+test('the part stands at the end of the header message, the same in every batch, and not in the files message', () => {
+  const first = buildMessages({ ...args, batchIndex: 0, extension: ext });
+  const second = buildMessages({ ...args, batchIndex: 1, extension: ext });
+  assert.equal(first[1]!.content, second[1]!.content);
+  assert.equal(first[1]!.content, `${pullRequestHeader(pr, 3, 'tok')}\n${extensionPart(ext, 'tok')}`);
+  assert.equal(first[1]!.content.endsWith(extensionPart(ext, 'tok')), true);
+  assert.equal(first[2]!.content.includes(EXTENSION_LINE), false);
+  assert.deepEqual([first[0], first[2]], [msgs[0], msgs[2]]);
+});
+test('criteria alone are shown, and a call that shows them counts the tool that takes rows', () => {
+  const criteria: ExtensionContext = { blocks: [], criteria: ['The change has a test.'] };
+  const shown = buildMessages({ ...args, extension: criteria });
+  assert.equal(shown[1]!.content, `${pullRequestHeader(pr, 3, 'tok')}\n${extensionPart(criteria, 'tok')}`);
+  assert.deepEqual([shown[0], shown[2]], [msgs[0], msgs[2]]);
+  for (const withThreads of [false, true]) {
+    const tool = estimateTokens(JSON.stringify(submitToolFor(withThreads, true))) - estimateTokens(JSON.stringify(submitToolFor(withThreads, false)));
+    assert.ok(tool > 0);
+    // The budget counts the tool as it is sent, the three statuses of a row included.
+    assert.ok(JSON.stringify(submitToolFor(withThreads, true)).includes('"enum":["met","not_met","not_verified"]'));
+    assert.equal(
+      fixedTokens('CONTRACT', pr, withThreads, undefined, criteria) - fixedTokens('CONTRACT', pr, withThreads),
+      estimateTokens(`\n${extensionPart(criteria, MEASURE_TOKEN)}`) + tool,
+    );
+  }
+});
+test('the part counts in the fixed tokens', () => {
+  const extra = estimateTokens(`\n${extensionPart(ext, MEASURE_TOKEN)}`);
+  assert.equal(fixedTokens('CONTRACT', pr, false, undefined, ext) - fixedTokens('CONTRACT', pr), extra);
+  assert.equal(fixedTokens('CONTRACT', pr, true, 'Earlier.', ext) - fixedTokens('CONTRACT', pr, true, 'Earlier.'), extra);
 });

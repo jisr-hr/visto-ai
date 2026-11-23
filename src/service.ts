@@ -7,7 +7,9 @@ import type { Db, InstanceLock } from './db/types.ts';
 import { gateUseOf, repoSettingsFor } from './config/load.ts';
 import type { ServiceConfig } from './config/load.ts';
 import type { ReviewDeps, ReviewInput, ReviewResult } from './engine/types.ts';
-import type { AppIdentity, ForgeAccess, ForgeChecks, ForgeWriter, HookDeliveries, Source, WebhookReader } from './forge/types.ts';
+import { alertSinksOf, notifiersOf } from './extensions/load.ts';
+import type { LoadedExtension } from './extensions/types.ts';
+import type { AppIdentity, ForgeAccess, ForgeChecks, ForgeWriter, HookDeliveries, PullRequestRef, Source, WebhookReader } from './forge/types.ts';
 import { gatingOf } from './gate/gating.ts';
 import { runGateJob } from './gate/job.ts';
 import type { GateJobDeps } from './gate/job.ts';
@@ -17,6 +19,8 @@ import { ALERT_TIMEOUT_MS, createAlerts } from './shell/alerts.ts';
 import type { Alert } from './shell/alerts.ts';
 import { codeOf, isShortCode } from './shell/codes.ts';
 import { dryChecks, dryWriter } from './shell/dry-writer.ts';
+import { createExtensionHealth } from './shell/extension-health.ts';
+import { createExtensionRoutes } from './shell/extension-routes.ts';
 import { createListener } from './shell/http.ts';
 import type { RequestLike, ResponseLike } from './shell/http.ts';
 import { checkModelKey, createModelHealth } from './shell/model-health.ts';
@@ -50,6 +54,11 @@ export interface ServiceDeps {
   review: (input: ReviewInput, deps: ReviewDeps) => Promise<ReviewResult>;
   lineUrl: ReviewJobDeps['lineUrl'];
   commentUrl: ReviewJobDeps['commentUrl'];
+  /** The modules loaded at start; [] when the config names none. */
+  extensions: LoadedExtension[];
+  /** Links a notice carries: to one review of a pull request, and to the pull request. */
+  reviewUrl: (ref: PullRequestRef, reviewId: string) => string;
+  pullRequestUrl: (ref: PullRequestRef) => string;
 }
 export const STOP_WAIT_MS = 10_000;
 export const CLOSE_WAIT_MS = 5_000;
@@ -107,8 +116,15 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps): Pr
     }
   }
   const settingsFor = (name: string) => repoSettingsFor(config, name);
-  const { alert, settled: alertsSettled } = createAlerts({ webhook: config.alerts?.webhook ?? null, fetch: deps.fetch, clock, log: say });
+  // In dry run no module is told of a review or an alert (11.1); its providers and routes still work.
+  const notifiers = notifiersOf(deps.extensions);
+  const sinks = alertSinksOf(deps.extensions);
+  const { alert, settled: alertsSettled } = createAlerts({
+    webhook: config.alerts?.webhook ?? null, fetch: deps.fetch, clock, log: say,
+    ...(config.dryRun || sinks.length === 0 ? {} : { sinks }),
+  });
   const health = createModelHealth(alert);
+  const extensionHealth = deps.extensions.length === 0 ? null : createExtensionHealth(alert);
   const spend = createSpendGuard({ db, limit: config.limits.spendPerDay, clock, alert });
   const reviewDeps: ReviewJobDeps = {
     db, forge: deps.forge, clock, log: say, sleep: deps.sleep, settingsFor,
@@ -118,6 +134,8 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps): Pr
     },
     dryRun: config.dryRun, writer: config.dryRun ? dryWriter() : deps.writer, engineDeps: deps.engineDeps, review: deps.review, lineUrl: deps.lineUrl, health, spend,
     commentUrl: deps.commentUrl, canResolve: () => deps.appInfo.canResolve(),
+    ...(config.dryRun || notifiers.length === 0 ? {} : { notice: { notifiers, reviewUrl: deps.reviewUrl, pullRequestUrl: deps.pullRequestUrl } }),
+    ...(extensionHealth === null ? {} : { extensionHealth }),
   };
   // gate_check_failed is raised once for each reason in a run of the service.
   const raisedGate = new Set<string>();
@@ -191,6 +209,11 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps): Pr
     webhook: (headers, body) => receive({
       db, reader: deps.reader, clock, log: say, settingsFor, onQueued: tickBoth, dryRun: config.dryRun, appId: config.app.id,
     }, headers, body),
+    // With no module that has a route the map is empty, and every address under /extensions/ is answered as any unknown one.
+    extensions: createExtensionRoutes(deps.extensions, {
+      log: say,
+      ...(extensionHealth === null ? {} : { noted: (name: string, ok: boolean, code: string) => { extensionHealth.noted(name, 'route', ok, code); } }),
+    }),
   });
 
   // 1 to 4: the lock, the migrations, the recovery, the listener.
@@ -228,6 +251,10 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps): Pr
     } catch {
       // the start failure is the one to report
     }
+  }
+
+  if (config.dryRun && notifiers.length + sinks.length > 0) {
+    say({ event: 'extensions_quiet', reason: 'dry_run', notifiers: notifiers.length, sinks: sinks.length });
   }
 
   // A repository in bypass is said at each start.

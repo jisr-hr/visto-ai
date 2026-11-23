@@ -43,6 +43,14 @@ export interface Discussed {
   resolved: boolean; settled: boolean;  // that thread, at the moment the finding was dropped
 }
 
+export type AcceptanceStatus = 'met' | 'not_met' | 'not_verified';
+export interface AcceptanceRow {
+  criterion: string;                       // the criterion's text, as the model was shown it
+  status: AcceptanceStatus;
+  note: string;                            // the model's reason on one line, at most 300 characters; '' when there is none
+  from: 'review' | 'earlier' | 'none';     // judged by this run; kept from an earlier review; judged by neither
+}
+
 export interface ReviewInput {
   pullRequest: PullRequestInfo;
   trigger: 'automatic' | 'manual';
@@ -52,6 +60,7 @@ export interface ReviewInput {
   earlier: EarlierState | null; // what the last published review left on the pull request; null for a first review
   history?: ScoreHistory | null;   // the scores of the pull request's earlier runs; absent reads as none
   mode?: 'full' | 'incremental' | 'recheck';   // absent reads as 'full'
+  earlierAcceptance?: AcceptanceRow[];   // the rows of the newest published review that has any; absent reads as none
 }
 export interface ScoreRequest { text: string; blocks: string[] } // blocks: ids to score, in diff order; never empty
 export interface ScoredItem { score: number; category: string; reason: string }
@@ -61,6 +70,21 @@ export interface ScoreAnswer {
   failure: string | null;             // a short code when some request for this file failed; what was answered before it is kept
 }
 export interface Scorer { score(request: ScoreRequest): Promise<ScoreAnswer> }
+
+export type ExtensionState = 'ok' | 'empty' | 'skipped' | 'error';
+export interface ExtensionStatus { status: ExtensionState; code: string } // code: a short code
+/** What a context provider answers. Nothing of it is trusted: the engine checks it field by field. */
+export interface ContextAnswer {
+  status: ExtensionState;
+  code?: string;          // a short code that says why, such as no_ticket
+  label?: string;         // names the text for the model, such as "ticket SHOP-12"
+  text?: string;
+  criteria?: string[];    // acceptance criteria, one for each entry
+}
+export interface ContextProvider {
+  name: string;           // the module's name
+  provide(pr: PullRequestInfo, signal: AbortSignal): Promise<ContextAnswer>;
+}
 
 export interface ReviewDeps {
   source: Source;
@@ -72,6 +96,7 @@ export interface ReviewDeps {
   scorer?: Scorer;            // scores the blocks in place of the review model, when set
   /** The highest scores other pull requests of the repository stored for these blocks, among the same lines, in the last 30 days. May reject. */
   reusableScores?: (blocks: Array<{ path: string; hash: string; around: string }>) => Promise<Array<{ path: string; hash: string; around: string; entry: ScoreEntry }>>;
+  contextProviders?: ContextProvider[]; // asked once for each review; absent reads as none
 }
 
 export interface RawFinding { path: string; side: Side; line: number; severity: Severity; body: string; quote: string; beyond_diff: boolean }
@@ -94,7 +119,7 @@ export interface ReviewResult {
   usage: Usage;
   models: string[];           // models that answered, distinct, in first-seen order
   providers: string[];        // upstream providers that answered, distinct, in first-seen order
-  dependencies: { model: 'ok' | 'error' };
+  dependencies: { model: 'ok' | 'error'; extensions?: Record<string, ExtensionStatus> }; // extensions: absent when no provider was asked
   audit: AuditEntry[];
   scores: FileScore[];        // one per changed file; empty when the review failed
   verdict: Verdict;
@@ -106,6 +131,7 @@ export interface ReviewResult {
   nothingToDo?: boolean;              // true when an incremental review or a re-check read nothing and would tell a person what the newest published review tells
   unchanged?: Finding[];              // in an incremental review and a re-check: majors on lines unchanged since their file was last read, listed in the body only
   blockingOnUnchanged?: number;       // in a full review of a later head: its blocker and major findings on lines unchanged since their file was last read
+  acceptance?: AcceptanceRow[];       // one row for each criterion, in the order shown; absent when no criterion was supplied, and on a failed review
 }
 export type { ChangedFile, PullRequestInfo, Side, Source };
 export type {

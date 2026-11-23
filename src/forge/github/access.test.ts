@@ -7,7 +7,7 @@ const REF = { service: 'github', owner: 'acme', repo: 'shop', number: 7 } as con
 const auth: AppAuth = { appToken: () => 'jwt', installationToken: async (id) => `tok-${id}` };
 const PULL = {
   number: 7, title: 'Add things', body: null, state: 'open', merged: false, draft: false,
-  user: { login: 'octo-dev', type: 'User' }, base: { ref: 'main', sha: 'base111' }, head: { ref: 'feat', sha: 'head222' },
+  user: { login: 'octo-dev', type: 'User' }, base: { ref: 'main', sha: 'base111', repo: { id: 501 } }, head: { ref: 'feat', sha: 'head222', repo: { id: 501 } },
 };
 const json = (value: unknown, status = 200): Response => new Response(JSON.stringify(value), { status });
 /** Answers by "<path and query>"; an unknown one is 404. Records each request's path and Authorization header. */
@@ -26,7 +26,7 @@ const COMPARE_PATH = '/repos/acme/shop/compare/base111...head222?per_page=1';
 test('an open pull request is read with the merge base as its base, using the installation token', async () => {
   const { access, seen } = github({ [PULL_PATH]: () => json(PULL), [COMPARE_PATH]: () => json({ merge_base_commit: { sha: 'merge000' }, files: [] }) });
   assert.deepEqual(await access.readPullRequest(REF, '99'), {
-    info: { ref: REF, title: 'Add things', description: '', author: 'octo-dev', baseBranch: 'main', headBranch: 'feat', baseSha: 'merge000', headSha: 'head222', draft: false },
+    info: { ref: REF, title: 'Add things', description: '', author: 'octo-dev', baseBranch: 'main', headBranch: 'feat', baseSha: 'merge000', headSha: 'head222', draft: false, fromFork: false },
     state: 'open',
   });
   assert.deepEqual(seen, [{ path: PULL_PATH, authorization: 'Bearer tok-99' }, { path: COMPARE_PATH, authorization: 'Bearer tok-99' }]);
@@ -58,4 +58,22 @@ test('sourceFor reads with that installation token', async () => {
   const info = { ref: REF, title: '', description: '', author: 'octo-dev', baseBranch: 'main', headBranch: 'feat', baseSha: 'merge000', headSha: 'head222', draft: false };
   assert.equal(await source.getFileContent(info, 'a.ts', 'head222'), 'x');
   assert.equal(seen[0]!.authorization, 'Bearer tok-99');
+});
+
+test('the read says whether a pull request comes from a fork, and a fork whose repository is gone is still one', async () => {
+  const compare = { [COMPARE_PATH]: () => json({ merge_base_commit: { sha: 'merge000' }, files: [] }) };
+  const cases: Array<[string, { base: Record<string, unknown>; head: Record<string, unknown> }, boolean]> = [
+    ['same repository', { base: PULL.base, head: PULL.head }, false],
+    ['another repository', { base: PULL.base, head: { ...PULL.head, repo: { id: 502 } } }, true],
+    ['a deleted fork', { base: PULL.base, head: { ...PULL.head, repo: null } }, true],
+    ['no repository said', { base: { ref: 'main', sha: 'base111' }, head: { ref: 'feat', sha: 'head222' } }, true],
+    ['ids that are not numbers', { base: { ...PULL.base, repo: {} }, head: { ...PULL.head, repo: {} } }, true],
+  ];
+  for (const [name, sides, fromFork] of cases) {
+    for (const closed of [false, true]) {
+      const pull = { ...PULL, ...sides, ...(closed ? { state: 'closed', merged: true } : {}) };
+      const live = await github({ [PULL_PATH]: () => json(pull), ...compare }).access.readPullRequest(REF, '99');
+      assert.equal(live?.info.fromFork, fromFork, `${name}, ${closed ? 'merged' : 'open'}`);
+    }
+  }
 });

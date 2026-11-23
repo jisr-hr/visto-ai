@@ -2,16 +2,18 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { unitTokens } from './context/batches.ts';
 import { buildFileContexts, hunksOf } from './context/build.ts';
+import { ACCEPTANCE_HEADING, ACCEPTANCE_RULES, EXTENSION_LINE, extensionPart } from './context/extensions.ts';
+import type { ExtensionContext } from './context/extensions.ts';
 import { buildMessages, fixedTokens } from './context/prompt.ts';
 import { ProviderError } from './model/errors.ts';
-import { SUBMIT_REVIEW, submitReviewTool, submitReviewWithThreadsTool } from './model/submit-review.ts';
+import { SUBMIT_REVIEW, submitReviewTool, submitReviewWithThreadsTool, submitToolFor } from './model/submit-review.ts';
 import { NOTHING_READ } from './plan.ts';
 import { chooseEffort, review } from './review.ts';
 import { blocksOf, fileDiffHash } from './score/blocks.ts';
 import { shownOf } from './score/shown.ts';
 import type { BlockScore, ScoreEntry, ScoreHistory } from './score/types.ts';
 import type {
-  ChangedFile, EarlierThread, ModelClient, ModelRequest, ModelResponse, PullRequestInfo, RepoConfig, ReviewDeps, ReviewInput, ReviewResult, ScoreAnswer, ScoreRequest, Scorer,
+  ChangedFile, ContextProvider, EarlierThread, ModelClient, ModelRequest, ModelResponse, PullRequestInfo, RepoConfig, ReviewDeps, ReviewInput, ReviewResult, ScoreAnswer, ScoreRequest, Scorer,
   Severity, Source, Usage,
 } from './types.ts';
 
@@ -54,6 +56,7 @@ const respond = (answer: unknown): ModelResponse =>
 type Step = unknown | ProviderError;
 function deps(spec: {
   files: ChangedFile[]; answers?: Step[]; answerFor?: Record<string, Step>; delayMs?: number; listError?: Error; scorer?: Scorer;
+  contextProviders?: ContextProvider[];
 }):
   ReviewDeps & { model: ModelClient & { requests: ModelRequest[]; maxInFlight: number }; logged: Array<Record<string, unknown>>; tokens: number } {
   const requests: ModelRequest[] = [];
@@ -94,6 +97,7 @@ function deps(spec: {
     token: () => { d.tokens += 1; return 'abcdef0123456789'; },
     log: (e: Record<string, unknown>) => { logged.push(e); },
     ...(spec.scorer === undefined ? {} : { scorer: spec.scorer }),
+    ...(spec.contextProviders === undefined ? {} : { contextProviders: spec.contextProviders }),
   };
   return d;
 }
@@ -1827,4 +1831,308 @@ test('no score falls: a block whose neighbours change and change back, and two h
   const d3 = await review({ ...input, mode: 'full', history: historyFrom([d1, d2]) }, backTall);
   assert.deepEqual(headersOf(backTall), ['### Block B1 (32 changed lines, scored)']);
   assert.deepEqual([d3.scores[0]!.blocks.map((one) => [one.id, one.entry?.score, one.origin]), d3.scores[0]!.finalScore], [[['B1', 70, 'earlier_run']], 70]);
+});
+
+// Context providers. The pull request of these tests says it is not from a fork.
+const own: ReviewInput = { ...input, pullRequest: { ...input.pullRequest, fromFork: false } };
+const TICKET = 'The total is rounded to cents, and a refund keeps its sign.';
+const ticketContext: ExtensionContext = { blocks: [{ name: 'tickets', label: 'ticket SHOP-12', text: TICKET }], criteria: [] };
+const TOKEN = 'abcdef0123456789';
+function ticketProvider(answer: unknown = { status: 'ok', label: 'ticket SHOP-12', text: TICKET }): ContextProvider & { calls: number } {
+  const p = { name: 'tickets', calls: 0, provide: async () => { p.calls += 1; return answer as never; } };
+  return p;
+}
+const longContent = Array.from({ length: 60 }, (_, i) => `const line${i} = ${i * 104729};`).join('\n');
+const withContent = <T extends ReviewDeps>(d: T): T => {
+  d.source.getFileContent = async (_p, path) => (path === 'src/a.ts' ? longContent : null);
+  return d;
+};
+async function unitOf(file: ChangedFile, content: boolean): Promise<number> {
+  const source = content ? withContent(deps({ files: [] })).source : deps({ files: [] }).source;
+  return unitTokens((await buildFileContexts(own.pullRequest, [file], source)).contexts[0]!);
+}
+const limitsOf = (inputTokensPerCall: number, batchesPerReview = 6): ReviewInput => ({ ...own, limits: { ...own.limits, inputTokensPerCall, batchesPerReview } });
+const partTokens = (): number => fixedTokens(CONTRACT, own.pullRequest, false, undefined, ticketContext) - fixedTokens(CONTRACT, own.pullRequest);
+
+test('a pull request from a fork is reviewed with no extension context, and the result says why', async () => {
+  const provider = ticketProvider();
+  const fork: ReviewInput = { ...input, pullRequest: { ...input.pullRequest, fromFork: true } };
+  const asked = deps({ files: [fileA], answers: [answerOnA], contextProviders: [provider] });
+  const r = await review(fork, asked);
+  const plain = deps({ files: [fileA], answers: [answerOnA] });
+  await review(fork, plain);
+  assert.equal(provider.calls, 0);
+  assert.deepEqual(asked.model.requests, plain.model.requests);
+  assert.deepEqual(r.dependencies.extensions, { tickets: { status: 'skipped', code: 'from_fork' } });
+});
+
+test('with no provider nothing is asked and the result says nothing of extensions', async () => {
+  const today = deps({ files: [fileA, fileB], answerFor: { 'src/a.ts': answerOnA, 'src/b.ts': answerOnB } });
+  const expected = await review(smallLimits, today);
+  for (const contextProviders of [undefined, []]) {
+    const d = deps({ files: [fileA, fileB], answerFor: { 'src/a.ts': answerOnA, 'src/b.ts': answerOnB }, ...(contextProviders === undefined ? {} : { contextProviders }) });
+    const r = await review({ ...smallLimits, pullRequest: own.pullRequest }, d);
+    assert.equal('extensions' in r.dependencies, false);
+    assert.deepEqual(d.model.requests, today.model.requests);
+    assert.deepEqual(r, expected);
+    assert.deepEqual(d.logged, today.logged);
+  }
+});
+
+test('a provider is asked once for a review of two batches, its text is in both calls and its status in the result', async () => {
+  const unit = await unitOf(fileA, false);
+  const provider = ticketProvider();
+  const d = deps({ files: [fileA, fileB], answerFor: { 'src/a.ts': answerOnA, 'src/b.ts': answerOnB }, contextProviders: [provider] });
+  const r = await review(limitsOf(fixedTokens(CONTRACT, own.pullRequest, false, undefined, ticketContext) + unit + Math.floor(unit / 2)), d);
+  assert.equal(provider.calls, 1);
+  assert.deepEqual(r.dependencies, { model: 'ok', extensions: { tickets: { status: 'ok', code: 'ok' } } });
+  assert.equal(d.model.requests.length, 2);
+  const headers = d.model.requests.map((q) => q.messages[1]!.content);
+  assert.equal(headers[0], headers[1]);
+  assert.equal(headers[0]!.endsWith(`\n${extensionPart(ticketContext, TOKEN)}`), true);
+  assert.equal(d.model.requests.some((q) => q.messages[2]!.content.includes(EXTENSION_LINE)), false);
+});
+
+test('a provider that throws or answers junk never fails the review', async () => {
+  const plain = deps({ files: [fileA], answers: [answerOnA] });
+  const expected = await review(own, plain);
+  const d = deps({
+    files: [fileA], answers: [answerOnA],
+    contextProviders: [
+      { name: 'tickets', provide: async () => { throw new Error('Refused by host 10.0.0.5'); } },
+      { name: 'chat', provide: async () => ({ status: 'ok', text: 5 }) as never },
+    ],
+  });
+  const r = await review(own, d);
+  assert.equal(r.status, 'ok');
+  assert.deepEqual(r.findings, expected.findings);
+  assert.deepEqual(r.dependencies.extensions, { tickets: { status: 'error', code: 'provider_failed' }, chat: { status: 'error', code: 'bad_shape' } });
+  assert.deepEqual(d.model.requests, plain.model.requests);
+  assert.doesNotMatch(JSON.stringify(r), /10\.0\.0\.5|Refused/);
+});
+
+test('the statuses are on a failed review too, and a pull request with no changed file asks nobody', async () => {
+  const failed = await review(own, deps({ files: [fileA], answers: [new ProviderError('auth', 'c', 401, null)], contextProviders: [ticketProvider()] }));
+  assert.deepEqual([failed.status, failed.dependencies], ['failed', { model: 'error', extensions: { tickets: { status: 'ok', code: 'ok' } } }]);
+  const unread = deps({ files: [fileA], contextProviders: [ticketProvider()] });
+  unread.source.getDefaultBranchFile = () => Promise.reject(new Error('github_500'));
+  const source = await review(own, unread);
+  assert.deepEqual([source.failure, source.dependencies.extensions], [{ stage: 'context', code: 'github_500' }, { tickets: { status: 'ok', code: 'ok' } }]);
+  const provider = ticketProvider();
+  const empty = await review(own, deps({ files: [], contextProviders: [provider] }));
+  assert.equal(provider.calls, 0);
+  assert.equal('extensions' in empty.dependencies, false);
+});
+
+test('text that would cost a file its full contents is dropped for the whole review, and the audit says so', async () => {
+  const full = await unitOf(fileA, true);
+  assert.ok(full - (await unitOf(fileA, false)) > partTokens());
+  const d = withContent(deps({ files: [fileA], answers: [answerOnA], contextProviders: [ticketProvider()] }));
+  const r = await review(limitsOf(fixedTokens(CONTRACT, own.pullRequest) + full), d);
+  assert.equal(d.model.requests.length, 1);
+  assert.ok(d.model.requests[0]!.messages[2]!.content.includes('### Full file'));
+  assert.equal(d.model.requests[0]!.messages[1]!.content.includes(EXTENSION_LINE), false);
+  assert.deepEqual(r.audit.filter((e) => e.action === 'extension_context_cut'), [{ stage: 'context', action: 'extension_context_cut', subject: 'extensions', reason: 'over_call_budget' }]);
+  assert.equal(r.audit.some((e) => e.action === 'full_file_cut'), false);
+  assert.deepEqual(r.dependencies.extensions, { tickets: { status: 'ok', code: 'ok' } });
+});
+
+test('a file that is cut with or without the text does not cost the text its place', async () => {
+  const bare = await unitOf(fileA, false);
+  const d = withContent(deps({ files: [fileA], answers: [answerOnA], contextProviders: [ticketProvider()] }));
+  const r = await review(limitsOf(fixedTokens(CONTRACT, own.pullRequest, false, undefined, ticketContext) + bare), d);
+  assert.ok(r.audit.some((e) => e.action === 'full_file_cut' && e.subject === 'src/a.ts'));
+  assert.equal(r.audit.some((e) => e.action === 'extension_context_cut'), false);
+  assert.equal(d.model.requests[0]!.messages[1]!.content.endsWith(extensionPart(ticketContext, TOKEN)), true);
+  assert.deepEqual(r.coverage, { reviewed: ['src/a.ts'], notReviewed: [] });
+});
+
+test('text that would leave a file unreviewed is dropped, and text that only moves a file to a second batch is kept', async () => {
+  const unit = await unitOf(fileA, false);
+  const room = fixedTokens(CONTRACT, own.pullRequest) + 2 * unit;
+  const one = deps({ files: [fileA, fileB], answerFor: { 'src/a.ts': answerOnA, 'src/b.ts': answerOnB }, contextProviders: [ticketProvider()] });
+  const r1 = await review(limitsOf(room, 1), one);
+  assert.equal(one.model.requests.length, 1);
+  assert.deepEqual(r1.coverage, { reviewed: ['src/a.ts', 'src/b.ts'], notReviewed: [] });
+  assert.equal(one.model.requests[0]!.messages[1]!.content.includes(EXTENSION_LINE), false);
+  assert.deepEqual(r1.audit.filter((e) => e.action === 'extension_context_cut').map((e) => e.subject), ['extensions']);
+  const two = deps({ files: [fileA, fileB], answerFor: { 'src/a.ts': answerOnA, 'src/b.ts': answerOnB }, contextProviders: [ticketProvider()] });
+  const r2 = await review(limitsOf(room, 2), two);
+  assert.equal(two.model.requests.length, 2);
+  assert.ok(two.model.requests.every((q) => q.messages[1]!.content.endsWith(extensionPart(ticketContext, TOKEN))));
+  assert.deepEqual(r2.coverage.notReviewed, []);
+  assert.equal(r2.audit.some((e) => e.action === 'extension_context_cut'), false);
+});
+
+// Acceptance criteria.
+const CRITERIA = ['Orders above the limit are refused.', 'A refund writes an audit row.', 'The export is paged.'];
+const criteriaProvider = (criteria: string[] = CRITERIA, text?: string): ContextProvider & { calls: number } =>
+  ticketProvider({ status: 'ok', label: 'ticket SHOP-12', criteria, ...(text === undefined ? {} : { text }) });
+const withRows = (answer: object, acceptance: unknown[]): object => ({ ...answer, acceptance });
+const rowOf = (criterion: string, status: string, note: string, from: string) => ({ criterion, status, note, from });
+const notJudged = (criterion: string) => rowOf(criterion, 'not_verified', '', 'none');
+
+test('criteria come back as rows, one for each, in the order shown', async () => {
+  const d = deps({
+    files: [fileA], contextProviders: [criteriaProvider()],
+    answers: [withRows(answerOnA, [{ item: 'A1', status: 'met', note: 'In src/a.ts:2.' }, { item: 'A3', status: 'not_met', note: 'Nothing pages the export.' }])],
+  });
+  const r = await review(own, d);
+  assert.deepEqual(r.acceptance, [
+    rowOf(CRITERIA[0]!, 'met', 'In src/a.ts:2.', 'review'), notJudged(CRITERIA[1]!), rowOf(CRITERIA[2]!, 'not_met', 'Nothing pages the export.', 'review'),
+  ]);
+  assert.deepEqual(d.model.requests[0]!.tools, [submitToolFor(false, true)]);
+  assert.ok(d.model.requests[0]!.messages[1]!.content.endsWith(extensionPart({ blocks: [], criteria: CRITERIA }, TOKEN)));
+  assert.ok(d.model.requests[0]!.messages[1]!.content.includes(`A1. ${CRITERIA[0]}\nA2. ${CRITERIA[1]}\nA3. ${CRITERIA[2]}`));
+  // Rows change nothing else.
+  const plain = await review(own, deps({ files: [fileA], answers: [answerOnA] }));
+  assert.deepEqual([r.findings, r.scores, r.verdict, r.coverage], [plain.findings, plain.scores, plain.verdict, plain.coverage]);
+});
+
+test('two batches that disagree leave the criterion not met', async () => {
+  const unit = await unitOf(fileA, false);
+  const shown: ExtensionContext = { blocks: [], criteria: CRITERIA };
+  const d = deps({
+    files: [fileA, fileB], contextProviders: [criteriaProvider()],
+    answerFor: {
+      'src/a.ts': withRows(answerOnA, [{ item: 'A1', status: 'met', note: 'In src/a.ts:2.' }]),
+      'src/b.ts': withRows(answerOnB, [{ item: 'A1', status: 'not_met', note: 'src/b.ts lets them through.' }]),
+    },
+  });
+  const r = await review(limitsOf(fixedTokens(CONTRACT, own.pullRequest, false, undefined, shown) + unit + Math.floor(unit / 2)), d);
+  assert.equal(d.model.requests.length, 2);
+  assert.deepEqual(r.acceptance![0], rowOf(CRITERIA[0]!, 'not_met', 'src/b.ts lets them through.', 'review'));
+  assert.deepEqual(r.audit.filter((e) => e.action === 'acceptance_disagreement'), [{ stage: 'reconcile', action: 'acceptance_disagreement', subject: 'A1', reason: 'not_met' }]);
+});
+
+test('a badly shaped row costs that row, and the findings of its answer are kept', async () => {
+  const d = deps({
+    files: [fileA], contextProviders: [criteriaProvider()],
+    answers: [withRows(answerOnA, [{ item: 1, status: 'met', note: 'In src/a.ts:2.' }, 'junk', { item: 'A2' }])],
+  });
+  const r = await review(own, d);
+  assert.equal(d.model.requests.length, 1);
+  assert.equal(r.audit.some((e) => e.action === 'retry'), false);
+  assert.deepEqual(r.findings.map((f) => [f.path, f.line]), [['src/a.ts', 2]]);
+  assert.deepEqual(r.acceptance, [rowOf(CRITERIA[0]!, 'met', 'In src/a.ts:2.', 'review'), notJudged(CRITERIA[1]!), notJudged(CRITERIA[2]!)]);
+  assert.deepEqual(r.audit.filter((e) => e.action === 'acceptance_dropped').map((e) => [e.subject, e.reason]), [['row', 'bad_shape'], ['A2', 'bad_shape']]);
+});
+
+test('rows that are no list cost no answer and no retry', async () => {
+  const d = deps({ files: [fileA], contextProviders: [criteriaProvider()], answers: [withRows(answerOnA, 'x' as never)] });
+  const r = await review(own, d);
+  assert.equal(d.model.requests.length, 1);
+  assert.deepEqual(r.findings.map((f) => [f.path, f.line]), [['src/a.ts', 2]]);
+  assert.deepEqual(r.acceptance, CRITERIA.map(notJudged));
+  assert.deepEqual(r.audit.filter((e) => e.action === 'acceptance_dropped'), [{ stage: 'reconcile', action: 'acceptance_dropped', subject: 'acceptance', reason: 'bad_shape' }]);
+});
+
+test('criteria are shown alone when the texts with them would cost a file something', async () => {
+  const full = await unitOf(fileA, true);
+  const alone: ExtensionContext = { blocks: [], criteria: CRITERIA.slice(0, 2) };
+  const d = withContent(deps({ files: [fileA], answers: [answerOnA], contextProviders: [criteriaProvider(CRITERIA.slice(0, 2), TICKET.repeat(20))] }));
+  const r = await review(limitsOf(fixedTokens(CONTRACT, own.pullRequest, false, undefined, alone) + full), d);
+  assert.equal(d.model.requests.length, 1);
+  const request = d.model.requests[0]!;
+  assert.ok(request.messages[2]!.content.includes('### Full file'));
+  assert.ok(request.messages[1]!.content.endsWith(extensionPart(alone, TOKEN)));
+  assert.ok(request.messages[1]!.content.includes(ACCEPTANCE_RULES));
+  assert.equal(request.messages[1]!.content.includes('extension tickets:'), false);
+  assert.deepEqual(request.tools, [submitToolFor(false, true)]);
+  assert.deepEqual(r.audit.filter((e) => e.action === 'extension_context_cut'), [{ stage: 'context', action: 'extension_context_cut', subject: 'texts', reason: 'over_call_budget' }]);
+  assert.equal(r.audit.some((e) => e.action === 'full_file_cut'), false);
+});
+
+test('with no criterion the result has no acceptance and the tool is the tool of today', async () => {
+  const text = deps({ files: [fileA], answers: [answerOnA], contextProviders: [ticketProvider()] });
+  const withText = await review(own, text);
+  assert.equal('acceptance' in withText, false);
+  assert.deepEqual(text.model.requests[0]!.tools, [submitReviewTool]);
+  assert.equal(text.model.requests[0]!.messages[1]!.content.includes(ACCEPTANCE_HEADING), false);
+  const silent = deps({ files: [fileA], answers: [answerOnA], contextProviders: [ticketProvider({ status: 'skipped', code: 'no_ticket' })] });
+  const plain = deps({ files: [fileA], answers: [answerOnA] });
+  const r = await review(own, silent);
+  const expected = await review(own, plain);
+  assert.deepEqual(silent.model.requests, plain.model.requests);
+  assert.deepEqual({ ...r, dependencies: { model: r.dependencies.model } }, expected);
+});
+
+test('a review that calls no model still lists the criteria, not judged', async () => {
+  const d = deps({ files: [binaryNoPatch], contextProviders: [criteriaProvider()] });
+  const r = await review(own, d);
+  assert.equal(d.model.requests.length, 0);
+  assert.deepEqual(r.acceptance, CRITERIA.map(notJudged));
+});
+
+test('criteria that were not shown for want of room stay in the result, and the tool is the tool of today', async () => {
+  const full = await unitOf(fileA, true);
+  const d = withContent(deps({ files: [fileA], answers: [answerOnA], contextProviders: [criteriaProvider(CRITERIA, TICKET)] }));
+  const r = await review(limitsOf(fixedTokens(CONTRACT, own.pullRequest) + full), d);
+  assert.equal(d.model.requests.length, 1);
+  assert.deepEqual(d.model.requests[0]!.tools, [submitReviewTool]);
+  assert.equal(d.model.requests[0]!.messages[1]!.content.includes(EXTENSION_LINE), false);
+  assert.deepEqual(r.audit.filter((e) => e.action === 'extension_context_cut').map((e) => e.subject), ['extensions']);
+  assert.deepEqual(r.acceptance, CRITERIA.map(notJudged));
+});
+
+test('an incremental review keeps what the last review found for a criterion it does not judge and tells the model of it, and a full review does neither', async () => {
+  const [a, b] = CRITERIA as [string, string];
+  const earlierAcceptance = [rowOf(a, 'met', 'In src/a.ts:2.', 'review'), rowOf(b, 'not_met', 'No audit row.', 'review')] as ReviewInput['earlierAcceptance'];
+  const answer = withRows(answerOnA, [{ item: 'A2', status: 'met', note: 'src/a.ts:2 writes it.' }]);
+  const LINE = 'The last review left these as: A1 met; A2 not_met.';
+  for (const mode of ['incremental', 'recheck'] as const) {
+    const d = deps({ files: [fileA], answers: [answer], contextProviders: [criteriaProvider([a, b])] });
+    const r = await review({ ...own, mode, earlierAcceptance }, d);
+    assert.deepEqual(r.acceptance, [rowOf(a, 'met', 'In src/a.ts:2.', 'earlier'), rowOf(b, 'met', 'src/a.ts:2 writes it.', 'review')], mode);
+    assert.ok(d.model.requests[0]!.messages[1]!.content.includes(`\n\n${LINE}\n\n<<<data ${TOKEN} acceptance criteria>>>`), mode);
+  }
+  const d = deps({ files: [fileA], answers: [answer], contextProviders: [criteriaProvider([a, b])] });
+  const r = await review({ ...own, mode: 'full', earlierAcceptance }, d);
+  assert.deepEqual(r.acceptance, [notJudged(a), rowOf(b, 'met', 'src/a.ts:2 writes it.', 'review')]);
+  assert.equal(d.model.requests[0]!.messages[1]!.content.includes('The last review left these as'), false);
+  // A stored row that is damaged is passed over.
+  const damaged = deps({ files: [fileA], answers: [answerOnA], contextProviders: [criteriaProvider([a])] });
+  const kept = await review({ ...own, mode: 'incremental', earlierAcceptance: [{ criterion: a, status: 'done', note: 'x', from: 'review' }] as never }, damaged);
+  assert.deepEqual(kept.acceptance, [notJudged(a)]);
+  assert.equal(damaged.model.requests[0]!.messages[1]!.content.includes('The last review left these as'), false);
+});
+
+test('a criterion cut at a space keeps its row at the next review, as one cut inside a word does', async () => {
+  for (const long of ['word '.repeat(80), 'wordss '.repeat(80)]) {
+    const first = deps({ files: [fileA], answers: [withRows(answerOnA, [{ item: 'A1', status: 'not_met', note: 'The handler has no test.' }])], contextProviders: [criteriaProvider([long])] });
+    const r1 = await review(own, first);
+    // Stored and read back, as the shell does.
+    const earlierAcceptance = JSON.parse(JSON.stringify(r1.acceptance)) as ReviewInput['earlierAcceptance'];
+    const second = deps({ files: [fileA], answers: [answerOnA], contextProviders: [criteriaProvider([long])] });
+    const r2 = await review({ ...own, mode: 'incremental', earlierAcceptance }, second);
+    assert.deepEqual(r2.acceptance!.map((row) => [row.status, row.from, row.note]), [['not_met', 'earlier', 'The handler has no test.']], long.slice(0, 6));
+    assert.ok(second.model.requests[0]!.messages[1]!.content.includes('The last review left these as: A1 not_met.'), long.slice(0, 6));
+  }
+});
+
+test('a failed review has no acceptance rows', async () => {
+  const r = await review(own, deps({ files: [fileA], answers: [new ProviderError('auth', 'c', 401, null)], contextProviders: [criteriaProvider()] }));
+  assert.equal(r.status, 'failed');
+  assert.equal('acceptance' in r, false);
+});
+
+test('a provider whose list of criteria is hostile fails no review', async () => {
+  const list = ['a'];
+  const trap: Record<string | symbol, unknown> = { every: () => true, some: () => false, [Symbol.iterator]: () => { throw new Error('Trap set'); } };
+  trap.map = () => trap;
+  Object.defineProperty(list, 'slice', { value: () => trap });
+  const lying = ['b'];
+  Object.defineProperty(lying, 'slice', { value: () => [{ obj: 1 }, 42] });
+  const plain = deps({ files: [fileA], answers: [answerOnA] });
+  const expected = await review(own, plain);
+  for (const criteria of [[, 'a'], new Array(3)]) {
+    const d = deps({ files: [fileA], answers: [answerOnA], contextProviders: [ticketProvider({ status: 'ok', criteria })] });
+    const r = await review(own, d);
+    assert.deepEqual(r.dependencies.extensions, { tickets: { status: 'error', code: 'bad_shape' } });
+    assert.deepEqual(d.model.requests, plain.model.requests);
+  }
+  const d = deps({ files: [fileA], answers: [answerOnA], contextProviders: [ticketProvider({ status: 'ok', criteria: list }), { ...ticketProvider({ status: 'ok', criteria: lying }), name: 'chat' }] });
+  const r = await review(own, d);
+  assert.deepEqual([r.status, r.failure, r.findings], [expected.status, expected.failure, expected.findings]);
+  assert.deepEqual(r.dependencies.extensions, { tickets: { status: 'ok', code: 'ok' }, chat: { status: 'ok', code: 'ok' } });
 });

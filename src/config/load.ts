@@ -12,6 +12,16 @@ export interface ModelConfig {
   timeoutSeconds: number;
 }
 
+/** One module the deployment names (section 11.3). Nothing is loaded here: `module` is kept as written. */
+export interface ExtensionConfig {
+  /** A short code, unique in the list. */
+  name: string;
+  /** As written: a path, or the name of a package. */
+  module: string;
+  /** As written, with every { env: NAME } replaced by that variable's value. */
+  options: Record<string, unknown>;
+}
+
 export interface ScorerConfig { baseUrl: string; apiKey: string; model: string; timeoutSeconds: number }
 export interface DeploymentConfig {
   model: ModelConfig;
@@ -21,6 +31,7 @@ export interface DeploymentConfig {
   server: { port: number };
   dryRun: boolean;
   alerts: { webhook: string } | null;
+  extensions: ExtensionConfig[];
   limits: { inputTokensPerCall: number; batchesPerReview: number; spendPerDay: number; queueConcurrency: number };
   repositories: { defaults: RepoSettings; overrides: Record<string, RepoOverride> };
 }
@@ -110,6 +121,31 @@ function gateBranchIssues(repositories: { defaults: { gate: GateSettings }; over
   return issues;
 }
 
+function isMapping(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/** Replaces every mapping whose only key is `env` by that variable's value, at any depth. An issue names a key, never a value. */
+function resolveReferences(value: unknown, path: string, env: Record<string, string | undefined>, issues: string[]): unknown {
+  if (Array.isArray(value)) return value.map((item, i) => resolveReferences(item, `${path}.${i}`, env, issues));
+  if (!isMapping(value)) return value;
+  const keys = Object.keys(value);
+  if (keys.length === 1 && keys[0] === 'env') {
+    const name = value.env;
+    if (typeof name !== 'string' || name === '') {
+      issues.push(`${path}: env must name an environment variable`);
+      return null;
+    }
+    const found = env[name];
+    if (found === undefined || found === '') {
+      issues.push(`${path}: environment variable ${name} is not set`);
+      return null;
+    }
+    return found;
+  }
+  return Object.fromEntries(keys.map((k) => [k, resolveReferences(value[k], `${path}.${k}`, env, issues)]));
+}
+
 function definedOnly<T extends object>(value: T): Partial<T> {
   return Object.fromEntries(Object.entries(value).filter(([, v]) => v !== undefined)) as Partial<T>;
 }
@@ -196,6 +232,16 @@ export function parseConfig(yamlText: string, env: Record<string, string | undef
     if (!/^postgres(ql)?:\/\//.test(url) || !URL.canParse(url)) throw new ConfigError(['database.url: must be a postgres URL']);
     database = { url };
   }
+  const extensionIssues: string[] = [];
+  const extensions: ExtensionConfig[] = raw.extensions.map((e, i) => ({
+    name: e.name,
+    module: e.module,
+    // A reference is a value inside options, never options itself, which stays a mapping.
+    options: Object.fromEntries(
+      Object.entries(e.options).map(([k, v]) => [k, resolveReferences(v, `extensions.${i}.options.${k}`, env, extensionIssues)]),
+    ),
+  }));
+  if (extensionIssues.length > 0) throw new ConfigError(extensionIssues);
   const { defaults, overrides } = raw.repositories;
   // Repository names are case-insensitive on the git service, so two such keys name one repository.
   const seen = new Map<string, string>();
@@ -212,6 +258,7 @@ export function parseConfig(yamlText: string, env: Record<string, string | undef
     server: raw.server,
     dryRun: raw.dryRun,
     alerts,
+    extensions,
     limits: raw.limits,
     repositories: {
       defaults: {

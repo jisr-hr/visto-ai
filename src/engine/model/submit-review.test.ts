@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { parseSubmitReview, submitReviewTool, submitReviewWithThreadsTool, SUBMIT_REVIEW } from './submit-review.ts';
+import { createHash } from 'node:crypto';
+import { parseSubmitReview, submitReviewTool, submitReviewWithThreadsTool, submitToolFor, SUBMIT_REVIEW } from './submit-review.ts';
 
 const ok = { overview: 'Changes src/a.ts.', findings: [{ path: 'src/a.ts', side: 'RIGHT', line: 3, severity: 'major', body: 'Breaks on empty input.', quote: 'x()', beyond_diff: false }], files: [{ path: 'src/a.ts', change_summary: 'Adds a guard.', blocks: [{ id: 'B1', score: 45, category: 'fix', reason: 'Changes when the job runs.' }] }] };
 
@@ -189,4 +190,54 @@ test('with threads, verdicts are read when given and are an empty list when abse
   assert.ok(!refused.ok);
   assert.ok(refused.reason.includes('unexpected key thread_verdicts'));
   assert.ok(!('thread_verdicts' in (parseSubmitReview(JSON.stringify(ok)) as { value: object }).value));
+});
+
+const sha = (value: unknown): string => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+const propertiesOf = (tool: ReturnType<typeof submitToolFor>): string[] => Object.keys(tool.function.parameters.properties as object);
+test('the two tools of today keep their arguments, and two more carry acceptance', () => {
+  // The JSON of today's two tools, as it was before acceptance rows: not one character may change.
+  assert.equal(sha(submitReviewTool), '047416400155c8511ab43bd10543891c30f7092aff0ddc7a34a1fa15f9309e1c');
+  assert.equal(sha(submitReviewWithThreadsTool), 'cd33ff7beaed696ef81da0c1405ab53268c91da950a01e0828557c64d0ddef1b');
+  assert.deepEqual(submitToolFor(false, false), submitReviewTool);
+  assert.deepEqual(submitToolFor(true, false), submitReviewWithThreadsTool);
+  assert.deepEqual(propertiesOf(submitToolFor(false, false)), ['overview', 'findings', 'files']);
+  assert.deepEqual(propertiesOf(submitToolFor(true, false)), ['overview', 'findings', 'files', 'thread_verdicts']);
+  assert.deepEqual(propertiesOf(submitToolFor(false, true)), ['overview', 'findings', 'files', 'acceptance']);
+  assert.deepEqual(propertiesOf(submitToolFor(true, true)), ['overview', 'findings', 'files', 'thread_verdicts', 'acceptance']);
+  for (const tool of [submitToolFor(false, true), submitToolFor(true, true)]) {
+    assert.equal(tool.function.name, SUBMIT_REVIEW);
+    const acceptance = (tool.function.parameters.properties as Record<string, { type: string; items: { properties: object; required: string[] } }>).acceptance!;
+    assert.equal(acceptance.type, 'array');
+    assert.deepEqual(Object.keys(acceptance.items.properties), ['item', 'status', 'note']);
+    assert.deepEqual(acceptance.items.required, ['item', 'status']);
+    assert.deepEqual((acceptance.items.properties as Record<string, unknown>).status, { type: 'string', enum: ['met', 'not_met', 'not_verified'] });
+    assert.deepEqual((tool.function.parameters as { required: string[] }).required, ['overview', 'findings', 'files']);
+  }
+});
+test('acceptance is read only in a call that asked for it, and no entry of it can fail the answer', () => {
+  const entries = [5, null, { item: 2, status: 'met', note: 'x' }, { item: 'Z9', status: 'maybe' }, { item: 'A1' }];
+  const given = parseSubmitReview(JSON.stringify({ ...ok, acceptance: entries }), false, true);
+  assert.ok(given.ok);
+  assert.deepEqual(given.value.acceptance, entries);
+  assert.equal(given.value.findings.length, 1);
+  const withBoth = parseSubmitReview(JSON.stringify({ ...ok, thread_verdicts: [], acceptance: entries }), true, true);
+  assert.ok(withBoth.ok);
+  assert.deepEqual([withBoth.value.thread_verdicts, withBoth.value.acceptance], [[], entries]);
+  const none = parseSubmitReview(JSON.stringify({ ...ok, acceptance: null }), false, true);
+  assert.ok(none.ok);
+  assert.equal('acceptance' in none.value, false);
+  const absent = parseSubmitReview(JSON.stringify(ok), false, true);
+  assert.ok(absent.ok);
+  assert.equal('acceptance' in absent.value, false);
+  // A list that is no list costs no answer: it is judged, and dropped, in reconcileAcceptance.
+  for (const junk of ['x', 5, { item: 'A1' }]) {
+    const notList = parseSubmitReview(JSON.stringify({ ...ok, acceptance: junk }), false, true);
+    assert.ok(notList.ok);
+    assert.deepEqual([notList.value.acceptance, notList.value.findings.length], [junk, 1]);
+  }
+  for (const withThreads of [false, true]) {
+    const refused = parseSubmitReview(JSON.stringify({ ...ok, acceptance: entries }), withThreads);
+    assert.ok(!refused.ok);
+    assert.ok(refused.reason.includes('unexpected key acceptance'));
+  }
 });

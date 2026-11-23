@@ -1,4 +1,5 @@
-import type { Discussed, Finding, NotReviewed, ReviewResult, Side, UnplacedFinding } from '../types.ts';
+import type { AcceptanceRow, Discussed, Finding, NotReviewed, ReviewResult, Side, UnplacedFinding } from '../types.ts';
+import { readAcceptance } from '../reconcile/acceptance.ts';
 import type { BlockScore, FileLevelSource, FileScore, ScoreEntry, Span } from '../score/types.ts';
 
 export interface InlineComment { path: string; side: Side; line: number; body: string }
@@ -255,6 +256,24 @@ function humanReviewSection(result: ReviewResult, lineUrl: Meta['lineUrl']): str
   return out.join('\n\n');
 }
 
+const ACCEPTANCE_WORDS: Record<AcceptanceRow['status'], string> = { met: 'met', not_met: 'not met', not_verified: 'not verified' };
+const ACCEPTANCE_TAGS: Record<AcceptanceRow['from'], string> = { review: '', earlier: ' _(kept from an earlier review)_', none: ' _(not judged in this review)_' };
+
+// A criterion comes from a module and is shown in a code span, where nothing is live; a note is the model's and is made inert as a finding's first line.
+const acceptanceLine = (r: AcceptanceRow): string => {
+  const note = inertInline(firstLine(r.note));
+  return `- **\\[${ACCEPTANCE_WORDS[r.status]}]** ${codeSpan(firstLine(r.criterion))}${note === '' ? '' : ` \u2014 ${note}`}${ACCEPTANCE_TAGS[r.from]}`;
+};
+
+// One line for each row that can be read, under the three counts; null when none can.
+function acceptanceSection(result: ReviewResult): string | null {
+  const rows = readAcceptance(result.acceptance);
+  if (rows.length === 0) return null;
+  const count = (s: AcceptanceRow['status']): number => rows.filter((r) => r.status === s).length;
+  const counts = `${count('met')} met, ${count('not_met')} not met, ${count('not_verified')} not verified.`;
+  return ['## Acceptance criteria', '', counts, '', ...rows.map(acceptanceLine)].join('\n');
+}
+
 const UNCHANGED_HEADING = '## On code unchanged since the last review';
 const UNCHANGED_NOTE = 'These are on lines that have not changed since the reviewer last read their file. They are not posted as comments and do not hold a merge.';
 const SEVERITIES: readonly unknown[] = ['blocker', 'major', 'minor'];
@@ -339,6 +358,8 @@ function rendered(result: ReviewResult, meta: Meta): { body: string; comments: I
   const overview = result.overview.trim();
   if (overview !== '') head.push(`## Summary\n\n${noHeading(inert(overview))}`);
   head.push(humanReviewSection(result, meta.lineUrl));
+  const acceptance = acceptanceSection(result);
+  if (acceptance !== null) head.push(acceptance);
   if (result.findings.length > 0) {
     const items = meta.inline ? bullets(result.findings.map(located)) : bullets(result.findings.map(locatedWhole), false);
     head.push(['## Findings', '', ...items].join('\n'));

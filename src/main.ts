@@ -2,22 +2,26 @@ import { randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { createServer as createHttpServer } from 'node:http';
 import type { Server } from 'node:http';
-import { join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { ConfigError, contractFile, loadConfig, serviceConfig } from './config/load.ts';
 import { postgresDb, takeInstanceLock } from './db/postgres.ts';
+import type { InstanceLock } from './db/types.ts';
 import { createModelClient } from './engine/model/client.ts';
 import { review } from './engine/review.ts';
 import { createJevScorer } from './engine/scorer/jev.ts';
+import { contextProvidersOf, errorNameOf, loadExtensions } from './extensions/load.ts';
+import type { LoadedExtension } from './extensions/types.ts';
 import { createGithubAccess } from './forge/github/access.ts';
 import { createAppAuth } from './forge/github/app-auth.ts';
 import { createAppInfo } from './forge/github/app-info.ts';
 import { createGithubChecks } from './forge/github/checks.ts';
 import { createGithubHookDeliveries } from './forge/github/hook-deliveries.ts';
-import { githubCommentUrl, githubLineUrl } from './forge/github/links.ts';
+import { githubCommentUrl, githubLineUrl, githubPullRequestUrl, githubReviewUrl } from './forge/github/links.ts';
 import { createGithubWebhookReader } from './forge/github/webhook.ts';
 import { createGithubWriter } from './forge/github/writer.ts';
 import { startService } from './service.ts';
 import type { Listening } from './service.ts';
+import { createFeedback } from './shell/feedback.ts';
 import type { RequestLike, ResponseLike } from './shell/http.ts';
 
 // Node's default lets a caller take five minutes to send a request, and each such caller holds one of the 20 places.
@@ -54,6 +58,49 @@ export function boundedFetch(inner: typeof fetch, limitMs: number = GITHUB_CALL_
 }
 
 class UsageError extends Error {}
+
+/** One log line for a rejected promise nobody handled, with the error's name when it is the platform's own, else null. Never throws. */
+export function rejectionHandler(log: (entry: Record<string, unknown>) => void): (reason: unknown) => void {
+  return (reason) => {
+    try {
+      log({ event: 'unhandled_rejection', error: errorNameOf(reason) });
+    } catch {
+      // a logger that throws changes nothing
+    }
+  };
+}
+
+/**
+ * With a module loaded, a promise a part started and left behind cannot end the service: the handler is registered and
+ * returned. With none, nothing is registered and the platform's default stands; null is returned.
+ */
+export function guardRejections(
+  extensions: LoadedExtension[], log: (entry: Record<string, unknown>) => void, register: (handler: (reason: unknown) => void) => void,
+): ((reason: unknown) => void) | null {
+  if (extensions.length === 0) return null;
+  const handler = rejectionHandler(log);
+  register(handler);
+  return handler;
+}
+
+/**
+ * Takes the instance lock, then loads the modules. Rejects with Error('another_instance_running') when another instance holds the lock, and `load` is then not called.
+ * When `load` rejects, the lock is released and the rejection passed on; a release that fails changes nothing.
+ */
+export async function lockThenLoad(takeLock: () => Promise<InstanceLock | null>, load: () => Promise<LoadedExtension[]>): Promise<{ lock: InstanceLock; extensions: LoadedExtension[] }> {
+  const lock = await takeLock();
+  if (lock === null) throw new Error('another_instance_running');
+  try {
+    return { lock, extensions: await load() };
+  } catch (error) {
+    try {
+      await lock.release();
+    } catch {
+      // the loader's failure is the one to report
+    }
+    throw error;
+  }
+}
 
 export function createServer(listener: (req: RequestLike, res: ResponseLike) => void): Server {
   return createHttpServer({ requestTimeout: REQUEST_TIMEOUT_MS, headersTimeout: HEADERS_TIMEOUT_MS }, listener);
@@ -119,8 +166,11 @@ export function runUntilSignal(
 
 export async function main(argv: string[], env: Record<string, string | undefined>, out: (line: string) => void): Promise<number> {
   let config;
+  let configDir: string;
   try {
     const path = configPath(argv);
+    // A module's relative path starts at the folder of the config file.
+    configDir = dirname(resolve(path));
     try {
       config = serviceConfig(loadConfig(path, env));
     } catch (error) {
@@ -152,7 +202,7 @@ export async function main(argv: string[], env: Record<string, string | undefine
       // A key that cannot be read throws here and fails the start.
       const auth = createAppAuth({ appId: config.app.id, privateKey: config.app.privateKey, fetch: github, clock });
       const info = createAppInfo({ auth, fetch: github });
-      const engine = {
+      const base = {
         model: createModelClient(config.model, { fetch, sleep }),
         contract: readFileSync(join(import.meta.dirname, '..', 'contract', contractFile(config)), 'utf8'),
         clock,
@@ -160,20 +210,50 @@ export async function main(argv: string[], env: Record<string, string | undefine
         log,
         ...(config.scorer === null ? {} : { scorer: createJevScorer(config.scorer, { fetch, sleep }) }),
       };
+      // Every adapter is made before the lock is taken: from the lock on, nothing throws before the service holds it.
+      const reader = createGithubWebhookReader(config.app.webhookSecret);
+      const forge = createGithubAccess({ auth, fetch: github });
+      const hooks = createGithubHookDeliveries({ auth, fetch: github });
+      const writer = createGithubWriter({ auth, info, fetch: github });
+      const checks = createGithubChecks({ auth, appId: config.app.id, fetch: github });
+      // The database object is made before the modules, so the function a module reports feedback through exists when
+      // it is set up; it connects when first used, and the service migrates it once it has started.
+      const db = postgresDb(config.database.url, log);
+      const reportFeedback = createFeedback({ db, clock, log });
+      let lock: InstanceLock;
+      let extensions: LoadedExtension[];
+      try {
+        // No module is set up by an instance that is about to be refused (call 1).
+        ({ lock, extensions } = await lockThenLoad(
+          () => takeInstanceLock(config.database.url, () => {
+            log({ event: 'instance_lock_lost' });
+            process.exit(1);
+          }),
+          () => loadExtensions(config.extensions, { configDir, log, reportFeedback }),
+        ));
+      } catch (error) {
+        try {
+          await db.close();
+        } catch {
+          // the start failure is the one to report
+        }
+        throw error;
+      }
+      guardRejections(extensions, log, (handler) => { process.on('unhandledRejection', handler); });
+      const providers = contextProvidersOf(extensions);
+      const engine = { ...base, ...(providers.length === 0 ? {} : { contextProviders: providers }) };
       return await startService(config, {
-        db: postgresDb(config.database.url, log),
-        reader: createGithubWebhookReader(config.app.webhookSecret),
+        db,
+        reader,
         clock,
         log,
-        takeLock: () => takeInstanceLock(config.database.url, () => {
-          log({ event: 'instance_lock_lost' });
-          process.exit(1);
-        }),
-        forge: createGithubAccess({ auth, fetch: github }),
-        hooks: createGithubHookDeliveries({ auth, fetch: github }),
+        // Taken above; the service releases it when it stops or fails.
+        takeLock: () => Promise.resolve(lock),
+        forge,
+        hooks,
         appInfo: info,
-        writer: createGithubWriter({ auth, info, fetch: github }),
-        checks: createGithubChecks({ auth, appId: config.app.id, fetch: github }),
+        writer,
+        checks,
         fetch,
         sleep,
         every: (ms, work) => {
@@ -185,6 +265,9 @@ export async function main(argv: string[], env: Record<string, string | undefine
         review,
         lineUrl: githubLineUrl,
         commentUrl: githubCommentUrl,
+        extensions,
+        reviewUrl: githubReviewUrl,
+        pullRequestUrl: githubPullRequestUrl,
         listen: (listener, port) => new Promise<Listening>((resolve, reject) => {
           const listening = createServer(listener);
           server = listening;
