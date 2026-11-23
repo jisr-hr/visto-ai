@@ -212,3 +212,41 @@ test('the rules name the three statuses, forbid not_met by absence, and say that
   assert.match(ACCEPTANCE_RULES, /A criterion that is not met is not a finding by itself: report a finding only when the rules for findings hold\.$/);
   assert.equal(ACCEPTANCE_HEADING, '## Acceptance criteria');
 });
+
+// A list whose own slice returns an object whose iterator throws.
+const hostileList = (): string[] => {
+  const list = ['a'];
+  const trap: Record<string | symbol, unknown> = { every: () => true, some: () => false, [Symbol.iterator]: () => { throw new Error('Trap set'); } };
+  trap.map = () => trap;
+  Object.defineProperty(list, 'slice', { value: () => trap });
+  return list;
+};
+
+test('a list of criteria is read entry by entry, and calls nothing of the provider', async () => {
+  const shape = async (criteria: unknown) => statusOf(async () => ({ status: 'ok', criteria }) as ContextAnswer);
+  assert.deepEqual(await shape([, 'a']), { status: 'error', code: 'bad_shape' });
+  assert.deepEqual(await shape(new Array(3)), { status: 'error', code: 'bad_shape' });
+  assert.deepEqual(await shape(hostileList()), { status: 'ok', code: 'ok' });
+  const lying = ['a', 'b'];
+  Object.defineProperty(lying, 'slice', { value: () => [{ obj: 1 }, 42] });
+  const lied = await gatherContext([answering('tickets', { status: 'ok', criteria: lying })], pr);
+  assert.deepEqual([lied.statuses.tickets, lied.context.criteria], [{ status: 'ok', code: 'ok' }, ['a', 'b']]);
+  // Not a list: an array-like object is no list of strings.
+  assert.deepEqual(await shape({ length: 1, 0: 'a' }), { status: 'error', code: 'bad_shape' });
+  const throwing = ['a'];
+  const getter = new Proxy(throwing, { get: (t, key) => { if (key === 'length') throw new Error('Trap set'); return Reflect.get(t, key); } });
+  assert.deepEqual(await shape(getter), { status: 'error', code: 'bad_shape' });
+  const counted = new Proxy(['a', 'b'], { get: (t, key) => (key === 'length' ? 1.5 : Reflect.get(t, key)) });
+  assert.deepEqual(await shape(counted), { status: 'error', code: 'bad_shape' });
+  const ok = await gatherContext([answering('tickets', { status: 'ok', criteria: hostileList() })], pr);
+  assert.deepEqual(ok.context.criteria, ['a']);
+});
+
+test('a lone surrogate in a text, a label or a criterion is made well formed', async () => {
+  const got = await gatherContext([answering('tickets', { status: 'ok', label: 'ticket \ud800', text: 'before \ud800 after', criteria: ['has \ud800 one'] })], pr);
+  const all = JSON.stringify([got.context.blocks, got.context.criteria]);
+  assert.equal(got.context.blocks[0]!.text, 'before \ufffd after');
+  assert.equal(got.context.blocks[0]!.label, 'ticket \ufffd');
+  assert.deepEqual(got.context.criteria, ['has \ufffd one']);
+  assert.equal(all.includes('\\ud800'), false);
+});

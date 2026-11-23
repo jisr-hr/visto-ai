@@ -2093,3 +2093,24 @@ test('a failed review has no acceptance rows', async () => {
   assert.equal(r.status, 'failed');
   assert.equal('acceptance' in r, false);
 });
+
+test('a provider whose list of criteria is hostile fails no review', async () => {
+  const list = ['a'];
+  const trap: Record<string | symbol, unknown> = { every: () => true, some: () => false, [Symbol.iterator]: () => { throw new Error('Trap set'); } };
+  trap.map = () => trap;
+  Object.defineProperty(list, 'slice', { value: () => trap });
+  const lying = ['b'];
+  Object.defineProperty(lying, 'slice', { value: () => [{ obj: 1 }, 42] });
+  const plain = deps({ files: [fileA], answers: [answerOnA] });
+  const expected = await review(own, plain);
+  for (const criteria of [[, 'a'], new Array(3)]) {
+    const d = deps({ files: [fileA], answers: [answerOnA], contextProviders: [ticketProvider({ status: 'ok', criteria })] });
+    const r = await review(own, d);
+    assert.deepEqual(r.dependencies.extensions, { tickets: { status: 'error', code: 'bad_shape' } });
+    assert.deepEqual(d.model.requests, plain.model.requests);
+  }
+  const d = deps({ files: [fileA], answers: [answerOnA], contextProviders: [ticketProvider({ status: 'ok', criteria: list }), { ...ticketProvider({ status: 'ok', criteria: lying }), name: 'chat' }] });
+  const r = await review(own, d);
+  assert.deepEqual([r.status, r.failure, r.findings], [expected.status, expected.failure, expected.findings]);
+  assert.deepEqual(r.dependencies.extensions, { tickets: { status: 'ok', code: 'ok' }, chat: { status: 'ok', code: 'ok' } });
+});

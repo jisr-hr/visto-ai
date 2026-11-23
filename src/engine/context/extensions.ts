@@ -69,11 +69,18 @@ function readAnswer(name: string, answer: unknown): Read {
   if (status !== 'ok') return nothing({ status: status as ExtensionState, code: isCode(code) ? code : status });
   if (label !== undefined && typeof label !== 'string') return nothing(BAD_SHAPE);
   if (text !== undefined && typeof text !== 'string') return nothing(BAD_SHAPE);
-  let entries: unknown[] = [];
+  // The list is read entry by entry into one of our own: no method of the provider's object is called and
+  // no iterator of it is run. A hole reads as undefined, which is no string.
+  const entries: string[] = [];
   if (criteria !== undefined) {
     if (!Array.isArray(criteria)) return nothing(BAD_SHAPE);
-    entries = criteria.slice(0, CRITERIA_READ);
-    if (!entries.every((c) => typeof c === 'string')) return nothing(BAD_SHAPE);
+    const length: unknown = (criteria as { length: unknown }).length;
+    if (typeof length !== 'number' || !Number.isSafeInteger(length) || length < 0) return nothing(BAD_SHAPE);
+    for (let i = 0; i < Math.min(length, CRITERIA_READ); i += 1) {
+      const entry: unknown = (criteria as unknown[])[i];
+      if (typeof entry !== 'string') return nothing(BAD_SHAPE);
+      entries.push(entry);
+    }
   }
   let removed = 0;
   let body = '';
@@ -82,20 +89,20 @@ function readAnswer(name: string, answer: unknown): Read {
     // A huge string is cut first, so that it costs nothing to clean.
     const stripped = stripControl(cutAt(text, 4 * EXTENSION_TEXT_CHARS));
     removed += stripped.removed;
-    const trimmed = stripped.text.trim();
+    const trimmed = stripped.text.toWellFormed().trim();
     body = cutAt(trimmed, EXTENSION_TEXT_CHARS);
     textCut = body.length < trimmed.length;
   }
   let criteriaCut = 0;
-  const lines = (entries as string[]).map((raw) => {
+  const lines = entries.map((raw) => {
     const stripped = stripControl(raw);
     removed += stripped.removed;
-    const line = stripped.text.replace(/\s+/g, ' ').trim();
+    const line = stripped.text.toWellFormed().replace(/\s+/g, ' ').trim();
     const cut = cutAt(line, CRITERION_CHARS);
     if (cut.length < line.length) criteriaCut += 1;
     return cut;
   });
-  const shownLabel = cutAt(inlineText(label ?? '').replace(/[<>]/g, '').trim(), EXTENSION_LABEL_CHARS).trim();
+  const shownLabel = cutAt(inlineText(label ?? '').toWellFormed().replace(/[<>]/g, '').trim(), EXTENSION_LABEL_CHARS).trim();
   const anything = body !== '' || lines.some((l) => l !== '');
   return {
     status: anything ? { status: 'ok', code: isCode(code) ? code : 'ok' } : { status: 'empty', code: 'empty' },
