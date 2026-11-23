@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { testDb } from './testing.ts';
-import { addRecords, liveRecords, retireExpired } from './memory-records.ts';
+import { addRecords, liveRecords, liveRecordsWithin, retireExpired } from './memory-records.ts';
 import type { NewRecord, RepoKey } from './memory-records.ts';
 
 const REPO: RepoKey = { service: 'github', owner: 'acme', repo: 'shop' };
@@ -151,5 +151,68 @@ test('the owner and the name of a repository are compared in lower case', async 
   assert.equal((await liveRecords(db, REPO, 'human_signal', T, 10)).length, 1);
   assert.equal((await liveRecords(db, { ...REPO, owner: 'ACME', repo: 'SHOP' }, 'human_signal', T, 10)).length, 1);
   assert.equal(await addRecords(db, REPO, [record()]), 0);
+  await db.close();
+});
+
+test('a row whose time cannot be read is passed over, and a record kept for good is read', async () => {
+  const db = await testDb();
+  await addRecords(db, REPO, [
+    record({ sourceRef: 'good-1' }), record({ sourceRef: 'never', createdAt: ms(T, -DAY) }),
+    record({ sourceRef: 'minus', createdAt: ms(T, -2 * DAY) }), record({ sourceRef: 'bc', createdAt: ms(T, -3 * DAY) }),
+    record({ sourceRef: 'good-2', createdAt: ms(T, -4 * DAY) }),
+  ]);
+  await db.query("update visto_ai.memory_records set created_at = '-infinity' where source_ref = 'minus'");
+  await db.query("update visto_ai.memory_records set created_at = '0044-03-15 BC' where source_ref = 'bc'");
+  // what an operator writes to keep a record for good
+  await db.query("update visto_ai.memory_records set expires_at = 'infinity' where source_ref = 'never'");
+  const rows = await liveRecords(db, REPO, 'human_signal', ms(T, DAY), 10);
+  assert.deepEqual(rows.map((r) => r.sourceRef), ['good-1', 'never', 'good-2']);
+  assert.equal(rows[1]!.createdAt, ms(T, -DAY));
+  // and far in the future still
+  assert.deepEqual((await liveRecords(db, REPO, 'human_signal', '2030-01-01T00:00:00.000Z', 10)).map((r) => r.sourceRef), ['never']);
+  await db.close();
+});
+
+test('the records of the pull request left out take no place in the read', async () => {
+  const db = await testDb();
+  await addRecords(db, REPO, [
+    record({ sourceRef: 'own-1', number: 7, createdAt: T }), record({ sourceRef: 'own-2', number: 7, createdAt: T }),
+    record({ sourceRef: 'other-1', number: 8, createdAt: ms(T, -DAY) }), record({ sourceRef: 'other-2', number: 9, createdAt: ms(T, -2 * DAY) }),
+  ]);
+  const later = ms(T, DAY);
+  assert.deepEqual((await liveRecords(db, REPO, 'human_signal', later, 2, 7)).map((r) => r.sourceRef), ['other-1', 'other-2']);
+  assert.deepEqual((await liveRecords(db, REPO, 'human_signal', later, 2, 8)).map((r) => r.sourceRef).sort(), ['own-1', 'own-2']);
+  // with no number, none is left out
+  assert.equal((await liveRecords(db, REPO, 'human_signal', later, 10)).length, 4);
+  await db.close();
+});
+
+test('a read within a limit sets the limit inside its transaction, and refuses a limit that is no whole number above 0', async () => {
+  const db = await testDb();
+  await addRecords(db, REPO, [record({ sourceRef: 'own', number: 7 }), record({ sourceRef: 'other', number: 8 })]);
+  const setting = async (): Promise<string> => (await db.query<{ setting: string }>("select setting from pg_settings where name = 'statement_timeout'"))[0]!.setting;
+  const outside = await setting();
+  const seen: string[] = [];
+  const watched = {
+    ...db,
+    query: db.query.bind(db), script: db.script.bind(db), close: db.close.bind(db),
+    transaction: <R>(work: (tx: typeof db) => Promise<R>) => db.transaction((tx) => work({
+      query: async <Row>(text: string, params?: unknown[]) => {
+        const rows = await tx.query<Row>(text, params);
+        seen.push((await tx.query<{ setting: string }>("select setting from pg_settings where name = 'statement_timeout'"))[0]!.setting);
+        return rows;
+      },
+      script: (sql: string) => tx.script(sql), close: () => tx.close(), transaction: (w) => tx.transaction(w),
+    })),
+  };
+  const rows = await liveRecordsWithin(watched, REPO, 'human_signal', ms(T, DAY), 10, 1234, 7);
+  assert.deepEqual(rows.map((r) => r.sourceRef), ['other']);
+  assert.deepEqual(seen, ['1234', '1234']);
+  assert.equal(await setting(), outside);
+  for (const bad of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, '5' as unknown as number, null as unknown as number]) {
+    seen.length = 0;
+    await assert.rejects(liveRecordsWithin(watched, REPO, 'human_signal', ms(T, DAY), 10, bad, 7), /bad_statement_limit/, String(bad));
+    assert.deepEqual(seen, [], String(bad));
+  }
   await db.close();
 });

@@ -2477,3 +2477,25 @@ test('a damaged status is not logged, and a health that throws changes nothing',
   assert.deepEqual(same(throwing), same(plain));
   assert.equal((await getJob(db, throwing.job.id))?.outcome, 'published');
 });
+
+test('a memory health that returns a rejected promise leaves no rejection unhandled, and changes nothing', async () => {
+  const unhandled: unknown[] = [];
+  const listener = (reason: unknown): void => { unhandled.push(reason); };
+  process.on('unhandledRejection', listener);
+  try {
+    const result = okResult({ dependencies: { model: 'ok', memory: { status: 'error', code: 'timeout', lines: 0 } } });
+    const plain = await live({ pullRequest: 93, result });
+    await runReviewJob(plain.job, plain.deps);
+    const rejecting = await live({ pullRequest: 94, result });
+    let calls = 0;
+    const noted = (() => { calls += 1; return Promise.reject(new Error('health_down')); }) as unknown as MemoryHealth['noted'];
+    await runReviewJob(rejecting.job, { ...rejecting.deps, memoryHealth: { noted } });
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+    const same = (x: Harness): Record<string, unknown> => ({ ...reviewLine(x), job: 0, number: 0, duration_ms: 0 });
+    assert.deepEqual([calls, unhandled, same(rejecting)], [1, [], same(plain)]);
+    assert.equal((await getJob(db, rejecting.job.id))?.outcome, 'published');
+  } finally {
+    process.off('unhandledRejection', listener);
+  }
+});

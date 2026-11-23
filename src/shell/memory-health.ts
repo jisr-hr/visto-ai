@@ -11,7 +11,11 @@ export function createMemoryHealth(alert: Alert): MemoryHealth {
   let failing = false;
 
   function raise(code: string, details?: Record<string, string>): void {
-    try { alert(code, details); } catch { /* an alert that throws changes nothing */ }
+    try {
+      const out: unknown = alert(code, details);
+      // An alert that returns a rejected promise changes nothing either.
+      if (typeof out === 'object' && out !== null) Promise.resolve(out).catch(() => {});
+    } catch { /* an alert that throws changes nothing */ }
   }
 
   return {

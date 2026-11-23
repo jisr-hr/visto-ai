@@ -683,7 +683,9 @@ export async function runReviewJob(job: Job, deps: ReviewJobDeps): Promise<void>
       const memory = memoryOf(result);
       if (memory !== null && memory.status !== 'skipped') {
         try {
-          deps.memoryHealth?.noted(memory.status !== 'error', memory.code);
+          const out: unknown = deps.memoryHealth?.noted(memory.status !== 'error', memory.code);
+          // A health that returns a rejected promise changes nothing either.
+          if (typeof out === 'object' && out !== null) Promise.resolve(out).catch(() => {});
         } catch {
           // a health that fails changes nothing
         }

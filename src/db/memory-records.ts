@@ -44,24 +44,54 @@ export async function addRecords(db: Db, repo: RepoKey, records: NewRecord[]): P
 
 interface LiveDbRow {
   id: number; source_ref: string; number: number; path: string | null; directory: string | null;
-  category: string | null; missed: boolean; created_at: Date;
+  category: string | null; missed: boolean; created_at: unknown;
 }
 
-/** The repository's records of that kind live at `at`: status active, made at or before it, expiring after it. Newest first (made, then id), at most `limit`. */
-export async function liveRecords(db: Db, repo: RepoKey, kind: RecordKind, at: string, limit: number): Promise<LiveRow[]> {
+// A time as the driver hands it back, as an ISO time; null for one that cannot be read as one (-infinity, a date before the year 1, ...).
+function isoOf(value: unknown): string | null {
+  if (!(value instanceof Date) || !Number.isFinite(value.getTime())) return null;
+  try {
+    return value.toISOString();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The repository's records of that kind live at `at`: status active, made at or before it, expiring after it. Newest first (made, then id), at most `limit`.
+ * `except`: a pull request whose records are left out, so that they take no place in the limit. A row whose time cannot be read is passed over.
+ */
+export async function liveRecords(db: Db, repo: RepoKey, kind: RecordKind, at: string, limit: number, except?: number): Promise<LiveRow[]> {
   const r = lowered(repo);
   const rows = await db.query<LiveDbRow>(
     `select id, source_ref, number, path, directory, category, missed, created_at
      from visto_ai.memory_records
      where service = $1 and owner = $2 and repo = $3 and kind = $4
        and status = 'active' and created_at <= $5::timestamptz and expires_at > $5::timestamptz
+       and ($7::integer is null or number <> $7::integer)
      order by created_at desc, id desc
      limit $6`,
-    [r.service, r.owner, r.repo, kind, at, limit]);
-  return rows.map((x) => ({
-    id: x.id, sourceRef: x.source_ref, number: x.number, path: x.path, directory: x.directory,
-    category: x.category, missed: x.missed, createdAt: x.created_at.toISOString(),
-  }));
+    [r.service, r.owner, r.repo, kind, at, limit, except ?? null]);
+  const out: LiveRow[] = [];
+  for (const x of rows) {
+    const createdAt = isoOf(x.created_at);
+    if (createdAt === null) continue;
+    out.push({ id: x.id, sourceRef: x.source_ref, number: x.number, path: x.path, directory: x.directory, category: x.category, missed: x.missed, createdAt });
+  }
+  return out;
+}
+
+/**
+ * `liveRecords` in one transaction of its own that first sets its statement limit to `ms` milliseconds. `local`: the limit ends with the
+ * transaction, and no other query of the pool is held to it. A `set` takes no bound parameter, so `ms` is written into the statement, only
+ * once it is a whole number above 0; anything else rejects with Error('bad_statement_limit') before any statement.
+ */
+export async function liveRecordsWithin(db: Db, repo: RepoKey, kind: RecordKind, at: string, limit: number, ms: number, except?: number): Promise<LiveRow[]> {
+  if (typeof ms !== 'number' || !Number.isSafeInteger(ms) || ms <= 0) throw new Error('bad_statement_limit');
+  return db.transaction(async (tx) => {
+    await tx.query(`set local statement_timeout = ${ms}`);
+    return liveRecords(tx, repo, kind, at, limit, except);
+  });
 }
 
 /** Every active record whose expiry is at or before `now` becomes expired. Returns how many. */

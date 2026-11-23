@@ -7,10 +7,11 @@ import type { NewRecord, RepoKey } from '../db/memory-records.ts';
 import { MEMORY_TIMEOUT_MS } from '../engine/context/memory.ts';
 import { review } from '../engine/review.ts';
 import { SUBMIT_REVIEW } from '../engine/model/submit-review.ts';
-import type { ModelClient, ModelRequest, ModelResponse, ReviewInput } from '../engine/types.ts';
+import type { Memory, ModelClient, ModelRequest, ModelResponse, ReviewInput, ReviewResult } from '../engine/types.ts';
 import type { Source } from '../forge/types.ts';
 import { RECORDS_READ } from '../memory/select.ts';
 import { recordsMemory } from './memory.ts';
+import { createMemoryHealth } from './memory-health.ts';
 
 const REF = { service: 'github', owner: 'acme', repo: 'shop', number: 7 } as const;
 const REPO: RepoKey = { service: 'github', owner: 'acme', repo: 'shop' };
@@ -144,7 +145,8 @@ test('each read sets its own statement limit inside its transaction, and the lim
     assert.equal(seen[i]!.params, undefined);
     assert.equal(seen[i]!.limit, String(MEMORY_TIMEOUT_MS));
     assert.match(seen[i + 1]!.text, /from visto_ai\.memory_records/);
-    assert.deepEqual(seen[i + 1]!.params, ['github', 'acme', 'shop', 'human_signal', at, RECORDS_READ + 1]);
+    // the pull request's own records are left out by the statement
+    assert.deepEqual(seen[i + 1]!.params, ['github', 'acme', 'shop', 'human_signal', at, RECORDS_READ + 1, 7]);
   }
   // after the transaction the limit is what it was
   assert.equal(await setting(db), outside);
@@ -170,20 +172,8 @@ test('a read that fails rejects, and leaves no limit behind', async () => {
   assert.deepEqual(await db.query('show statement_timeout'), outside);
 });
 
-// Sentences of their own: none of their words is in the contract, the rules of memory, the diff or a path.
-const WRITTEN = [
-  'Gargoyles knit turquoise hammocks.',
-  'Velvet comets bake cinnamon pretzels.',
-  'Platypus orchestras rehearse lullabies.',
-  'Kangaroo librarians catalogue thunderstorms.',
-];
-
-test('nothing a person wrote reaches the model through memory', async () => {
-  await addRecords(db, REPO, [
-    record({ excerpt: WRITTEN[0]!, reason: WRITTEN[1]! }),
-    record({ sourceRef: '9:file:src/billing/rates.ts', number: 9, path: 'src/billing/rates.ts', excerpt: WRITTEN[2]!, reason: WRITTEN[3]!, comment: 'c-91', createdAt: '2026-03-05T09:00:00.000Z' }),
-  ]);
-  const files = ['src/billing/tax.ts', 'src/billing/fees.ts'];
+/** The real review of pull request 7 over these changed files, with a stub source and a stub model, given this memory; every request the model got. */
+async function reviewWith(memory: Memory, files: string[]): Promise<{ result: ReviewResult; requests: ModelRequest[] }> {
   const source: Source = {
     listFiles: () => Promise.resolve(files.map((path) => ({ path, previousPath: null, status: 'modified' as const, additions: 1, deletions: 0, patch: '@@ -1,1 +1,2 @@\n head\n+const a = 1;' }))),
     getFileContent: () => Promise.resolve(null),
@@ -204,10 +194,25 @@ test('nothing a person wrote reaches the model through memory', async () => {
     trigger: 'automatic', repoConfig: { primaryBranches: ['main'], scoreThreshold: 70 },
     limits: { inputTokensPerCall: 200_000, batchesPerReview: 6, modelTimeoutSeconds: 30 }, asOf: AS_OF, earlier: null,
   };
-  const r = await review(input, {
-    source, model, contract: 'You review pull requests.', clock: () => AS_OF, token: () => 'abcdef0123456789', log: () => {},
-    memory: recordsMemory(db, REF),
-  });
+  const result = await review(input, { source, model, contract: 'You review pull requests.', clock: () => AS_OF, token: () => 'abcdef0123456789', log: () => {}, memory });
+  return { result, requests };
+}
+
+// Sentences of their own: none of their words is in the contract, the rules of memory, the diff or a path.
+const WRITTEN = [
+  'Gargoyles knit turquoise hammocks.',
+  'Velvet comets bake cinnamon pretzels.',
+  'Platypus orchestras rehearse lullabies.',
+  'Kangaroo librarians catalogue thunderstorms.',
+];
+
+test('nothing a person wrote reaches the model through memory', async () => {
+  await addRecords(db, REPO, [
+    record({ excerpt: WRITTEN[0]!, reason: WRITTEN[1]! }),
+    record({ sourceRef: '9:file:src/billing/rates.ts', number: 9, path: 'src/billing/rates.ts', excerpt: WRITTEN[2]!, reason: WRITTEN[3]!, comment: 'c-91', createdAt: '2026-03-05T09:00:00.000Z' }),
+  ]);
+  const files = ['src/billing/tax.ts', 'src/billing/fees.ts'];
+  const { result: r, requests } = await reviewWith(recordsMemory(db, REF), files);
   assert.deepEqual(r.dependencies.memory, { status: 'ok', code: 'ok', lines: 2 });
   assert.ok(requests.length >= 1);
   const sent = requests.map((request) => JSON.stringify(request));
@@ -228,4 +233,54 @@ test('nothing a person wrote reaches the model through memory', async () => {
   for (const text of sent.map((t) => t.toLowerCase())) {
     for (const word of words) assert.equal(text.includes(word), false, word);
   }
+});
+
+/** `count` records of other pull requests on src/cart, made one second apart going back from `newest`, in one statement. */
+const others = (count: number, newest: string, first: number): Promise<unknown> => db.query(
+  `insert into visto_ai.memory_records (service, owner, repo, kind, source_ref, created_at, expires_at, number, path, directory, missed, excerpt)
+   select 'github', 'acme', 'shop', 'human_signal', 'cart-' || n, $1::timestamptz - n * interval '1 second', $1::timestamptz + interval '180 days',
+          n, 'src/cart/c' || n || '.ts', 'src/cart', false, ''
+   from generate_series($2::integer, $2::integer + $3::integer - 1) as n`,
+  [newest, first, count]);
+
+test('the pull request\'s own records take no place in the read, and records left out are said to be', async () => {
+  // the newest: five of pull request 7; then 4,996 of others; then the three oldest, on the changed file
+  await addRecords(db, REPO, [1, 2, 3, 4, 5].map((n) => record({ sourceRef: `7:own:${n}`, number: 7, path: 'src/cart/own.ts', directory: 'src/cart', createdAt: '2026-03-11T00:00:00.000Z' })));
+  await others(4_996, '2026-03-10T00:00:00.000Z', 100);
+  const tax = [8, 9, 10].map((n) => record({ sourceRef: `${n}:file:src/billing/tax.ts`, number: n, createdAt: `2026-02-0${n - 7}T00:00:00.000Z` }));
+  await addRecords(db, REPO, tax);
+  const blocks = await recordsMemory(db, REF).blocks([TAX], AS_OF, signal);
+  assert.deepEqual(blocks.pullRequest.map((l) => l.ref), ['10:file:src/billing/tax.ts', '9:file:src/billing/tax.ts', '8:file:src/billing/tax.ts']);
+  assert.equal(blocks.cut.records, false);
+  // two more of others, older than all: 5,001 live records of other pull requests, and the answer says some were left out
+  await others(2, '2026-01-01T00:00:00.000Z', 6_000);
+  const more = await recordsMemory(db, REF).blocks([TAX], AS_OF, signal);
+  assert.equal(more.pullRequest.length, 3);
+  assert.equal(more.cut.records, true);
+});
+
+test('a record whose time cannot be read is passed over, and the review still has its memory', async () => {
+  await addRecords(db, REPO, [
+    record(), record({ sourceRef: 'minus', number: 9 }), record({ sourceRef: 'bc', number: 10 }), record({ sourceRef: 'never', number: 11, createdAt: '2026-03-02T09:00:00.000Z' }),
+  ]);
+  await db.query("update visto_ai.memory_records set created_at = '-infinity' where source_ref = 'minus'");
+  await db.query("update visto_ai.memory_records set created_at = '0044-03-15 BC' where source_ref = 'bc'");
+  await db.query("update visto_ai.memory_records set expires_at = 'infinity' where source_ref = 'never'");
+  const blocks = await recordsMemory(db, REF).blocks([TAX], AS_OF, signal);
+  assert.deepEqual(blocks.pullRequest.map((l) => l.ref), ['8:file:src/billing/tax.ts', 'never']);
+  const alerts: unknown[][] = [];
+  const health = createMemoryHealth((code, details) => { alerts.push([code, details]); });
+  const r = await reviewWith(recordsMemory(db, REF), [TAX.path]);
+  assert.deepEqual(r.result.dependencies.memory, { status: 'ok', code: 'ok', lines: 2 });
+  health.noted(r.result.dependencies.memory!.status !== 'error', r.result.dependencies.memory!.code);
+  assert.deepEqual(alerts, []);
+});
+
+test('a live record of another kind on the changed file is in no block', async () => {
+  await addRecords(db, REPO, [record(), record({ sourceRef: 'lesson-1', number: 9 }), record({ sourceRef: 'revert-1', number: 10 })]);
+  await db.query("update visto_ai.memory_records set kind = 'lesson' where source_ref = 'lesson-1'");
+  await db.query("update visto_ai.memory_records set kind = 'revert' where source_ref = 'revert-1'");
+  const blocks = await recordsMemory(db, REF).blocks([TAX], AS_OF, signal);
+  assert.deepEqual(blocks.pullRequest.map((l) => l.ref), ['8:file:src/billing/tax.ts']);
+  assert.deepEqual(blocks.repository, { directories: [], categories: [] });
 });

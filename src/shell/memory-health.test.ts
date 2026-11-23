@@ -47,3 +47,20 @@ test('an alert that throws changes nothing, and a reason that is no short code i
     assert.deepEqual(alerts, [['memory_error', { reason: 'internal_error' }]], String(code));
   }
 });
+
+test('an alert that returns a rejected promise leaves no rejection unhandled', async () => {
+  const unhandled: unknown[] = [];
+  const listener = (reason: unknown): void => { unhandled.push(reason); };
+  process.on('unhandledRejection', listener);
+  try {
+    const codes: string[] = [];
+    const health = createMemoryHealth(((code: string) => { codes.push(code); return Promise.reject(new Error('alert_down')); }) as unknown as Parameters<typeof createMemoryHealth>[0]);
+    assert.doesNotThrow(() => health.noted(false, 'timeout'));
+    assert.doesNotThrow(() => health.noted(true, 'ok'));
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual([codes, unhandled], [['memory_error', 'memory_ok'], []]);
+  } finally {
+    process.off('unhandledRejection', listener);
+  }
+});
