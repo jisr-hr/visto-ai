@@ -220,3 +220,54 @@ test('a call that shows criteria sends the tool with acceptance, and one that do
     assert.ok(refused.reason.includes('unexpected key acceptance'));
   }
 });
+
+test('with the choice not given, and given as forced, the requests are those of before', async () => {
+  const retried: ChatMessage[] = [
+    ...messages,
+    { role: 'assistant', content: 'I reviewed it.' },
+    { role: 'user', content: 'Your answer was rejected: not_a_tool_call. Call submit_review again.' },
+  ];
+  for (const choice of [undefined, 'forced' as const]) {
+    const model = stubModel(prose('I reviewed it.'), toolCall(valid));
+    const r = await callBatch(choice === undefined ? args : { ...args, toolChoice: choice }, model);
+    assert.ok(r.ok);
+    assert.equal(model.requests.length, 2);
+    assert.deepEqual(model.requests[0], { messages, tools: [submitReviewTool], forcedTool: 'submit_review', effort: 'elevated', timeoutMs: 1234 });
+    assert.deepEqual(model.requests[1], { messages: retried, tools: [submitReviewTool], forcedTool: 'submit_review', effort: 'elevated', timeoutMs: 1234 });
+    for (const request of model.requests) {
+      assert.deepEqual(Object.keys(request), ['messages', 'tools', 'forcedTool', 'effort', 'timeoutMs']);
+    }
+  }
+});
+
+test('under auto every request leaves the choice to the model and offers submit_review alone', async () => {
+  const forced = stubModel(prose('I reviewed it.'), toolCall(valid));
+  await callBatch(args, forced);
+  const model = stubModel(prose('I reviewed it.'), toolCall(valid));
+  const r = await callBatch({ ...args, toolChoice: 'auto' }, model);
+  assert.ok(r.ok);
+  assert.equal(model.requests.length, 2);
+  for (const request of model.requests) {
+    assert.equal(request.forcedTool, null);
+    assert.deepEqual(request.tools, [submitReviewTool]);
+    assert.equal(request.effort, 'elevated');
+    assert.equal(request.timeoutMs, 1234);
+  }
+  assert.deepEqual(model.requests.map((q) => q.messages), forced.requests.map((q) => q.messages));
+});
+
+test('under auto a prose answer is retried once with the reason, and a second one fails the batch as invalid output', async () => {
+  const model = stubModel(prose('I reviewed it.'), prose('Still prose.'));
+  const r = await callBatch({ ...args, toolChoice: 'auto' }, model);
+  assert.equal(model.requests.length, 2);
+  assert.ok(!r.ok);
+  assert.deepEqual({ ok: r.ok, code: r.code, reason: r.reason }, { ok: false, code: 'invalid_output', reason: 'not_a_tool_call' });
+  assert.deepEqual(model.requests[1]!.messages.slice(-2), [
+    { role: 'assistant', content: 'I reviewed it.' },
+    { role: 'user', content: 'Your answer was rejected: not_a_tool_call. Call submit_review again.' },
+  ]);
+  assert.deepEqual(r.audit, [
+    { stage: 'model', action: 'retry', subject: 'batch', reason: 'not_a_tool_call' },
+    { stage: 'model', action: 'failed', subject: 'batch', reason: 'invalid_output' },
+  ]);
+});

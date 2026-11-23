@@ -107,6 +107,7 @@ export interface ReviewDeps {
   /** The highest scores other pull requests of the repository stored for these blocks, among the same lines, in the last 30 days. May reject. */
   reusableScores?: (blocks: Array<{ path: string; hash: string; around: string }>) => Promise<Array<{ path: string; hash: string; around: string; entry: ScoreEntry }>>;
   contextProviders?: ContextProvider[]; // asked once for each review; absent reads as none
+  toolChoice?: 'forced' | 'auto';       // how the model is made to call submit_review; absent reads as 'forced'
 }
 
 export interface RawFinding { path: string; side: Side; line: number; severity: Severity; body: string; quote: string; beyond_diff: boolean }

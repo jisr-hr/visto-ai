@@ -41,12 +41,16 @@ function rejectedText(response: ModelResponse): string {
 }
 
 export async function callBatch(
-  args: { messages: ChatMessage[]; effort: Effort; timeoutMs: number; prPaths: string[]; withThreads?: boolean; withAcceptance?: boolean },
+  args: {
+    messages: ChatMessage[]; effort: Effort; timeoutMs: number; prPaths: string[]; withThreads?: boolean; withAcceptance?: boolean;
+    toolChoice?: 'forced' | 'auto';   // absent reads as 'forced'; 'auto' leaves the choice to the model (call 31)
+  },
   model: ModelClient,
 ): Promise<BatchAnswer> {
   const withThreads = args.withThreads === true;
   const withAcceptance = args.withAcceptance === true;
   const tool = submitToolFor(withThreads, withAcceptance);
+  const forcedTool = args.toolChoice === 'auto' ? null : SUBMIT_REVIEW;
   let usage = zeroUsage();
   const audit: AuditEntry[] = [];
   const models: string[] = [];
@@ -56,7 +60,7 @@ export async function callBatch(
   try {
     for (let attempt = 0; attempt < 2; attempt++) {
       const response = await model.complete({
-        messages, tools: [tool], forcedTool: SUBMIT_REVIEW, effort: args.effort, timeoutMs: args.timeoutMs,
+        messages, tools: [tool], forcedTool, effort: args.effort, timeoutMs: args.timeoutMs,
       });
       usage = addUsage(usage, response.usage);
       models.push(response.model);

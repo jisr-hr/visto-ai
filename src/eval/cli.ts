@@ -64,7 +64,7 @@ interface RunSetup {
 }
 
 // What `replay` and `backtest` share: the same options, the same checks, and the same real clients.
-function prepareRun(command: string, inputName: string, argv: string[], env: Record<string, string | undefined>): RunSetup {
+export function prepareRun(command: string, inputName: string, argv: string[], env: Record<string, string | undefined>): RunSetup {
   const parsed = parse(argv, [inputName, 'out', 'label', 'config', 'max-cases', 'max-cost', 'concurrency'], ['force']);
   if (parsed.positional.length > 0) throw new UsageError(`usage: ${command} takes no positional arguments`);
   const get = (name: string): string => {
@@ -99,6 +99,7 @@ function prepareRun(command: string, inputName: string, argv: string[], env: Rec
     token: () => randomBytes(8).toString('hex'),
     log: (entry) => { process.stderr.write(JSON.stringify(entry) + '\n'); },
     ...(config.scorer === null ? {} : { scorer: createJevScorer(config.scorer, { fetch: globalThis.fetch, sleep }) }),
+    ...(config.model.toolChoice === 'auto' ? { toolChoice: 'auto' as const } : {}),
   };
   return { inputPath, outDir, label, maxCases, maxCost, concurrency, config, deps };
 }

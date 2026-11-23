@@ -56,7 +56,7 @@ const respond = (answer: unknown): ModelResponse =>
 type Step = unknown | ProviderError;
 function deps(spec: {
   files: ChangedFile[]; answers?: Step[]; answerFor?: Record<string, Step>; delayMs?: number; listError?: Error; scorer?: Scorer;
-  contextProviders?: ContextProvider[];
+  contextProviders?: ContextProvider[]; toolChoice?: 'forced' | 'auto';
 }):
   ReviewDeps & { model: ModelClient & { requests: ModelRequest[]; maxInFlight: number }; logged: Array<Record<string, unknown>>; tokens: number } {
   const requests: ModelRequest[] = [];
@@ -98,6 +98,7 @@ function deps(spec: {
     log: (e: Record<string, unknown>) => { logged.push(e); },
     ...(spec.scorer === undefined ? {} : { scorer: spec.scorer }),
     ...(spec.contextProviders === undefined ? {} : { contextProviders: spec.contextProviders }),
+    ...(spec.toolChoice === undefined ? {} : { toolChoice: spec.toolChoice }),
   };
   return d;
 }
@@ -2135,4 +2136,22 @@ test('a provider whose list of criteria is hostile fails no review', async () =>
   const r = await review(own, d);
   assert.deepEqual([r.status, r.failure, r.findings], [expected.status, expected.failure, expected.findings]);
   assert.deepEqual(r.dependencies.extensions, { tickets: { status: 'ok', code: 'ok' }, chat: { status: 'ok', code: 'ok' } });
+});
+
+test('the tool choice of the dependencies reaches every call of a review, a retry and the halves of a split batch included', async () => {
+  const split = (toolChoice?: 'forced' | 'auto') =>
+    deps({ files: [fileA, fileB], answers: [new ProviderError('timeout', 't', null, null), answerOnA, answerOnB], ...(toolChoice === undefined ? {} : { toolChoice }) });
+  const auto = split('auto');
+  const r = await review(input, auto);
+  assert.deepEqual(r.coverage.reviewed, ['src/a.ts', 'src/b.ts']);
+  assert.deepEqual(auto.model.requests.map((q) => q.forcedTool), [null, null, null]);
+  const forced = split();
+  await review(input, forced);
+  assert.deepEqual(forced.model.requests.map((q) => q.forcedTool), [SUBMIT_REVIEW, SUBMIT_REVIEW, SUBMIT_REVIEW]);
+  assert.deepEqual(auto.model.requests.map((q) => [q.messages, q.tools]), forced.model.requests.map((q) => [q.messages, q.tools]));
+  // a second try after a time-out, then the retry of an invalid answer
+  const retried = deps({ files: [fileA], answers: [new ProviderError('timeout', 't', null, null), ungrounded, answerOnA], toolChoice: 'auto' });
+  const again = await review(input, retried);
+  assert.deepEqual([again.status, again.coverage.reviewed], ['ok', ['src/a.ts']]);
+  assert.deepEqual(retried.model.requests.map((q) => q.forcedTool), [null, null, null]);
 });

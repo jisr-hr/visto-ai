@@ -141,7 +141,7 @@ async function oneCall(run: Run, files: FileContext[], firstFileNumber: number, 
   });
   const answer = await callBatch(
     { messages, effort: run.effort, timeoutMs: run.limits.modelTimeoutSeconds * 1000, prPaths: files.map((f) => f.file.path), ...(run.withThreads ? { withThreads: true } : {}),
-      ...(run.withAcceptance ? { withAcceptance: true } : {}) },
+      ...(run.withAcceptance ? { withAcceptance: true } : {}), ...(run.deps.toolChoice === undefined ? {} : { toolChoice: run.deps.toolChoice }) },
     run.deps.model,
   );
   safeLog(run.deps, {

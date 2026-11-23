@@ -209,6 +209,7 @@ export async function main(argv: string[], env: Record<string, string | undefine
         token: () => randomBytes(8).toString('hex'),
         log,
         ...(config.scorer === null ? {} : { scorer: createJevScorer(config.scorer, { fetch, sleep }) }),
+        ...(config.model.toolChoice === 'auto' ? { toolChoice: 'auto' as const } : {}),
       };
       // Every adapter is made before the lock is taken: from the lock on, nothing throws before the service holds it.
       const reader = createGithubWebhookReader(config.app.webhookSecret);
