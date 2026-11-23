@@ -1,8 +1,9 @@
-// The engine's side of MCP, its pure part: what of a server's tool list the model is offered, and what text
-// a tool's result becomes. Everything a server sent is hostile input. A tool's name, description and schema go
+// The engine's side of MCP. Its pure part: what of a server's tool list the model is offered, and what text
+// a tool's result becomes. Its stateful part, at the end: the sessions of one review, opened, called within the
+// review's count and closed, each step under a limit of its own. Everything a server sent is hostile input. A tool's name, description and schema go
 // into the model's tool list, where nothing can be wrapped as data, so they are cleaned and bounded here; a
 // result is read field by field inside a guard, cleaned, cut and wrapped with the review's token.
-import type { AuditEntry, ToolDefinition } from '../types.ts';
+import type { AuditEntry, McpServer, McpState, McpStatus, PullRequestInfo, ToolCall, ToolDefinition } from '../types.ts';
 import { cutAt } from '../context/extensions.ts';
 import { stripControl, wrapData } from '../context/untrusted.ts';
 
@@ -220,4 +221,269 @@ export function resultMessage(fn: string, result: unknown, token: string): { con
   } catch {
     return null;
   }
+}
+
+// ---- The sessions of one review: opened, called within the review's count, closed
+
+export const MCP_CALLS_PER_REVIEW = 8;
+export const MCP_OPEN_MS = 10_000;               // the handshake and the tool list together
+export const MCP_CALL_MS = 30_000;               // one call
+export const MCP_CLOSE_MS = 1_000;
+export const TOOL_ARGUMENTS_CHARS = 10_000;
+export const NOT_RUN_CAP = 'Not run: the limit of tool calls for this review is reached. Review from what you have.';
+export const NOT_RUN_CLOSED = 'Not run: no more tool calls are run in this call. Review from what you have.';
+export const NOT_RUN_UNKNOWN = 'Not run: there is no tool of that name.';
+export const NOT_RUN_ARGUMENTS = 'Not run: the arguments were not a JSON object.';
+/** The text of a tool message for a tool error. */
+export function failedText(code: string): string {
+  return `The tool call failed (${code}). No more tool calls are run in this call. Review from what you have.`;
+}
+
+export interface ToolOutcome {
+  content: string;                                   // the tool message's text
+  audit: AuditEntry;                                 // the one entry of this call
+  stop: 'call_cap' | 'tool_error' | null;            // why no further call is run in this model call; null: none
+  sent: boolean;                                     // whether the call reached a server
+}
+export interface ReviewTools {
+  definitions: ToolDefinition[];                     // every function offered: the servers in their order, each one's tools in the config's order; [] when none
+  audit: AuditEntry[];                               // what was not offered, cut or stripped
+  /** Answers one call of the model's. Never rejects. With `open` false the call is not run. Takes one of the review's calls when it sends the call to a server. */
+  run(call: ToolCall, token: string, open: boolean): Promise<ToolOutcome>;
+  /** From now on no call is sent, and every server whose status is `ok` reads the status given, with this code. */
+  withhold(status: 'skipped' | 'error', code: string): void;
+  /** One entry for each server given, whatever happened to it. */
+  statuses(): Record<string, McpStatus>;
+  /** Ends every session opened, all at the same time, each under the close limit. Never rejects. A second call does nothing. */
+  close(): Promise<void>;
+}
+
+const SHORT_CODE = /^[a-z][a-z0-9_]{0,39}$/;
+const CODE_CHARS = 30;   // the longest code of a server's or a client's that is kept
+const isKeptCode = (v: unknown): v is string => typeof v === 'string' && v.length <= CODE_CHARS && SHORT_CODE.test(v);
+
+type Settled = { kind: 'value'; value: unknown } | { kind: 'error'; error: unknown } | { kind: 'timeout' };
+
+// Starts `start` with a signal that aborts at `ms`, and stops waiting at `ms` whatever it does. Never rejects.
+// What `start` returns is only ever resolved into a promise of our own, so a hostile thenable, or a throw
+// before any promise is returned, is a rejection here and never a throw. `late` is given a value that
+// arrives after the limit.
+function within(start: (signal: AbortSignal) => unknown, ms: number, late?: (value: unknown) => void): Promise<Settled> {
+  return new Promise((resolve) => {
+    const controller = new AbortController();
+    let done = false;
+    const finish = (settled: Settled): void => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      resolve(settled);
+    };
+    const timer = setTimeout(() => {
+      controller.abort();
+      finish({ kind: 'timeout' });
+    }, ms);
+    timer.unref?.();
+    const pending = new Promise<unknown>((settle, refuse) => {
+      try {
+        settle(start(controller.signal));
+      } catch (error) {
+        refuse(error);
+      }
+    });
+    pending.then(
+      (value) => {
+        if (done) {
+          late?.(value);
+          return;
+        }
+        finish({ kind: 'value', value });
+      },
+      (error) => finish({ kind: 'error', error }),
+    );
+  });
+}
+
+// A session as read once, at its arrival: its list and its two functions, never read again from the object.
+interface Opened { self: object; tools: unknown; call: (...args: unknown[]) => unknown; close: (...args: unknown[]) => unknown }
+
+// Reads what an open resolved. Null when it is no session. Never throws.
+function readSession(value: unknown): Opened | null {
+  try {
+    if (typeof value !== 'object' || value === null) return null;
+    const { tools, call, close } = value as Record<string, unknown>;
+    if (!Array.isArray(tools) || typeof call !== 'function' || typeof close !== 'function') return null;
+    return { self: value, tools, call: call as Opened['call'], close: close as Opened['close'] };
+  } catch {
+    return null;
+  }
+}
+
+// Ends one session under the close limit. Never rejects, and nothing a close does changes anything.
+async function closeSession(session: Opened, ms: number): Promise<void> {
+  await within((signal) => Reflect.apply(session.close, session.self, [signal]), ms);
+}
+
+// A value an open resolved that is no session may still hold a close of its own: it is called all the same,
+// guarded, so that nothing opened is left behind.
+function closeAnything(value: unknown, ms: number): void {
+  let close: unknown;
+  try {
+    if (typeof value !== 'object' || value === null) return;
+    close = (value as { close: unknown }).close;
+  } catch {
+    return;
+  }
+  if (typeof close !== 'function') return;
+  void within((signal) => Reflect.apply(close as Opened['close'], value, [signal]), ms);
+}
+
+const openCode = (settled: Settled): string => {
+  if (settled.kind === 'timeout') return 'open_timeout';
+  if (settled.kind === 'error') {
+    try {
+      const { error } = settled;
+      if (error instanceof Error && isKeptCode(error.message)) return `open_${error.message}`;
+    } catch {
+      // an error that throws when it is read says nothing
+    }
+    return 'open_failed';
+  }
+  return 'open_bad_session';
+};
+
+// The code of what a sent call gave, or the message when it gave a result. Never throws.
+function readAnswer(fn: string, settled: Settled, token: string): { content: string; reason: string } | { code: string } {
+  if (settled.kind === 'timeout') return { code: 'timeout' };
+  if (settled.kind === 'error') return { code: 'failed' };
+  try {
+    const answer = settled.value;
+    if (typeof answer !== 'object' || answer === null) return { code: 'failed' };
+    const ok: unknown = (answer as { ok: unknown }).ok;
+    if (ok === true) {
+      const message = resultMessage(fn, (answer as { result: unknown }).result, token);
+      return message ?? { code: 'bad_result' };
+    }
+    if (ok === false) {
+      const code: unknown = (answer as { code: unknown }).code;
+      return { code: isKeptCode(code) ? code : 'failed' };
+    }
+    return { code: 'failed' };
+  } catch {
+    return { code: 'failed' };
+  }
+}
+
+// The arguments as an object, or null when they are none the service sends.
+function readArguments(text: string | null): Record<string, unknown> | null {
+  if (typeof text !== 'string' || text.length > TOOL_ARGUMENTS_CHARS) return null;
+  if (text.trim() === '') return {};
+  try {
+    const parsed: unknown = JSON.parse(text);
+    return isPlainObject(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+interface ServerState { name: string; status: McpState; code: string; calls: number; failed: boolean; session: Opened | null }
+
+/** Opens every server once, all at the same time, each under the open limit. Never rejects. Absent limits read as the three constants. */
+export async function openTools(servers: McpServer[], pr: PullRequestInfo, limits?: { openMs?: number; callMs?: number; closeMs?: number }): Promise<ReviewTools> {
+  const openMs = limits?.openMs ?? MCP_OPEN_MS;
+  const callMs = limits?.callMs ?? MCP_CALL_MS;
+  const closeMs = limits?.closeMs ?? MCP_CLOSE_MS;
+  const states: ServerState[] = servers.map((s) => ({ name: s.name, status: 'skipped', code: '', calls: 0, failed: false, session: null }));
+  const definitions: ToolDefinition[] = [];
+  const audit: AuditEntry[] = [];
+  const offered = new Map<string, { state: ServerState; tool: string }>();
+
+  // A pull request from a fork, or one whose origin is not known, is given no tool: what a tool returns could be posted.
+  if (pr.fromFork !== false) {
+    const code = pr.fromFork === true ? 'from_fork' : 'origin_unknown';
+    for (const state of states) state.code = code;
+  } else {
+    // Every open is started before any is awaited. A session that arrives after its limit is closed at once.
+    const pending = servers.map((s) => within((signal) => s.open(signal), openMs, (late) => {
+      const session = readSession(late);
+      if (session !== null) void closeSession(session, closeMs);
+      else closeAnything(late, closeMs);
+    }));
+    const settled = await Promise.all(pending);
+    settled.forEach((result, i) => {
+      const state = states[i]!;
+      const session = result.kind === 'value' ? readSession(result.value) : null;
+      if (session === null) {
+        if (result.kind === 'value') closeAnything(result.value, closeMs);
+        state.status = 'error';
+        state.code = openCode(result);
+        return;
+      }
+      state.session = session;
+      const answer = offerTools(state.name, servers[i]!.tools, session.tools, new Set(offered.keys()));
+      for (const o of answer.offered) {
+        definitions.push(o.definition);
+        offered.set(o.definition.function.name, { state, tool: o.tool });
+      }
+      audit.push(...answer.audit);
+      state.status = answer.problem === null ? 'ok' : 'error';
+      state.code = answer.problem ?? 'ok';
+    });
+  }
+
+  let left = MCP_CALLS_PER_REVIEW;
+  let withheld = false;
+  let closing: Promise<void> | null = null;
+
+  const refuse = (subject: string, reason: string, content: string, stop: ToolOutcome['stop'] = null): ToolOutcome =>
+    ({ content, audit: { stage: 'tools', action: 'tool_call_refused', subject, reason }, stop, sent: false });
+
+  // Nothing is awaited before the call takes its place, so two calls at once can never both take the last one.
+  async function run(call: ToolCall, token: string, open: boolean): Promise<ToolOutcome> {
+    const target = offered.get(call.name);
+    const subject = target === undefined ? 'unknown' : call.name;
+    if (!open || closing !== null) return refuse(subject, 'closed', NOT_RUN_CLOSED);
+    if (withheld) return refuse(subject, 'withheld', NOT_RUN_CLOSED);
+    if (target === undefined) return refuse(subject, 'unknown_tool', NOT_RUN_UNKNOWN);
+    const { state, tool } = target;
+    if (state.failed || state.session === null) return refuse(subject, 'unavailable', failedText('unavailable'), 'tool_error');
+    if (left <= 0) return refuse(subject, 'call_cap', NOT_RUN_CAP, 'call_cap');
+    const args = readArguments(call.arguments);
+    if (args === null) return refuse(subject, 'bad_arguments', NOT_RUN_ARGUMENTS);
+    left -= 1;
+    state.calls += 1;
+    const session = state.session;
+    const settled = await within((signal) => Reflect.apply(session.call, session.self, [tool, args, signal]), callMs);
+    const answer = readAnswer(subject, settled, token);
+    if ('content' in answer) return { content: answer.content, audit: { stage: 'tools', action: 'tool_call', subject, reason: answer.reason }, stop: null, sent: true };
+    state.failed = true;
+    if (state.status !== 'error') {
+      state.status = 'error';
+      state.code = `call_${answer.code}`;
+    }
+    return { content: failedText(answer.code), audit: { stage: 'tools', action: 'tool_call', subject, reason: answer.code }, stop: 'tool_error', sent: true };
+  }
+
+  return {
+    definitions,
+    audit,
+    run,
+    withhold(status, code) {
+      withheld = true;
+      for (const state of states) {
+        if (state.status !== 'ok') continue;
+        state.status = status;
+        state.code = code;
+      }
+    },
+    statuses() {
+      return Object.fromEntries(states.map((s): [string, McpStatus] => [s.name, { status: s.status, code: s.code, calls: s.calls }]));
+    },
+    close() {
+      closing ??= (async () => {
+        const sessions = states.flatMap((s) => (s.session === null ? [] : [s.session]));
+        await Promise.all(sessions.map((session) => closeSession(session, closeMs)));
+      })();
+      return closing;
+    },
+  };
 }
