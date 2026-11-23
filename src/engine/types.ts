@@ -96,6 +96,23 @@ export interface ContextProvider {
   provide(pr: PullRequestInfo, signal: AbortSignal): Promise<ContextAnswer>;
 }
 
+/** One tool as a server lists it. Only `name` is checked by the client; the rest is as the server sent it. */
+export interface McpTool { name: string; description?: unknown; inputSchema?: unknown }
+/** What a call gave: the `result` of tools/call as the server sent it, or the short code of a tool error. */
+export type McpAnswer = { ok: true; result: unknown } | { ok: false; code: string };
+export interface McpSession {
+  tools: McpTool[];                                                                                 // every tool the server listed
+  call(name: string, args: Record<string, unknown>, signal: AbortSignal): Promise<McpAnswer>;      // never rejects
+  close(signal: AbortSignal): Promise<void>;                                                        // never rejects
+}
+export interface McpServer {
+  name: string;                                    // the config's name
+  tools: string[];                                 // the names the model may be offered, in the config's order
+  open(signal: AbortSignal): Promise<McpSession>;  // rejects with Error(<short code>)
+}
+export type McpState = 'ok' | 'skipped' | 'error';
+export interface McpStatus { status: McpState; code: string; calls: number }   // code: a short code; calls: the calls sent to the server in this review
+
 export interface ReviewDeps {
   source: Source;
   model: ModelClient;
@@ -108,6 +125,7 @@ export interface ReviewDeps {
   reusableScores?: (blocks: Array<{ path: string; hash: string; around: string }>) => Promise<Array<{ path: string; hash: string; around: string; entry: ScoreEntry }>>;
   contextProviders?: ContextProvider[]; // asked once for each review; absent reads as none
   toolChoice?: 'forced' | 'auto';       // how the model is made to call submit_review; absent reads as 'forced'
+  mcpServers?: McpServer[];             // opened once for each review; absent reads as none
 }
 
 export interface RawFinding { path: string; side: Side; line: number; severity: Severity; body: string; quote: string; beyond_diff: boolean }
@@ -130,7 +148,7 @@ export interface ReviewResult {
   usage: Usage;
   models: string[];           // models that answered, distinct, in first-seen order
   providers: string[];        // upstream providers that answered, distinct, in first-seen order
-  dependencies: { model: 'ok' | 'error'; extensions?: Record<string, ExtensionStatus> }; // extensions: absent when no provider was asked
+  dependencies: { model: 'ok' | 'error'; extensions?: Record<string, ExtensionStatus>; mcp?: Record<string, McpStatus> }; // extensions: absent when no provider was asked; mcp: absent when no server was considered
   audit: AuditEntry[];
   scores: FileScore[];        // one per changed file; empty when the review failed
   verdict: Verdict;
