@@ -185,15 +185,27 @@ test('the pull requests with work come in a fixed order, after the one named, no
 test('a failed attempt is counted, a pull request at the limit of attempts is left out, and marking it starts the count again', async () => {
   const db = await testDb();
   await savePullRequest(db, closed());
-  assert.equal(await noteLearnFailure(db, REF), 1);
-  assert.equal(await noteLearnFailure(db, REF), 2);
-  assert.equal(await noteLearnFailure(db, { ...REF, owner: 'ACME' }), 3);
+  assert.equal(await noteLearnFailure(db, REF, true), 1);
+  assert.equal(await noteLearnFailure(db, REF, true), 2);
+  assert.equal(await noteLearnFailure(db, { ...REF, owner: 'ACME' }, true), 3);
   assert.deepEqual(await numbers(db, null, 10, 3), []);
   assert.deepEqual(await numbers(db, null, 10, 4), [7]);
   await markLearned(db, REF, [], T1, null);
   assert.deepEqual(await db.query('select learn_attempts from visto_ai.pull_requests'), [{ learn_attempts: 0 }]);
   assert.deepEqual(await numbers(db, null, 10, 3), [7]);
-  assert.equal(await noteLearnFailure(db, { ...REF, number: 99 }), 0);
+  assert.equal(await noteLearnFailure(db, { ...REF, number: 99 }, true), 0);
+  await db.close();
+});
+
+test('a failed attempt that does not count leaves the row as it is and returns its count', async () => {
+  const db = await testDb();
+  await savePullRequest(db, closed());
+  assert.equal(await noteLearnFailure(db, REF, true), 1);
+  const before = await db.query('select * from visto_ai.pull_requests');
+  assert.equal(await noteLearnFailure(db, REF, false), 1);
+  assert.equal(await noteLearnFailure(db, { ...REF, owner: 'ACME' }, false), 1);
+  assert.deepEqual(await db.query('select * from visto_ai.pull_requests'), before);
+  assert.equal(await noteLearnFailure(db, { ...REF, number: 99 }, false), 0);
   await db.close();
 });
 

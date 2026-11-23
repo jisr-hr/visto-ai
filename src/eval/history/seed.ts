@@ -21,16 +21,11 @@ export interface Seeded { cases: number; known: number; activity: number; signal
 
 const REPO = /^([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)$/;
 const MAX_NUMBER = 2_147_483_647;                        // the largest number the database's integer column takes
-const FIRST_TIME = Date.parse('0001-01-01T00:00:00Z');   // the database takes no time before the year 1
+const MIN_NUMBER = -2_147_483_648;                       // the smallest
 
-// A time the memory part reads, and the database takes: readTime also reads a day that does not exist (2026-02-30) as a
-// later one, which the database refuses, so the day written must be one of the calendar.
-const storableTime = (value: unknown): boolean => {
-  const ms = readTime(value);
-  if (ms === null || ms < FIRST_TIME || typeof value !== 'string') return false;
-  const day = value.slice(0, 10);
-  return new Date(`${day}T00:00:00Z`).toISOString().slice(0, 10) === day;
-};
+// A line the integer column takes: null, or a number within its range.
+const storableLine = (value: unknown): boolean =>
+  typeof value !== 'number' || (value >= MIN_NUMBER && value <= MAX_NUMBER);
 
 // An activity of a person as capture stores it (rule 4). It came from no delivery and no thread event.
 function activityOf(ref: PullRequestRef, a: HistoryActivity): Activity {
@@ -81,7 +76,8 @@ export async function seedMemory(db: Db, cases: HistoryCase[], now: Date): Promi
     if (repo === null) throw new Error('bad_case_repo');
     // Refused before its transaction opens: such a case would stop every run with an error of the driver, and say nothing of why.
     if (!Number.isInteger(c.pr_number) || c.pr_number < 1 || c.pr_number > MAX_NUMBER) throw new Error('bad_case_number');
-    if (!storableTime(c.merged_at) || !c.activity.every((a) => storableTime(a.at))) throw new Error('bad_case_time');
+    if (!c.activity.every((a) => storableLine(a.line) && storableLine(a.start_line))) throw new Error('bad_case_number');
+    if (readTime(c.merged_at) === null || !c.activity.every((a) => readTime(a.at) !== null)) throw new Error('bad_case_time');
     const ref: PullRequestRef = { service: 'github', owner: repo[1]!, repo: repo[2]!, number: c.pr_number };
     const done = await db.transaction((tx) => seedCase(tx, c, ref, at));
     out.cases += 1;

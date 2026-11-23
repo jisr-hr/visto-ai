@@ -33,14 +33,20 @@ export function dayStart(at: Date): Date {
 const ZONED_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,9})?)?(Z|[+-]\d{2}:\d{2})$/;
 const KNOWN_CATEGORIES: ReadonlySet<string> = new Set(CATEGORIES);
 
+const FIRST_TIME = Date.parse('0001-01-01T00:00:00Z');   // the database takes no time before the year 1
+
 /**
  * The one reader of a time in the memory part: an ISO time that names its zone, as milliseconds; null for anything
- * else, a time with no zone included, and one that cannot be written back as YYYY-MM-DD.
+ * else, a time with no zone included, one before the year 1, one whose day as written is not a day of the calendar
+ * (2026-02-30), and one that cannot be written back as YYYY-MM-DD.
  */
 export function readTime(value: unknown): number | null {
   if (typeof value !== 'string' || !ZONED_TIME.test(value)) return null;
   const ms = Date.parse(value);
-  if (!Number.isFinite(ms)) return null;
+  if (!Number.isFinite(ms) || ms < FIRST_TIME) return null;
+  const day = value.slice(0, 10);
+  const written = Date.parse(`${day}T00:00:00Z`);
+  if (!Number.isFinite(written) || new Date(written).toISOString().slice(0, 10) !== day) return null;
   return /^\d{4}-\d{2}-\d{2}T/.test(new Date(ms).toISOString()) ? ms : null;
 }
 
@@ -108,6 +114,13 @@ export function linesFor(files: File[], records: LiveRecord[]): { lines: MemoryL
     if (own.length === 0) without.push(file);
     take(own, MEMORY_LINES_PER_FILE, false, onFiles);
   }
+  // A record on a changed file, or on the previous path of one, is never near: it is on a file the pull request changes.
+  const changed = new Set<string>();
+  for (const file of files) {
+    changed.add(file.path);
+    if (file.previousPath !== null) changed.add(file.previousPath);
+  }
+  const elsewhere = usable.filter((entry) => !changed.has(entry.record.path));
   const nearFiles: MemoryLine[] = [];
   for (const file of without) {
     const segments = file.path.split('/');
@@ -115,7 +128,7 @@ export function linesFor(files: File[], records: LiveRecord[]): { lines: MemoryL
     for (let depth = segments.length - 1; depth >= 1; depth -= 1) {
       const directory = segments.slice(0, depth).join('/');
       if (directory === '') continue;
-      const under = usable.filter((entry) => {
+      const under = elsewhere.filter((entry) => {
         const d = entry.record.directory;
         return typeof d === 'string' && (d === directory || d.startsWith(`${directory}/`));
       });

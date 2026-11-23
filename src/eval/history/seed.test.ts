@@ -364,3 +364,20 @@ test('a case with a merge or an activity time that cannot be read stops the seed
   ];
   for (const [name, c] of bad) await refused(c, 'bad_case_time', name);
 });
+
+test('a case with an inline line or start line that cannot be stored stops the seed with a short code', async () => {
+  const lineOf = (over: Partial<HistoryActivity>): HistoryCase => {
+    const c = case8();
+    return { ...c, activity: c.activity.map((a, i) => (i === 1 ? { ...a, ...over } : a)) };
+  };
+  await refused(lineOf({ line: 2_147_483_648 }), 'bad_case_number', 'line');
+  await refused(lineOf({ start_line: 2_147_483_648 }), 'bad_case_number', 'start_line');
+  await refused(lineOf({ line: -2_147_483_649 }), 'bad_case_number', 'line below');
+  // The largest line that can be stored is stored.
+  const db = await testDb();
+  await seedMemory(db, [lineOf({ line: 2_147_483_647, start_line: 2_147_483_647 })], NOW);
+  const stored = (await activityRows(db)).find((r) => r.source_id === 'i8b')!;
+  assert.equal(stored.line, 2_147_483_647);
+  assert.equal(stored.start_line, 2_147_483_647);
+  await db.close();
+});

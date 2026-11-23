@@ -120,13 +120,13 @@ export async function markLearned(db: Db, ref: PullRequestRef, comments: string[
     [r.service, r.owner, r.repo, r.number, now, JSON.stringify(comments.map(storable)), closed]);
 }
 
-/** One more failed attempt for the pull request. Returns the count it has now; 0 when the pull request is not stored. */
-export async function noteLearnFailure(db: Db, ref: PullRequestRef): Promise<number> {
+/** A failed attempt for the pull request, one more when it `counts`. Returns the count it has now; 0 when the pull request is not stored. One statement either way: it also tells that the database does not answer. */
+export async function noteLearnFailure(db: Db, ref: PullRequestRef, counts: boolean): Promise<number> {
   const r = lowered(ref);
   const rows = await db.query<{ n: number }>(
-    `update visto_ai.pull_requests set learn_attempts = learn_attempts + 1
+    `update visto_ai.pull_requests set learn_attempts = learn_attempts + $5
      where service = $1 and owner = $2 and repo = $3 and number = $4
      returning learn_attempts as n`,
-    [r.service, r.owner, r.repo, r.number]);
+    [r.service, r.owner, r.repo, r.number, counts ? 1 : 0]);
   return rows[0]?.n ?? 0;
 }

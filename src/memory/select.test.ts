@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import type { MemoryBlocks } from '../engine/types.ts';
 import { MEMORY_NAME } from '../engine/context/memory.ts';
-import { countsOf, createMemory, dayStart, linesFor, RECORDS_READ, type LiveRecord, type RecordSource } from './select.ts';
+import { countsOf, createMemory, dayStart, linesFor, readTime, RECORDS_READ, type LiveRecord, type RecordSource } from './select.ts';
 
 let serial = 0;
 function rec(number: number, path: string, createdAt: string, over: Partial<LiveRecord> = {}): LiveRecord {
@@ -335,4 +335,43 @@ test('a category the engine does not know is not counted, and takes no place', a
   assert.deepEqual(got.repository.categories.map((c) => c.name), real);
   assert.equal(got.cut.categories, 0);
   assert.deepEqual(countsOf([rec(8, 'a/b.ts', day(1), { category: 'IGNORE' }), rec(9, 'a/b.ts', day(1), { category: 'IGNORE' })]).categories, []);
+});
+
+test('a record on a file the pull request changes is never shown as near another changed file', async () => {
+  const tax = [1, 2, 3, 4].map((d) => rec(10 + d, 'src/billing/tax.ts', day(d)));
+  const files = [file('src/billing/tax.ts'), file('src/billing/rates.ts')];
+  const got = await blocksOf(tax, files);
+  assert.deepEqual(got.pullRequest.map((l) => [l.ref, l.near, l.path]), [
+    [tax[3]!.ref, false, 'src/billing/tax.ts'], [tax[2]!.ref, false, 'src/billing/tax.ts'], [tax[1]!.ref, false, 'src/billing/tax.ts'],
+  ]);
+  const other = rec(20, 'src/billing/other.ts', day(1));
+  const more = await blocksOf([...tax, other], files);
+  assert.deepEqual(more.pullRequest.filter((l) => l.near).map((l) => l.ref), [other.ref]);
+  assert.equal(more.pullRequest.length, 4);
+});
+
+test('a record on the previous path of a renamed changed file is never shown as near another changed file', async () => {
+  const old = [1, 2, 3, 4].map((d) => rec(10 + d, 'src/billing/tax.ts', day(d)));
+  const got = await blocksOf(old, [file('src/billing/fees.ts', 'src/billing/tax.ts'), file('src/billing/rates.ts')]);
+  assert.deepEqual(got.pullRequest.map((l) => [l.ref, l.near]), [[old[3]!.ref, false], [old[2]!.ref, false], [old[1]!.ref, false]]);
+});
+
+test('the walk for near records reaches the first segment of the path', () => {
+  const x = rec(8, 'src/x/y.ts', day(1));
+  assert.deepEqual(linesFor([file('src/a/b/c.ts')], [x]).lines.map((l) => [l.ref, l.near]), [[x.ref, true]]);
+});
+
+test('a directory is matched whole, never by its first letters', () => {
+  const billing = rec(8, 'billing/y.ts', day(1));
+  assert.equal(billing.directory, 'billing');
+  assert.deepEqual(linesFor([file('bill/x.ts')], [billing]).lines, []);
+});
+
+test('a time the database cannot hold is no time', () => {
+  for (const value of ['0000-06-01T00:00:00Z', '2026-02-30T00:00:00Z', '2026-02-29T12:00:00Z', '2026-04-31T00:00:00+02:00', '0001-01-01T00:00:00+05:00']) {
+    assert.equal(readTime(value), null, value);
+  }
+  assert.equal(readTime('0001-01-01T00:00:00Z'), Date.parse('0001-01-01T00:00:00Z'));
+  assert.equal(readTime('2024-02-29T23:59:59Z'), Date.parse('2024-02-29T23:59:59Z'));
+  assert.equal(readTime('2026-03-01T00:30:00+01:00'), Date.parse('2026-02-28T23:30:00Z'));
 });

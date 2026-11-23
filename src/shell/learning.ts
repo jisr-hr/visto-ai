@@ -77,9 +77,9 @@ async function learnOne(tx: Db, pr: ToLearn, now: string): Promise<{ examined: n
   return { examined: fresh.length, added };
 }
 
-/** One pass. Rejects when the database does not answer; what it committed before stays. batch, batches: for tests; absent: LEARN_BATCH, LEARN_BATCHES. */
+/** One pass. Rejects when the database does not answer; what it committed before stays. counts: whether a pull request that fails has one more failed attempt; absent: true. batch, batches: for tests; absent: LEARN_BATCH, LEARN_BATCHES. */
 export async function learnOnce(deps: {
-  db: Db; clock: () => Date; log?: (entry: Record<string, unknown>) => void; stopping?: () => boolean; batch?: number; batches?: number;
+  db: Db; clock: () => Date; log?: (entry: Record<string, unknown>) => void; stopping?: () => boolean; counts?: boolean; batch?: number; batches?: number;
 }): Promise<Learned> {
   const log = safe(deps.log);
   try {
@@ -94,6 +94,7 @@ async function pass(deps: Parameters<typeof learnOnce>[0], log: Log): Promise<Le
   const { db } = deps;
   const size = deps.batch ?? LEARN_BATCH;
   const batches = deps.batches ?? LEARN_BATCHES;
+  const counts = deps.counts !== false;
   const stopping = (): boolean => {
     try {
       return deps.stopping?.() === true;
@@ -121,7 +122,7 @@ async function pass(deps: Parameters<typeof learnOnce>[0], log: Log): Promise<Le
         out.added += done.added;
       } catch (err) {
         // This pull request fails; the database not answering is told by the statement below rejecting.
-        const attempts = await noteLearnFailure(db, pr.ref);
+        const attempts = await noteLearnFailure(db, pr.ref, counts);
         out.failed += 1;
         const reason = codeOf(err);
         log({ event: 'learning_pr_failed', repo: repoOf(pr.ref), number: pr.ref.number, reason, attempts });
@@ -186,6 +187,7 @@ export function createLearning(deps: { db: Db; clock: () => Date; log: (entry: R
   let raised = false;                        // learning_stale was raised since a pass last completed
   let stopped = false;
   let pending = false;                       // one more pass was asked for meanwhile
+  let pendingCounts = false;                 // and a tick asked for it: its failed attempts count (call 13)
 
   /** One pass: settles when that pass has ended and the next one, if asked for, has started. */
   interface Pass { settled: Promise<void>; ctl: { stop: boolean } }
@@ -199,13 +201,14 @@ export function createLearning(deps: { db: Db; clock: () => Date; log: (entry: R
   };
   now();
 
-  function startPass(): Pass {
+  // counts: the timer asked for this pass; a pass a wake alone asked for counts no failed attempt.
+  function startPass(counts: boolean): Pass {
     const ctl = { stop: false };
     const pass: Pass = {
       ctl,
       settled: (async () => {
         try {
-          await learnOnce({ db: deps.db, clock: deps.clock, log, stopping: () => stopped || ctl.stop });
+          await learnOnce({ db: deps.db, clock: deps.clock, log, stopping: () => stopped || ctl.stop, counts });
           lastCompleted = now() ?? lastCompleted;
           raised = false;
         } catch {
@@ -214,21 +217,25 @@ export function createLearning(deps: { db: Db; clock: () => Date; log: (entry: R
       })().finally(() => {
         current = null;
         const again = pending && !stopped;
+        const next = pendingCounts;
         pending = false;
-        if (again) current = startPass();
+        pendingCounts = false;
+        if (again) current = startPass(next);
       }),
     };
     return pass;
   }
 
-  /** The pass this call is for: the one under way, after which one more is asked for, or the one it starts. null after stop. */
-  function ask(): Pass | null {
+  /** The pass this call is for: the one under way, after which one more is asked for, or the one it starts. null after stop. counts: a tick asks. */
+  function ask(counts: boolean): Pass | null {
     if (stopped) return null;
     if (current !== null) {
       pending = true;
+      // A wake never changes whether the next pass counts; a tick makes it count.
+      if (counts) pendingCounts = true;
       return current;
     }
-    current = startPass();
+    current = startPass(counts);
     return current;
   }
 
@@ -275,7 +282,7 @@ export function createLearning(deps: { db: Db; clock: () => Date; log: (entry: R
     },
     wake(): void {
       try {
-        ask();
+        ask(false);
       } catch {
         // a wake that fails changes nothing
       }
@@ -290,7 +297,7 @@ export function createLearning(deps: { db: Db; clock: () => Date; log: (entry: R
         // the check never stops a tick
       }
       try {
-        const own = ask();
+        const own = ask(true);
         if (own === null) return;
         if (!(await within(own.settled, Math.max(0, deadline - Date.now())))) {
           own.ctl.stop = true;
@@ -304,6 +311,7 @@ export function createLearning(deps: { db: Db; clock: () => Date; log: (entry: R
     stop(): void {
       stopped = true;
       pending = false;
+      pendingCounts = false;
     },
   };
 }

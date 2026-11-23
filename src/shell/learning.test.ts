@@ -351,7 +351,7 @@ test('a database that does not answer at all fails the pass, and counts no attem
   // A transaction that rejects and a count of the attempt that rejects too: the database is not answering.
   const half = wrap(db, {
     query: async <R,>(text: string, params?: unknown[]) => {
-      if (text.includes('learn_attempts + 1')) throw new Error('db_down');
+      if (text.includes('set learn_attempts = learn_attempts +')) throw new Error('db_down');
       return db.query<R>(text, params);
     },
     transaction: () => Promise.reject(new Error('db_down')),
@@ -1019,6 +1019,110 @@ test('idle waits for the pass a wake chained behind the one under way', async ()
   gates[1]!.release();
   await bounded(waiting, 1_000);
   assert.equal(ended, 2);
+  learning.stop();
+  await db.close();
+});
+
+// Fix wave: a failed attempt counts only in a pass the timer asked for.
+
+/** A Db on which every insert of a record rejects, inside the transaction of its pull request. */
+function recordsFail(db: Db): Db {
+  return wrap(db, {
+    transaction: <T,>(work: (tx: Db) => Promise<T>) => db.transaction((tx) => work(wrap(tx, {
+      query: async <R,>(text: string, params?: unknown[]) => {
+        if (text.includes('insert into visto_ai.memory_records')) throw new Error('injected');
+        return tx.query<R>(text, params);
+      },
+    }))),
+  });
+}
+const failedAttempts = (logged: Array<Record<string, unknown>>): unknown[] =>
+  logged.filter((e) => e['event'] === 'learning_pr_failed').map((e) => e['attempts']);
+const givenUp = (logged: Array<Record<string, unknown>>): number => logged.filter((e) => e['event'] === 'learning_pr_given_up').length;
+
+test('the passes wakes start count no failed attempt, and the passes the timer starts do', async () => {
+  const db = await testDb();
+  await savePullRequest(db, closed());
+  const logged: Array<Record<string, unknown>> = [];
+  const learning = createLearning({ db: recordsFail(db), clock: fixed(plus(CLOSED, HOUR_MS)), log: (e) => { logged.push(e); }, alert: () => {} });
+  for (const n of [1, 2, 3]) {
+    await recordActivity(db, comment({ sourceId: `c-${n}`, delivery: `d-${n}` }));
+    learning.wake();
+    await bounded(learning.idle(), 5_000);
+  }
+  assert.equal(await attemptsOf(db, 7), 0);
+  assert.deepEqual(failedAttempts(logged), [0, 0, 0]);
+  assert.equal(givenUp(logged), 0);
+  for (const n of [1, 2, 3]) {
+    await bounded(learning.tick(), 5_000);
+    assert.equal(await attemptsOf(db, 7), n);
+    assert.equal(givenUp(logged), n < 3 ? 0 : 1);
+  }
+  assert.deepEqual(failedAttempts(logged), [0, 0, 0, 1, 2, 3]);
+  assert.deepEqual(logged.filter((e) => e['event'] === 'learning_pr_given_up').map((e) => ({ ...e, reason: undefined })),
+    [{ event: 'learning_pr_given_up', repo: 'acme/shop', number: 7, reason: undefined }]);
+  learning.stop();
+  await db.close();
+});
+
+/** Two passes over a pull request whose records fail, the first held until `release`. */
+function heldFailing(db: Db): { db: Db; release: () => void; passes: () => number } {
+  const gate = held();
+  let passes = 0;
+  const failing = recordsFail(db);
+  return {
+    db: wrap(failing, {
+      query: async <R,>(text: string, params?: unknown[]) => {
+        if (FIRST_BATCH(text, params)) {
+          passes += 1;
+          if (passes === 1) await gate.promise;
+        }
+        return failing.query<R>(text, params);
+      },
+    }),
+    release: gate.release,
+    passes: () => passes,
+  };
+}
+
+test('a tick that asks while a wake\'s pass is under way makes the pass that follows count', async () => {
+  const db = await testDb();
+  await savePullRequest(db, closed());
+  await recordActivity(db, comment());
+  const h = heldFailing(db);
+  const logged: Array<Record<string, unknown>> = [];
+  const learning = createLearning({ db: h.db, clock: fixed(plus(CLOSED, HOUR_MS)), log: (e) => { logged.push(e); }, alert: () => {} });
+  learning.wake();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(h.passes(), 1);
+  const ticked = learning.tick();
+  h.release();
+  await bounded(ticked, 5_000);
+  await bounded(learning.idle(), 5_000);
+  assert.equal(h.passes(), 2);
+  assert.deepEqual(failedAttempts(logged), [0, 1]);
+  assert.equal(await attemptsOf(db, 7), 1);
+  learning.stop();
+  await db.close();
+});
+
+test('a wake that asks while a tick\'s pass is under way makes the pass that follows not count', async () => {
+  const db = await testDb();
+  await savePullRequest(db, closed());
+  await recordActivity(db, comment());
+  const h = heldFailing(db);
+  const logged: Array<Record<string, unknown>> = [];
+  const learning = createLearning({ db: h.db, clock: fixed(plus(CLOSED, HOUR_MS)), log: (e) => { logged.push(e); }, alert: () => {} });
+  const ticked = learning.tick();
+  for (let i = 0; i < 50 && h.passes() < 1; i += 1) await new Promise((resolve) => setTimeout(resolve, 2));
+  assert.equal(h.passes(), 1);
+  learning.wake();
+  h.release();
+  await bounded(ticked, 5_000);
+  await bounded(learning.idle(), 5_000);
+  assert.equal(h.passes(), 2);
+  assert.deepEqual(failedAttempts(logged), [1, 1]);
+  assert.equal(await attemptsOf(db, 7), 1);
   learning.stop();
   await db.close();
 });

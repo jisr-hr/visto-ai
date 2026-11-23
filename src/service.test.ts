@@ -1608,15 +1608,24 @@ test('stop waits for a pass that never settles at most CLOSE_WAIT_MS', async (t)
   await service.settled;
   await h.until(() => entered);
   t.mock.timers.enable({ apis: ['setTimeout'] });
-  const stopped = service.stop();
-  for (let i = 0; i < 20 && !h.events.includes('close'); i += 1) await h.flush();
-  assert.equal(h.events.includes('close'), false);
-  for (let i = 0; i < 20 && !h.events.includes('close'); i += 1) {
-    t.mock.timers.tick(CLOSE_WAIT_MS);
-    await h.flush();
+  let ended = false;
+  const stopped = service.stop().then(() => { ended = true; });
+  try {
+    for (let i = 0; i < 20 && !h.events.includes('close'); i += 1) await h.flush();
+    assert.equal(h.events.includes('close'), false);
+    for (let i = 0; i < 20 && !h.events.includes('close'); i += 1) {
+      t.mock.timers.tick(CLOSE_WAIT_MS);
+      await h.flush();
+    }
+    await stopped;
+    assert.equal(h.events.includes('close'), true);
+  } finally {
+    // A failure above must not leave the stop waiting on a mocked timer: the clean-up after the test waits for the same stop.
+    for (let i = 0; i < 20 && !ended; i += 1) {
+      t.mock.timers.tick(CLOSE_WAIT_MS);
+      await h.flush();
+    }
   }
-  await stopped;
-  assert.equal(h.events.includes('close'), true);
 });
 
 test('a review of a repository with a record is given it', async () => {
