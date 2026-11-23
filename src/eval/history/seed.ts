@@ -7,25 +7,30 @@ import type { Activity } from '../../db/human-activity.ts';
 import { markLearned } from '../../db/learning.ts';
 import { addRecords } from '../../db/memory-records.ts';
 import type { NewRecord } from '../../db/memory-records.ts';
+import { isApplied } from '../../db/migrate.ts';
 import { getPullRequest } from '../../db/pull-requests.ts';
 import type { Db } from '../../db/types.ts';
 import type { PullRequestRef } from '../../forge/types.ts';
+import { readTime } from '../../memory/select.ts';
 import { signalsOf } from '../../memory/signals.ts';
-import type { PersonComment, Signal } from '../../memory/signals.ts';
+import type { Signal } from '../../memory/signals.ts';
+import { personComments } from '../backtest/memory.ts';
 import type { HistoryActivity, HistoryCase } from './file.ts';
 
 export interface Seeded { cases: number; known: number; activity: number; signals: number }
 
 const REPO = /^([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)$/;
+const MAX_NUMBER = 2_147_483_647;                        // the largest number the database's integer column takes
+const FIRST_TIME = Date.parse('0001-01-01T00:00:00Z');   // the database takes no time before the year 1
 
-// An inline comment of the file as the rule reads it: the same reading as the backtest's memory (Task 10, rule 2).
-function personComment(a: HistoryActivity): PersonComment {
-  return {
-    id: a.id, author: a.author, bot: a.bot, association: a.association, at: a.at, body: a.body,
-    path: a.path ?? null, side: a.side ?? null, line: a.line ?? null, startLine: a.start_line ?? null,
-    fileLevel: a.file_level ?? false, commit: a.commit ?? null, replyTo: a.reply_to ?? null,
-  };
-}
+// A time the memory part reads, and the database takes: readTime also reads a day that does not exist (2026-02-30) as a
+// later one, which the database refuses, so the day written must be one of the calendar.
+const storableTime = (value: unknown): boolean => {
+  const ms = readTime(value);
+  if (ms === null || ms < FIRST_TIME || typeof value !== 'string') return false;
+  const day = value.slice(0, 10);
+  return new Date(`${day}T00:00:00Z`).toISOString().slice(0, 10) === day;
+};
 
 // An activity of a person as capture stores it (rule 4). It came from no delivery and no thread event.
 function activityOf(ref: PullRequestRef, a: HistoryActivity): Activity {
@@ -59,11 +64,10 @@ async function seedCase(tx: Db, c: HistoryCase, ref: PullRequestRef, now: string
   }
   // A pull request the service stores: the pass makes its signals, from its comments not yet looked at (rule 6).
   if (await getPullRequest(tx, ref) !== null) return { known: true, activity, signals: 0 };
-  const inline = c.activity.filter((a) => a.kind === 'inline');
-  const comments = inline.filter((a) => a.bot === false).map((a) => a.id);
+  const comments = c.activity.filter((a) => a.kind === 'inline' && a.bot === false).map((a) => a.id);
   // No close: no row of pull_requests is there to mark, and none is written (rule 5).
   await markLearned(tx, ref, comments, now, null);
-  const signals = signalsOf({ number: c.pr_number, author: c.author, closedAt: c.merged_at, comments: inline.map(personComment) });
+  const signals = signalsOf({ number: c.pr_number, author: c.author, closedAt: c.merged_at, comments: personComments(c) });
   const added = await addRecords(tx, { service: ref.service, owner: ref.owner, repo: ref.repo }, signals.map(recordOf));
   return { known: false, activity, signals: added };
 }
@@ -75,6 +79,9 @@ export async function seedMemory(db: Db, cases: HistoryCase[], now: Date): Promi
   for (const c of cases) {
     const repo = typeof c.repo === 'string' ? REPO.exec(c.repo) : null;
     if (repo === null) throw new Error('bad_case_repo');
+    // Refused before its transaction opens: such a case would stop every run with an error of the driver, and say nothing of why.
+    if (!Number.isInteger(c.pr_number) || c.pr_number < 1 || c.pr_number > MAX_NUMBER) throw new Error('bad_case_number');
+    if (!storableTime(c.merged_at) || !c.activity.every((a) => storableTime(a.at))) throw new Error('bad_case_time');
     const ref: PullRequestRef = { service: 'github', owner: repo[1]!, repo: repo[2]!, number: c.pr_number };
     const done = await db.transaction((tx) => seedCase(tx, c, ref, at));
     out.cases += 1;
@@ -83,4 +90,11 @@ export async function seedMemory(db: Db, cases: HistoryCase[], now: Date): Promi
     out.signals += done.signals;
   }
   return out;
+}
+
+/** The command's steps once connected: refuses a database 0010_memory is not applied to before any write, never migrates, seeds, and returns the one line to print. */
+export async function seedCommand(db: Db, cases: HistoryCase[], now: Date): Promise<string> {
+  if (!(await isApplied(db, '0010_memory'))) throw new Error('database_not_migrated');
+  const s = await seedMemory(db, cases, now);
+  return `cases ${s.cases}, known ${s.known}, activity ${s.activity}, signals ${s.signals}`;
 }

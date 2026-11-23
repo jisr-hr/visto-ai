@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 import { recordActivity } from '../../db/human-activity.ts';
@@ -11,7 +12,7 @@ import type { PullRequestFacts, PullRequestRef } from '../../forge/types.ts';
 import { learnOnce } from '../../shell/learning.ts';
 import { historyMemory } from '../backtest/memory.ts';
 import type { HistoryActivity, HistoryCase } from './file.ts';
-import { seedMemory } from './seed.ts';
+import { seedCommand, seedMemory } from './seed.ts';
 
 const TAX = 'src/billing/tax.ts';
 const CART = 'src/cart/cart.ts';
@@ -298,4 +299,68 @@ test('one case is one transaction: a case that fails leaves nothing of itself, a
   // Run again without the failure: case 8 is written whole, and case 7 adds nothing.
   assert.deepEqual(await seedMemory(db, [case7(), case8()], NOW), { cases: 2, known: 0, activity: 2, signals: 1 });
   await db.close();
+});
+
+test('the seed reads a case\'s comments with the backtest\'s own mapping, and holds no copy of it', () => {
+  const text = readFileSync(new URL('./seed.ts', import.meta.url), 'utf8');
+  assert.match(text, /import \{[^}]*\bpersonComments\b[^}]*\} from '\.\.\/backtest\/memory\.ts';/);
+  assert.equal(/function personComment\b/.test(text), false);
+  assert.equal(/start_line \?\? null/.test(text.slice(text.indexOf('function seedCase'))), false);
+});
+
+test('a database the seed\'s migration is not applied to is refused before any write', async () => {
+  const db = await testDb();
+  // Removing the one ledger row stands in for a database that was never migrated to 0010_memory.
+  await db.query("delete from visto_ai.schema_migrations where name = '0010_memory'");
+  const before = await snapshot(db);
+  await assert.rejects(seedCommand(db, [case7(), case8()], NOW), { message: 'database_not_migrated' });
+  assert.deepEqual(await snapshot(db), before);
+  await db.close();
+});
+
+test('the command prints the four counts in their order', async () => {
+  const db = await testDb();
+  assert.equal(await savePullRequest(db, facts(8)), true);
+  const case9 = mkCase(9, [TAX], M8, [inline('i9', TAX, '2026-03-11T10:00:00.000Z')]);
+  assert.equal(await seedCommand(db, [case7(), case8(), case9], NOW), 'cases 3, known 1, activity 6, signals 2');
+  await db.close();
+});
+
+/** A case that cannot be stored stops the seed with its code: the case before it stays, nothing of it or after it is written. */
+async function refused(bad: HistoryCase, code: string, name: string): Promise<void> {
+  const db = await testDb();
+  const after = mkCase(9, [TAX], M8, [inline('i9', TAX, '2026-03-11T10:00:00.000Z')]);
+  await assert.rejects(seedMemory(db, [case7(), bad, after], NOW), { message: code }, name);
+  const dump = await snapshot(db);
+  const mentions = (n: number) => [...dump.human_activity!, ...dump.memory_records!].filter((j) => (JSON.parse(j) as { number: number }).number === n).length;
+  assert.equal(mentions(7) > 0, true, name);
+  assert.equal(mentions(bad.pr_number), 0, name);
+  assert.equal(mentions(9), 0, name);
+  assert.deepEqual(dump.pull_requests, [], name);
+  await db.close();
+}
+
+test('a case with a number that cannot be stored stops the seed with a short code', async () => {
+  for (const n of [0, -8, 1.5, 2_147_483_648, Number.NaN]) await refused({ ...case8(), pr_number: n }, 'bad_case_number', String(n));
+  // The largest number that can be stored is seeded.
+  const db = await testDb();
+  assert.equal((await seedMemory(db, [{ ...case8(), pr_number: 2_147_483_647 }], NOW)).signals, 1);
+  await db.close();
+});
+
+test('a case with a merge or an activity time that cannot be read stops the seed with a short code', async () => {
+  const at = (value: string, index: number): HistoryCase => {
+    const c = case8();
+    return { ...c, activity: c.activity.map((a, i) => (i === index ? { ...a, at: value } : a)) };
+  };
+  const bad: [string, HistoryCase][] = [
+    ['merged_at not a time', { ...case8(), merged_at: 'yesterday' }],
+    ['merged_at with no zone', { ...case8(), merged_at: '2026-03-12T12:00:00' }],
+    ['merged_at in the year 0', { ...case8(), merged_at: '0000-03-12T12:00:00Z' }],
+    ['first activity not a time', at('soon', 0)],
+    ['second activity on a day that does not exist', at('2026-02-30T10:00:00Z', 1)],
+    ['an activity in the year 0', at('0000-03-11T10:00:00Z', 1)],
+    ['a bot\'s activity not a time', { ...case8(), activity: [...case8().activity, inline('b8', CART, 'later', { author: 'ci-bot', bot: true, association: 'none' })] }],
+  ];
+  for (const [name, c] of bad) await refused(c, 'bad_case_time', name);
 });

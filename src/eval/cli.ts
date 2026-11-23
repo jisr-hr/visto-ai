@@ -5,7 +5,6 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ConfigError, contractFile, loadConfig } from '../config/load.ts';
 import type { DeploymentConfig } from '../config/load.ts';
-import { isApplied } from '../db/migrate.ts';
 import { postgresDb } from '../db/postgres.ts';
 import { createModelClient } from '../engine/model/client.ts';
 import { createJevScorer } from '../engine/scorer/jev.ts';
@@ -23,7 +22,7 @@ import { readCaseScores, runBacktest } from './backtest/run.ts';
 import type { BacktestSummary } from './backtest/run.ts';
 import { loadHistory } from './history/file.ts';
 import { runImport } from './history/import.ts';
-import { seedMemory } from './history/seed.ts';
+import { seedCommand } from './history/seed.ts';
 import { assertOutsideProject, runReplay } from './replay.ts';
 import type { SummaryFile } from './replay.ts';
 
@@ -308,9 +307,8 @@ async function seedMemoryCommand(argv: string[], env: Record<string, string | un
   const { cases } = readable('history', () => loadHistory(historyPath));
   const db = postgresDb(config.database.url, (entry) => { process.stderr.write(JSON.stringify(entry) + '\n'); });
   try {
-    if (!(await isApplied(db, '0010_memory'))) throw new Error('database_not_migrated');
-    const seeded = await seedMemory(db, cases, new Date());
-    out(`cases ${seeded.cases}, known ${seeded.known}, activity ${seeded.activity}, signals ${seeded.signals}`);
+    out(await seedCommand(db, cases, new Date()));
+    // The close after a failure is not tested in the suite, which opens no database here: the real run under Docker checks it.
   } finally {
     try {
       await db.close();
