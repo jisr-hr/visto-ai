@@ -517,3 +517,93 @@ test('the example with its gate block switched on parses to a gate on main', () 
   });
   assert.deepEqual(parseConfig(uncomment(example(), '    # score:'), exampleEnv).repositories.defaults.gate, GATE_OFF);
 });
+
+const ext = (body: string): string => `${minimal}extensions:\n${body}`;
+const KEY = { MODEL_KEY: 'k' };
+
+test('a config with no extensions block has none', () => {
+  assert.deepEqual(parseConfig(minimal, KEY).extensions, []);
+  assert.deepEqual(parseConfig(example(), exampleEnv).extensions, []);
+});
+
+test('an extension has a name, a module and options, and options not written are empty', () => {
+  const c = parseConfig(
+    ext('  - name: tickets\n    module: ./extensions/tickets.ts\n    options: { project: SHOP }\n  - name: chat\n    module: acme-visto-chat\n'),
+    KEY,
+  );
+  assert.deepEqual(c.extensions, [
+    { name: 'tickets', module: './extensions/tickets.ts', options: { project: 'SHOP' } },
+    { name: 'chat', module: 'acme-visto-chat', options: {} },
+  ]);
+});
+
+test('a name that is no short code, a name used twice, an unknown key and a module that is neither a path nor a package are refused by key', () => {
+  const issuesOf = (text: string): string[] => {
+    try {
+      parseConfig(text, KEY);
+    } catch (e) {
+      return (e as ConfigError).issues;
+    }
+    return [];
+  };
+  const one = (name: string, module = './m.ts'): string => ext(`  - name: '${name}'\n    module: '${module}'\n`);
+  for (const bad of ['Tickets', '9a', 'a-b', '', 'a'.repeat(41)]) {
+    const issues = issuesOf(one(bad));
+    assert.ok(issues.length > 0, `name ${bad}`);
+    assert.ok(issues.every((i) => i.startsWith('extensions.0.name: must be a short code')), issues.join());
+    assert.ok(issues.every((i) => !i.includes(bad) || bad === ''), bad);
+  }
+  assert.equal(issuesOf(one('a'.repeat(40))).length, 0);
+  const twice = issuesOf(ext('  - { name: chat, module: ./a.ts }\n  - { name: chat, module: ./b.ts }\n'));
+  assert.deepEqual(twice, ['extensions.1.name: is already used by another extension']);
+  const unknown = issuesOf(ext('  - { name: chat, module: ./a.ts, path: ./x.ts }\n'));
+  assert.ok(unknown.some((i) => i.startsWith('extensions.0') && i.includes('path')), unknown.join());
+  for (const bad of ['', 'file:///x.ts', 'node:fs', '.hidden', 'C:\\x.ts', 'extensions/tickets.ts', 'fs', 'child_process']) {
+    const issues = issuesOf(one('chat', bad));
+    assert.deepEqual(issues, ['extensions.0.module: must be a path that starts with ./, ../ or /, or the name of a package'], bad);
+  }
+  for (const good of ['@acme/visto-chat', 'acme-visto-chat/tickets', './a.ts', '../a.ts', '/opt/a.ts']) {
+    assert.equal(issuesOf(one('chat', good)).length, 0, good);
+  }
+  const many = Array.from({ length: 21 }, (_, i) => `  - { name: m${i}, module: ./m.ts }\n`).join('');
+  const over = issuesOf(ext(many));
+  assert.ok(over.length > 0 && over.every((i) => i.startsWith('extensions')), over.join());
+  assert.equal(issuesOf(ext(many.split('\n').slice(0, 20).join('\n') + '\n')).length, 0);
+});
+
+test('a reference inside options is replaced by the variable, at any depth and in a list', () => {
+  const text = ext(
+    '  - name: chat\n    module: ./c.ts\n    options:\n      token: { env: CHAT_TOKEN }\n      nested: { key: { env: K2 } }\n      hooks: [{ env: H1 }, plain]\n',
+  );
+  const c = parseConfig(text, { ...KEY, CHAT_TOKEN: 'v1', K2: 'v2', H1: 'v3' });
+  assert.deepEqual(c.extensions[0]!.options, { token: 'v1', nested: { key: 'v2' }, hooks: ['v3', 'plain'] });
+});
+
+test('a reference to a variable that is not set, or that names none, stops the config, and the issue names the key and never a value', () => {
+  const at = (opt: string): string => ext(`  - name: chat\n    module: ./c.ts\n    options:\n      secret: sk-inline-77\n      ${opt}\n`);
+  const issuesOf = (text: string, env: Record<string, string | undefined>): string[] => {
+    try {
+      parseConfig(text, env);
+    } catch (e) {
+      return (e as ConfigError).issues;
+    }
+    return [];
+  };
+  for (const env of [KEY, { ...KEY, CHAT_TOKEN: '' }]) {
+    assert.deepEqual(issuesOf(at('token: { env: CHAT_TOKEN }'), env), ['extensions.0.options.token: environment variable CHAT_TOKEN is not set']);
+  }
+  for (const bad of ['{ env: 5 }', "{ env: '' }"]) {
+    assert.deepEqual(issuesOf(at(`token: ${bad}`), KEY), ['extensions.0.options.token: env must name an environment variable']);
+  }
+  assert.deepEqual(issuesOf(at('hooks: [plain, { env: NOPE }]'), KEY), ['extensions.0.options.hooks.1: environment variable NOPE is not set']);
+  const kept = parseConfig(at('token: { env: A, other: 1 }'), KEY);
+  assert.deepEqual(kept.extensions[0]!.options.token, { env: 'A', other: 1 });
+  for (const issue of issuesOf(at('token: { env: CHAT_TOKEN }'), KEY)) assert.ok(!issue.includes('sk-inline-77'));
+});
+
+test('the example with its extensions block switched on names the example module', () => {
+  const c = parseConfig(uncomment(example(), '# extensions:'), { ...exampleEnv, EXAMPLE_FEEDBACK_SECRET: 'fb-secret' });
+  assert.deepEqual(c.extensions, [{ name: 'example', module: './examples/extension-example.ts', options: { secret: 'fb-secret' } }]);
+  const appEnv = { ...exampleEnv, APP_PRIVATE_KEY: PEM, ALERT_WEBHOOK_URL: 'https://alerts.example.test/in/abc', WEBHOOK_SECRET: 'w', DATABASE_URL: 'postgres://u:p@db:5432/visto' };
+  assert.deepEqual(parseConfig(uncomment(example(), '# app:'), appEnv).extensions, []);
+});
