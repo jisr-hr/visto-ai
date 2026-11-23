@@ -18,12 +18,14 @@ import { renderNotes } from '../engine/render/notes.ts';
 import { shownOf } from '../engine/score/shown.ts';
 import type { BlockScore } from '../engine/score/types.ts';
 import { SUBMIT_REVIEW } from '../engine/model/submit-review.ts';
-import type { ModelClient, ModelResponse, ReviewDeps, ReviewInput, ReviewResult, ThreadVerdict } from '../engine/types.ts';
+import type { Memory, MemoryStatus, ModelClient, ModelResponse, ReviewDeps, ReviewInput, ReviewResult, ThreadVerdict } from '../engine/types.ts';
 import { runReviewJob } from './review-job.ts';
 import type { ReviewJobDeps } from './review-job.ts';
 import type { Notifier } from './notify.ts';
 import { createExtensionHealth } from './extension-health.ts';
 import { createMcpHealth } from './mcp-health.ts';
+import { createMemoryHealth } from './memory-health.ts';
+import type { MemoryHealth } from './memory-health.ts';
 import type { ReviewNotice } from '../extensions/types.ts';
 
 const REF = { service: 'github', owner: 'acme', repo: 'shop', number: 7 } as const;
@@ -2354,6 +2356,123 @@ test('a health that throws changes nothing of the job', async () => {
   const throwing = await live({ pullRequest: 8, result });
   throwing.deps.mcpHealth = { noted: () => { throw new Error('health_down'); } };
   await runReviewJob(throwing.job, throwing.deps);
+  const same = (x: Harness): Record<string, unknown> => ({ ...reviewLine(x), job: 0, number: 0, duration_ms: 0 });
+  assert.deepEqual(same(throwing), same(plain));
+  assert.equal((await getJob(db, throwing.job.id))?.outcome, 'published');
+});
+
+/** A memory that only says it was given, and the refs it was made for. */
+const givenMemory = (): { memory: Memory; memoryFor: (ref: PullRequestRef) => Memory; refs: PullRequestRef[] } => {
+  const refs: PullRequestRef[] = [];
+  const memory: Memory = { blocks: () => Promise.reject(new Error('not_asked')) };
+  return { memory, refs, memoryFor: (ref) => { refs.push(ref); return memory; } };
+};
+/** Tells into `told`, as [ok, code]. */
+const memoryHealthInto = (told: unknown[][]): Pick<MemoryHealth, 'noted'> => ({ noted: (...args) => { told.push(args); } });
+
+test('with learning off the engine is given no memory, and the review line and the alerts are those of before', async () => {
+  const alerts: unknown[][] = [];
+  const health = createMemoryHealth((code, details) => { alerts.push([code, details]); });
+  for (const [number, dryRun] of [[7, true], [8, false]] as const) {
+    const h = await harness({ pullRequest: number, dryRun });
+    await runReviewJob(h.job, h.deps);
+    assert.equal(h.engines.length, 1);
+    assert.equal('memory' in h.engines[0]!, false, String(number));
+    assert.deepEqual(Object.keys(h.engines[0]!), dryRun ? [] : ['reusableScores'], String(number));
+    assert.deepEqual(Object.keys(reviewLine(h)), REVIEW_LINE_KEYS, String(number));
+    // a health given with no memory is told nothing by a result with no memory
+    const told = await harness({ pullRequest: number + 10, dryRun });
+    await runReviewJob(told.job, { ...told.deps, memoryHealth: health });
+    const same = (x: Harness): Record<string, unknown> => ({ ...reviewLine(x), job: 0, number: 0, duration_ms: 0 });
+    assert.deepEqual(same(told), same(h), String(number));
+  }
+  // a stored result written before this plan, read by a later start
+  await recorded({ ref: { ...REF, number: 30 }, result: okResult() });
+  const resumed = await live({ pullRequest: 30 });
+  await runReviewJob(resumed.job, resumed.deps);
+  assert.deepEqual([Object.keys(reviewLine(resumed)), reviewLine(resumed).resumed], [REVIEW_LINE_KEYS, true]);
+  assert.deepEqual(alerts, []);
+});
+
+test('with learning on the engine is given the repository\'s memory, in dry run too', async () => {
+  for (const [number, dryRun] of [[7, true], [8, false]] as const) {
+    const given = givenMemory();
+    const h = await harness({ pullRequest: number, dryRun });
+    h.deps.engineDeps = () => ({ contract: 'x' }) as ReviewDeps;
+    await runReviewJob(h.job, { ...h.deps, memoryFor: given.memoryFor });
+    assert.deepEqual(given.refs, [{ ...REF, number }], String(number));
+    assert.equal(h.engines.length, 1);
+    assert.equal(h.engines[0]!.memory, given.memory, String(number));
+    // beside what it is given today
+    assert.deepEqual(Object.keys(h.engines[0]!).sort(), dryRun ? ['contract', 'memory'] : ['contract', 'memory', 'reusableScores'], String(number));
+  }
+});
+
+test('the review line carries how memory did, and the health is told', async () => {
+  const cases: Array<[MemoryStatus, unknown[][]]> = [
+    [{ status: 'ok', code: 'ok', lines: 2 }, [[true, 'ok']]],
+    [{ status: 'empty', code: 'no_records', lines: 0 }, [[true, 'no_records']]],
+    [{ status: 'error', code: 'timeout', lines: 0 }, [[false, 'timeout']]],
+    [{ status: 'skipped', code: 'no_room', lines: 0 }, []],
+  ];
+  let number = 40;
+  for (const [memory, expected] of cases) {
+    for (const dryRun of [true, false]) {
+      number += 1;
+      const told: unknown[][] = [];
+      const h = await harness({ pullRequest: number, dryRun, result: okResult({ dependencies: { model: 'ok', memory } }) });
+      await runReviewJob(h.job, { ...h.deps, memoryHealth: memoryHealthInto(told) });
+      assert.deepEqual([told, reviewLine(h).memory], [expected, memory], `${memory.status} ${dryRun}`);
+      const keys = Object.keys(reviewLine(h));
+      assert.deepEqual(keys.slice(keys.indexOf('extensions')), ['extensions', 'memory']);
+    }
+  }
+  // after mcp
+  const both = await harness({ pullRequest: 60, result: okResult({ dependencies: { model: 'ok', mcp: MCP, memory: { status: 'ok', code: 'ok', lines: 1 } } }) });
+  await runReviewJob(both.job, both.deps);
+  const keys = Object.keys(reviewLine(both));
+  assert.deepEqual(keys.slice(keys.indexOf('extensions')), ['extensions', 'mcp', 'memory']);
+  // a review an earlier start recorded tells nothing, and its line carries what it stored
+  const memory: MemoryStatus = { status: 'error', code: 'lookup_failed', lines: 0 };
+  await recorded({ ref: { ...REF, number: 61 }, result: okResult({ dependencies: { model: 'ok', memory } }) });
+  const told: unknown[][] = [];
+  const resumed = await live({ pullRequest: 61 });
+  await runReviewJob(resumed.job, { ...resumed.deps, memoryHealth: memoryHealthInto(told) });
+  assert.deepEqual([resumed.inputs.length, told, reviewLine(resumed).memory, reviewLine(resumed).resumed], [0, [], memory, true]);
+});
+
+test('a damaged status is not logged, and a health that throws changes nothing', async () => {
+  const damaged: unknown[] = [
+    'x', null, [], 5,
+    { status: 'fine', code: 'ok', lines: 0 },
+    { status: 'ok', code: 'Not A Code', lines: 0 },
+    { status: 'ok', code: 5, lines: 0 },
+    { status: 'ok', code: 'ok', lines: -1 },
+    { status: 'ok', code: 'ok', lines: 1.5 },
+    { status: 'ok', code: 'ok' },
+    { status: 'error', code: 'a'.repeat(41), lines: 0 },
+  ];
+  let number = 70;
+  for (const memory of damaged) {
+    number += 1;
+    const told: unknown[][] = [];
+    const dependencies = { model: 'ok', memory } as unknown as ReviewResult['dependencies'];
+    const h = await harness({ pullRequest: number, result: okResult({ dependencies }) });
+    await runReviewJob(h.job, { ...h.deps, memoryHealth: memoryHealthInto(told) });
+    assert.deepEqual([told, 'memory' in reviewLine(h)], [[], false], JSON.stringify(memory));
+    assert.deepEqual(Object.keys(reviewLine(h)), REVIEW_LINE_KEYS, JSON.stringify(memory));
+  }
+  // a stored result that is damaged
+  await recorded({ ref: { ...REF, number: 90 }, result: okResult({ dependencies: { model: 'ok', memory: 'x' } as unknown as ReviewResult['dependencies'] }) });
+  const stored = await live({ pullRequest: 90 });
+  await runReviewJob(stored.job, stored.deps);
+  assert.equal('memory' in reviewLine(stored), false);
+  // a health that throws
+  const result = okResult({ dependencies: { model: 'ok', memory: { status: 'error', code: 'timeout', lines: 0 } } });
+  const plain = await live({ pullRequest: 91, result });
+  await runReviewJob(plain.job, plain.deps);
+  const throwing = await live({ pullRequest: 92, result });
+  await runReviewJob(throwing.job, { ...throwing.deps, memoryHealth: { noted: () => { throw new Error('health_down'); } } });
   const same = (x: Harness): Record<string, unknown> => ({ ...reviewLine(x), job: 0, number: 0, duration_ms: 0 });
   assert.deepEqual(same(throwing), same(plain));
   assert.equal((await getJob(db, throwing.job.id))?.outcome, 'published');
