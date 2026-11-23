@@ -5,7 +5,7 @@ import { recordBlockScores, reusableScores } from '../db/block-scores.ts';
 import { getPullRequest } from '../db/pull-requests.ts';
 import { listComments, NOTE, recordComments } from '../db/review-comments.ts';
 import type { StoredComment } from '../db/review-comments.ts';
-import { adoptableRun, hasOkRun, hasRun, listRuns, markPublished, markPublishTried, recordRun, unpublishedRun } from '../db/review-runs.ts';
+import { adoptableRun, claimNotice, hasOkRun, hasRun, listRuns, markPublished, markPublishTried, recordRun, unpublishedRun } from '../db/review-runs.ts';
 import type { RunRecord, StoredRun } from '../db/review-runs.ts';
 import type { Db } from '../db/types.ts';
 import { renderReview } from '../engine/render/body.ts';
@@ -14,9 +14,13 @@ import { renderNotes } from '../engine/render/notes.ts';
 import type { Category, ScoredBy, Span } from '../engine/score/types.ts';
 import type { EarlierState, Limits, ReviewDeps, ReviewInput, ReviewResult, ThreadVerdict, Usage } from '../engine/types.ts';
 import type { ForgeAccess, ForgeWriter, LivePullRequest, PullRequestInfo, PullRequestRef, ReviewThread, Source } from '../forge/types.ts';
+import type { ReviewNotice } from '../extensions/types.ts';
 import { PAUSE_MS } from './model-health.ts';
 import type { ModelHealth } from './model-health.ts';
-import { codeOf } from './codes.ts';
+import { codeOf, isShortCode } from './codes.ts';
+import type { ExtensionHealth } from './extension-health.ts';
+import { sendNotice } from './notify.ts';
+import type { Notifier } from './notify.ts';
 import { failureText, mayCommand, refusalText } from './commands.ts';
 import { earlierOf, missedComments } from './earlier.ts';
 import { matchPosted, notedOf } from './posted.ts';
@@ -58,6 +62,16 @@ export interface ReviewJobDeps {
   canResolve: () => Promise<boolean>;
   health: Pick<ModelHealth, 'reviewed'>;
   spend: { noteRun(usage: Usage): void };
+  /** Where a published review is told to; absent in dry run and when no module has a notifier. */
+  notice?: {
+    notifiers: Notifier[];
+    reviewUrl: (ref: PullRequestRef, reviewId: string) => string;
+    pullRequestUrl: (ref: PullRequestRef) => string;
+    /** For tests; passed on to sendNotice, whose own default is 10 seconds. */
+    timeoutMs?: number;
+  };
+  /** Told how each module did; absent when the deployment has none. */
+  extensionHealth?: Pick<ExtensionHealth, 'noted'>;
 }
 
 /** The newest published run of these, or null. */
@@ -113,6 +127,35 @@ function duplicatesOf(result: unknown): number {
 function notesOf(comments: unknown): number {
   if (!Array.isArray(comments)) return 0;
   return (comments as unknown[]).filter((c) => typeof c === 'object' && c !== null && typeof (c as { note?: unknown }).note === 'string').length;
+}
+
+/**
+ * The providers' statuses of an engine result, or of a stored one: each entry whose name, status and code are short codes, as { status, code }.
+ * null when the result has no such map or it is not one.
+ */
+function extensionsOf(result: unknown): Record<string, { status: string; code: string }> | null {
+  const dependencies = (result as { dependencies?: unknown } | null | undefined)?.dependencies;
+  const map = typeof dependencies === 'object' && dependencies !== null ? (dependencies as { extensions?: unknown }).extensions : undefined;
+  if (typeof map !== 'object' || map === null || Array.isArray(map)) return null;
+  const out: Record<string, { status: string; code: string }> = {};
+  for (const [name, entry] of Object.entries(map)) {
+    if (!isShortCode(name) || typeof entry !== 'object' || entry === null) continue;
+    const { status, code } = entry as { status?: unknown; code?: unknown };
+    if (typeof status === 'string' && typeof code === 'string' && isShortCode(status) && isShortCode(code)) out[name] = { status, code };
+  }
+  return out;
+}
+
+/** The findings of an engine result, or of a stored one, counted by severity; 0 each when they cannot be read. */
+function severitiesOf(result: unknown): ReviewNotice['findings'] {
+  const counts = { blocker: 0, major: 0, minor: 0 };
+  const findings = (result as { findings?: unknown } | null | undefined)?.findings;
+  if (!Array.isArray(findings)) return counts;
+  for (const f of findings as unknown[]) {
+    const severity = typeof f === 'object' && f !== null ? (f as { severity?: unknown }).severity : undefined;
+    if (severity === 'blocker' || severity === 'major' || severity === 'minor') counts[severity] += 1;
+  }
+  return counts;
 }
 
 /**
@@ -267,6 +310,54 @@ export async function runReviewJob(job: Job, deps: ReviewJobDeps): Promise<void>
     }
   };
 
+  /**
+   * Tells the notifiers of a run this job just marked as published: the notice is built, then the stamp is written, then they are called.
+   * Never in dry run, never without notifiers. Never rejects, and nothing in it changes the job.
+   */
+  const tell = async (target: StoredRun, info: PullRequestInfo, reviewId: string, body: string): Promise<void> => {
+    try {
+      const notice = deps.notice;
+      if (deps.dryRun || notice === undefined || notice.notifiers.length === 0) return;
+      let built: ReviewNotice;
+      try {
+        built = {
+          run: target.id, repository: repo, number: job.ref.number, title: info.title, author: info.author,
+          headSha: target.headSha, mode: target.mode, trigger: target.trigger,
+          reviewUrl: notice.reviewUrl(job.ref, reviewId), pullRequestUrl: notice.pullRequestUrl(job.ref),
+          needsHuman: target.needsHuman, highestScore: target.highestScore, findings: severitiesOf(target.result), body,
+        };
+      } catch (error) {
+        log({ event: 'notice_failed', job: job.id, run: target.id, reason: codeOf(error) });
+        return;
+      }
+      // The stamp first, in its own statement: a stop after it loses the notice, and never doubles it.
+      let claimed: boolean;
+      try {
+        claimed = await claimNotice(db, target.id, later(0));
+      } catch (error) {
+        log({ event: 'notice_failed', job: job.id, run: target.id, reason: codeOf(error) });
+        return;
+      }
+      if (!claimed) {
+        log({ event: 'notice', job: job.id, run: target.id, sent: false });
+        return;
+      }
+      const outcomes = await sendNotice(notice.notifiers, built, notice.timeoutMs);
+      const results: Record<string, string> = {};
+      for (const o of outcomes) results[o.name] = o.code;
+      log({ event: 'notice', job: job.id, run: target.id, review: reviewId, sent: true, results });
+      for (const o of outcomes) {
+        try {
+          deps.extensionHealth?.noted(o.name, 'notify', o.ok, o.code);
+        } catch {
+          // a health that fails changes nothing
+        }
+      }
+    } catch {
+      // nothing in a notice changes the job
+    }
+  };
+
   let result: ReviewResult | null = null;
   /** The mode of this review, decided once the live pull request and its last review are known; full until then, and in dry run. */
   let mode: RunRecord['mode'] = 'full';
@@ -393,6 +484,8 @@ export async function runReviewJob(job: Job, deps: ReviewJobDeps): Promise<void>
               log({ event: 'adopted_late', job: job.id, run: found.id, review: review.id });
               // Nothing is known of the notes it was posted with: none is counted as missing.
               await readBack(found, installation, review.id, true);
+              // Told now, before the live head is reviewed: a failure later in the job cannot lose it.
+              await tell(found, live.info, review.id, found.body);
             }
             if (adopted) {
               runs = await listRuns(db, job.ref);
@@ -513,6 +606,14 @@ export async function runReviewJob(job: Job, deps: ReviewJobDeps): Promise<void>
       } catch {
         // a guard that fails changes nothing
       }
+      // How each provider did; in dry run too.
+      for (const [name, status] of Object.entries(extensionsOf(result) ?? {})) {
+        try {
+          deps.extensionHealth?.noted(name, 'context', status.status !== 'error', status.code);
+        } catch {
+          // a health that fails changes nothing
+        }
+      }
     }
 
     // 7. The record.
@@ -604,6 +705,8 @@ export async function runReviewJob(job: Job, deps: ReviewJobDeps): Promise<void>
 
     // 8. The publication. Once the review is recorded, only a publication that failed puts the job back.
     let publish: PublishOutcome | null = null;
+    /** The notice of the run this job published, sent once the job's line is logged. */
+    let toTell: { target: StoredRun; reviewId: string; body: string } | null = null;
     const target = toPublish;
     if (!deps.dryRun && written && target !== null) {
       // A review recorded by an earlier start is held for the wait after a failed publication, counted from the last start that set out
@@ -625,6 +728,7 @@ export async function runReviewJob(job: Job, deps: ReviewJobDeps): Promise<void>
         if (written) {
           await readBack(target, installation, out.reviewId, out.notesDropped);
           await threadFollowUp(target, installation, out.reviewId);
+          toTell = { target, reviewId: out.reviewId, body: out.body };
         }
       } else if (out.kind === 'moved' && retryReason !== null) {
         // A command, a /done or a re-run starts over once, as a new job for the live head.
@@ -680,7 +784,10 @@ export async function runReviewJob(job: Job, deps: ReviewJobDeps): Promise<void>
       threads_due: threadsDueOf(result ?? resumed?.result), verdicts: verdictsOf(result ?? resumed?.result).length, duplicates: duplicatesOf(result ?? resumed?.result),
       blocking_on_unchanged: blockingOnUnchangedOf(result ?? resumed?.result), nothing_new: endedNothingNew,
       notes: endedNothingNew ? 0 : notesOf(run.comments), notes_dropped: publish?.kind === 'published' ? publish.notesDropped : null,
+      extensions: extensionsOf(result ?? resumed?.result),
     });
+    // 10. The notice: the last thing the job does, so the line's duration does not count it.
+    if (toTell !== null) await tell(toTell.target, live!.info, toTell.reviewId, toTell.body);
   } catch (error) {
     if (result !== null) {
       // The review was paid for: putting the job back would pay for it again. It is left running, as after three failed tries to record.

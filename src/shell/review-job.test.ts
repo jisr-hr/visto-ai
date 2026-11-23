@@ -11,7 +11,7 @@ import type { RunRecord } from '../db/review-runs.ts';
 import { listComments, recordComments } from '../db/review-comments.ts';
 import type { StoredComment } from '../db/review-comments.ts';
 import { GATE_OFF, type RepoSettings } from '../config/load.ts';
-import type { ForgeWriter, LivePullRequest, PostedComment, ReviewDraft, ReviewThread, Source } from '../forge/types.ts';
+import type { ForgeWriter, LivePullRequest, PostedComment, PullRequestRef, ReviewDraft, ReviewThread, Source } from '../forge/types.ts';
 import { review } from '../engine/review.ts';
 import { renderReview } from '../engine/render/body.ts';
 import { renderNotes } from '../engine/render/notes.ts';
@@ -21,6 +21,8 @@ import { SUBMIT_REVIEW } from '../engine/model/submit-review.ts';
 import type { ModelClient, ModelResponse, ReviewDeps, ReviewInput, ReviewResult, ThreadVerdict } from '../engine/types.ts';
 import { runReviewJob } from './review-job.ts';
 import type { ReviewJobDeps } from './review-job.ts';
+import type { Notifier } from './notify.ts';
+import type { ReviewNotice } from '../extensions/types.ts';
 
 const REF = { service: 'github', owner: 'acme', repo: 'shop', number: 7 } as const;
 const at = (seconds: number): string => new Date(Date.parse('2026-03-01T10:00:00.000Z') + seconds * 1000).toISOString();
@@ -121,10 +123,18 @@ interface Options {
   echo?: boolean;
   /** With echo: the text GitHub gives back for each posted comment, from the text it was posted with. */
   echoText?: (body: string) => string;
+  /** The notifiers a published review is told to, with GitHub's links; no `notice` at all when not given. */
+  notifiers?: Notifier[];
+  /** With notifiers: the limit of each, in milliseconds. */
+  noticeTimeoutMs?: number;
 }
 
 /** The next id an echoed comment gets: never one another echoed comment had. */
 let echoedId = 9100;
+
+/** The links a notice is given, as the service builds them for its git service. */
+const reviewUrlOf = (ref: PullRequestRef, reviewId: string): string => `https://git.example.test/${ref.owner}/${ref.repo}/pull/${ref.number}#review-${reviewId}`;
+const pullRequestUrlOf = (ref: PullRequestRef): string => `https://git.example.test/${ref.owner}/${ref.repo}/pull/${ref.number}`;
 
 async function harness(options: Options = {}) {
   const ref = options.pullRequest === undefined ? REF : { ...REF, number: options.pullRequest };
@@ -165,6 +175,8 @@ async function harness(options: Options = {}) {
   const spendCalls: unknown[] = [];
   const slept: number[] = [];
   const logged: Array<Record<string, unknown>> = [];
+  /** What the health of the modules was told, as ['noted', extension, part, ok, code]. */
+  const noted: unknown[][] = [];
   const live = options.live === undefined ? (head === 'h1' ? LIVE : { ...LIVE, info: { ...LIVE.info, headSha: head } }) : options.live;
   let reads = 0;
   const writes: unknown[][] = [];
@@ -279,8 +291,12 @@ async function harness(options: Options = {}) {
     canResolve: () => Promise.resolve(options.canResolve ?? true),
     health: { reviewed: (code, when) => { healthCalls.push(code); healthTimes.push(when.toISOString()); } },
     spend: { noteRun: (usage) => { spendCalls.push(usage); } },
+    extensionHealth: { noted: (...args) => { noted.push(['noted', ...args]); } },
   };
-  return { job, deps, inputs, engines, healthCalls, healthTimes, spendCalls, slept, logged, writes, drafts, get reads() { return reads; } };
+  if (options.notifiers !== undefined) {
+    deps.notice = { notifiers: options.notifiers, reviewUrl: reviewUrlOf, pullRequestUrl: pullRequestUrlOf, timeoutMs: options.noticeTimeoutMs };
+  }
+  return { job, deps, inputs, engines, healthCalls, healthTimes, spendCalls, slept, logged, writes, drafts, noted, get reads() { return reads; } };
 }
 const live = (options: Options = {}) => harness({ dryRun: false, ...options });
 /** A job a /review comment stored: by octo-lead, comment 31, through installation 99; out of dry run unless given. */
@@ -1962,4 +1978,216 @@ test('a /done job and its retry get no second eyes, and a failure is answered', 
   const closed = await manualJob({ reason: 'done', settings: GATED, pullRequest: 10, live: { ...LIVE, state: 'closed' } });
   await runReviewJob(closed.job, closed.deps);
   assert.deepEqual(closed.writes, [['react', '31', 'confused'], ['comment', '@octo-lead The review was not started (`closed`).']]);
+});
+
+// ---- Notices to the modules, and the health of their parts ----
+
+type Harness = Awaited<ReturnType<typeof harness>>;
+type Calls = unknown[][];
+/** A notifier that pushes ['notify', name, notice] for each call, then does what `then` says; resolves at once when not given. */
+const notifier = (name: string, calls: Calls, then?: (notice: ReviewNotice, signal: AbortSignal) => Promise<void>): Notifier => ({
+  name,
+  notify: (notice, signal) => { calls.push(['notify', name, notice]); return then === undefined ? Promise.resolve() : then(notice, signal); },
+});
+/** How many runs have their notice stamp. */
+const stamped = async (): Promise<number> =>
+  (await db.query<{ n: number }>('select count(*)::int as n from visto_ai.review_runs where notified_at is not null'))[0]!.n;
+const reviewLine = (h: Harness): Record<string, unknown> => h.logged.find((e) => e.event === 'review')!;
+const noticeLines = (h: Harness): Array<Record<string, unknown>> => h.logged.filter((e) => e.event === 'notice' || e.event === 'notice_failed');
+const BLOCKER = { path: 'a.ts', side: 'RIGHT' as const, line: 3, severity: 'blocker' as const, body: 'This breaks the total.', quote: 'x', requestedLine: null };
+const EXTENSIONS = { tickets: { status: 'ok' as const, code: 'ok' }, wiki: { status: 'error' as const, code: 'timeout' } };
+
+test('a published review is told to every notifier once, as the last thing the job does, with what a message needs', async () => {
+  const calls: Calls = [];
+  const atCall: Array<{ writes: unknown[]; reviewLogged: boolean }> = [];
+  const minor = okResult().findings[0]!;
+  const h: Harness = await live({
+    result: okResult({ findings: [BLOCKER, minor, { ...minor, line: 4 }], verdict: { threshold: 70, needsHuman: true, highest: 85 } }),
+    notifiers: [notifier('chat', calls, async () => { atCall.push({ writes: h.writes.map((w) => w[0]), reviewLogged: h.logged.some((e) => e.event === 'review') }); })],
+  });
+  await runReviewJob(h.job, h.deps);
+  const [stored] = await listRuns(db, REF);
+  assert.deepEqual(calls, [['notify', 'chat', {
+    run: stored!.id, repository: 'acme/shop', number: 7, title: LIVE.info.title, author: 'octo-dev', headSha: 'h1', mode: 'full', trigger: 'automatic',
+    reviewUrl: reviewUrlOf(REF, '501'), pullRequestUrl: pullRequestUrlOf(REF), needsHuman: true, highestScore: 85,
+    findings: { blocker: 1, major: 0, minor: 2 }, body: stored!.body,
+  }]]);
+  assert.equal(stored!.body, h.drafts[0]!.body);
+  assert.deepEqual(atCall, [{ writes: ['listOwnReviews', 'listOwnReviews', 'publishReview', 'listReviewComments'], reviewLogged: true }]);
+  assert.deepEqual(noticeLines(h), [{ event: 'notice', job: h.job.id, run: stored!.id, review: '501', sent: true, results: { chat: 'ok' } }]);
+  assert.equal(h.logged.at(-1)!.event, 'notice');
+  assert.deepEqual(h.noted, [['noted', 'chat', 'notify', true, 'ok']]);
+});
+test('the stamp is written before the notifier is called', async () => {
+  const calls: Calls = [];
+  const atCall: number[] = [];
+  const h = await live({ notifiers: [notifier('chat', calls, async () => { atCall.push(await stamped()); })] });
+  await runReviewJob(h.job, h.deps);
+  assert.deepEqual([calls.length, atCall], [1, [1]]);
+});
+test('a review that a later start publishes, and one it finds already posted, are told once', async () => {
+  const calls: Calls = [];
+  const runId = await recorded({ trigger: 'manual', mode: 'incremental' });
+  const later = await live({ notifiers: [notifier('chat', calls)] });
+  await runReviewJob(later.job, later.deps);
+  assert.deepEqual([later.inputs.length, (await getJob(db, later.job.id))?.outcome], [0, 'published']);
+  const shown = (): unknown[][] => calls.map((c) => { const n = c[2] as ReviewNotice; return [n.run, n.number, n.trigger, n.mode, n.reviewUrl, n.body]; });
+  assert.deepEqual(shown(), [[runId, 7, 'manual', 'incremental', reviewUrlOf(REF, '501'), (await listRuns(db, REF))[0]!.body]]);
+
+  // the review was posted already: the publication adopts it
+  const ref8 = { ...REF, number: 8 };
+  const adoptedId = await recorded({ ref: ref8 });
+  const adopted = await live({ pullRequest: 8, own: [[{ id: '502', commit: 'h1' }]], notifiers: [notifier('chat', calls)] });
+  await runReviewJob(adopted.job, adopted.deps);
+  assert.equal(adopted.writes.some((w) => w[0] === 'publishReview'), false);
+  assert.equal(reviewLine(adopted).adopted, true);
+  assert.deepEqual(shown().slice(1), [[adoptedId, 8, 'automatic', 'full', reviewUrlOf(ref8, '502'), (await listRuns(db, ref8))[0]!.body]]);
+
+  // a further start for the same head tells nobody again
+  const third = await live({ pullRequest: 8, notifiers: [notifier('chat', calls)] });
+  await runReviewJob(third.job, third.deps);
+  assert.deepEqual([(await getJob(db, third.job.id))?.outcome, calls.length, noticeLines(third)], ['already_reviewed', 2, []]);
+});
+test('a run adopted late is told once, with its own head and body and the present title', async () => {
+  const calls: Calls = [];
+  const writesAtCall: unknown[][] = [];
+  const lostRun = await recorded({ headSha: 'h0', result: EARLIER_RESULT });
+  const h: Harness = await live({
+    own: [[{ id: '401', commit: 'h0' }]], threads: [[THREAD]], live: { ...LIVE, info: { ...LIVE.info, title: 'Add things, renamed' } },
+    notifiers: [notifier('chat', calls, async () => { writesAtCall.push(h.writes.map((w) => w[0])); })],
+  });
+  await runReviewJob(h.job, h.deps);
+  const newest = (await listRuns(db, REF)).find((r) => r.id !== lostRun)!;
+  assert.deepEqual(calls.map((c) => { const n = c[2] as ReviewNotice; return [n.run, n.headSha, n.title, n.reviewUrl, n.body, n.findings]; }), [
+    [lostRun, 'h0', 'Add things, renamed', reviewUrlOf(REF, '401'), EARLIER.body, { blocker: 0, major: 1, minor: 0 }],
+    [newest.id, 'h1', 'Add things, renamed', reviewUrlOf(REF, '501'), newest.body, { blocker: 0, major: 0, minor: 1 }],
+  ]);
+  // told right after its read-back, before the live head is reviewed
+  assert.deepEqual(writesAtCall[0], ['listOwnReviews', 'listReviewComments']);
+  assert.deepEqual(noticeLines(h).map((e) => [e.event, e.run, e.review, e.sent]), [['notice', lostRun, '401', true], ['notice', newest.id, '501', true]]);
+});
+test('a re-check is told like any other review', async () => {
+  const calls: Calls = [];
+  await published({ head: 'h1' });
+  const h = await manualJob({ own: [[{ id: '401', commit: 'h1' }]], notifiers: [notifier('chat', calls)] });
+  await runReviewJob(h.job, h.deps);
+  assert.equal((await getJob(db, h.job.id))?.outcome, 'published');
+  assert.deepEqual(calls.map((c) => { const n = c[2] as ReviewNotice; return [n.mode, n.trigger, n.reviewUrl]; }), [['recheck', 'manual', reviewUrlOf(REF, '501')]]);
+});
+test('nothing is told in dry run, nor for a review that was not published', async () => {
+  const calls: Calls = [];
+  const told = (): Notifier[] => [notifier('chat', calls)];
+  const jobs: Array<[Harness, string]> = [];
+  const run = async (h: Harness, outcome: string): Promise<void> => { await runReviewJob(h.job, h.deps); jobs.push([h, outcome]); };
+  await run(await harness({ notifiers: told() }), 'reviewed');
+  await run(await live({ pullRequest: 8, result: failed('model', 'timeout', { dependencies: { model: 'error' } }), notifiers: told() }), 'failed');
+  await run(await live({ pullRequest: 9, result: okResult({ nothingToDo: true, mode: 'incremental' }), notifiers: told() }), 'nothing_new');
+  await run(await live({ pullRequest: 10, posts: [new Error('review_rejected'), new Error('review_rejected')], notifiers: told() }), 'publish_rejected');
+  const before = await live({ pullRequest: 11, posts: [new Error('github_502')], notifiers: told() });
+  await run(before, '');
+  await run(await live({ pullRequest: 11, reuseJob: before.job.id, now: at(5), notifiers: told() }), '');
+  await run(await live({ pullRequest: 12, liveAfter: { ...LIVE, info: { ...LIVE.info, headSha: 'h2' } }, notifiers: told() }), 'head_moved');
+  await run(await live({ pullRequest: 13, liveAfter: { ...LIVE, state: 'closed' }, notifiers: told() }), 'closed');
+  await run(await live({ pullRequest: 14, renderThrows: true, notifiers: told() }), 'render_failed');
+  await run(await live({ pullRequest: 15, notifiers: [] }), 'published');
+  await run(await live({ pullRequest: 16 }), 'published');
+  for (const [h, outcome] of jobs) {
+    if (outcome !== '') assert.equal((await getJob(db, h.job.id))?.outcome, outcome);
+    assert.deepEqual(noticeLines(h), [], outcome);
+  }
+  assert.equal(((await getJob(db, before.job.id))?.status), 'pending');
+  assert.deepEqual([calls, await stamped()], [[], 0]);
+});
+test('a notifier that throws or hangs changes nothing of the job', async () => {
+  const verdicts = okResult({ threadVerdicts: [VERDICT], threadsDue: 1 });
+  await published({ pullRequest: 8 });
+  const plain = await live({ pullRequest: 8, threads: [[THREAD]], result: verdicts });
+  await runReviewJob(plain.job, plain.deps);
+
+  await published();
+  const calls: Calls = [];
+  let pagerSignal: AbortSignal | null = null;
+  const h = await live({
+    threads: [[THREAD]], result: verdicts, noticeTimeoutMs: 5,
+    notifiers: [
+      notifier('chat', calls, () => Promise.reject(new Error('chat_unreachable'))),
+      notifier('pager', calls, (_notice, signal) => { pagerSignal = signal; return new Promise<void>(() => {}); }),
+    ],
+  });
+  await runReviewJob(h.job, h.deps);
+  const j = await getJob(db, h.job.id);
+  assert.deepEqual([j?.status, j?.outcome], ['done', 'published']);
+  assert.equal(h.writes.some((w) => w[0] === 'listReviewComments'), true);
+  assert.deepEqual(h.writes.filter((w) => w[0] === 'replyToThread'), [['replyToThread', 'PRRT_1', REPLY]]);
+  const same = (x: Harness): Record<string, unknown> => ({ ...reviewLine(x), job: 0, number: 0 });
+  assert.deepEqual(same(h), same(plain));
+  assert.deepEqual(noticeLines(h).map((e) => e.results), [{ chat: 'chat_unreachable', pager: 'timeout' }]);
+  assert.deepEqual(h.noted, [['noted', 'chat', 'notify', false, 'chat_unreachable'], ['noted', 'pager', 'notify', false, 'timeout']]);
+  assert.equal((pagerSignal as AbortSignal | null)?.aborted, true);
+  assert.deepEqual([calls.length, noticeLines(plain)], [2, []]);
+
+  // a health and a logger that throw change nothing either
+  const throwing = await live({ pullRequest: 9, notifiers: [notifier('chat', calls)] });
+  throwing.deps.extensionHealth = { noted: () => { throw new Error('health_down'); } };
+  const log = throwing.deps.log;
+  throwing.deps.log = (e) => { if (e.event === 'notice') throw new Error('log_down'); log(e); };
+  await runReviewJob(throwing.job, throwing.deps);
+  assert.deepEqual([(await getJob(db, throwing.job.id))?.outcome, calls.length], ['published', 3]);
+});
+test('a stamp that cannot be written, and one already taken, send nothing and change nothing', async () => {
+  const calls: Calls = [];
+  const failing = await live({ failQuery: 'set notified_at', notifiers: [notifier('chat', calls)] });
+  await runReviewJob(failing.job, failing.deps);
+  const [run7] = await listRuns(db, REF);
+  assert.deepEqual([(await getJob(db, failing.job.id))?.outcome, run7!.published, calls.length], ['published', true, 0]);
+  assert.deepEqual(noticeLines(failing), [{ event: 'notice_failed', job: failing.job.id, run: run7!.id, reason: 'internal_error' }]);
+
+  const ref8 = { ...REF, number: 8 };
+  const id8 = await recorded({ ref: ref8 });
+  await db.query('update visto_ai.review_runs set notified_at = $2::timestamptz where id = $1', [id8, at(-100)]);
+  const taken = await live({ pullRequest: 8, notifiers: [notifier('chat', calls)] });
+  await runReviewJob(taken.job, taken.deps);
+  assert.deepEqual([(await getJob(db, taken.job.id))?.outcome, (await listRuns(db, ref8))[0]!.published, calls.length], ['published', true, 0]);
+  assert.deepEqual(noticeLines(taken), [{ event: 'notice', job: taken.job.id, run: id8, sent: false }]);
+});
+test('a notice that cannot be built writes no stamp and calls nobody', async () => {
+  const calls: Calls = [];
+  const h = await live({ notifiers: [notifier('chat', calls)] });
+  h.deps.notice = { ...h.deps.notice!, reviewUrl: () => { throw new Error('github_bad_path'); } };
+  await runReviewJob(h.job, h.deps);
+  const [stored] = await listRuns(db, REF);
+  assert.deepEqual([(await getJob(db, h.job.id))?.outcome, stored!.published, calls.length, await stamped()], ['published', true, 0, 0]);
+  assert.deepEqual(noticeLines(h), [{ event: 'notice_failed', job: h.job.id, run: stored!.id, reason: 'github_bad_path' }]);
+});
+test('the health is told how each provider did, in dry run too, and the review line carries the statuses', async () => {
+  const result = okResult({ dependencies: { model: 'ok', extensions: EXTENSIONS } });
+  const told = [['noted', 'tickets', 'context', true, 'ok'], ['noted', 'wiki', 'context', false, 'timeout']];
+  const dry = await harness({ result });
+  await runReviewJob(dry.job, dry.deps);
+  assert.deepEqual([dry.noted, reviewLine(dry).extensions], [told, EXTENSIONS]);
+  const out = await live({ pullRequest: 8, result });
+  await runReviewJob(out.job, out.deps);
+  assert.deepEqual([out.noted, reviewLine(out).extensions, (await getJob(db, out.job.id))?.outcome], [told, EXTENSIONS, 'published']);
+  // a review an earlier start recorded tells nothing, and its line carries what it stored
+  await recorded({ ref: { ...REF, number: 9 }, result });
+  const resumed = await live({ pullRequest: 9 });
+  await runReviewJob(resumed.job, resumed.deps);
+  assert.deepEqual([resumed.inputs.length, resumed.noted, reviewLine(resumed).extensions, reviewLine(resumed).resumed], [0, [], EXTENSIONS, true]);
+});
+test('a result with no statuses, or damaged ones, tells the health nothing and logs none', async () => {
+  const cases: Array<[unknown, unknown, number]> = [[undefined, null, 7], ['x', null, 8], [{ tickets: 5, wiki: { status: 'ok' } }, {}, 9]];
+  for (const [extensions, expected, number] of cases) {
+    const dependencies = (extensions === undefined ? { model: 'ok' } : { model: 'ok', extensions }) as unknown as ReviewResult['dependencies'];
+    const h = await harness({ pullRequest: number, result: okResult({ dependencies }) });
+    await runReviewJob(h.job, h.deps);
+    assert.deepEqual([h.noted, reviewLine(h).extensions], [[], expected], String(number));
+  }
+  // a stored result that is damaged, and a failed run with no result
+  await recorded({ ref: { ...REF, number: 10 }, result: okResult({ dependencies: { model: 'ok', extensions: 'x' } as unknown as ReviewResult['dependencies'] }) });
+  const stored = await live({ pullRequest: 10 });
+  await runReviewJob(stored.job, stored.deps);
+  assert.deepEqual([stored.noted, reviewLine(stored).extensions], [[], null]);
+  const unread = await live({ pullRequest: 11, live: new Error('github_502') });
+  await runReviewJob(unread.job, unread.deps);
+  assert.deepEqual([unread.noted, reviewLine(unread).extensions], [[], null]);
 });
