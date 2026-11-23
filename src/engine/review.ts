@@ -19,6 +19,7 @@ import type { SubmitReviewArgs } from './model/submit-review.ts';
 import { NOTHING_READ, filesToSend } from './plan.ts';
 import { inPool } from './pool.ts';
 import type { Control } from './pool.ts';
+import { readAcceptance, reconcileAcceptance } from './reconcile/acceptance.ts';
 import { reconcile } from './reconcile/index.ts';
 import { onChangedLine, reconcileMode } from './reconcile/mode.ts';
 import { normalizePath } from './reconcile/placement.ts';
@@ -30,7 +31,7 @@ import { shownOf } from './score/shown.ts';
 import type { ScoredBy, ScoreEntry, ScoreHistory } from './score/types.ts';
 import { askScorer, summariesOf } from './scorer/ask.ts';
 import type {
-  AuditEntry, ChangedFile, Discussed, EarlierThread, Effort, ExtensionStatus, Finding, NotReviewed, PullRequestInfo, RepoConfig, ReviewDeps, ReviewInput, ReviewResult, Severity, Side, Source, Usage,
+  AcceptanceRow, AuditEntry, ChangedFile, Discussed, EarlierThread, Effort, ExtensionStatus, Finding, NotReviewed, PullRequestInfo, RepoConfig, ReviewDeps, ReviewInput, ReviewResult, Severity, Side, Source, Usage,
 } from './types.ts';
 
 const CONCURRENCY = 2;
@@ -119,6 +120,7 @@ interface Run {
   withThreads: boolean; // the run shows earlier threads: its calls take the tool with verdicts
   lastOverview: string | undefined; // the last review's overview, shown in every call's header; undefined when there is none to show
   extension: ExtensionContext | undefined; // what the context providers gave, as it is shown in every call's header; undefined when nothing is
+  withAcceptance: boolean; // the criteria are shown: the run's calls take the tool with rows
 }
 
 // A failing logger must never change a review.
@@ -138,7 +140,8 @@ async function oneCall(run: Run, files: FileContext[], firstFileNumber: number, 
     ...(run.extension === undefined ? {} : { extension: run.extension }),
   });
   const answer = await callBatch(
-    { messages, effort: run.effort, timeoutMs: run.limits.modelTimeoutSeconds * 1000, prPaths: files.map((f) => f.file.path), ...(run.withThreads ? { withThreads: true } : {}) },
+    { messages, effort: run.effort, timeoutMs: run.limits.modelTimeoutSeconds * 1000, prPaths: files.map((f) => f.file.path), ...(run.withThreads ? { withThreads: true } : {}),
+      ...(run.withAcceptance ? { withAcceptance: true } : {}) },
     run.deps.model,
   );
   safeLog(run.deps, {
@@ -303,7 +306,7 @@ function chooseRoom(
 ): { packed: Packing; shown: ExtensionContext | undefined; audit: AuditEntry[] } {
   if (first.batches.length === 0) return { packed: first, shown: undefined, audit: [] };
   const whole = extension;
-  const candidates = [whole, { blocks: [], criteria: extension.criteria }];
+  const candidates = [whole, { ...extension, blocks: [] }];   // then the criteria alone
   const same = JSON.stringify([first.notReviewed, first.audit]);
   let packed = first;
   let shown: ExtensionContext | undefined;
@@ -347,6 +350,8 @@ async function reviewOnce(input: ReviewInput, deps: ReviewDeps, asked: { statuse
   const lastText = typeof last?.overview === 'string' ? stripControl(last.overview).text.trim() : '';
   const lastOverview = lastText !== '' && lastText !== NOTHING_READ ? last!.overview : undefined;
   try {
+    // The rows of the newest published review that has any, each checked: a stored row may be old or damaged.
+    const earlierRows = readAcceptance(input.earlierAcceptance ?? []);
     // Every thread the run owes a verdict, whether or not its file is shown.
     due = (input.earlier?.threads ?? []).filter(isDue).length;
     const pr = input.pullRequest;
@@ -378,7 +383,19 @@ async function reviewOnce(input: ReviewInput, deps: ReviewDeps, asked: { statuse
       asked.statuses = gathered.statuses;
       audit.push(...gathered.audit);
       extension = gathered.context;
+      // In an incremental review and a re-check the model is told the status each criterion was left with, never the note.
+      if (mode !== 'full' && extension.criteria.length > 0) {
+        extension = { ...extension, lastStatus: extension.criteria.map((c) => earlierRows.find((r) => r.criterion === c && r.from !== 'none')?.status ?? null) };
+      }
     }
+    // One row for each criterion, whether or not the criteria were shown; none when there is no criterion.
+    const criteria = extension?.criteria ?? [];
+    const rowsOf = (answers: Array<{ value: SubmitReviewArgs }>): { acceptance?: AcceptanceRow[] } => {
+      if (criteria.length === 0) return {};
+      const rows = reconcileAcceptance(answers, criteria, earlierRows, mode !== 'full');
+      audit.push(...rows.audit);
+      return { acceptance: rows.rows };
+    };
 
     // Read only when there is something to floor; a rejection fails the review here, like any source error.
     const floors = parseRepoFile(await source.getDefaultBranchFile(pr, REPO_FILE));
@@ -437,7 +454,9 @@ async function reviewOnce(input: ReviewInput, deps: ReviewDeps, asked: { statuse
         if (notSent.some((n) => n.path === s.file)) audit.push({ stage: 'context', action: 'thread_not_shown', subject: s.key, reason: 'file_not_reviewed' });
       }
       const scored = reconcileScores([], built.contexts, new Set(notSent.map((n) => n.path)), floors, by);
+      const rows = rowsOf([]);
       const result = okResult(mode === 'full' ? 'No reviewable changes.' : NOTHING_READ, threshold, due, said, {
+        ...rows,
         coverage: { reviewed: [], notReviewed: notSent }, audit: [...audit, ...scored.audit],
         scores: scored.scores, verdict: verdictOf(scored.scores, threshold), teamFileInvalid,
       });
@@ -452,7 +471,7 @@ async function reviewOnce(input: ReviewInput, deps: ReviewDeps, asked: { statuse
       contexts: built.contexts, limits: input.limits,
       effort: chooseEffort(pr, files, input.repoConfig), token: deps.token(), pr, deps,
       fileCount: packed.batches.reduce((n, b) => n + b.files.length, 0), batchCount: packed.batches.length, withThreads, lastOverview,
-      extension: room.shown,
+      extension: room.shown, withAcceptance: (room.shown?.criteria.length ?? 0) > 0,
     };
     const firsts: number[] = [];
     let seen = 0;
@@ -531,7 +550,9 @@ async function reviewOnce(input: ReviewInput, deps: ReviewDeps, asked: { statuse
     }
     const scored = reconcileScores(scoreAnswers, built.contexts, notRead, floors, by);
     audit.push(...scored.audit);
+    const rows = rowsOf(outcomes.flatMap((o) => o.answers));
     return okResult(rec.overview, threshold, due, said, {
+      ...rows,
       findings, ...byMode, unplaced: away.kept, beyondDiff: rec.beyondDiff,
       threadVerdicts: judged.verdicts, alreadyDiscussed,
       coverage: { reviewed: outcomes.flatMap((o) => o.reviewed), notReviewed },

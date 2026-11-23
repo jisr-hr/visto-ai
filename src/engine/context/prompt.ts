@@ -4,7 +4,7 @@ import type { Batch } from './batches.ts';
 import { ANCHOR_LEGEND } from './diff.ts';
 import { extensionPart } from './extensions.ts';
 import type { ExtensionContext } from './extensions.ts';
-import { submitReviewTool, submitReviewWithThreadsTool } from '../model/submit-review.ts';
+import { submitToolFor } from '../model/submit-review.ts';
 import { MEASURE_NUMBER, MEASURE_TOKEN, fileSection } from './section.ts';
 import { THREAD_HEADING, THREAD_RULES, threadsPart } from './threads.ts';
 import { cutText, inlineText, stripControl, wrapData } from './untrusted.ts';
@@ -80,7 +80,8 @@ export function fixedTokens(contract: string, pr: PullRequestInfo, withThreads =
     estimateTokens(pullRequestHeader(pr, MEASURE_NUMBER, MEASURE_TOKEN, lastOverview)) +
     estimateTokens(`Batch ${MEASURE_NUMBER} of ${MEASURE_NUMBER}.\n\n`) +
     estimateTokens(`${ANCHOR_LEGEND}\n\n`) +
-    estimateTokens(JSON.stringify(withThreads ? submitReviewWithThreadsTool : submitReviewTool)) +
+    // A call that shows criteria is sent the tool that takes rows.
+    estimateTokens(JSON.stringify(submitToolFor(withThreads, part !== '' && extension!.criteria.length > 0))) +
     (withThreads ? estimateTokens(`${THREAD_HEADING}\n\n${THREAD_RULES}\n\n`) : 0) +
     RETRY_ALLOWANCE_TOKENS +
     (part === '' ? 0 : estimateTokens(`\n${part}`))

@@ -43,6 +43,14 @@ export interface Discussed {
   resolved: boolean; settled: boolean;  // that thread, at the moment the finding was dropped
 }
 
+export type AcceptanceStatus = 'met' | 'not_met' | 'not_verified';
+export interface AcceptanceRow {
+  criterion: string;                       // the criterion's text, as the model was shown it
+  status: AcceptanceStatus;
+  note: string;                            // the model's reason on one line, at most 300 characters; '' when there is none
+  from: 'review' | 'earlier' | 'none';     // judged by this run; kept from an earlier review; judged by neither
+}
+
 export interface ReviewInput {
   pullRequest: PullRequestInfo;
   trigger: 'automatic' | 'manual';
@@ -52,6 +60,7 @@ export interface ReviewInput {
   earlier: EarlierState | null; // what the last published review left on the pull request; null for a first review
   history?: ScoreHistory | null;   // the scores of the pull request's earlier runs; absent reads as none
   mode?: 'full' | 'incremental' | 'recheck';   // absent reads as 'full'
+  earlierAcceptance?: AcceptanceRow[];   // the rows of the newest published review that has any; absent reads as none
 }
 export interface ScoreRequest { text: string; blocks: string[] } // blocks: ids to score, in diff order; never empty
 export interface ScoredItem { score: number; category: string; reason: string }
@@ -122,6 +131,7 @@ export interface ReviewResult {
   nothingToDo?: boolean;              // true when an incremental review or a re-check read nothing and would tell a person what the newest published review tells
   unchanged?: Finding[];              // in an incremental review and a re-check: majors on lines unchanged since their file was last read, listed in the body only
   blockingOnUnchanged?: number;       // in a full review of a later head: its blocker and major findings on lines unchanged since their file was last read
+  acceptance?: AcceptanceRow[];       // one row for each criterion, in the order shown; absent when no criterion was supplied, and on a failed review
 }
 export type { ChangedFile, PullRequestInfo, Side, Source };
 export type {

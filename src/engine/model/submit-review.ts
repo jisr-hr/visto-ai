@@ -6,7 +6,10 @@ export interface RawPart { first: string; last: string; score: number; category:
 export interface RawBlock { id: string; score?: number; category?: string; reason?: string; parts?: RawPart[] }
 export interface RawFile { path: string; change_summary: string; score?: number; category?: string; reason?: string; blocks: RawBlock[] }
 export interface RawVerdict { thread_id: string; verdict: string; reply?: string }
-export interface SubmitReviewArgs { overview: string; findings: RawFinding[]; files: RawFile[]; thread_verdicts?: RawVerdict[] }
+export interface SubmitReviewArgs {
+  overview: string; findings: RawFinding[]; files: RawFile[]; thread_verdicts?: RawVerdict[];
+  acceptance?: unknown[];   // the entries as the model sent them; each is judged in reconcileAcceptance
+}
 
 const findingSchema = z.object({
   path: z.string().trim().min(1),
@@ -68,6 +71,17 @@ const argsWithThreadsSchema = z.object({
   thread_verdicts: optional(z.array(verdictSchema)),
 }).strict();
 
+// The rows a call that shows criteria takes, as the model is told of them. The answer is read more loosely, by
+// the schemas below them: an entry is taken as it comes and judged in reconcileAcceptance, where a bad one costs that row.
+const acceptanceShown = z.array(z.object({ item: z.string(), status: z.string(), note: z.string().optional() })).optional();
+const acceptanceRead = optional(z.array(z.unknown()));
+
+// Two further variants for a call that shows criteria; the JSON of the two above stays what it was.
+const argsWithAcceptanceShown = z.object({ ...argsSchema.shape, acceptance: acceptanceShown }).strict();
+const argsWithBothShown = z.object({ ...argsWithThreadsSchema.shape, acceptance: acceptanceShown }).strict();
+const argsWithAcceptanceSchema = z.object({ ...argsSchema.shape, acceptance: acceptanceRead }).strict();
+const argsWithBothSchema = z.object({ ...argsWithThreadsSchema.shape, acceptance: acceptanceRead }).strict();
+
 const SUBMIT_DESCRIPTION = 'Submit your review of the pull request. Call this tool exactly once, with your overview, all of your findings, and one entry for each file.';
 
 function toolOf(schema: z.ZodType): ToolDefinition {
@@ -78,6 +92,14 @@ function toolOf(schema: z.ZodType): ToolDefinition {
 
 export const submitReviewTool: ToolDefinition = toolOf(argsSchema);
 export const submitReviewWithThreadsTool: ToolDefinition = toolOf(argsWithThreadsSchema);
+const submitReviewWithAcceptanceTool: ToolDefinition = toolOf(argsWithAcceptanceShown);
+const submitReviewWithBothTool: ToolDefinition = toolOf(argsWithBothShown);
+
+/** The tool of a call: with thread verdicts, with acceptance rows, with both or with neither. (false, false) and (true, false) are today's two tools, unchanged. */
+export function submitToolFor(withThreads: boolean, withAcceptance: boolean): ToolDefinition {
+  if (withAcceptance) return withThreads ? submitReviewWithBothTool : submitReviewWithAcceptanceTool;
+  return withThreads ? submitReviewWithThreadsTool : submitReviewTool;
+}
 
 const LEADING_TAG = /^\s*(?:\*\*)?\[(blocker|major|minor|nit)\](?:\*\*)?\s*/i;
 
@@ -97,19 +119,24 @@ function oneLine(text: string): string {
 }
 
 // A rejection reason is one line of at most MAX_REASON_CHARS characters.
-export function parseSubmitReview(json: string, withThreads = false): { ok: true; value: SubmitReviewArgs } | { ok: false; reason: string } {
-  const parsed = parseArgs(json, withThreads);
+export function parseSubmitReview(json: string, withThreads = false, withAcceptance = false): { ok: true; value: SubmitReviewArgs } | { ok: false; reason: string } {
+  const parsed = parseArgs(json, withThreads, withAcceptance);
   return parsed.ok ? parsed : { ok: false, reason: oneLine(parsed.reason).slice(0, MAX_REASON_CHARS) };
 }
 
-function parseArgs(json: string, withThreads: boolean): { ok: true; value: SubmitReviewArgs } | { ok: false; reason: string } {
+function schemaFor(withThreads: boolean, withAcceptance: boolean): z.ZodType {
+  if (withAcceptance) return withThreads ? argsWithBothSchema : argsWithAcceptanceSchema;
+  return withThreads ? argsWithThreadsSchema : argsSchema;
+}
+
+function parseArgs(json: string, withThreads: boolean, withAcceptance: boolean): { ok: true; value: SubmitReviewArgs } | { ok: false; reason: string } {
   let data: unknown;
   try {
     data = JSON.parse(json);
   } catch {
     return { ok: false, reason: 'not_json' };
   }
-  const parsed = withThreads ? argsWithThreadsSchema.safeParse(data) : argsSchema.safeParse(data);
+  const parsed = (schemaFor(withThreads, withAcceptance) as typeof argsSchema).safeParse(data);
   if (!parsed.success) {
     const issue = parsed.error.issues[0];
     if (issue === undefined) return { ok: false, reason: 'invalid' };
@@ -130,6 +157,11 @@ function parseArgs(json: string, withThreads: boolean): { ok: true; value: Submi
   if (withThreads) {
     const given = (parsed.data as { thread_verdicts?: RawVerdict[] }).thread_verdicts ?? [];
     value.thread_verdicts = given.map((v) => (v.reply === undefined ? { thread_id: v.thread_id, verdict: v.verdict } : { thread_id: v.thread_id, verdict: v.verdict, reply: v.reply }));
+  }
+  if (withAcceptance) {
+    // Absent, or null, reads as absent; nothing of an entry is checked here.
+    const rows = (parsed.data as { acceptance?: unknown[] }).acceptance;
+    if (rows !== undefined) value.acceptance = rows;
   }
   return { ok: true, value };
 }
