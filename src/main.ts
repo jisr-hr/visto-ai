@@ -289,6 +289,9 @@ export async function main(argv: string[], env: Record<string, string | undefine
           return () => { clearInterval(timer); };
         },
         engineDeps: (source) => ({ source, ...engine }),
+        // The judge's calls go through the client the reviews use, with its fallbacks, prices and request extras.
+        model: base.model,
+        token: base.token,
         review,
         lineUrl: githubLineUrl,
         commentUrl: githubCommentUrl,

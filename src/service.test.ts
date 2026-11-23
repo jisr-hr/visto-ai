@@ -13,7 +13,7 @@ import type { RunRecord } from './db/review-runs.ts';
 import { beat, readHeartbeat } from './db/heartbeat.ts';
 import { serviceConfig, parseConfig } from './config/load.ts';
 import type { AppIdentity, FeatureOff, ForgeChecks, ForgeEvent, ForgeWriter, HookDelivery, LivePullRequest, OwnCheck, PostedComment, PullRequestAction, PullRequestFacts, ReviewThread, Source } from './forge/types.ts';
-import type { ReviewDeps, ReviewInput, ReviewResult } from './engine/types.ts';
+import type { ModelRequest, ModelResponse, ReviewDeps, ReviewInput, ReviewResult } from './engine/types.ts';
 import { BEAT_MS, CLOSE_WAIT_MS, DRAIN_WAIT_MS, gateForge, startService, STOP_WAIT_MS, TICK_MS, UPKEEP_MS } from './service.ts';
 import type { Listening } from './service.ts';
 import type { RequestLike, ResponseLike } from './shell/http.ts';
@@ -24,6 +24,7 @@ import { LEARN_MS } from './shell/learning.ts';
 import { recordActivity } from './db/human-activity.ts';
 import type { Activity } from './db/human-activity.ts';
 import { addRecords } from './db/memory-records.ts';
+import { recordComments } from './db/review-comments.ts';
 import type { HumanInlineComment } from './forge/types.ts';
 
 const REF = { service: 'github', owner: 'acme', repo: 'shop', number: 7 } as const;
@@ -121,6 +122,8 @@ async function harness(options: Options = {}) {
   const logged: Array<Record<string, unknown>> = [];
   const writes: unknown[][] = [];
   const listings = [...(options.listings ?? [])];
+  /** Every request the model was sent, in order. */
+  const modelRequests: ModelRequest[] = [];
   /** The text of every statement outside a transaction. */
   const queries: string[] = [];
   /** Every statement, inside a transaction or not, with its parameters. */
@@ -170,7 +173,7 @@ async function harness(options: Options = {}) {
   const lock: InstanceLock = { release: async () => { events.push('release'); } };
 
   const h = {
-    db, queries, allQueries, reviewDeps, events, order, lacksCalls, gateCalls, checked, held, timers, inputs, fetched, listedSince, logged, writes,
+    db, queries, allQueries, reviewDeps, modelRequests, events, order, lacksCalls, gateCalls, checked, held, timers, inputs, fetched, listedSince, logged, writes,
     port: 0,
     /** What the clock reads; a test may move it. */
     now: options.now ?? at(0),
@@ -187,6 +190,8 @@ async function harness(options: Options = {}) {
     beforeTransaction: undefined as (() => Promise<void>) | undefined,
     /** Called when the database is being closed, before anything else. */
     beforeClose: undefined as (() => void) | undefined,
+    /** What the model answers to a request; it rejects when not set. */
+    answer: undefined as ((request: ModelRequest) => Promise<ModelResponse>) | undefined,
     releaseReview: () => { releaseReview(); },
     reviewed: () => reviewed,
     published: () => published,
@@ -306,6 +311,14 @@ async function harness(options: Options = {}) {
         return () => { timer.cancelled = true; };
       },
       engineDeps: (source) => ({ source }) as ReviewDeps,
+      model: {
+        complete: async (request) => {
+          modelRequests.push(request);
+          if (h.answer === undefined) throw new Error('not_expected');
+          return h.answer(request);
+        },
+      },
+      token: () => 'tok-test',
       review: async (input, given) => {
         inputs.push(input);
         reviewDeps.push(given);
@@ -1655,4 +1668,162 @@ test('a review of a repository with a record is given it', async () => {
   const blocks = await memory.blocks([{ path: TAX, previousPath: null }], new Date(at(600)), new AbortController().signal);
   assert.deepEqual(blocks.pullRequest.map((l) => l.ref), [`8:file:${TAX}`]);
   assert.deepEqual(alertsOf(h, 'memory_error', 'memory_ok'), [{ event: 'alert', code: 'memory_error', reason: 'timeout' }]);
+});
+
+// The judge (Task 9).
+const FINDING = { path: TAX, side: 'RIGHT', line: 12, severity: 'major', quote: 'total = round(sum)', body: 'Rounds before the discount is taken off.' };
+const REPLY_BODY = 'We round half up here on purpose, as the invoices require it.';
+const QUOTE = 'round half up here on purpose';
+const LESSON = 'A rounding finding on invoice totals is wrong: invoices round half up on purpose.';
+const pushback = (cost = 0.25): ModelResponse => ({
+  toolName: 'submit_verdict', toolArguments: JSON.stringify({ classification: 'valid_pushback', lesson: LESSON, quote: QUOTE }), text: null,
+  model: 'm', provider: null, usage: { calls: 1, inputTokens: 100, outputTokens: 10, cachedTokens: 0, cost },
+});
+/** Pull request 7 with a run of yesterday whose one finding was posted as c-1, and `replies` members' replies to it, written yesterday. */
+async function queueReplies(h: { db: Db }, replies: number): Promise<void> {
+  await migrate(h.db, loadMigrations(MIGRATIONS_DIR));
+  await savePullRequest(h.db, facts());
+  const id = await recordRun(h.db, run({ result: { findings: [FINDING] }, usage: { calls: 1, inputTokens: 1, outputTokens: 1, cachedTokens: 0, cost: 0 } }));
+  await recordComments(h.db, id, REF, [{ commentId: 'c-1', path: TAX, side: 'RIGHT', line: 12, severity: 'major', quote: 'total = round(sum)' }]);
+  for (let i = 1; i <= replies; i += 1) {
+    await recordActivity(h.db, stored({ sourceId: `r-${i}`, replyTo: 'c-1', body: REPLY_BODY, at: at(3600 + i), delivery: `d-r${i}` }));
+  }
+}
+const ofJudge = (logged: Array<Record<string, unknown>>) => logged.filter((e) => typeof e.event === 'string' && e.event.startsWith('lessons'));
+const judgeRows = async (h: { db: Db }) => ({
+  verdicts: await h.db.query<{ reply: string; outcome: string }>('select reply, outcome from visto_ai.reply_verdicts order by reply'),
+  calls: await h.db.query<{ reply: string }>('select reply from visto_ai.judge_calls order by id'),
+  lessons: await h.db.query<{ source_ref: string }>("select source_ref from visto_ai.memory_records where kind = 'lesson' order by id"),
+});
+const lessonsLine = (h: { logged: Array<Record<string, unknown>> }) => h.logged.filter((e) => e.event === 'lessons');
+
+test('with learning off nothing of the judge runs: no row, no log line, no model call, no alert', async () => {
+  const h = await harness({ now: at(86_400) });
+  await queueReplies(h, 1);
+  h.answer = async () => pushback();
+  await (await h.start()).settled;
+  for (const timer of [...h.timers]) await timer.work();
+  await h.flush();
+  assert.deepEqual(h.timers.map((t) => t.ms), [TICK_MS, UPKEEP_MS, BEAT_MS]);
+  assert.deepEqual(ofJudge(h.logged), []);
+  assert.equal(h.logged.some((e) => e.event === 'alert' && String(e.code).startsWith('lessons')), false);
+  assert.deepEqual(await h.db.query('select 1 from visto_ai.learning'), []);
+  assert.deepEqual(await judgeRows(h), { verdicts: [], calls: [], lessons: [] });
+  assert.deepEqual(h.modelRequests, []);
+});
+
+test('with learning on the start logs the judge\'s row after the learning\'s, and no run starts before the timer', async () => {
+  const h = await harness({ learning: true, now: at(86_400) });
+  await queueReplies(h, 1);
+  h.answer = async () => pushback();
+  await (await h.start()).settled;
+  await h.flush();
+  const events = h.logged.map((e) => e.event);
+  assert.deepEqual(h.logged.filter((e) => e.event === 'lessons_state'), [
+    { event: 'lessons_state', since: at(86_400), last_ran: null, judged: 0, lessons: 0, given_up: 0, failed: 0 },
+  ]);
+  assert.ok(events.indexOf('lessons_state') > events.indexOf('learning_state'));
+  assert.ok(events.indexOf('learning_state') >= 0);
+  assert.deepEqual(h.timers.map((t) => t.ms).sort(), [TICK_MS, UPKEEP_MS, LEARN_MS, BEAT_MS].sort());
+  learnTimer(h);
+  assert.deepEqual(h.modelRequests, []);
+  assert.deepEqual(await h.db.query("select ran_at from visto_ai.learning where work = 'lessons'"), [{ ran_at: null }]);
+});
+
+test('the learning timer starts the day\'s run, and a member\'s reply to a finding becomes a lesson', async () => {
+  const h = await harness({ learning: true, now: at(86_400), dryRun: false });
+  await queueReplies(h, 1);
+  h.answer = async () => pushback();
+  await (await h.start()).settled;
+  await learnTimer(h).work();
+  await h.until(() => lessonsLine(h).length === 1);
+  assert.equal(h.modelRequests.length, 1);
+  assert.deepEqual(await judgeRows(h), { verdicts: [{ reply: 'r-1', outcome: 'lesson' }], calls: [{ reply: 'r-1' }], lessons: [{ source_ref: '7:r-1' }] });
+  assert.deepEqual(lessonsLine(h), [{ event: 'lessons', judged: 1, lessons: 1, given_up: 0, failed: 0, calls: 1, cost: 0.25, more: false, end: 'done' }]);
+  // The judge's request has the review's tool choice and time limit, and the service's token.
+  assert.equal(h.modelRequests[0]!.forcedTool, 'submit_verdict');
+  assert.equal(h.modelRequests[0]!.timeoutMs, config.model.timeoutSeconds * 1000);
+  assert.ok(JSON.stringify(h.modelRequests[0]!.messages).includes('tok-test'));
+  await learnTimer(h).work();
+  await h.flush();
+  assert.equal(h.modelRequests.length, 1);
+  assert.equal(lessonsLine(h).length, 1);
+});
+
+test('at the daily limit the judge makes no call, and what the judge spends pauses the reviews', async () => {
+  const h = await harness({ learning: true, now: at(86_400) });
+  await queueReplies(h, 1);
+  await recordRun(h.db, run({ startedAt: at(86_000), finishedAt: at(86_100), usage: { calls: 1, inputTokens: 1, outputTokens: 1, cachedTokens: 0, cost: 50 } }));
+  h.answer = async () => pushback();
+  await (await h.start()).settled;
+  await learnTimer(h).work();
+  await h.until(() => lessonsLine(h).length === 1);
+  assert.deepEqual(h.modelRequests, []);
+  assert.equal(lessonsLine(h)[0]!.end, 'spend_limit');
+
+  const k = await harness({ learning: true, now: at(86_400) });
+  await queueReplies(k, 2);
+  k.answer = async () => pushback(50);
+  await (await k.start()).settled;
+  await learnTimer(k).work();
+  await k.until(() => lessonsLine(k).length === 1);
+  assert.equal(k.modelRequests.length, 1);
+  assert.deepEqual(lessonsLine(k)[0], { event: 'lessons', judged: 1, lessons: 1, given_up: 0, failed: 0, calls: 1, cost: 50, more: false, end: 'spend_limit' });
+  assert.deepEqual((await judgeRows(k)).verdicts, [{ reply: 'r-1', outcome: 'lesson' }]);
+  assert.deepEqual(await k.webhook(pr('opened', { updatedAt: at(86_400) }), 'd-open'), { status: 202, body: 'accepted' });
+  await k.runTimer(TICK_MS);
+  await k.flush();
+  assert.deepEqual(k.inputs, []);
+});
+
+test('stop tells the run under way, waits for it at most CLOSE_WAIT_MS, and nothing is written after', async (t) => {
+  const h = await harness({ learning: true, now: at(86_400) });
+  await queueReplies(h, 2);
+  let answer!: () => void;
+  const answered = new Promise<void>((done) => { answer = done; });
+  h.answer = async () => { await answered; return pushback(); };
+  let statementsAtClose: number | null = null;
+  h.beforeClose = () => { statementsAtClose ??= h.allQueries.length; };
+  const service = await h.start();
+  await service.settled;
+  await learnTimer(h).work();
+  await h.until(() => h.modelRequests.length === 1);
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let ended = false;
+  void service.stop().then(() => { ended = true; });
+  try {
+    for (let i = 0; i < 20 && !h.events.includes('close'); i += 1) await h.flush();
+    assert.equal(h.events.includes('close'), false);
+    for (let i = 0; i < 20 && !ended; i += 1) {
+      t.mock.timers.tick(CLOSE_WAIT_MS);
+      await h.flush();
+    }
+    // Read through a flag, not awaited: a stop that waits for the run without a limit fails here rather than hangs.
+    assert.equal(ended, true, 'the stop did not end once the mocked time had passed');
+    assert.equal(h.events.includes('close'), true);
+  } finally {
+    // A failure above must not leave the stop waiting: the clean-up after the test waits for the same stop.
+    answer();
+    for (let i = 0; i < 20 && !ended; i += 1) {
+      t.mock.timers.tick(CLOSE_WAIT_MS);
+      await h.flush();
+    }
+  }
+  t.mock.timers.reset();
+  await h.until(() => lessonsLine(h).length === 1);
+  assert.equal(lessonsLine(h)[0]!.end, 'stopped');
+  assert.equal(h.modelRequests.length, 1);
+  assert.equal(h.allQueries.length, statementsAtClose);
+});
+
+test('in dry run the judge runs as it does out of it', async () => {
+  const h = await harness({ learning: true, now: at(86_400), dryRun: true });
+  await queueReplies(h, 1);
+  h.answer = async () => pushback();
+  await (await h.start()).settled;
+  await learnTimer(h).work();
+  await h.until(() => lessonsLine(h).length === 1);
+  assert.equal(h.modelRequests.length, 1);
+  assert.deepEqual(await judgeRows(h), { verdicts: [{ reply: 'r-1', outcome: 'lesson' }], calls: [{ reply: 'r-1' }], lessons: [{ source_ref: '7:r-1' }] });
+  assert.equal(lessonsLine(h)[0]!.end, 'done');
 });
