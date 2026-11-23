@@ -7,7 +7,7 @@ These notes record what happened while `2026-11-22-the-merge-gate.md` was built:
 - The plan was drafted from the design, a map of the code it builds on and a private map of the predecessor's gate, and reviewed by another model before anything was built. That review found one critical defect, seven important ones and ten minor; all were ruled on and applied before the first line of code (decisions 1 to 7).
 - Tasks 1 to 12 were built one at a time, each by one implementer, tests first, and each reviewed by an independent reviewer working in a separate checkout of the task's commit. Four tasks needed a fix round (3, 5, 9, and the small points of 1 and 2), each re-reviewed. The points the reviews called minor were kept in a ledger and applied in two fix waves at the end of the tasks.
 - Task 13's documents were written by an implementer; its run on a real Postgres was made by the controller.
-- Then a review of the whole branch by the strongest model. What it found, and the fix wave after it, are below.
+- Then a review of the whole branch by the strongest model. It drove the real listener, both runners, the review job and the gate job through more than ten thousand random lives of gated pull requests, with deliveries reordered, held and repeated, calls to GitHub failing, restarts, pauses and changes of mode, and judged each life by reading only the fake GitHub and the database. It also sent the same deliveries through this branch with no gate and through `main`, and the rows, the writes to GitHub, the answers and the log lines were the same. It found no check written green that should not be, four important gaps in which a check was kept stale or missing or a command was lost, and smaller points. One fix wave followed (decisions 17 to 20), and a re-review by the same model.
 - The owner granted the trial app the gate's permissions, and the gate was tried once against it, in part. What that showed, and the one fix it led to, are below.
 
 ## Decisions taken while building
@@ -39,9 +39,17 @@ Each is the builder's, taken without the owner, and listed so he can overrule it
 
 16. **A completed check that must wait or review again is replaced by a new run of the same name** (call 48, turned round). GitHub answers an update that asks a completed run to be queued or in progress, and changes neither its status nor its conclusion.
 
+**From the review of the whole branch**
+
+17. **The sweep at start asks for every stored open gated pull request** (call 38, rewritten). As first built it asked only where the last recorded check was missing, of another mode, unfinished or failed. A thread unresolved, a push, or clearing by reply switched off while the service was down or in dry run then left a green check, or no check, until an event.
+18. **A `sync` carries the installation it was asked with** (call 53). Before, a pull request opened before the app was installed never got a check from a `/done`, a reply or a start.
+19. **A manual review that fails while the stored head moved starts over once** (call 54), also with no gate. Before, a `/done` that had joined the running review of an older head was lost when that review failed.
+20. **Only a review that will run counts as under way** (calls 25 and 43). Before, a stranger's waiting `/review` made a green check say that a review was waiting.
+
 ## What the reviews found that the plan had wrong
 
 - **The plan's review.** Decisions 1 to 7; a start sweep that would ask again at every start; an alert that an outage with steady events could keep from ever being raised; texts that named the skip team, told the public about the operator's account, or promised a retry after the service had given up.
+- **The review of the whole branch.** Decisions 17 to 20; that the README's sentence on an unwritten `newHead` was wrong for a gated pull request; and that the cost of two pull requests sharing one head commit was understated (see "For the owner to decide").
 - **The reviews of the tasks.** Two ways a merge could pass that should be held, each found by a reviewer running the code rather than reading it: a list of statuses cut short (decision 8), and a damaged verdict entry skipped in favour of a later one (decision 9; the reviewer compared the rule with its own reading of the plan on several hundred thousand generated inputs). One way a member's `/done` did nothing while it was told accepted (decision 11). And that no call to GitHub had a time limit (decision 13).
 
 ## What the run on a real Postgres showed
@@ -81,19 +89,30 @@ On 2026-11-22 and 23, after the owner had granted the trial app `Checks` write, 
 - A push: the new commit got its own waiting check, the old commit's check was left as it was, and no review was queued.
 - A re-run, sent as an event built from the real check run: a full review of the new head (the default for a gated pull request), which kept a `fixed` verdict for the thread the push had answered; the check passed, counting one finding cleared by a review and one by a reply.
 
+**A second, short trial on the code after decisions 16 to 20**
+
+- At start the sweep asked for both gated pull requests of the repository; each was evaluated and nothing was written, since both checks were right.
+- A `/review` on a head whose check had passed: the service wrote a new run that said a review was under way and, once the re-check was posted, completed it as passed. GitHub listed the new run alone for the name, both when asked for all, and the pull request showed as passed.
+
 **Still not verified**
 
-- The check as a required one: how each state holds a merge, how `action_required` reads on the page, whether a re-run is offered there.
+- The check as a required one: how each state holds a merge, how `action_required` reads on the page, whether a re-run is offered there. The scratch repository is private, and GitHub offers no ruleset and no branch protection for a private repository on its organisation's plan; trying it needs a public repository or another plan, which is the owner's call.
 - GitHub's own deliveries: which `check_run` deliveries the app is sent and how many, a thread event for a resolve made in the page, what a real re-run carries, for a fork too.
 - A skip by a member of the team, a skip typed after a push, and the answers to a team membership question.
 - The required CI checks of `/done`; `shadow`; `bypass` across two starts; a review GitHub refuses inline; a pause of reviews; the manifest flow with the new permissions.
-- The code of decision 16 itself against GitHub: it was written from what the probe showed.
+
+## For the owner to decide
+
+- **Two pull requests of one repository with the same head commit share one check** (call 33): GitHub attaches a check run to a commit. The pull request evaluated last decides it, so one of them can show a green check on the strength of the other's review, or of a skip given for the other. It needs one commit opened against two branches, at least one of them gated. Nothing guards against it; the README says so. A guard would decide the check from every open gated pull request that shares the head and take the worst.
+- **Whether the 60-second limit on calls to GitHub should hold for the review lane too** (decision 13). It does as built.
 
 ## Known and left as they are
 
 - A read or a write of GitHub that fails leaves the check GitHub already shows, which can be a stale green one (call 49).
 - A pause of reviews that begins while every place of the review runner is busy brings the waiting checks up to date only when a place frees.
-- A pull request the service has no stored row for gets its check at its next event, not at start.
+- A pull request the service has no stored row for gets its check at its next event or command, not at start.
+- At each start every stored open gated pull request is evaluated once: reads of GitHub, and a write only where the check differs.
+- A gate job the runner gives up on records nothing; the next start asks again.
 - A pull request whose check can never be written, as after the app is removed from the repository, is tried three times at each start, with one alert for each code (call 52).
 - A command that fails inside the gate job's own first steps ends as a failed gate job with the alert, and is not answered.
 - The previous release cannot be put back on a database this release has migrated.
