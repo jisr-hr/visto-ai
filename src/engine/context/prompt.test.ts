@@ -361,3 +361,22 @@ test('memory counts in the fixed tokens', () => {
   assert.equal(fixedTokens('CONTRACT', pr, true, 'Earlier.', ext, memory) - fixedTokens('CONTRACT', pr, true, 'Earlier.', ext), extra);
   assert.equal(fixedTokens('CONTRACT', pr, false, undefined, undefined, lines) - fixedTokens('CONTRACT', pr), estimateTokens(`\n${memoryParts(lines).pullRequest}`));
 });
+test('memory counts its two parts apart in the fixed tokens', () => {
+  // A context for which counting the two texts joined, or without the line feed, gives another number.
+  let found: MemoryContext | undefined;
+  for (let d = 1; d <= 3 && found === undefined; d += 1) {
+    for (let p = 1; p <= 3 && found === undefined; p += 1) {
+      const candidate: MemoryContext = {
+        directories: [{ name: `src/${'d'.repeat(d)}`, pullRequests: 2 }], categories: [],
+        lines: [{ ...memory.lines[0]!, path: `src/${'p'.repeat(p)}.ts` }],
+      };
+      const { repository, pullRequest } = memoryParts(candidate);
+      const apart = estimateTokens(repository) + estimateTokens(`\n${pullRequest}`);
+      if (apart !== estimateTokens(`${repository}\n${pullRequest}`) && apart !== estimateTokens(repository) + estimateTokens(pullRequest)) found = candidate;
+    }
+  }
+  assert.ok(found !== undefined);
+  const { repository, pullRequest } = memoryParts(found);
+  assert.equal(fixedTokens('CONTRACT', pr, false, undefined, undefined, found) - fixedTokens('CONTRACT', pr),
+    estimateTokens(repository) + estimateTokens(`\n${pullRequest}`));
+});
