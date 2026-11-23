@@ -113,6 +113,29 @@ export interface McpServer {
 export type McpState = 'ok' | 'skipped' | 'error';
 export interface McpStatus { status: McpState; code: string; calls: number }   // code: a short code; calls: the calls sent to the server in this review
 
+/** One line of the pull request block: one record, as the model is shown it. It has no field for what a person wrote. The engine checks every field. */
+export interface MemoryLine {
+  ref: string;               // the record's source reference, for the audit; never shown to the model
+  near: boolean;             // false: on a file the run sends; true: on a file near one
+  path: string;              // the record's own file
+  day: string;               // YYYY-MM-DD, UTC: the day the record was made
+  category: string | null;   // the kind of change the review had given that code; null when it had given none
+  missed: boolean;           // the review had left that code below the threshold
+}
+export interface MemoryCount { name: string; pullRequests: number }
+export interface MemoryBlocks {
+  repository: { directories: MemoryCount[]; categories: MemoryCount[] };   // both empty when `pullRequest` is
+  pullRequest: MemoryLine[];                                               // in the order shown
+  // What was left out: by the fixed sizes; `names`, because a path or a directory is not printable; `records`, because the repository has more records than are read.
+  cut: { directories: number; categories: number; lines: number; names: number; records: boolean };
+}
+export interface Memory {
+  /** The two blocks for these files as of that time (7.4). Reads only. May reject or never settle: the engine bounds it. */
+  blocks(files: Array<{ path: string; previousPath: string | null }>, asOf: Date, signal: AbortSignal): Promise<MemoryBlocks>;
+}
+export type MemoryState = 'ok' | 'empty' | 'skipped' | 'error';
+export interface MemoryStatus { status: MemoryState; code: string; lines: number }   // code: a short code; lines: the lines shown
+
 export interface ReviewDeps {
   source: Source;
   model: ModelClient;
@@ -126,6 +149,7 @@ export interface ReviewDeps {
   contextProviders?: ContextProvider[]; // asked once for each review; absent reads as none
   toolChoice?: 'forced' | 'auto';       // how the model is made to call submit_review; absent reads as 'forced'
   mcpServers?: McpServer[];             // opened once for each review; absent reads as none
+  memory?: Memory;                      // where people stepped in before; absent: the review has no memory, and is what it was
 }
 
 export interface RawFinding { path: string; side: Side; line: number; severity: Severity; body: string; quote: string; beyond_diff: boolean }
@@ -148,7 +172,8 @@ export interface ReviewResult {
   usage: Usage;
   models: string[];           // models that answered, distinct, in first-seen order
   providers: string[];        // upstream providers that answered, distinct, in first-seen order
-  dependencies: { model: 'ok' | 'error'; extensions?: Record<string, ExtensionStatus>; mcp?: Record<string, McpStatus> }; // extensions: absent when no provider was asked; mcp: absent when no server was considered
+  // extensions: absent when no provider was asked; mcp: absent when no server was considered; memory: absent when no memory was given, and when the review ended before it was asked
+  dependencies: { model: 'ok' | 'error'; extensions?: Record<string, ExtensionStatus>; mcp?: Record<string, McpStatus>; memory?: MemoryStatus };
   audit: AuditEntry[];
   scores: FileScore[];        // one per changed file; empty when the review failed
   verdict: Verdict;

@@ -17,6 +17,11 @@ const mcpOwn = [{ group: [githubAdapter] }, outsideMcp(['engine/types.ts', 'conf
 // A test of the part may also run a review end to end: the engine's review and its submit tool.
 const mcpTestOwn = [{ group: [githubAdapter] }, outsideMcp(['engine/types.ts', 'config/load.ts', 'engine/review.ts', 'engine/model/submit-review.ts'])];
 const mcpTypesOnly = ['error', { patterns: [{ group: ['../engine/types.ts', '../config/load.ts'], allowTypeImports: true, message: 'The mcp part imports only types of the project.' }] }];
+const engineNodeForbidden = engineForbidden.flatMap((name) => [name, `node:${name}`]);
+// The memory part is pure: types and helpers of the engine, types of the git boundary, and its own files; no input or output.
+const memoryForbidden = [githubAdapter, '**/db/**', '**/shell/**', '**/eval/**', '**/gate/**', '**/extensions/**', '**/mcp/**', '**/main.ts', '**/service.ts'];
+// Only the eval's command line, the seed and the seed's test reach the database.
+const evalSeed = ['src/eval/history/seed.ts', 'src/eval/history/seed.test.ts'];
 
 // Flat config does not merge a rule's options across blocks: each block carries every restriction for its files.
 export default tseslint.config(
@@ -24,16 +29,29 @@ export default tseslint.config(
   ...tseslint.configs.recommended,
   {
     files: ['src/**/*.ts'],
-    ignores: ['src/forge/github/**', 'src/eval/**', 'src/mcp/**', 'src/main.ts', 'src/db/**'],
+    ignores: ['src/forge/github/**', 'src/eval/**', 'src/mcp/**', 'src/main.ts', 'src/db/**', 'src/memory/**'],
     rules: {
       'no-restricted-imports': ['error', { patterns: [githubAdapter, ...mcpPart], paths: postgresClients }],
     },
   },
   {
     files: ['src/eval/**/*.ts'],
-    ignores: ['src/eval/cli.ts'],
+    ignores: ['src/eval/cli.ts', ...evalSeed],
+    rules: {
+      'no-restricted-imports': ['error', { patterns: [githubAdapter, ...evalForbidden, '**/db/**'], paths: postgresClients }],
+    },
+  },
+  {
+    files: evalSeed,
     rules: {
       'no-restricted-imports': ['error', { patterns: [githubAdapter, ...evalForbidden], paths: postgresClients }],
+    },
+  },
+  {
+    files: ['src/memory/**/*.ts'],
+    rules: {
+      'no-restricted-imports': ['error', { patterns: memoryForbidden, paths: [...engineNodeForbidden, ...postgresClients] }],
+      'no-restricted-syntax': ['error', { selector: 'ImportExpression', message: 'The memory part may not import dynamically.' }],
     },
   },
   {
@@ -81,8 +99,8 @@ export default tseslint.config(
       'no-restricted-imports': [
         'error',
         {
-          patterns: [githubAdapter, '**/eval/**', '**/db/**', '**/shell/**', '**/extensions/**', '**/mcp/**'],
-          paths: [...engineForbidden.flatMap((name) => [name, `node:${name}`]), ...postgresClients],
+          patterns: [githubAdapter, '**/eval/**', '**/db/**', '**/shell/**', '**/extensions/**', '**/mcp/**', '**/memory/**'],
+          paths: [...engineNodeForbidden, ...postgresClients],
         },
       ],
       'no-restricted-syntax': ['error', { selector: 'ImportExpression', message: 'The engine may not import dynamically.' }],
