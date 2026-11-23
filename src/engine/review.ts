@@ -2,6 +2,8 @@ import { buildFileContexts } from './context/build.ts';
 import type { FileContext } from './context/build.ts';
 import { packBatches } from './context/batches.ts';
 import type { Batch } from './context/batches.ts';
+import { extensionPart, gatherContext } from './context/extensions.ts';
+import type { ExtensionContext } from './context/extensions.ts';
 import { changedLines, leftBlocksOf } from './context/increment.ts';
 import type { Changed } from './context/increment.ts';
 import { renderAnchoredDiff } from './context/diff.ts';
@@ -10,6 +12,7 @@ import { attachThreads, isDue } from './context/threads.ts';
 import { stripControl } from './context/untrusted.ts';
 import type { ShownThread } from './context/threads.ts';
 import { buildMessages, fixedTokens, headerStripCounts } from './context/prompt.ts';
+import { MEASURE_TOKEN } from './context/section.ts';
 import { callBatch } from './model/call.ts';
 import type { BatchAnswer } from './model/call.ts';
 import type { SubmitReviewArgs } from './model/submit-review.ts';
@@ -27,7 +30,7 @@ import { shownOf } from './score/shown.ts';
 import type { ScoredBy, ScoreEntry, ScoreHistory } from './score/types.ts';
 import { askScorer, summariesOf } from './scorer/ask.ts';
 import type {
-  AuditEntry, ChangedFile, Discussed, EarlierThread, Effort, Finding, NotReviewed, PullRequestInfo, RepoConfig, ReviewDeps, ReviewInput, ReviewResult, Severity, Side, Source, Usage,
+  AuditEntry, ChangedFile, Discussed, EarlierThread, Effort, ExtensionStatus, Finding, NotReviewed, PullRequestInfo, RepoConfig, ReviewDeps, ReviewInput, ReviewResult, Severity, Side, Source, Usage,
 } from './types.ts';
 
 const CONCURRENCY = 2;
@@ -115,6 +118,7 @@ interface Run {
   batchCount: number;
   withThreads: boolean; // the run shows earlier threads: its calls take the tool with verdicts
   lastOverview: string | undefined; // the last review's overview, shown in every call's header; undefined when there is none to show
+  extension: ExtensionContext | undefined; // what the context providers gave, as it is shown in every call's header; undefined when nothing is
 }
 
 // A failing logger must never change a review.
@@ -131,6 +135,7 @@ async function oneCall(run: Run, files: FileContext[], firstFileNumber: number, 
   const messages = buildMessages({
     contract: run.deps.contract, pr: run.pr, fileCount: run.fileCount, firstFileNumber, batch,
     batchIndex, batchCount: run.batchCount, token: run.token, ...(run.lastOverview === undefined ? {} : { lastOverview: run.lastOverview }),
+    ...(run.extension === undefined ? {} : { extension: run.extension }),
   });
   const answer = await callBatch(
     { messages, effort: run.effort, timeoutMs: run.limits.modelTimeoutSeconds * 1000, prPaths: files.map((f) => f.file.path), ...(run.withThreads ? { withThreads: true } : {}) },
@@ -287,7 +292,47 @@ async function countUnchanged(findings: Finding[], contexts: FileContext[], head
   }).length;
 }
 
+type Packing = ReturnType<typeof packBatches>;
+
+/**
+ * Whether what the providers gave is shown, and the packing the review then uses (5.3, call 8). It is shown only
+ * when packing the files with it counted cuts nothing more and leaves nothing more unreviewed than packing them without it.
+ */
+function chooseRoom(
+  extension: ExtensionContext, first: Packing, budgetWith: (shown: ExtensionContext) => number, pack: (budget: number) => Packing,
+): { packed: Packing; shown: ExtensionContext | undefined; audit: AuditEntry[] } {
+  if (first.batches.length === 0) return { packed: first, shown: undefined, audit: [] };
+  const whole = extension;
+  const candidates = [whole, { blocks: [], criteria: extension.criteria }];
+  const same = JSON.stringify([first.notReviewed, first.audit]);
+  let packed = first;
+  let shown: ExtensionContext | undefined;
+  for (const candidate of candidates) {
+    if (extensionPart(candidate, MEASURE_TOKEN) === '') continue;   // a candidate that shows nothing is passed over
+    const budget = budgetWith(candidate);
+    if (budget <= 0) continue;
+    const again = pack(budget);
+    if (JSON.stringify([again.notReviewed, again.audit]) === same) {
+      packed = again;
+      shown = candidate;
+      break;
+    }
+  }
+  const audit: AuditEntry[] = [];
+  if (extensionPart(whole, MEASURE_TOKEN) !== '' && shown !== whole) {
+    audit.push({ stage: 'context', action: 'extension_context_cut', subject: shown === undefined ? 'extensions' : 'texts', reason: 'over_call_budget' });
+  }
+  return { packed, shown, audit };
+}
+
 export async function review(input: ReviewInput, deps: ReviewDeps): Promise<ReviewResult> {
+  // Set once the providers are asked: every result returned from then on says how each of them did.
+  const asked: { statuses?: Record<string, ExtensionStatus> } = {};
+  const result = await reviewOnce(input, deps, asked);
+  return asked.statuses === undefined ? result : { ...result, dependencies: { ...result.dependencies, extensions: asked.statuses } };
+}
+
+async function reviewOnce(input: ReviewInput, deps: ReviewDeps, asked: { statuses?: Record<string, ExtensionStatus> }): Promise<ReviewResult> {
   let stage: 'context' | 'model' = 'context';
   const sourceErrors = new Set<unknown>(); // what the source rejected with; a caught probe failure is not fatal
   let usage = zeroUsage();
@@ -324,6 +369,16 @@ export async function review(input: ReviewInput, deps: ReviewDeps): Promise<Revi
     const by: ScoredBy = deps.scorer !== undefined ? 'scorer' : 'model';
     const files = await source.listFiles(pr);
     if (files.length === 0) return okResult('No changes to review.', threshold, due, said, {});
+
+    // Asked once for the whole review, before anything is packed; a provider never fails the review.
+    let extension: ExtensionContext | undefined;
+    const providers = deps.contextProviders ?? [];
+    if (providers.length > 0) {
+      const gathered = await gatherContext(providers, pr);
+      asked.statuses = gathered.statuses;
+      audit.push(...gathered.audit);
+      extension = gathered.context;
+    }
 
     // Read only when there is something to floor; a rejection fails the review here, like any source error.
     const floors = parseRepoFile(await source.getDefaultBranchFile(pr, REPO_FILE));
@@ -362,8 +417,16 @@ export async function review(input: ReviewInput, deps: ReviewDeps): Promise<Revi
       budget = input.limits.inputTokensPerCall - fixedTokens(deps.contract, pr, true, lastOverview);
       if (budget <= 0) return failedResult('context', 'budget_too_small', usage, audit, 'ok', threshold, due, said);
     }
-    const packed = packBatches(plan.send, budget, input.limits.batchesPerReview);
-    audit.push(...built.audit, ...reuseAudit, ...attached.audit, ...leftOutAudit, ...packed.audit);
+    const firstPacking = packBatches(plan.send, budget, input.limits.batchesPerReview);
+    const room = extension === undefined
+      ? { packed: firstPacking, shown: undefined, audit: [] }
+      : chooseRoom(
+        extension, firstPacking,
+        (shown) => input.limits.inputTokensPerCall - fixedTokens(deps.contract, pr, withThreads, lastOverview, shown),
+        (b) => packBatches(plan.send, b, input.limits.batchesPerReview),
+      );
+    const packed = room.packed;
+    audit.push(...built.audit, ...reuseAudit, ...attached.audit, ...leftOutAudit, ...packed.audit, ...room.audit);
     // A covered file that found no room was read, as it is, by an earlier review: it is left out too.
     const roomless = plan.send.filter((c) => c.kept?.covered === true && packed.notReviewed.some((n) => n.path === c.file.path && n.reason === 'over_batch_limit'));
     audit.push(...roomless.flatMap(leaveOut));
@@ -389,6 +452,7 @@ export async function review(input: ReviewInput, deps: ReviewDeps): Promise<Revi
       contexts: built.contexts, limits: input.limits,
       effort: chooseEffort(pr, files, input.repoConfig), token: deps.token(), pr, deps,
       fileCount: packed.batches.reduce((n, b) => n + b.files.length, 0), batchCount: packed.batches.length, withThreads, lastOverview,
+      extension: room.shown,
     };
     const firsts: number[] = [];
     let seen = 0;

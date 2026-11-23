@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { unitTokens } from './context/batches.ts';
 import { buildFileContexts, hunksOf } from './context/build.ts';
+import { EXTENSION_LINE, extensionPart } from './context/extensions.ts';
+import type { ExtensionContext } from './context/extensions.ts';
 import { buildMessages, fixedTokens } from './context/prompt.ts';
 import { ProviderError } from './model/errors.ts';
 import { SUBMIT_REVIEW, submitReviewTool, submitReviewWithThreadsTool } from './model/submit-review.ts';
@@ -11,7 +13,7 @@ import { blocksOf, fileDiffHash } from './score/blocks.ts';
 import { shownOf } from './score/shown.ts';
 import type { BlockScore, ScoreEntry, ScoreHistory } from './score/types.ts';
 import type {
-  ChangedFile, EarlierThread, ModelClient, ModelRequest, ModelResponse, PullRequestInfo, RepoConfig, ReviewDeps, ReviewInput, ReviewResult, ScoreAnswer, ScoreRequest, Scorer,
+  ChangedFile, ContextProvider, EarlierThread, ModelClient, ModelRequest, ModelResponse, PullRequestInfo, RepoConfig, ReviewDeps, ReviewInput, ReviewResult, ScoreAnswer, ScoreRequest, Scorer,
   Severity, Source, Usage,
 } from './types.ts';
 
@@ -54,6 +56,7 @@ const respond = (answer: unknown): ModelResponse =>
 type Step = unknown | ProviderError;
 function deps(spec: {
   files: ChangedFile[]; answers?: Step[]; answerFor?: Record<string, Step>; delayMs?: number; listError?: Error; scorer?: Scorer;
+  contextProviders?: ContextProvider[];
 }):
   ReviewDeps & { model: ModelClient & { requests: ModelRequest[]; maxInFlight: number }; logged: Array<Record<string, unknown>>; tokens: number } {
   const requests: ModelRequest[] = [];
@@ -94,6 +97,7 @@ function deps(spec: {
     token: () => { d.tokens += 1; return 'abcdef0123456789'; },
     log: (e: Record<string, unknown>) => { logged.push(e); },
     ...(spec.scorer === undefined ? {} : { scorer: spec.scorer }),
+    ...(spec.contextProviders === undefined ? {} : { contextProviders: spec.contextProviders }),
   };
   return d;
 }
@@ -1827,4 +1831,135 @@ test('no score falls: a block whose neighbours change and change back, and two h
   const d3 = await review({ ...input, mode: 'full', history: historyFrom([d1, d2]) }, backTall);
   assert.deepEqual(headersOf(backTall), ['### Block B1 (32 changed lines, scored)']);
   assert.deepEqual([d3.scores[0]!.blocks.map((one) => [one.id, one.entry?.score, one.origin]), d3.scores[0]!.finalScore], [[['B1', 70, 'earlier_run']], 70]);
+});
+
+// Context providers. The pull request of these tests says it is not from a fork.
+const own: ReviewInput = { ...input, pullRequest: { ...input.pullRequest, fromFork: false } };
+const TICKET = 'The total is rounded to cents, and a refund keeps its sign.';
+const ticketContext: ExtensionContext = { blocks: [{ name: 'tickets', label: 'ticket SHOP-12', text: TICKET }], criteria: [] };
+const TOKEN = 'abcdef0123456789';
+function ticketProvider(answer: unknown = { status: 'ok', label: 'ticket SHOP-12', text: TICKET }): ContextProvider & { calls: number } {
+  const p = { name: 'tickets', calls: 0, provide: async () => { p.calls += 1; return answer as never; } };
+  return p;
+}
+const longContent = Array.from({ length: 60 }, (_, i) => `const line${i} = ${i * 104729};`).join('\n');
+const withContent = <T extends ReviewDeps>(d: T): T => {
+  d.source.getFileContent = async (_p, path) => (path === 'src/a.ts' ? longContent : null);
+  return d;
+};
+async function unitOf(file: ChangedFile, content: boolean): Promise<number> {
+  const source = content ? withContent(deps({ files: [] })).source : deps({ files: [] }).source;
+  return unitTokens((await buildFileContexts(own.pullRequest, [file], source)).contexts[0]!);
+}
+const limitsOf = (inputTokensPerCall: number, batchesPerReview = 6): ReviewInput => ({ ...own, limits: { ...own.limits, inputTokensPerCall, batchesPerReview } });
+const partTokens = (): number => fixedTokens(CONTRACT, own.pullRequest, false, undefined, ticketContext) - fixedTokens(CONTRACT, own.pullRequest);
+
+test('a pull request from a fork is reviewed with no extension context, and the result says why', async () => {
+  const provider = ticketProvider();
+  const fork: ReviewInput = { ...input, pullRequest: { ...input.pullRequest, fromFork: true } };
+  const asked = deps({ files: [fileA], answers: [answerOnA], contextProviders: [provider] });
+  const r = await review(fork, asked);
+  const plain = deps({ files: [fileA], answers: [answerOnA] });
+  await review(fork, plain);
+  assert.equal(provider.calls, 0);
+  assert.deepEqual(asked.model.requests, plain.model.requests);
+  assert.deepEqual(r.dependencies.extensions, { tickets: { status: 'skipped', code: 'from_fork' } });
+});
+
+test('with no provider nothing is asked and the result says nothing of extensions', async () => {
+  const today = deps({ files: [fileA, fileB], answerFor: { 'src/a.ts': answerOnA, 'src/b.ts': answerOnB } });
+  const expected = await review(smallLimits, today);
+  for (const contextProviders of [undefined, []]) {
+    const d = deps({ files: [fileA, fileB], answerFor: { 'src/a.ts': answerOnA, 'src/b.ts': answerOnB }, ...(contextProviders === undefined ? {} : { contextProviders }) });
+    const r = await review({ ...smallLimits, pullRequest: own.pullRequest }, d);
+    assert.equal('extensions' in r.dependencies, false);
+    assert.deepEqual(d.model.requests, today.model.requests);
+    assert.deepEqual(r, expected);
+    assert.deepEqual(d.logged, today.logged);
+  }
+});
+
+test('a provider is asked once for a review of two batches, its text is in both calls and its status in the result', async () => {
+  const unit = await unitOf(fileA, false);
+  const provider = ticketProvider();
+  const d = deps({ files: [fileA, fileB], answerFor: { 'src/a.ts': answerOnA, 'src/b.ts': answerOnB }, contextProviders: [provider] });
+  const r = await review(limitsOf(fixedTokens(CONTRACT, own.pullRequest, false, undefined, ticketContext) + unit + Math.floor(unit / 2)), d);
+  assert.equal(provider.calls, 1);
+  assert.deepEqual(r.dependencies, { model: 'ok', extensions: { tickets: { status: 'ok', code: 'ok' } } });
+  assert.equal(d.model.requests.length, 2);
+  const headers = d.model.requests.map((q) => q.messages[1]!.content);
+  assert.equal(headers[0], headers[1]);
+  assert.equal(headers[0]!.endsWith(`\n${extensionPart(ticketContext, TOKEN)}`), true);
+  assert.equal(d.model.requests.some((q) => q.messages[2]!.content.includes(EXTENSION_LINE)), false);
+});
+
+test('a provider that throws or answers junk never fails the review', async () => {
+  const plain = deps({ files: [fileA], answers: [answerOnA] });
+  const expected = await review(own, plain);
+  const d = deps({
+    files: [fileA], answers: [answerOnA],
+    contextProviders: [
+      { name: 'tickets', provide: async () => { throw new Error('Refused by host 10.0.0.5'); } },
+      { name: 'chat', provide: async () => ({ status: 'ok', text: 5 }) as never },
+    ],
+  });
+  const r = await review(own, d);
+  assert.equal(r.status, 'ok');
+  assert.deepEqual(r.findings, expected.findings);
+  assert.deepEqual(r.dependencies.extensions, { tickets: { status: 'error', code: 'provider_failed' }, chat: { status: 'error', code: 'bad_shape' } });
+  assert.deepEqual(d.model.requests, plain.model.requests);
+  assert.doesNotMatch(JSON.stringify(r), /10\.0\.0\.5|Refused/);
+});
+
+test('the statuses are on a failed review too, and a pull request with no changed file asks nobody', async () => {
+  const failed = await review(own, deps({ files: [fileA], answers: [new ProviderError('auth', 'c', 401, null)], contextProviders: [ticketProvider()] }));
+  assert.deepEqual([failed.status, failed.dependencies], ['failed', { model: 'error', extensions: { tickets: { status: 'ok', code: 'ok' } } }]);
+  const unread = deps({ files: [fileA], contextProviders: [ticketProvider()] });
+  unread.source.getDefaultBranchFile = () => Promise.reject(new Error('github_500'));
+  const source = await review(own, unread);
+  assert.deepEqual([source.failure, source.dependencies.extensions], [{ stage: 'context', code: 'github_500' }, { tickets: { status: 'ok', code: 'ok' } }]);
+  const provider = ticketProvider();
+  const empty = await review(own, deps({ files: [], contextProviders: [provider] }));
+  assert.equal(provider.calls, 0);
+  assert.equal('extensions' in empty.dependencies, false);
+});
+
+test('text that would cost a file its full contents is dropped for the whole review, and the audit says so', async () => {
+  const full = await unitOf(fileA, true);
+  assert.ok(full - (await unitOf(fileA, false)) > partTokens());
+  const d = withContent(deps({ files: [fileA], answers: [answerOnA], contextProviders: [ticketProvider()] }));
+  const r = await review(limitsOf(fixedTokens(CONTRACT, own.pullRequest) + full), d);
+  assert.equal(d.model.requests.length, 1);
+  assert.ok(d.model.requests[0]!.messages[2]!.content.includes('### Full file'));
+  assert.equal(d.model.requests[0]!.messages[1]!.content.includes(EXTENSION_LINE), false);
+  assert.deepEqual(r.audit.filter((e) => e.action === 'extension_context_cut'), [{ stage: 'context', action: 'extension_context_cut', subject: 'extensions', reason: 'over_call_budget' }]);
+  assert.equal(r.audit.some((e) => e.action === 'full_file_cut'), false);
+  assert.deepEqual(r.dependencies.extensions, { tickets: { status: 'ok', code: 'ok' } });
+});
+
+test('a file that is cut with or without the text does not cost the text its place', async () => {
+  const bare = await unitOf(fileA, false);
+  const d = withContent(deps({ files: [fileA], answers: [answerOnA], contextProviders: [ticketProvider()] }));
+  const r = await review(limitsOf(fixedTokens(CONTRACT, own.pullRequest, false, undefined, ticketContext) + bare), d);
+  assert.ok(r.audit.some((e) => e.action === 'full_file_cut' && e.subject === 'src/a.ts'));
+  assert.equal(r.audit.some((e) => e.action === 'extension_context_cut'), false);
+  assert.equal(d.model.requests[0]!.messages[1]!.content.endsWith(extensionPart(ticketContext, TOKEN)), true);
+  assert.deepEqual(r.coverage, { reviewed: ['src/a.ts'], notReviewed: [] });
+});
+
+test('text that would leave a file unreviewed is dropped, and text that only moves a file to a second batch is kept', async () => {
+  const unit = await unitOf(fileA, false);
+  const room = fixedTokens(CONTRACT, own.pullRequest) + 2 * unit;
+  const one = deps({ files: [fileA, fileB], answerFor: { 'src/a.ts': answerOnA, 'src/b.ts': answerOnB }, contextProviders: [ticketProvider()] });
+  const r1 = await review(limitsOf(room, 1), one);
+  assert.equal(one.model.requests.length, 1);
+  assert.deepEqual(r1.coverage, { reviewed: ['src/a.ts', 'src/b.ts'], notReviewed: [] });
+  assert.equal(one.model.requests[0]!.messages[1]!.content.includes(EXTENSION_LINE), false);
+  assert.deepEqual(r1.audit.filter((e) => e.action === 'extension_context_cut').map((e) => e.subject), ['extensions']);
+  const two = deps({ files: [fileA, fileB], answerFor: { 'src/a.ts': answerOnA, 'src/b.ts': answerOnB }, contextProviders: [ticketProvider()] });
+  const r2 = await review(limitsOf(room, 2), two);
+  assert.equal(two.model.requests.length, 2);
+  assert.ok(two.model.requests.every((q) => q.messages[1]!.content.endsWith(extensionPart(ticketContext, TOKEN))));
+  assert.deepEqual(r2.coverage.notReviewed, []);
+  assert.equal(r2.audit.some((e) => e.action === 'extension_context_cut'), false);
 });

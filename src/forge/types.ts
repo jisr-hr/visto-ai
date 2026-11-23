@@ -8,6 +8,7 @@ export interface PullRequestInfo {
   baseSha: string;            // the diff's base: the merge base with the base branch
   headSha: string;
   draft: boolean;
+  fromFork?: boolean;         // whether the head branch lies in another repository than the base; absent: not known
 }
 export type FileStatus = 'added' | 'modified' | 'removed' | 'renamed';
 export interface ChangedFile {
