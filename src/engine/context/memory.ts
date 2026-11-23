@@ -178,9 +178,12 @@ export function askMemory(memory: Memory, files: Array<{ path: string; previousP
     const given = files.map((f) => ({ path: f.path, previousPath: f.previousPath }));
     // A promise of our own: what the memory returns is only ever resolved into it, so a hostile
     // thenable, or a throw before any promise is returned, is a rejection here and never a throw.
+    // The time is a copy too, made inside the guard: a time that is no Date, or cannot be read, is a failed lookup.
     const pending = new Promise<unknown>((settle, refuse) => {
       try {
-        settle(memory.blocks(given, asOf, controller.signal));
+        if (!(asOf instanceof Date)) throw new TypeError();
+        const time = new Date(asOf.getTime());
+        settle(memory.blocks(given, time, controller.signal));
       } catch (error) {
         refuse(error);
       }

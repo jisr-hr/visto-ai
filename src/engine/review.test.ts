@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { unitTokens } from './context/batches.ts';
 import { buildFileContexts, hunksOf } from './context/build.ts';
+import { ANCHOR_LEGEND } from './context/diff.ts';
 import { ACCEPTANCE_HEADING, ACCEPTANCE_RULES, EXTENSION_LINE, extensionPart } from './context/extensions.ts';
 import type { ExtensionContext } from './context/extensions.ts';
 import { memoryParts } from './context/memory.ts';
@@ -84,7 +85,8 @@ function deps(spec: {
         if (spec.delayMs) await new Promise((r) => setTimeout(r, spec.delayMs));
         let step: Step;
         if (spec.answerFor) {
-          const last = request.messages[2]!.content; // the file sections; a retry appends later messages
+          // The message of the file sections, wherever it stands: a repository message of memory comes before it, a retry appends after it.
+          const last = request.messages.find((m) => m.role === 'user' && m.content.includes(ANCHOR_LEGEND))!.content;
           const key = Object.keys(spec.answerFor).find((p) => last.includes(p));
           step = key === undefined ? undefined : spec.answerFor[key];
         } else {
@@ -2679,7 +2681,15 @@ test('memory is asked once for a review of two batches, with the files the run s
   assert.equal(d.model.requests.length, 2);
   assert.equal(memory.calls.length, 1);
   assert.deepEqual(memory.calls[0]![0], [{ path: 'src/a.ts', previousPath: null }, { path: 'src/b.ts', previousPath: null }]);
-  assert.equal(memory.calls[0]![1], asOf);
+  // A copy of the time it was given: equal to it, not the same object.
+  assert.deepEqual(memory.calls[0]![1], asOf);
+  assert.notEqual(memory.calls[0]![1], asOf);
+  // A memory that sets the time it was handed leaves the review's own as it was.
+  const given = new Date('2026-03-12T10:00:00.000Z');
+  const setting: Memory = { blocks: async (_files, at) => { at.setTime(0); return answer; } };
+  const r = await review({ ...(await memoryRoom(answer, 1.5)), asOf: given }, deps({ files: [fileA, fileB], answers: [answerOnA, answerOnB], memory: setting }));
+  assert.deepEqual(r.dependencies.memory, { status: 'ok', code: 'ok', lines: 2 });
+  assert.equal(given.getTime(), asOf.getTime());
 });
 
 test('both batches are sent the repository message and the same header, and the result counts the lines', async () => {
@@ -2795,13 +2805,22 @@ test('tools are offered only when they cost memory nothing', async () => {
   const answer = memoryAnswer(twoLines);
   const parts = memoryParts(contextOf(answer));
   const full = await unitOf(fileA, true);
-  const lim = limitsOf(fixedTokens(CONTRACT, own.pullRequest, false, undefined, undefined, contextOf(answer)) + full);
+  // One token short of the room the tools need with memory counted: without memory there is room for them.
+  const lim = limitsOf(fixedTokens(SYSTEM_WITH_TOOLS, own.pullRequest, false, undefined, undefined, contextOf(answer)) + toolRoomTokens([docsSearch]) + full - 1);
+  assert.ok(memoryTokens(answer) >= 1);
+  const bare = withContent(deps({ files: [fileA], answers: [answerOnA], mcpServers: [fakeServer().server] }));
+  const without = await review(lim, bare);
+  assert.deepEqual(bare.model.requests[0]!.tools, [submitReviewTool, docsSearch]);
+  assert.ok(bare.model.requests[0]!.messages[2]!.content.includes('### Full file'));
+  assert.equal(without.audit.some((e) => e.action === 'tools_cut'), false);
+  assert.deepEqual(without.dependencies.mcp, { docs: { status: 'ok', code: 'ok', calls: 0 } });
   const docs = fakeServer();
   const d = withContent(deps({ files: [fileA], answers: [answerOnA], memory: memoryOf(answer), mcpServers: [docs.server] }));
   const r = await review(lim, d);
   const plain = withContent(deps({ files: [fileA], answers: [answerOnA], memory: memoryOf(answer) }));
   await review(lim, plain);
   assert.deepEqual(d.model.requests, plain.model.requests);
+  assert.ok(d.model.requests[0]!.messages[3]!.content.includes('### Full file'));
   assert.equal(d.model.requests[0]!.messages[2]!.content.endsWith(`\n${parts.pullRequest}`), true);
   assert.deepEqual(d.model.requests[0]!.tools, [submitReviewTool]);
   assert.deepEqual(r.audit.filter((e) => e.action === 'tools_cut'), [{ stage: 'context', action: 'tools_cut', subject: 'tools', reason: 'over_call_budget' }]);
@@ -2916,4 +2935,49 @@ test('in an incremental review memory is asked for the files that are sent, not 
   assert.equal(r.status, 'ok');
   assert.deepEqual(memory.calls.map(([files]) => files), [[{ path: 'src/u.ts', previousPath: null }]]);
   assert.deepEqual(r.dependencies.memory, { status: 'ok', code: 'ok', lines: 2 });
+});
+
+test('memory is fitted with the threads counted', async () => {
+  const answer = memoryAnswer(twoLines, false);
+  const thread = earlierThread({ resolved: false });
+  const later = (inputTokensPerCall: number): ReviewInput => ({ ...limitsOf(inputTokensPerCall), earlier: { head: 'abcdef0', threads: [thread] } });
+  const run = async (inputTokensPerCall: number, memory?: Memory) => {
+    const d = withContent(deps({ files: [fileA], answers: [answerOnA], ...(memory === undefined ? {} : { memory }) }));
+    return { r: await review(later(inputTokensPerCall), d), d };
+  };
+  // The smallest limit under which, with the thread shown and no memory, the file keeps its full contents.
+  const keeps = async (n: number) => !(await run(n)).r.audit.some((e) => e.action === 'full_file_cut');
+  let low = fixedTokens(CONTRACT, own.pullRequest, true);
+  let high = low + 10_000;
+  assert.ok(await keeps(high));
+  while (high - low > 1) {
+    const mid = Math.floor((low + high) / 2);
+    if (await keeps(mid)) high = mid; else low = mid;
+  }
+  // One token short of the room memory needs with the threads counted; with them left out of the count it would fit.
+  const edge = high + memoryTokens(answer) - 1;
+  assert.ok(fixedTokens(CONTRACT, own.pullRequest, true) - fixedTokens(CONTRACT, own.pullRequest, false) >= 1);
+  const plain = await run(edge);
+  const { r, d } = await run(edge, memoryOf(answer));
+  assert.ok(d.model.requests[0]!.messages[2]!.content.includes('### Thread T1'));
+  assert.deepEqual(d.model.requests, plain.d.model.requests);
+  assert.ok(d.model.requests[0]!.messages[2]!.content.includes('### Full file'));
+  assert.deepEqual(r.dependencies.memory, { status: 'skipped', code: 'no_room', lines: 0 });
+  assert.ok(r.audit.some((e) => e.action === 'memory_cut' && e.subject === 'memory'));
+  // One token more and memory is shown, and the file keeps its contents.
+  const shown = await run(edge + 1, memoryOf(answer));
+  assert.deepEqual(shown.r.dependencies.memory, { status: 'ok', code: 'ok', lines: 2 });
+  assert.ok(shown.d.model.requests[0]!.messages[1]!.content.includes(memoryParts(contextOf(answer)).pullRequest));
+  assert.ok(shown.d.model.requests[0]!.messages[2]!.content.includes('### Full file'));
+});
+
+test('the stub answers each batch from its own files, whatever paths the memory names in the header', async () => {
+  // The only line names src/b.ts: the header of both batches holds that path, and only the files' message tells them apart.
+  const answer = memoryAnswer([memoryLine({ ref: '8:file:src/b.ts', path: 'src/b.ts' })]);
+  const d = deps({ files: [fileA, fileB], answerFor: { 'src/a.ts': answerOnA, 'src/b.ts': answerOnB }, memory: memoryOf(answer) });
+  const r = await review(await memoryRoom(answer, 1.5), d);
+  assert.equal(d.model.requests.length, 2);
+  assert.ok(d.model.requests.every((q) => q.messages[2]!.content.includes('changed | src/b.ts') && !q.messages[2]!.content.includes('src/a.ts')));
+  assert.deepEqual(r.findings.map((f) => f.path), ['src/a.ts']);
+  assert.deepEqual([r.overview.includes('src/a.ts has a problem.'), r.overview.includes('src/b.ts is fine.')], [true, true]);
 });

@@ -164,12 +164,39 @@ test('an answer that is no object, or whose lists are no lists, is a bad answer'
   assert.deepEqual(await askMemory(answering(blocks({ pullRequest: [line0] })), files, asOf), bad);
 });
 
-test('the memory is given a copy of the files, and the time it was given', async () => {
+test('the memory is given a copy of the files, and a copy of the time it was given', async () => {
   const seen: unknown[] = [];
   const given = [{ path: 'src/billing/tax.ts', previousPath: 'src/billing/old.ts' }];
-  await askMemory({ blocks: async (f, a) => { seen.push(structuredClone(f), a); f[0]!.path = 'changed'; return blocks(); } }, given, asOf);
+  const time = new Date(asOf.getTime());
+  let handed: Date | undefined;
+  await askMemory({
+    blocks: async (f, a) => {
+      seen.push(structuredClone(f), new Date(a.getTime()));
+      handed = a;
+      f[0]!.path = 'changed';
+      f.push({ path: 'src/cart/add.ts', previousPath: null });
+      a.setTime(0);
+      return blocks();
+    },
+  }, given, time);
   assert.deepEqual(seen, [[{ path: 'src/billing/tax.ts', previousPath: 'src/billing/old.ts' }], asOf]);
-  assert.equal(given[0]!.path, 'src/billing/tax.ts');
+  assert.notEqual(handed, time);
+  assert.deepEqual(given, [{ path: 'src/billing/tax.ts', previousPath: 'src/billing/old.ts' }]);
+  assert.equal(time.getTime(), asOf.getTime());
+});
+
+test('a time that is no Date is an error of the lookup, never a throw', async () => {
+  let asked = 0;
+  const memory: Memory = { blocks: async () => { asked += 1; return blocks(); } };
+  const hostile = Object.create(Date.prototype) as Date;
+  const throwing = new Date(asOf.getTime());
+  Object.defineProperty(throwing, 'getTime', { value: () => { throw new Error('No time here!'); } });
+  for (const time of ['2026-03-10' as never, null as never, { getTime: () => 0 } as never, hostile, throwing]) {
+    const got = await askMemory(memory, files, time);
+    assert.deepEqual([got.context, got.status.status, got.status.code], [undefined, 'error', 'lookup_failed']);
+    assert.deepEqual(got.audit, [{ stage: 'context', action: 'memory_failed', subject: 'memory', reason: 'lookup_failed' }]);
+  }
+  assert.equal(asked, 0);
 });
 
 test('what the sizes cut is named in the audit, and so is a repository with more records than are read', async () => {
