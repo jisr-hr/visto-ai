@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  directoryOf, EXCERPT_CHARS, excerptOf, mayCount, readScored, signalsOf, SIGNAL_DAYS,
+  directoryOf, EXCERPT_CHARS, excerptOf, mayCount, ownWords, readScored, signalsOf, SIGNAL_DAYS,
   type PersonComment, type ScoredRun, type SignalInput,
 } from './signals.ts';
 
@@ -325,4 +325,12 @@ test('a file-level score counts for a miss only when it is a whole number from 0
   assert.equal(missed({ score: -5, source: 'whole_file' }), false);
   assert.equal(missed({ score: 30.5, source: 'whole_file' }), false);
   assert.equal(missed({ score: 101, source: 'whole_file' }), false);
+});
+
+test('own words keep the lines of a comment and leave out what it quotes', () => {
+  const body = 'a\n> quoted\n\nb\n```\ncode\n```\nc';
+  assert.equal(ownWords(body), 'a\n\nb\nc');
+  assert.equal(excerptOf(body), 'a b c');
+  assert.equal(ownWords('> only a quote').trim(), '');
+  assert.equal(ownWords('```\nonly code\n```').trim(), '');
 });
