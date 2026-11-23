@@ -1,6 +1,6 @@
 import type { RepoSettings } from '../config/load.ts';
-import { lastEvaluation, recordEvaluation, skipOf } from '../db/gate.ts';
-import type { GateCounts } from '../db/gate.ts';
+import { lastEvaluation, NO_COUNTS, recordEvaluation, skipOf } from '../db/gate.ts';
+import type { GateCounts, GateState } from '../db/gate.ts';
 import { askGate, finishJob, requeueJob, reviewJobsOf } from '../db/jobs.ts';
 import type { Job } from '../db/jobs.ts';
 import { getPullRequest } from '../db/pull-requests.ts';
@@ -8,7 +8,7 @@ import { listComments } from '../db/review-comments.ts';
 import { listRuns } from '../db/review-runs.ts';
 import type { StoredRun } from '../db/review-runs.ts';
 import type { Db } from '../db/types.ts';
-import type { ForgeAccess, ForgeChecks, ForgeWriter, LivePullRequest, PullRequestRef } from '../forge/types.ts';
+import type { ForgeAccess, ForgeChecks, ForgeWriter, LivePullRequest, PullRequestFacts, PullRequestRef } from '../forge/types.ts';
 import type { Alert } from '../shell/alerts.ts';
 import { codeOf } from '../shell/codes.ts';
 import { missedComments } from '../shell/earlier.ts';
@@ -115,6 +115,36 @@ const COMMANDS = new Set(['done', 'skip', 'rerun']);
 
 const codeOfPlan = (plan: CheckPlan): string | null => (plan.state === 'failed' || plan.state === 'paused' ? plan.code : null);
 
+/** What the job read of the pull request as the database holds it; undefined until it was read. */
+interface Seen { stored?: PullRequestFacts | null }
+
+/** The first gating of these base branches that is not off; null when there is none. */
+function modeOf(settings: RepoSettings, ...bases: Array<string | undefined>): Exclude<Gating, 'off'> | null {
+  for (const base of bases) {
+    if (base === undefined) continue;
+    const gating = gatingOf(settings, base);
+    if (gating !== 'off') return gating;
+  }
+  return null;
+}
+
+/**
+ * Records what a sync found without reading or writing a check (a give-up, a pull request closed or gone), unless the
+ * newest row of the pull request already says the same head, mode, state and code (call 52). A row that cannot be
+ * read or stored is logged and changes nothing.
+ */
+async function recordFound(deps: GateJobDeps, job: Job, log: (e: Record<string, unknown>) => void, row: {
+  headSha: string; mode: Exclude<Gating, 'off'>; state: GateState; code: string | null;
+}): Promise<void> {
+  try {
+    const last = await lastEvaluation(deps.db, job.ref);
+    if (last !== null && last.headSha === row.headSha && last.mode === row.mode && last.state === row.state && last.code === row.code) return;
+    await recordEvaluation(deps.db, { ref: job.ref, at: deps.clock().toISOString(), run: null, counts: NO_COUNTS, ...row });
+  } catch (error) {
+    log({ event: 'gate_record_failed', job: job.id, reason: codeOf(error) });
+  }
+}
+
 /** Takes one claimed gate job to its end. Never rejects. */
 export async function runGateJob(job: Job, deps: GateJobDeps): Promise<void> {
   const log = (entry: Record<string, unknown>): void => {
@@ -130,9 +160,10 @@ export async function runGateJob(job: Job, deps: GateJobDeps): Promise<void> {
     try { return deps.clock().toISOString(); } catch { return new Date().toISOString(); }
   };
 
+  const seen: Seen = {};
   let end: End;
   try {
-    end = await work(job, deps, entry, log);
+    end = await work(job, deps, entry, log, seen);
   } catch (error) {
     end = { kind: 'retry', code: codeOf(error) };
   }
@@ -162,6 +193,7 @@ export async function runGateJob(job: Job, deps: GateJobDeps): Promise<void> {
       if (await finishJob(deps.db, job.id, 'done', 'failed', now())) {
         entry.outcome = 'failed';
         try { deps.alert('gate_check_failed', { reason: end.code }); } catch { /* an alert that throws changes nothing */ }
+        await recordGiveUp(job, deps, entry, log, seen, end.code);
       }
     } else {
       const at = deps.clock();
@@ -177,20 +209,44 @@ export async function runGateJob(job: Job, deps: GateJobDeps): Promise<void> {
   log({ ...entry });
 }
 
+/** A sync that gave up records it as failed with its code, so that the next start's sweep asks for it again (call 52). */
+async function recordGiveUp(job: Job, deps: GateJobDeps, entry: Entry, log: (e: Record<string, unknown>) => void, seen: Seen, code: string): Promise<void> {
+  try {
+    const settings = deps.settingsFor(`${job.ref.owner}/${job.ref.repo}`);
+    if (seen.stored === undefined && (entry.head === null || entry.mode === null)) seen.stored = await getPullRequest(deps.db, job.ref);
+    const mode = (entry.mode as Exclude<Gating, 'off'> | null) ?? modeOf(settings, seen.stored?.baseBranch);
+    // Not gated as far as the job knows: the sweep would not ask for it either.
+    if (mode === null) return;
+    await recordFound(deps, job, log, { headSha: entry.head ?? seen.stored?.headSha ?? '', mode, state: 'failed', code });
+  } catch (error) {
+    log({ event: 'gate_record_failed', job: job.id, reason: codeOf(error) });
+  }
+}
+
 /** The job up to its end; rejects when a step does, and the caller tries again. */
-async function work(job: Job, deps: GateJobDeps, entry: Entry, log: (e: Record<string, unknown>) => void): Promise<End> {
+async function work(job: Job, deps: GateJobDeps, entry: Entry, log: (e: Record<string, unknown>) => void, seen: Seen): Promise<End> {
   const { db } = deps;
   if (deps.dryRun) return { kind: 'finish', status: 'dropped', outcome: 'dry_run' };
   const settings = deps.settingsFor(`${job.ref.owner}/${job.ref.repo}`);
   if (!settings.gate.enabled) return { kind: 'finish', status: 'dropped', outcome: 'gate_off' };
-  const installation = job.installation ?? (await getPullRequest(db, job.ref))?.installation ?? null;
+  if (job.installation === null) seen.stored = await getPullRequest(db, job.ref);
+  const installation = job.installation ?? seen.stored?.installation ?? null;
   if (installation === null) return { kind: 'finish', status: 'dropped', outcome: 'no_installation' };
   if (COMMANDS.has(job.reason)) return { kind: 'command', installation, settings };
   if (job.reason !== 'sync') return { kind: 'finish', status: 'done', outcome: 'unknown_reason', ask: true };
 
   const live = await deps.forge.readPullRequest(job.ref, installation);
-  if (live === null) return { kind: 'finish', status: 'dropped', outcome: 'not_found' };
-  if (live.state !== 'open') return { kind: 'finish', status: 'done', outcome: 'closed' };
+  // Closed or gone: no check is read or written, and what was found is recorded, so the sweep does not ask again (call 52).
+  if (live === null) {
+    const mode = modeOf(settings, seen.stored?.baseBranch);
+    if (mode !== null) await recordFound(deps, job, log, { headSha: seen.stored?.headSha ?? '', mode, state: 'not_found', code: null });
+    return { kind: 'finish', status: 'dropped', outcome: 'not_found' };
+  }
+  if (live.state !== 'open') {
+    const mode = modeOf(settings, seen.stored?.baseBranch, live.info.baseBranch);
+    if (mode !== null) await recordFound(deps, job, log, { headSha: live.info.headSha, mode, state: 'closed', code: null });
+    return { kind: 'finish', status: 'done', outcome: 'closed' };
+  }
   const gating = gatingOf(settings, live.info.baseBranch);
   if (gating === 'off') return { kind: 'finish', status: 'done', outcome: 'not_gated' };
 

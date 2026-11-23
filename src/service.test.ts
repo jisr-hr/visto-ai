@@ -110,6 +110,8 @@ async function harness(options: Options = {}) {
   const listings = [...(options.listings ?? [])];
   /** The text of every statement outside a transaction. */
   const queries: string[] = [];
+  /** Every statement, inside a transaction or not, with its parameters. */
+  const allQueries: Array<[string, unknown[]]> = [];
   let listener: ((req: RequestLike, res: ResponseLike) => void) | null = null;
   let current: ForgeEvent = PING;
   let delivered = 'd-1';
@@ -137,11 +139,11 @@ async function harness(options: Options = {}) {
   };
 
   const db: Db = {
-    query: (text, params) => (queries.push(text), options.failQuery !== undefined && text.includes(options.failQuery) ? Promise.reject(new Error('db_down')) : real.query(text, params)),
+    query: (text, params) => (queries.push(text), allQueries.push([text, params ?? []]), options.failQuery !== undefined && text.includes(options.failQuery) ? Promise.reject(new Error('db_down')) : real.query(text, params)),
     script: (sql) => (options.migrationError === undefined ? real.script(sql) : Promise.reject(options.migrationError)),
     transaction: async (work) => {
       if (h.beforeTransaction !== undefined) await h.beforeTransaction();
-      return real.transaction(work);
+      return real.transaction((tx) => work({ ...tx, query: (text, params) => (allQueries.push([text, params ?? []]), tx.query(text, params)) }));
     },
     close: () => {
       events.push('close');
@@ -153,7 +155,7 @@ async function harness(options: Options = {}) {
   const lock: InstanceLock = { release: async () => { events.push('release'); } };
 
   const h = {
-    db, queries, events, order, lacksCalls, gateCalls, checked, held, timers, inputs, fetched, listedSince, logged, writes,
+    db, queries, allQueries, events, order, lacksCalls, gateCalls, checked, held, timers, inputs, fetched, listedSince, logged, writes,
     port: 0,
     /** What the clock reads; a test may move it. */
     now: options.now ?? at(0),
@@ -862,6 +864,7 @@ test('the sweep comes after the recovery and before the listener, and not in dry
     await other.runTimer(TICK_MS);
     await other.flush();
     assert.deepEqual([other.logged.filter((e) => e.event === 'gate_sweep'), await other.gateJobs(), other.checked], [[], [], []]);
+    assert.deepEqual(gateQueries(other.allQueries), [], JSON.stringify(options));
   }
 });
 test('a sweep that cannot read the database fails the start', async () => {
@@ -956,6 +959,13 @@ test('a pause that begins asks for the checks of the waiting reviews, and one wh
   assert.deepEqual(failed[0], { event: 'gate_ask_failed', reason: 'db_down' });
   assert.deepEqual([quiet.inputs.length, await quiet.gateJobs()], [0, []]);
 });
+/** The statements that belong to the gate: a sweep's read of the open pull requests, the gate's tables, a gate job stored. */
+const gateQueries = (all: Array<[string, unknown[]]>): string[] => all
+  .filter(([text, params]) => (text.includes('from visto_ai.pull_requests') && text.includes("where state = 'open'"))
+    || text.includes('gate_evaluations') || text.includes('gate_overrides')
+    || (text.includes('insert into visto_ai.jobs') && (text.includes("'gate'") || params.includes('gate'))))
+  .map(([text]) => text);
+
 test('with no gate a pause and its end ask for nothing', async () => {
   const h = await harness({ dryRun: false });
   await (await h.start()).settled;
@@ -968,6 +978,9 @@ test('with no gate a pause and its end ask for nothing', async () => {
   await h.flush();
   assert.deepEqual([h.queries.filter((q) => q.includes("status in ('pending', 'running')") || q.includes('gate')), h.checked], [[], []]);
   assert.deepEqual(h.logged.filter((e) => typeof e.event === 'string' && e.event.startsWith('gate')), []);
+  // Every statement since before the start, inside a transaction or not: nothing of the gate, and the pull request is only stored.
+  assert.deepEqual(gateQueries(h.allQueries), []);
+  assert.deepEqual(h.allQueries.filter(([text]) => text.includes('visto_ai.pull_requests')).map(([text]) => text.trim().split(/\s+/).slice(0, 3).join(' ')), ['insert into visto_ai.pull_requests']);
 });
 test('a /done that joined the review of an older head is answered by a review of the new one', async () => {
   const h = await harness({ gate: true, github: true, holdReview: true });

@@ -8,7 +8,10 @@ import { gatingOf } from './gating.ts';
 
 const keyOf = (ref: PullRequestRef): string => `${ref.service}/${ref.owner.toLowerCase()}/${ref.repo.toLowerCase()}#${ref.number}`;
 
-/** Asks for the check of each stored open pull request that is gated and whose newest recorded evaluation is absent, was made under another mode, or says reviewing or paused. Returns how many. */
+/** The recorded states the sweep asks again for: a review under way or paused, and a check that failed (call 52). */
+const ASKED_AGAIN = new Set(['reviewing', 'paused', 'failed']);
+
+/** Asks for the check of each stored open pull request that is gated and whose newest recorded evaluation is absent, was made under another mode, or says reviewing, paused or failed. Returns how many. */
 export async function sweepGate(db: Db, settingsFor: (fullName: string) => RepoSettings, now: string): Promise<number> {
   const open = await openPullRequests(db);
   const newest = new Map((await lastEvaluations(db)).map((e) => [keyOf(e.ref), e]));
@@ -17,7 +20,7 @@ export async function sweepGate(db: Db, settingsFor: (fullName: string) => RepoS
     const gating = gatingOf(settingsFor(`${ref.owner}/${ref.repo}`), baseBranch);
     if (gating === 'off') continue;
     const last = newest.get(keyOf(ref));
-    if (last !== undefined && last.mode === gating && last.state !== 'reviewing' && last.state !== 'paused') continue;
+    if (last !== undefined && last.mode === gating && !ASKED_AGAIN.has(last.state)) continue;
     await askGate(db, ref, now);
     asked += 1;
   }

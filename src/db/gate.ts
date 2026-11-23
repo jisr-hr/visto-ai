@@ -2,7 +2,8 @@ import type { PullRequestRef } from '../forge/types.ts';
 import { storable } from './text.ts';
 import type { Db } from './types.ts';
 
-export type GateState = 'waiting' | 'paused' | 'reviewing' | 'passed' | 'blocked' | 'failed' | 'skipped' | 'bypassed';
+// closed and not_found: a sync found the live pull request closed, or gone; no check was read or written.
+export type GateState = 'waiting' | 'paused' | 'reviewing' | 'passed' | 'blocked' | 'failed' | 'skipped' | 'bypassed' | 'closed' | 'not_found';
 export interface GateCounts {
   blocking: number; clearedByReview: number; clearedByReply: number; silentResolves: number; unknownThreads: number;
   findings: number; notReviewed: number; withoutThread: number; refusedInline: number;

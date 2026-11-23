@@ -3,13 +3,14 @@ import assert from 'node:assert/strict';
 import { GATE_OFF } from '../config/load.ts';
 import { recordEvaluation, recordSkip, NO_COUNTS } from '../db/gate.ts';
 import type { GateState } from '../db/gate.ts';
-import { askGate, claimJob, enqueueJob, getJob } from '../db/jobs.ts';
+import { askGate, claimJob, enqueueJob, finishJob, getJob } from '../db/jobs.ts';
 import type { Db } from '../db/types.ts';
 import type { CheckWrite, OwnCheck } from '../forge/types.ts';
 import { checkText } from './check.ts';
 import type { CheckMeta } from './check.ts';
 import { runGateJob } from './job.ts';
 import { createKeyedLock } from './lock.ts';
+import { sweepGate } from './sweep.ts';
 import {
   appComment, at, closeHarnesses, finding, harness, liveOf, REF, reply, SETTINGS, storeComment, storeRun, thread, withGate,
 } from './testing.ts';
@@ -284,7 +285,7 @@ test('a job that fails three times ends, stops promising, and the operator is to
     await failing.run();
     assert.equal(writes(failing).length, 1);
     assert.equal(failing.calls.at(-1)![0], 'writeCheck', 'no further call');
-    assert.equal((await rows(failing.db)).length, 0);
+    assert.deepEqual((await rows(failing.db)).map((r) => [r.head_sha, r.mode, r.state, r.code]), [['h1', 'enforce', 'failed', code]], 'the give-up is recorded (call 52)');
     assert.deepEqual(await statusOf(failing), ['done', 'failed']);
     assert.deepEqual(failing.alerts, [['gate_check_failed', { reason: code }]]);
   }
@@ -303,6 +304,8 @@ test('a job that fails three times ends, stops promising, and the operator is to
   assert.deepEqual(await statusOf(gone), ['done', 'failed']);
   assert.deepEqual(gone.alerts, [['gate_check_failed', { reason: 'github_503' }]]);
   assert.equal(finds(gone).length + writes(gone).length, 0);
+  // The head and mode come from the stored pull request when the live one could not be read.
+  assert.deepEqual((await rows(gone.db)).map((r) => [r.head_sha, r.mode, r.state, r.code]), [['h1', 'enforce', 'failed', 'github_503']]);
 });
 
 test('a failed review of this head says so with its code, and a later look does not turn it back to waiting', async () => {
@@ -350,22 +353,23 @@ test('two pull requests on one commit decide the check one after the other', asy
 });
 
 test('a pull request that is closed, gone or not gated, a repository with the gate off, no installation and a dry run touch no check', async () => {
-  const cases: Array<[Parameters<typeof harness>[0], [string, string], boolean]> = [
-    [{ live: liveOf({ state: 'closed' }) }, ['done', 'closed'], true],
-    [{ live: liveOf({ state: 'merged' }) }, ['done', 'closed'], true],
-    [{ live: null }, ['dropped', 'not_found'], true],
-    [{ live: liveOf({ baseBranch: 'feature/x' }) }, ['done', 'not_gated'], true],
-    [{ settings: { ...SETTINGS, gate: GATE_OFF } }, ['dropped', 'gate_off'], false],
-    [{ installation: null }, ['dropped', 'no_installation'], false],
-    [{ dryRun: true }, ['dropped', 'dry_run'], false],
+  // closed, merged and gone record what they found (call 52); the others record nothing.
+  const cases: Array<[Parameters<typeof harness>[0], [string, string], boolean, string | null]> = [
+    [{ live: liveOf({ state: 'closed' }) }, ['done', 'closed'], true, 'closed'],
+    [{ live: liveOf({ state: 'merged' }) }, ['done', 'closed'], true, 'closed'],
+    [{ live: null }, ['dropped', 'not_found'], true, 'not_found'],
+    [{ live: liveOf({ baseBranch: 'feature/x' }) }, ['done', 'not_gated'], true, null],
+    [{ settings: { ...SETTINGS, gate: GATE_OFF } }, ['dropped', 'gate_off'], false, null],
+    [{ installation: null }, ['dropped', 'no_installation'], false, null],
+    [{ dryRun: true }, ['dropped', 'dry_run'], false, null],
   ];
-  for (const [options, end, read] of cases) {
+  for (const [options, end, read, recorded] of cases) {
     const h = await harness({ ...options, check: WAITING_CHECK });
     await h.run();
     assert.equal(finds(h).length + writes(h).length, 0, end[1]);
     assert.equal(h.calls.some((c) => c[0] === 'readPullRequest'), read, end[1]);
     assert.deepEqual(await statusOf(h), end);
-    assert.equal((await rows(h.db)).length, 0);
+    assert.deepEqual((await rows(h.db)).map((r) => r.state), recorded === null ? [] : [recorded], end[1]);
     assert.equal(gateLogs(h)[0]!['outcome'], end[1]);
   }
 });
@@ -497,4 +501,40 @@ test('the log holds ids, states, codes and counts only', async () => {
   assert.deepEqual([logs[1]!['job'], logs[1]!['state'], logs[1]!['wrote'], logs[1]!['blocking']], [second, 'skipped', true, 0]);
   const text = JSON.stringify(h.logs);
   for (const word of ['octo-', 'src/a.ts', 'hotfix', 'release-managers']) assert.ok(!text.includes(word), word);
+});
+
+test('a sync that gives up on a write that never succeeds records one failed row, and the same failure again adds none', async () => {
+  const fail = (): Error => new Error('github_500');
+  const h = await harness({ writeFailures: [fail(), fail(), fail(), fail()] });
+  await h.run();
+  await h.run((await h.claimNext(at(10)))!);
+  await h.run((await h.claimNext(at(70)))!);
+  assert.deepEqual(await statusOf(h), ['done', 'failed']);
+  const failed = (await rows(h.db)).map((r) => [r.head_sha, r.mode, r.state, r.code, r.blocking, r.findings]);
+  assert.deepEqual(failed, [['h1', 'enforce', 'failed', 'github_500', 0, 0]]);
+  // The next start's sweep asks for it again, and the same failure records nothing new.
+  assert.equal(await sweepGate(h.db, () => SETTINGS, at(100)), 1);
+  await h.db.query("update visto_ai.jobs set starts = 2 where kind = 'gate' and status = 'pending'");
+  const again = (await h.claimNext(at(100)))!;
+  assert.equal(again.starts, 3);
+  await h.run(again);
+  assert.equal((await rows(h.db)).length, 1);
+  assert.equal(writes(h).length, 4);
+});
+
+test('a pull request the database holds as open that is closed or gone is asked for at the first start and not again', async () => {
+  for (const [live, state] of [[liveOf({ state: 'closed' }), 'closed'], [liveOf({ state: 'merged', head: 'h2' }), 'closed'], [null, 'not_found']] as const) {
+    const h = await harness({ live });
+    await finishJob(h.db, h.job.id, 'dropped', 'other', at(0));
+    const asked: number[] = [];
+    for (const start of [100, 200, 300]) {
+      asked.push(await sweepGate(h.db, () => SETTINGS, at(start)));
+      const job = await h.claimNext(at(start));
+      if (job !== null) await h.run(job);
+    }
+    assert.deepEqual(asked, [1, 0, 0], state);
+    const head = live === null ? 'h1' : live.info.headSha;
+    assert.deepEqual((await rows(h.db)).map((r) => [r.head_sha, r.mode, r.state, r.code, r.blocking, r.findings, r.run]), [[head, 'enforce', state, null, 0, 0, null]], state);
+    assert.equal(finds(h).length + writes(h).length, 0, state);
+  }
 });

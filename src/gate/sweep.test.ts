@@ -88,3 +88,14 @@ test('the pull requests with a review waiting are asked for, and a running revie
   const gate = await d.query<{ repo: string; number: number; run_at: Date }>("select repo, number, run_at from visto_ai.jobs where kind = 'gate' order by id");
   assert.deepEqual(gate.map((r) => [r.repo, r.number, r.run_at.toISOString()]), [['shop', 3, at(0)], ['shop', 1, at(10)]]);
 });
+
+test('at start a check whose newest record says failed is asked for again, and one that says a settled state is not', async () => {
+  const d = await db();
+  const states: GateState[] = ['failed', 'passed', 'blocked', 'waiting', 'skipped', 'bypassed', 'closed', 'not_found'];
+  for (const [i, state] of states.entries()) {
+    await savePullRequest(d, facts(refOf(i + 1)));
+    await recordEvaluation(d, { ...evaluation(refOf(i + 1), 'enforce', state), code: state === 'failed' ? 'github_500' : null });
+  }
+  assert.equal(await sweepGate(d, settingsIn('enforce'), at(10)), 1);
+  assert.deepEqual(await gateJobs(d), [1]);
+});
