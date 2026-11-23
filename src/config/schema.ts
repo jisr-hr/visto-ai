@@ -34,6 +34,7 @@ const model = z
     extraHeaders: z.record(z.string(), z.string()).default({}),
     prices: prices.nullable().default(null),
     timeoutSeconds: z.number().positive().max(300).default(240),
+    toolChoice: z.enum(['forced', 'auto']).default('forced'),
   })
   .strict();
 
@@ -92,6 +93,73 @@ const extensions = z
     const seen = new Set<string>();
     list.forEach((entry, i) => {
       if (seen.has(entry.name)) ctx.addIssue({ code: 'custom', path: [i, 'name'], message: 'is already used by another extension' });
+      seen.add(entry.name);
+    });
+  });
+
+const SET_BY_SERVICE = new Set([
+  'accept', 'content-type', 'content-length', 'host', 'connection', 'transfer-encoding', 'mcp-session-id', 'mcp-protocol-version',
+]);
+
+/** A server's address: http or https, with no user name and no password (a secret goes in a header). */
+function isServerUrl(value: string): boolean {
+  if (!isHttpUrl(value)) return false;
+  const { username, password } = new URL(value);
+  return username === '' && password === '';
+}
+
+/** Each value is plain text or a reference; a value's characters are checked after a reference is resolved. */
+const mcpHeaders = z
+  .record(z.string(), z.union([z.string(), secretRef], { error: 'must be text or a reference { env: NAME }' }))
+  .superRefine((headers, ctx) => {
+    const seen = new Set<string>();
+    const names = Object.keys(headers);
+    if (names.length > 20) ctx.addIssue({ code: 'custom', path: [], message: 'must have at most 20 headers' });
+    for (const name of names) {
+      if (!/^[A-Za-z0-9-]{1,100}$/.test(name)) {
+        ctx.addIssue({ code: 'custom', path: [name], message: 'must be a header name of letters, digits and hyphens, at most 100' });
+        continue;
+      }
+      const lower = name.toLowerCase();
+      if (SET_BY_SERVICE.has(lower)) ctx.addIssue({ code: 'custom', path: [name], message: 'is set by the service' });
+      else if (seen.has(lower)) ctx.addIssue({ code: 'custom', path: [name], message: 'is written twice' });
+      seen.add(lower);
+    }
+  });
+
+const mcpTools = z
+  .array(
+    z.string().refine((t) => /^[^\x00-\x1f\x7f]{1,128}$/.test(t), { message: 'must be 1 to 128 characters with no control character' }),
+    { error: 'must name 1 to 20 tools' },
+  )
+  .min(1, 'must name 1 to 20 tools')
+  .max(20, 'must name 1 to 20 tools')
+  .superRefine((list, ctx) => {
+    const seen = new Set<string>();
+    list.forEach((tool, j) => {
+      if (seen.has(tool)) ctx.addIssue({ code: 'custom', path: [j], message: 'is named twice' });
+      seen.add(tool);
+    });
+  });
+
+const mcpServer = z
+  .object({
+    name: z.string().regex(/^[a-z][a-z0-9_]{0,19}$/, {
+      message: 'must be a short code of at most 20 characters (a lower-case letter, then lower-case letters, digits or underscores)',
+    }),
+    url: z.string().refine(isServerUrl, { message: 'must be an http or https URL with no user name and no password' }),
+    headers: mcpHeaders.default({}),
+    tools: mcpTools,
+  })
+  .strict();
+
+const mcpServers = z
+  .array(mcpServer)
+  .max(5, 'must name at most 5 servers')
+  .superRefine((list, ctx) => {
+    const seen = new Set<string>();
+    list.forEach((entry, i) => {
+      if (seen.has(entry.name)) ctx.addIssue({ code: 'custom', path: [i, 'name'], message: 'is already used by another server' });
       seen.add(entry.name);
     });
   });
@@ -175,6 +243,7 @@ export const configSchema = z
     dryRun: z.boolean().default(true),
     alerts: alerts.optional(),
     extensions: extensions.default([]),
+    mcpServers: mcpServers.default([]),
     limits: limits.prefault({}),
     repositories: repositories.prefault({}),
   })

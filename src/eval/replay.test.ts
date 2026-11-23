@@ -14,10 +14,10 @@ import type { CaseScore, ReplayFinding } from './score.ts';
 const config: DeploymentConfig = {
   model: {
     baseUrl: 'https://models.example.test/v1', apiKey: 'k', model: 'm', fallbacks: [],
-    effort: { default: {}, elevated: {} }, extraBody: {}, extraHeaders: {}, prices: null, timeoutSeconds: 45,
+    effort: { default: {}, elevated: {} }, extraBody: {}, extraHeaders: {}, prices: null, timeoutSeconds: 45, toolChoice: 'forced',
   },
   scorer: null,
-  app: null, database: null, server: { port: 8080 }, dryRun: false, alerts: null, extensions: [],
+  app: null, database: null, server: { port: 8080 }, dryRun: false, alerts: null, extensions: [], mcpServers: [],
   limits: { inputTokensPerCall: 200_000, batchesPerReview: 6, spendPerDay: 50, queueConcurrency: 2 },
   repositories: { defaults: { primaryBranches: ['main'], scoreThreshold: 70, ignoredAuthors: [], baseBranches: [], newHead: null, inlineNotes: false, gate: GATE_OFF }, overrides: {} },
 };

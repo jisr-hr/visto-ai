@@ -11,7 +11,7 @@ const baseConfig: ModelConfig = {
   baseUrl: 'https://openrouter.ai/api/v1', apiKey: 'k', model: 'vendor/model-a', fallbacks: ['vendor/model-b'],
   effort: { default: {}, elevated: { reasoning: { effort: 'high' } } },
   extraBody: { provider: { require_parameters: true } }, extraHeaders: { 'X-Title': 'synthetic' },
-  prices: null, timeoutSeconds: 60,
+  prices: null, timeoutSeconds: 60, toolChoice: 'forced',
 };
 const req: ModelRequest = {
   messages: [{ role: 'user', content: 'hi' }],

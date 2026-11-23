@@ -27,6 +27,11 @@ model:
   # prices: { inputPerMillion: 1.0, cachedInputPerMillion: 0.1, outputPerMillion: 4.0 }
   # How long one model call may take, at most 300.
   timeoutSeconds: 240
+  # How the model is made to answer through submit_review.
+  # forced: every request names the tool. It is what you get when this is not written.
+  # auto: for a model whose endpoint refuses a request that names a tool. The model is asked to call the tool
+  # and may answer in prose instead, which costs one more request; two such answers fail that part of the review.
+  toolChoice: forced
 
 limits:
   # Input tokens allowed in one model call.
@@ -90,6 +95,23 @@ dryRun: true
 #     # Handed to the module as written. A secret is named by reference, anywhere inside: { env: VARIABLE_NAME }.
 #     options:
 #       secret: { env: EXAMPLE_FEEDBACK_SECRET }
+
+# Optional MCP servers: tools the review model may call while it reviews, for example a search in your documentation.
+# The service speaks revision 2025-11-25 of the protocol, over Streamable HTTP, with the headers written here.
+# A review makes at most 8 calls in all. What a tool returns is shown to the model as data, cut at 8,000 characters.
+# What the model sends as arguments goes to the server, and what a tool returns can be written in the review:
+# name only a server you trust with the reviewed code, and only tools that read.
+# A server's tool descriptions are trusted like this file. No server is asked for a pull request from a fork.
+# mcpServers:
+#     # The server's name in records, alerts and tool names: a lower-case letter, then lower-case letters, digits or underscores, at most 20.
+#   - name: docs
+#     # The server's address (http or https). A redirect is not followed. A secret never goes here: put it in a header.
+#     url: https://docs.example.test/mcp
+#     # Sent with every request to the server. A secret is named by reference: { env: VARIABLE_NAME }.
+#     headers:
+#       Authorization: { env: DOCS_MCP_AUTHORIZATION }
+#     # The tools the model may be offered, by the names the server lists (1 to 20). No other tool of the server is offered.
+#     tools: [search]
 
 repositories:
   # Settings for every repository.
