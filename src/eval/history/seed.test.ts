@@ -5,6 +5,8 @@ import test from 'node:test';
 import { recordActivity } from '../../db/human-activity.ts';
 import { pullRequestsToLearn } from '../../db/learning.ts';
 import { addRecords } from '../../db/memory-records.ts';
+import { loadMigrations, MIGRATIONS_DIR, migrate } from '../../db/migrate.ts';
+import { pgliteDb } from '../../db/pglite.ts';
 import { savePullRequest } from '../../db/pull-requests.ts';
 import { testDb } from '../../db/testing.ts';
 import type { Db } from '../../db/types.ts';
@@ -310,8 +312,8 @@ test('the seed reads a case\'s comments with the backtest\'s own mapping, and ho
 
 test('a database the seed\'s migration is not applied to is refused before any write', async () => {
   const db = await testDb();
-  // Removing the one ledger row stands in for a database that was never migrated to 0010_memory.
-  await db.query("delete from visto_ai.schema_migrations where name = '0010_memory'");
+  // Removing the one ledger row stands in for a database that was never migrated to 0011_lessons.
+  await db.query("delete from visto_ai.schema_migrations where name = '0011_lessons'");
   const before = await snapshot(db);
   await assert.rejects(seedCommand(db, [case7(), case8()], NOW), { message: 'database_not_migrated' });
   assert.deepEqual(await snapshot(db), before);
@@ -385,4 +387,14 @@ test('a case with an inline line or start line that cannot be stored stops the s
   await seedMemory(low, [lineOf({ line: -2_147_483_648 })], NOW);
   assert.equal((await activityRows(low)).find((r) => r.source_id === 'i8b')!.line, -2_147_483_648);
   await low.close();
+});
+
+test('a database migrated to 0010_memory and no further is refused by the seed before any write', async () => {
+  const db = await pgliteDb();
+  await migrate(db, loadMigrations(MIGRATIONS_DIR).filter((m) => m.name <= '0010_memory'));
+  const before = await snapshot(db);
+  await assert.rejects(seedCommand(db, [case7(), case8()], NOW), { message: 'database_not_migrated' });
+  assert.deepEqual(await snapshot(db), before);
+  assert.deepEqual(Object.entries(before).filter(([t, rows]) => t !== 'schema_migrations' && rows.length > 0), []);
+  await db.close();
 });

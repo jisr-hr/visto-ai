@@ -88,9 +88,9 @@ export async function seedMemory(db: Db, cases: HistoryCase[], now: Date): Promi
   return out;
 }
 
-/** The command's steps once connected: refuses a database 0010_memory is not applied to before any write, never migrates, seeds, and returns the one line to print. */
+/** The command's steps once connected: refuses a database 0011_lessons is not applied to before any write (records are written through a statement that writes the column it adds), never migrates, seeds, and returns the one line to print. */
 export async function seedCommand(db: Db, cases: HistoryCase[], now: Date): Promise<string> {
-  if (!(await isApplied(db, '0010_memory'))) throw new Error('database_not_migrated');
+  if (!(await isApplied(db, '0011_lessons'))) throw new Error('database_not_migrated');
   const s = await seedMemory(db, cases, now);
   return `cases ${s.cases}, known ${s.known}, activity ${s.activity}, signals ${s.signals}`;
 }
