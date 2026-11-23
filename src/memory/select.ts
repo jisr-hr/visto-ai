@@ -33,13 +33,19 @@ export function dayStart(at: Date): Date {
 const ZONED_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,9})?)?(Z|[+-]\d{2}:\d{2})$/;
 const KNOWN_CATEGORIES: ReadonlySet<string> = new Set(CATEGORIES);
 
-// The time of a record, or null when its `createdAt` is no time (or one that cannot be written as YYYY-MM-DD).
-function timeOf(record: LiveRecord): number | null {
-  if (typeof record.createdAt !== 'string' || !ZONED_TIME.test(record.createdAt)) return null;
-  const ms = Date.parse(record.createdAt);
+/**
+ * The one reader of a time in the memory part: an ISO time that names its zone, as milliseconds; null for anything
+ * else, a time with no zone included, and one that cannot be written back as YYYY-MM-DD.
+ */
+export function readTime(value: unknown): number | null {
+  if (typeof value !== 'string' || !ZONED_TIME.test(value)) return null;
+  const ms = Date.parse(value);
   if (!Number.isFinite(ms)) return null;
   return /^\d{4}-\d{2}-\d{2}T/.test(new Date(ms).toISOString()) ? ms : null;
 }
+
+// The time of a record, or null when its `createdAt` is no time.
+const timeOf = (record: LiveRecord): number | null => readTime(record.createdAt);
 
 const byCodeUnit = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
 const text = (value: unknown) => (typeof value === 'string' ? value : '');

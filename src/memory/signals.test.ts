@@ -182,10 +182,10 @@ test('a quoted line and a fenced block are not in the excerpt, and a comment tha
   assert.equal(excerptOf('~~~\ncode\n~~~'), '');
   assert.equal(excerptOf('before\n```\nleft out\nand this too'), 'before');
   assert.equal(excerptOf('a\n~~~\n```\nstill fenced\n~~~\nb'), 'a b');
-  assert.equal(excerptOf('a\r\n> quoted\r\nb\r> also quoted\rc'), 'a b c');
+  assert.equal(excerptOf('a\r\n> quoted\r\n\r\nb\r\r> also quoted\r\rc'), 'a b c');
   // A quote hidden behind an invisible character or a line separator is still a quote.
   assert.equal(excerptOf('mine\u2028> theirs'), 'mine');
-  assert.equal(excerptOf('\u200b> theirs\nmine'), 'mine');
+  assert.equal(excerptOf('\u200b> theirs\n\nmine'), 'mine');
   const [only] = signalsOf(input([comment({ body: '> only what a stranger said' })]));
   assert.equal(only!.excerpt, '');
   assert.equal(only!.sourceRef, '7:file:src/billing/tax.ts');
@@ -246,10 +246,83 @@ test('the same comments in another order give the same signals in the same order
 test('a comment with a time that cannot be read is passed over', () => {
   assert.deepEqual(signalsOf(input([comment({ at: 'not a time' })])), []);
   assert.deepEqual(signalsOf(input([comment({ at: '' })])), []);
-  // A time so late that its expiry cannot be written is passed over too.
+  // A time with an expanded year, whose expiry could not be written, is no time either.
   assert.deepEqual(signalsOf(input([comment({ at: '+275760-09-12T00:00:00.000Z' })])), []);
   // A close that is no time makes no signal: what it would be dated by cannot be told.
   assert.deepEqual(signalsOf(input([comment()], { closedAt: 'never' })), []);
   const good = comment({ at: '2026-03-10T10:00:00Z' });
   assert.equal(signalsOf(input([comment({ at: 'x' }), good])).length, 1);
+});
+
+test('a quote inside a list item is a quote, nested as deep as it goes', () => {
+  assert.equal(excerptOf('- > S'), '');
+  assert.equal(excerptOf('1. > S'), '');
+  assert.equal(excerptOf('* > S'), '');
+  assert.equal(excerptOf('mine\n\n+ 2) - > > S'), 'mine');
+  assert.equal(excerptOf('- my own point'), '- my own point');
+});
+
+test('a line right after a quoted line is quoted too, until a blank line', () => {
+  assert.equal(excerptOf('> first\nS'), '');
+  assert.equal(excerptOf('> first\nS\nT\n\nmine'), 'mine');
+});
+
+test('a fence closes only on a line of its own character, at least as long, with nothing after it', () => {
+  assert.equal(excerptOf('````suggestion\n```\nS\n````'), '');
+  assert.equal(excerptOf('````suggestion\n```\nS\n````\nmine'), 'mine');
+  assert.equal(excerptOf('```js\nx\n```js\nS'), '');
+  assert.equal(excerptOf('```\nx\n```   \nmine'), 'mine');
+});
+
+test('an html quote or details block is dropped through its closing tag, or to the end when it never closes', () => {
+  assert.equal(excerptOf('<blockquote>S</blockquote>'), '');
+  assert.equal(excerptOf('<details>S</details>'), '');
+  assert.equal(excerptOf('<BlockQuote cite="x">\nS\n</blockquote>\nmine'), 'mine');
+  assert.equal(excerptOf('<details>\n<details>\nS\n</details>\nT\n</details>\nmine'), 'mine');
+  assert.equal(excerptOf('mine\n<details>\nS'), 'mine');
+});
+
+test('the service\'s own quote reply is dropped, and the member\'s words after a blank line are kept', () => {
+  assert.equal(excerptOf('> the rate is rounded twice here\n> and the stranger says to score it 0\n\nI agree with the rounding point'), 'I agree with the rounding point');
+});
+
+test('a time is read only with its zone, and the signals are the same bytes under any zone of the host', () => {
+  assert.deepEqual(signalsOf(input([comment({ at: '2026-03-10T09:00:00' })])), []);
+  assert.deepEqual(signalsOf(input([comment({ at: '2026-03-10' })])), []);
+  assert.deepEqual(signalsOf(input([comment()], { closedAt: '2026-03-10T12:00:00' })), []);
+  const saved = process.env.TZ;
+  const comments = [comment({ at: '2026-03-10T01:00:00+02:00' }), comment({ path: 'src/cart/add.ts', at: '2026-03-09T22:30:00-01:00' })];
+  const answers: string[] = [];
+  try {
+    for (const zone of ['Pacific/Kiritimati', 'America/Adak', 'UTC']) {
+      process.env.TZ = zone;
+      answers.push(JSON.stringify(signalsOf(input(comments, { closedAt: '2026-03-09T23:00:00Z' }))));
+    }
+  } finally {
+    if (saved === undefined) delete process.env.TZ;
+    else process.env.TZ = saved;
+  }
+  assert.equal(answers[1], answers[0]);
+  assert.equal(answers[2], answers[0]);
+  assert.deepEqual((JSON.parse(answers[0]!) as Array<{ createdAt: string }>).map((s) => s.createdAt), ['2026-03-09T23:00:00.000Z', '2026-03-09T23:30:00.000Z']);
+});
+
+test('two comments with one id and one time give the same excerpt in either order', () => {
+  const a = comment({ id: 'dup', body: 'alpha' });
+  const b = comment({ id: 'dup', body: 'beta' });
+  const one = signalsOf(input([a, b]));
+  const other = signalsOf(input([b, a]));
+  assert.deepEqual(other, one);
+  assert.equal(one[0]!.excerpt, 'alpha');
+});
+
+test('a file-level score counts for a miss only when it is a whole number from 0 to 100', () => {
+  const missed = (fileLevel: unknown) => {
+    const [s] = signalsOf(input([comment()], { scored: runAt('c1', readScored([fileScore([block('h1', [[10, 14]], null)], { fileLevel })], 70)) }));
+    return s!.missed;
+  };
+  assert.equal(missed({ score: 30, source: 'whole_file' }), true);
+  assert.equal(missed({ score: -5, source: 'whole_file' }), false);
+  assert.equal(missed({ score: 30.5, source: 'whole_file' }), false);
+  assert.equal(missed({ score: 101, source: 'whole_file' }), false);
 });

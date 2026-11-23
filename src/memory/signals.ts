@@ -7,6 +7,7 @@ import { cleanLine } from '../engine/context/extensions.ts';
 import { stripControl } from '../engine/context/untrusted.ts';
 import { CATEGORIES } from '../engine/score/types.ts';
 import type { Association, Side } from '../forge/types.ts';
+import { readTime } from './select.ts';
 
 export const SIGNAL_DAYS = 180;
 export const EXCERPT_CHARS = 200;
@@ -44,11 +45,10 @@ const byCodeUnit = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
 const isObject = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
 const isFiniteNumber = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
 
-// The time of an ISO-like string, or null when it is none, or one whose expiry could not be written.
+// The time of a value, read the one way the memory part reads a time; null when it is none, or one whose expiry could not be written.
 function timeOf(value: unknown): number | null {
-  if (typeof value !== 'string') return null;
-  const ms = Date.parse(value);
-  if (!Number.isFinite(ms) || !Number.isFinite(new Date(ms + SIGNAL_DAYS * DAY_MS).getTime())) return null;
+  const ms = readTime(value);
+  if (ms === null || !Number.isFinite(new Date(ms + SIGNAL_DAYS * DAY_MS).getTime())) return null;
   return ms;
 }
 
@@ -60,24 +60,63 @@ export function directoryOf(path: string): string {
 
 // Every way a line can end is made a line feed: a quote cannot hide behind a line end the cleaner would strip.
 const LINE_ENDS = /\r\n|\r|\u2028|\u2029|\u0085/g;
-const FENCE = /^[ \t]*(`{3,}|~{3,})/;
-const QUOTE = /^[ \t]*>/;
+// Any number of list markers ('-', '*', '+', or digits and '.' or ')', each followed by spaces) may stand before a quote or a fence.
+const LIST = '(?:(?:[-*+]|\\d{1,9}[.)])[ \\t]+)*';
+const FENCE = new RegExp(`^[ \\t]*${LIST}(\`{3,}|~{3,})`);
+const FENCE_CLOSE = /^[ \t]*(`{3,}|~{3,})[ \t]*$/;
+const QUOTE = new RegExp(`^[ \\t]*${LIST}>`);
+const HTML_OPEN = /<(blockquote|details)(?=[\s>/]|$)/gi;
+const HTML_CLOSE = /<\/(blockquote|details)(?=[\s>]|$)/gi;
+const BLANK = /^[ \t]*$/;
 
-/** The start of what a comment says in its writer's own words: quoted lines and fenced blocks left out, one line, cut. */
+// How far a line moves the depth of html quotes and details: opening tags less closing tags.
+function htmlDepth(line: string): { opens: number; net: number } {
+  const opens = line.match(HTML_OPEN)?.length ?? 0;
+  const closes = line.match(HTML_CLOSE)?.length ?? 0;
+  return { opens, net: opens - closes };
+}
+
+/**
+ * The start of what a comment says in its writer's own words, one line, cut. Left out: fenced blocks (closed only by a
+ * line of the same character, at least as long, with nothing after it; an unclosed fence takes the rest), quoted lines
+ * (after any list markers, at any depth) and the lines right after them up to a blank line, and html quotes and details
+ * through their closing tag (an unclosed one takes the rest).
+ */
 export function excerptOf(body: string): string {
   if (typeof body !== 'string') return '';
   // Invisible characters are stripped before lines are read, so that one cannot hide a quote or a fence.
   const lines = stripControl(body.replace(LINE_ENDS, '\n')).text.split('\n');
   const kept: string[] = [];
-  let fence: string | null = null;   // the fence's character while inside one
+  let fence: { char: string; length: number } | null = null;
+  let html = 0;          // depth inside html quotes and details
+  let quoted = false;    // the line before was quoted
   for (const line of lines) {
-    const open = FENCE.exec(line);
     if (fence !== null) {
-      if (open !== null && open[1]![0] === fence) fence = null;
+      const close = FENCE_CLOSE.exec(line);
+      if (close !== null && close[1]![0] === fence.char && close[1]!.length >= fence.length) fence = null;
       continue;
     }
-    if (open !== null) { fence = open[1]![0]!; continue; }
-    if (QUOTE.test(line)) continue;
+    if (html > 0) {
+      html = Math.max(0, html + htmlDepth(line).net);
+      continue;
+    }
+    const open = FENCE.exec(line);
+    if (open !== null) {
+      fence = { char: open[1]![0]!, length: open[1]!.length };
+      quoted = false;
+      continue;
+    }
+    const tags = htmlDepth(line);
+    if (tags.opens > 0) {
+      html = Math.max(0, tags.net);
+      quoted = false;
+      continue;
+    }
+    if (QUOTE.test(line) || (quoted && !BLANK.test(line))) {
+      quoted = true;
+      continue;
+    }
+    quoted = false;
     kept.push(line);
   }
   return cleanLine(kept.join('\n'), EXCERPT_CHARS).text;
@@ -92,11 +131,12 @@ export function mayCount(c: PersonComment, author: string): boolean {
     && timeOf(c.at) !== null;
 }
 
+// A score that may be read: a whole number from 0 to 100.
+const isWholeScore = (v: unknown): v is number => Number.isInteger(v) && (v as number) >= 0 && (v as number) <= 100;
+
 // A score entry that may be read: an object with a whole score from 0 to 100.
 function entryOf(v: unknown): Record<string, unknown> | null {
-  if (!isObject(v)) return null;
-  const score = v.score;
-  return Number.isInteger(score) && (score as number) >= 0 && (score as number) <= 100 ? v : null;
+  return isObject(v) && isWholeScore(v.score) ? v : null;
 }
 
 // A list of pairs of whole numbers, copied into a list of our own; null when it is not one.
@@ -143,7 +183,7 @@ export function readScored(scores: unknown, threshold: unknown): ScoredRun {
         // A path stored twice is read once, the first time: a damaged result adds nothing.
         if (run.has(file.path)) continue;
         const wholeFile = entryOf(file.wholeFile);
-        const fileLevelScore = isObject(file.fileLevel) && isFiniteNumber(file.fileLevel.score) ? file.fileLevel.score : null;
+        const fileLevelScore = isObject(file.fileLevel) && isWholeScore(file.fileLevel.score) ? file.fileLevel.score : null;
         const blocks: ScoredBlock[] = [];
         for (let j = 0; j < file.blocks.length; j += 1) {
           const b = blockOf(file.blocks[j], wholeFile, fileLevelScore, limit);
@@ -200,11 +240,12 @@ export function signalsOf(input: SignalInput): Signal[] {
     if (closed === null) return [];
   }
 
-  // Oldest first, then by id: the first comment at a place is the one that gives the signal, whatever the order held.
+  // Oldest first, then by id, then by body: the first comment at a place is the one that gives the signal, whatever the order held.
+  const bodyOf = (c: PersonComment) => (typeof c.body === 'string' ? c.body : '');
   const comments = input.comments
     .filter((c) => isObject(c) && typeof c.id === 'string')
     .map((c) => ({ c, at: timeOf(c.at) }))
-    .sort((a, b) => (a.at ?? 0) - (b.at ?? 0) || byCodeUnit(a.c.id, b.c.id))
+    .sort((a, b) => (a.at ?? 0) - (b.at ?? 0) || byCodeUnit(a.c.id, b.c.id) || byCodeUnit(bodyOf(a.c), bodyOf(b.c)))
     .map(({ c }) => c);
   const byId = new Map<string, PersonComment>();
   for (const c of comments) if (!byId.has(c.id)) byId.set(c.id, c);
