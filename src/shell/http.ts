@@ -1,7 +1,16 @@
+import type { RouteRequest } from '../extensions/types.ts';
 import type { HttpAnswer } from './receive.ts';
 
 export const MAX_BODY_BYTES = 25 * 1024 * 1024;
 export const MAX_IN_FLIGHT = 20;
+export const EXTENSION_BODY_BYTES = 1024 * 1024;
+export const EXTENSION_IN_FLIGHT = 10;        // the places of one module
+export interface CheckedAnswer { status: number; headers: Record<string, string>; body: string }
+/**
+ * One module's route. `answer` resolves at the latest when the handler's limit passes, and never rejects.
+ * `settled` resolves when the promise the handler returned has settled, which can be later, and never rejects.
+ */
+export type ExtensionRoute = (request: RouteRequest) => { answer: Promise<CheckedAnswer>; settled: Promise<void> };
 
 export interface RequestLike extends AsyncIterable<Buffer> {
   method?: string | undefined; url?: string | undefined; headers: Record<string, string | string[] | undefined>;
@@ -12,15 +21,23 @@ export interface ResponseLike {
 }
 
 const HEADERS = { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' };
+const PREFIX = '/extensions/';
+const MODULE_FAILED: CheckedAnswer = { status: 500, headers: {}, body: 'internal_error' };
 
 export function createListener(
-  routes: { webhook: (headers: Record<string, string | undefined>, body: Buffer) => Promise<HttpAnswer> },
-  limits: { maxBodyBytes?: number; maxInFlight?: number } = {},
+  routes: {
+    webhook: (headers: Record<string, string | undefined>, body: Buffer) => Promise<HttpAnswer>;
+    extensions?: ReadonlyMap<string, ExtensionRoute>;   // by module name; absent reads as none
+  },
+  limits: { maxBodyBytes?: number; maxInFlight?: number; maxExtensionBodyBytes?: number; maxExtensionInFlight?: number } = {},
 ): { listener: (req: RequestLike, res: ResponseLike) => void; idle: () => Promise<void> } {
   const maxBody = limits.maxBodyBytes ?? MAX_BODY_BYTES;
   const maxInFlight = limits.maxInFlight ?? MAX_IN_FLIGHT;
+  const maxExtensionBody = limits.maxExtensionBodyBytes ?? EXTENSION_BODY_BYTES;
+  const maxExtensionInFlight = limits.maxExtensionInFlight ?? EXTENSION_IN_FLIGHT;
   const handling = new Set<Promise<void>>();
   let webhooks = 0;
+  const taken = new Map<string, number>();   // places in use, by module name
 
   function answer(res: ResponseLike, a: HttpAnswer, close = false): void {
     try {
@@ -38,9 +55,9 @@ export function createListener(
   }
 
   /** The body, or why there is none: over the limit, or the stream failed. */
-  async function readBody(req: RequestLike): Promise<{ body: Buffer } | { tooLarge: true } | { failed: true }> {
+  async function readBody(req: RequestLike, cap: number): Promise<{ body: Buffer } | { tooLarge: true } | { failed: true }> {
     const declared = firstValues(req.headers)['content-length'];
-    if (declared !== undefined && /^\d+$/.test(declared.trim()) && Number(declared) > maxBody) return { tooLarge: true };
+    if (declared !== undefined && /^\d+$/.test(declared.trim()) && Number(declared) > cap) return { tooLarge: true };
     const chunks: Buffer[] = [];
     let total = 0;
     try {
@@ -52,7 +69,7 @@ export function createListener(
         if (next.done) break;
         const piece = Buffer.isBuffer(next.value) ? next.value : Buffer.from(next.value);
         total += piece.length;
-        if (total > maxBody) return { tooLarge: true };
+        if (total > cap) return { tooLarge: true };
         chunks.push(piece);
       }
     } catch {
@@ -65,7 +82,7 @@ export function createListener(
     if (webhooks >= maxInFlight) return answer(res, { status: 503, body: 'busy' });
     webhooks += 1;
     try {
-      const read = await readBody(req);
+      const read = await readBody(req, maxBody);
       if ('failed' in read) return;
       if ('tooLarge' in read) return answer(res, { status: 413, body: 'payload_too_large' }, true);
       let result: HttpAnswer;
@@ -80,8 +97,78 @@ export function createListener(
     }
   }
 
+  /** A module's answer: its headers over the default type, and the two the service owns set last. */
+  function answerModule(res: ResponseLike, a: CheckedAnswer): void {
+    try {
+      res.writeHead(a.status, {
+        'content-type': HEADERS['content-type'], ...a.headers,
+        'cache-control': 'no-store', 'x-content-type-options': 'nosniff',
+      });
+      res.end(a.body);
+    } catch {
+      // the caller is gone: nothing is owed
+    }
+  }
+
+  /** A request for a module that has a route. Its place is given back once: unread, or when the handler settled. */
+  async function extension(req: RequestLike, res: ResponseLike, name: string, route: ExtensionRoute, rest: string, query: string): Promise<void> {
+    const inUse = taken.get(name) ?? 0;
+    if (inUse >= maxExtensionInFlight) return answer(res, { status: 503, body: 'busy' });
+    taken.set(name, inUse + 1);
+    let given = false;
+    const giveBack = (): void => {
+      if (given) return;
+      given = true;
+      const left = (taken.get(name) ?? 1) - 1;
+      if (left > 0) taken.set(name, left); else taken.delete(name);
+    };
+    let read: Awaited<ReturnType<typeof readBody>>;
+    try {
+      read = await readBody(req, maxExtensionBody);
+    } catch {
+      read = { failed: true };
+    }
+    if ('failed' in read) return giveBack();
+    if ('tooLarge' in read) { giveBack(); return answer(res, { status: 413, body: 'payload_too_large' }, true); }
+    // First values under lower-case names (call 33); defined, not assigned, so no name reaches the prototype.
+    const headers: Record<string, string | undefined> = {};
+    for (const [k, v] of Object.entries(req.headers)) {
+      const lower = k.toLowerCase();
+      if (Object.hasOwn(headers, lower)) continue;
+      Object.defineProperty(headers, lower, { value: Array.isArray(v) ? v[0] : v, enumerable: true, writable: true, configurable: true });
+    }
+    const request: RouteRequest = { method: req.method ?? '', path: rest === '' ? '/' : rest, query, headers, body: read.body };
+    let handled: ReturnType<ExtensionRoute>;
+    try {
+      handled = route(request);
+    } catch {
+      giveBack();
+      return answerModule(res, MODULE_FAILED);
+    }
+    // Not awaited: the caller is answered at the handler's limit, the place waits for the handler itself.
+    Promise.resolve(handled.settled).then(giveBack, giveBack);
+    let result: CheckedAnswer;
+    try {
+      result = await handled.answer;
+    } catch {
+      result = MODULE_FAILED;
+    }
+    answerModule(res, result);
+  }
+
   async function serve(req: RequestLike, res: ResponseLike): Promise<void> {
-    const path = (req.url ?? '').split('?')[0];
+    const url = req.url ?? '';
+    const path = url.split('?')[0] ?? '';
+    if (path.startsWith(PREFIX)) {
+      const after = path.slice(PREFIX.length);
+      const slash = after.indexOf('/');
+      const name = slash === -1 ? after : after.slice(0, slash);
+      const route = routes.extensions?.get(name);
+      if (route !== undefined) {
+        const mark = url.indexOf('?');
+        return extension(req, res, name, route, slash === -1 ? '' : after.slice(slash), mark === -1 ? '' : url.slice(mark + 1));
+      }
+    }
     if (path === '/webhooks/github') {
       if (req.method !== 'POST') return answer(res, { status: 405, body: 'method_not_allowed' });
       return webhook(req, res);
