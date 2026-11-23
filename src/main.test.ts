@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import type { InstanceLock } from './db/types.ts';
 import type { LoadedExtension } from './extensions/types.ts';
-import { boundedFetch, createServer, describeFailure, GITHUB_CALL_MS, guardRejections, HEADERS_TIMEOUT_MS, lockThenLoad, main, rejectionHandler, REQUEST_TIMEOUT_MS, runUntilSignal } from './main.ts';
+import { boundedFetch, createServer, describeFailure, GITHUB_CALL_MS, guardRejections, HEADERS_TIMEOUT_MS, lockThenLoad, main, mcpServersOf, rejectionHandler, REQUEST_TIMEOUT_MS, runUntilSignal } from './main.ts';
 
 async function run(argv: string[], env: Record<string, string | undefined> = {}): Promise<{ code: number; lines: string[] }> {
   const lines: string[] = [];
@@ -175,4 +175,15 @@ test('the handler is registered only when a module was loaded', () => {
   const modules: LoadedExtension[] = [{ name: 'chat', parts: { notify: async () => {} } }];
   const handler = guardRejections(modules, () => {}, (h) => { registered.push(h); });
   assert.deepEqual([typeof handler, registered.length, registered[0] === handler], ['function', 1, true]);
+});
+
+test('the engine is given MCP servers only when the config names some, and nothing is asked until one is opened', async () => {
+  const asked: string[] = [];
+  const fetchFn = ((url: string | URL | Request) => { asked.push(String(url)); return Promise.reject(new Error('refused')); }) as typeof fetch;
+  assert.deepEqual(mcpServersOf([], fetchFn), {});
+  const { mcpServers } = mcpServersOf([{ name: 'docs', url: 'https://docs.example.test/mcp', headers: {}, tools: ['search', 'get_page'] }], fetchFn);
+  assert.deepEqual(mcpServers!.map((s) => [s.name, s.tools]), [['docs', ['search', 'get_page']]]);
+  assert.deepEqual(asked, []);
+  await assert.rejects(mcpServers![0]!.open(new AbortController().signal));
+  assert.deepEqual(asked, ['https://docs.example.test/mcp']);
 });

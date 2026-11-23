@@ -76,3 +76,29 @@ test('the mcp part may not import the GitHub adapter or a Postgres client', asyn
     assert.ok((await lint(`import '${name}';\n`, 'src/mcp/x.ts')).includes('no-restricted-imports'), name);
   }
 });
+test('the eval may not import the mcp part or the service entry, its command line included', async () => {
+  for (const file of ['src/eval/x.ts', 'src/eval/cli.ts', 'src/eval/backtest/x.ts']) {
+    const up = file.split('/').length - 2;
+    const prefix = '../'.repeat(up);
+    for (const target of ['mcp/client.ts', 'mcp/headers.ts', 'main.ts']) {
+      assert.ok((await lint(`import '${prefix}${target}';\n`, file)).includes('no-restricted-imports'), `${file} ${target}`);
+    }
+  }
+});
+test('the MCP client may be imported only by the service entry and by the mcp part', async () => {
+  const refused: Array<[string, string]> = [
+    ['src/service.ts', './mcp/client.ts'], ['src/shell/x.ts', '../mcp/client.ts'], ['src/config/x.ts', '../mcp/client.ts'],
+    ['src/extensions/x.ts', '../mcp/client.ts'], ['src/forge/github/x.ts', '../../mcp/client.ts'], ['src/db/x.ts', '../mcp/client.ts'],
+    ['src/engine/x.ts', '../mcp/client.ts'],
+  ];
+  for (const [file, target] of refused) {
+    assert.ok((await lint(`import '${target}';\n`, file)).includes('no-restricted-imports'), file);
+  }
+  assert.deepEqual(await lint("import './mcp/client.ts';\n", 'src/main.ts'), []);
+  assert.deepEqual(await lint("import './client.ts';\n", 'src/mcp/x.ts'), []);
+  assert.deepEqual(await lint("import '../mcp/headers.ts';\n", 'src/config/x.ts'), []);
+});
+test('the mcp part may not import the service entry', async () => {
+  assert.ok((await lint("import '../main.ts';\n", 'src/mcp/x.ts')).includes('no-restricted-imports'));
+  assert.ok((await lint("import '../main.ts';\n", 'src/mcp/x.test.ts')).includes('no-restricted-imports'));
+});

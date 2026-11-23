@@ -5,7 +5,7 @@ import type { McpServerConfig } from '../config/load.ts';
 import { SUBMIT_REVIEW } from '../engine/model/submit-review.ts';
 import { review } from '../engine/review.ts';
 import type { ChangedFile, ModelRequest, ModelResponse, ReviewDeps, ReviewInput, Source, Usage } from '../engine/types.ts';
-import { mcpServersOf } from '../main.ts';
+import { createMcpServers } from './client.ts';
 
 const URL_ = 'https://docs.example.test/mcp';
 const DOCS: McpServerConfig = { name: 'docs', url: URL_, headers: { Authorization: 'Bearer t0k' }, tools: ['search'] };
@@ -94,7 +94,7 @@ test('a review with a server calls its tool through the real client and comes ba
     source,
     model: { complete: (request) => { requests.push(request); const next = steps[requests.length - 1]; return next === undefined ? Promise.reject(new Error('exhausted')) : Promise.resolve(next); } },
     contract: 'You review pull requests.', clock: () => new Date(0), token: () => TOKEN, log: () => {},
-    ...mcpServersOf([DOCS], server.fetch),
+    mcpServers: createMcpServers([DOCS], { fetch: server.fetch }),
   };
   assert.deepEqual(deps.mcpServers!.map((s) => [s.name, s.tools]), [['docs', ['search']]]);
 
@@ -119,10 +119,4 @@ test('a review with a server calls its tool through the real client and comes ba
   // Nothing of the server's address or headers is in the result.
   const text = JSON.stringify(r);
   assert.equal(text.includes('t0k') || text.includes('docs.example.test') || text.includes(FOUND), false);
-});
-
-test('a config that names no server gives the engine no mcpServers key', () => {
-  const server = playedServer();
-  assert.deepEqual(mcpServersOf([], server.fetch), {});
-  assert.deepEqual(server.seen, []);
 });
