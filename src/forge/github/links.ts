@@ -19,3 +19,14 @@ export function githubCommentUrl(ref: PullRequestRef, commentId: string): string
   if (!/^[0-9]+$/.test(commentId)) throw new Error('github_bad_path');
   return `${GITHUB_WEB}/${ref.owner}/${ref.repo}/pull/${ref.number}#discussion_r${commentId}`;
 }
+
+/** A link to one review of a pull request. */
+export function githubReviewUrl(ref: PullRequestRef, reviewId: string): string {
+  if (!/^[0-9]+$/.test(reviewId)) throw new Error('github_bad_path');
+  return `${githubPullRequestUrl(ref)}#pullrequestreview-${reviewId}`;
+}
+
+/** A link to a pull request. */
+export function githubPullRequestUrl(ref: PullRequestRef): string {
+  return `${GITHUB_WEB}/${ref.owner}/${ref.repo}/pull/${ref.number}`;
+}
