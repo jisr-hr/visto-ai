@@ -494,7 +494,7 @@ Every record has a source reference, a status (`active`, `disabled`, or `expired
 ### 7.3 Learning
 
 - **When a pull request closes:** its human signals are derived. This needs no model call.
-- **When a person comments inside a block the bot scored below the threshold:** the miss is recorded immediately. Both are done by one pass inside the process, every five minutes and when a comment or a close arrives. A miss is recorded at the comment when the review had already scored that commit; otherwise at the close. The scores of a dry run count. A pull request whose signals cannot be made in three passes running is given up and logged.
+- **When a person comments inside a block the bot scored below the threshold:** the miss is recorded immediately. Both are done by one pass inside the process, every five minutes and when a comment or a close arrives. A miss is recorded at the comment when the review had already scored that commit; otherwise at the close. The scores of a dry run count. A pull request whose signals cannot be made in three passes of the timer running, at least ten minutes, is given up and logged; a pass a delivery woke tries it again but does not count.
 - **Nightly:** replies to the bot's findings are judged by a model call into `confirmed_fix`, `valid_pushback`, `invalid_pushback`, `question` or `noise`. A valid pushback may become a lesson. Reverts are detected and expired records are retired.
 
 Guardrails on lessons, inherited, because lessons edit the reviewer's own prompt:
@@ -515,7 +515,7 @@ The learning job reports when it last ran and how many records it added. It keep
 Retrieval is deterministic lookups in Postgres. Every lookup takes an "as of" time. The database is asked for a repository's live records, at most 5,000, and the choice is made in code the eval shares. The two blocks hold only what the service computes: the model is shown no words a person wrote, and a path or a directory only when it is made of letters, digits and the marks ordinary in file names (dot, underscore, slash, hyphen, square brackets, parentheses, `@`, `+`, `$`, `~`), never one with a space, a colon, a quote or a backtick. A name stands in a code span. A pull request is not shown a record made from itself.
 
 - **Repository block.** Stable for a day, so it sits in the cached part of the prompt. It lists the directories and categories where people most often had to step in, with counts. It is counted from the records live at 00:00 UTC of the day, lists at most 10 directories and 8 categories, each from two pull requests up, and is shown only when the pull request block has a line.
-- **Pull request block.** For each changed file: records on the same path, newest first, otherwise records from the nearest directory that has any. Lessons are chosen by shared directory or file type with the changed files first, then by recency. At most 3 records on a file, 2 from the nearest directory, 30 in all. The nearest directory is the deepest one above the file under which a record's file lies, never the repository's root.
+- **Pull request block.** For each changed file: records on the same path, newest first, otherwise records from the nearest directory that has any. Lessons are chosen by shared directory or file type with the changed files first, then by recency. At most 3 records on a file, 2 from the nearest directory, 30 in all. The nearest directory is the deepest one above the file under which a record's file lies, never the repository's root. A record on a file the pull request changes is never a near line of another changed file.
 
 Each block has a fixed size. What is cut is named in the audit list. The predecessor injected lessons newest-first within a size limit, so most of a large repository's lessons never reached the reviewer.
 
@@ -828,7 +828,7 @@ Each stage ends with something that can be measured or shown.
 5. **Gate.**
 6. **Extensions and MCP tools,** including feedback routes.
 7. **Shadow at the first deployment, then cut-over.** Tracked in that deployment's private repository. From here the first deployment runs on this project: findings, the gate, and the score shown in every review, with automatic approval off and no learned records yet. Capture is already storing the human activity that memory and the live numbers need.
-8. **Memory.** Records, learning, retrieval, and the importer's database output. Both evals are re-run with memory "as of" each case. Until the UI exists, a record can be disabled only in the database. A deployment may leave learning off in configuration until stage 10. Built in two plans: memory for the score, then lessons.
+8. **Memory.** Records, learning, retrieval, and the importer's database output. Both evals are re-run with memory "as of" each case. Until the UI exists, a record can be disabled only in the database. A deployment may leave learning off in configuration until stage 10. Cut in two plans: memory for the score, which is built, and lessons, which is next.
 9. **Automatic approval and withdrawal.**
 10. **UI.** Three screens: score numbers per repository, learned records with their kill switch, recent reviews with failures, feedback and dependency health. Sign-in is through the same app, and access is limited to the accounts or the one team named in the deployment config. With neither named, the UI is off.
 
