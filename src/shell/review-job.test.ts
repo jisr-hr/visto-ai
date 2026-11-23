@@ -2002,7 +2002,11 @@ test('a published review is told to every notifier once, as the last thing the j
   const atCall: Array<{ writes: unknown[]; reviewLogged: boolean }> = [];
   const minor = okResult().findings[0]!;
   const h: Harness = await live({
-    result: okResult({ findings: [BLOCKER, minor, { ...minor, line: 4 }], verdict: { threshold: 70, needsHuman: true, highest: 85 } }),
+    // the unplaced major is not one of the findings placed on the diff, and is not counted
+    result: okResult({
+      findings: [BLOCKER, minor, { ...minor, line: 4 }], verdict: { threshold: 70, needsHuman: true, highest: 85 },
+      unplaced: [{ path: 'a.ts', side: 'RIGHT', line: 40, severity: 'major', body: 'Off the diff.', quote: 'z', reason: 'line_not_in_diff' }],
+    }),
     notifiers: [notifier('chat', calls, async () => { atCall.push({ writes: h.writes.map((w) => w[0]), reviewLogged: h.logged.some((e) => e.event === 'review') }); })],
   });
   await runReviewJob(h.job, h.deps);
@@ -2205,4 +2209,29 @@ test('a notifier that throws a value that cannot be read is one notice line with
   const lines = noticeLines(h);
   assert.equal(lines.length, 1);
   assert.deepEqual([lines[0]?.event, lines[0]?.sent, lines[0]?.results], ['notice', true, { chat: 'notifier_failed', pager: 'notifier_failed' }]);
+});
+test('a notice whose sending rejects is one notice_failed line, and the job ends as it would have', async () => {
+  const calls: Calls = [];
+  const h = await live({ notifiers: [notifier('chat', calls)] });
+  h.deps.notice = { ...h.deps.notice!, send: () => Promise.reject(new Error('send_broke')) };
+  await runReviewJob(h.job, h.deps);
+  const [stored] = await listRuns(db, REF);
+  assert.deepEqual([(await getJob(db, h.job.id))?.outcome, stored!.published, calls.length, h.noted], ['published', true, 0, []]);
+  assert.deepEqual(noticeLines(h), [{ event: 'notice_failed', job: h.job.id, run: stored!.id, reason: 'send_broke' }]);
+});
+test('a publication that could not be recorded tells nobody and takes no stamp', async () => {
+  const calls: Calls = [];
+  const h = await live({ markFailures: 3, notifiers: [notifier('chat', calls)] });
+  await runReviewJob(h.job, h.deps);
+  assert.deepEqual([reviewLine(h).outcome, calls, await stamped(), noticeLines(h)], ['record_failed', [], 0, []]);
+});
+test('a notice carries the body that was published and stored, also when GitHub refused the inline comments', async () => {
+  const calls: Calls = [];
+  const h = await live({ posts: [new Error('review_rejected'), { id: '502' }], posted: [], notifiers: [notifier('chat', calls)] });
+  await runReviewJob(h.job, h.deps);
+  const [stored] = await listRuns(db, REF);
+  const first = h.writes.filter((w) => w[0] === 'publishReview')[0]![2];
+  assert.equal(stored!.inlineDropped, true);
+  assert.notEqual(stored!.body, first);
+  assert.deepEqual(calls.map((c) => [(c[2] as ReviewNotice).body, (c[2] as ReviewNotice).reviewUrl]), [[stored!.body, reviewUrlOf(REF, '502')]]);
 });

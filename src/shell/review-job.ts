@@ -69,6 +69,8 @@ export interface ReviewJobDeps {
     pullRequestUrl: (ref: PullRequestRef) => string;
     /** For tests; passed on to sendNotice, whose own default is 10 seconds. */
     timeoutMs?: number;
+    /** For tests; absent: sendNotice. */
+    send?: typeof sendNotice;
   };
   /** Told how each module did; absent when the deployment has none. */
   extensionHealth?: Pick<ExtensionHealth, 'noted'>;
@@ -342,7 +344,14 @@ export async function runReviewJob(job: Job, deps: ReviewJobDeps): Promise<void>
         log({ event: 'notice', job: job.id, run: target.id, sent: false });
         return;
       }
-      const outcomes = await sendNotice(notice.notifiers, built, notice.timeoutMs);
+      let outcomes: Awaited<ReturnType<typeof sendNotice>>;
+      try {
+        outcomes = await (notice.send ?? sendNotice)(notice.notifiers, built, notice.timeoutMs);
+      } catch (error) {
+        // sendNotice never rejects; the job does not depend on it
+        log({ event: 'notice_failed', job: job.id, run: target.id, reason: codeOf(error) });
+        return;
+      }
       const results: Record<string, string> = {};
       for (const o of outcomes) results[o.name] = o.code;
       log({ event: 'notice', job: job.id, run: target.id, review: reviewId, sent: true, results });
