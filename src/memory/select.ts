@@ -2,7 +2,7 @@
 // the changed files, and the lists of the directories and kinds of change where people stepped in most.
 // Pure: no database, no clock, no input or output. The service and the eval both run it, so they cannot disagree.
 // A line carries only what the service computed: a printable path, a day, a category, whether it was a miss.
-import type { Memory, MemoryBlocks, MemoryCount, MemoryLine } from '../engine/types.ts';
+import type { Memory, MemoryBlocks, MemoryCount, MemoryLessons, MemoryLine } from '../engine/types.ts';
 import {
   MEMORY_CATEGORIES,
   MEMORY_DIRECTORIES,
@@ -13,6 +13,7 @@ import {
   MEMORY_NEAR_PER_FILE,
 } from '../engine/context/memory.ts';
 import { CATEGORIES } from '../engine/score/types.ts';
+import { LESSONS_READ, lessonsFor, newestLessons, type LiveLesson } from './lessons.ts';
 
 export const RECORDS_READ = 5_000;            // live records of one repository that are read
 
@@ -20,6 +21,8 @@ export interface LiveRecord { ref: string; number: number; path: string; directo
 export interface RecordSource {
   /** The repository's signals live at `at`, in any order; RECORDS_READ + 1 at most, the newest when there are more. May reject. */
   live(at: Date): Promise<LiveRecord[]>;
+  /** The repository's lessons live at `at`, in any order; LESSONS_READ + 1 at most, the newest when there are more. May reject. Absent: the repository has no lessons. */
+  lessons?(at: Date): Promise<LiveLesson[]>;
 }
 type File = { path: string; previousPath: string | null };
 
@@ -178,21 +181,23 @@ export function countsOf(records: LiveRecord[]): { directories: MemoryCount[]; c
   return { directories: d.list, categories: c.list, cut: { directories: d.cut, categories: c.cut }, names };
 }
 
-// The records of other pull requests, the newest RECORDS_READ of them; `cut` when there were more.
-function kept(records: LiveRecord[], own: number): { records: LiveRecord[]; cut: boolean } {
-  const others = records.filter((record) => record.number !== own);
-  if (others.length <= RECORDS_READ) return { records: others, cut: false };
-  // The records that have no time sort last: they are the first left out, and linesFor would pass over them anyway.
-  const withTime = dated(others).map((entry) => entry.record);
-  const without = others.filter((record) => timeOf(record) === null);
-  return { records: [...withTime, ...without].slice(0, RECORDS_READ), cut: true };
+// The entries of other pull requests, the newest `limit` of them; `cut` when there were more.
+function kept<T extends { number: number; createdAt: string }>(entries: T[], own: number, limit: number, newest: (list: T[]) => T[]): { records: T[]; cut: boolean } {
+  const others = entries.filter((entry) => entry.number !== own);
+  if (others.length <= limit) return { records: others, cut: false };
+  // The entries that have no time sort last: they are the first left out, and the choice would pass over them anyway.
+  const withTime = newest(others);
+  const without = others.filter((entry) => readTime(entry.createdAt) === null);
+  return { records: [...withTime, ...without].slice(0, limit), cut: true };
 }
+const keptRecords = (records: LiveRecord[], own: number) => kept(records, own, RECORDS_READ, (list) => dated(list).map((entry) => entry.record));
+const keptLessons = (lessons: LiveLesson[], own: number) => kept(lessons, own, LESSONS_READ, (list) => newestLessons(list).map((entry) => entry.lesson));
 
 /** A memory over one repository's records, for a review of the pull request `own`. */
 export function createMemory(source: RecordSource, own: number): Memory {
-  return {
+  const memory: Memory = {
     async blocks(files, asOf, signal): Promise<MemoryBlocks> {
-      const now = kept(await source.live(asOf), own);
+      const now = keptRecords(await source.live(asOf), own);
       const lines = linesFor(files, now.records);
       // Nothing is shown, and the answer still says what was passed over: the unprintable records, and the read's limit.
       if (lines.lines.length === 0) {
@@ -200,7 +205,7 @@ export function createMemory(source: RecordSource, own: number): Memory {
       }
       // A review that stopped waiting costs no second read.
       signal.throwIfAborted();
-      const day = kept(await source.live(dayStart(asOf)), own);
+      const day = keptRecords(await source.live(dayStart(asOf)), own);
       const counts = countsOf(day.records);
       return {
         repository: { directories: counts.directories, categories: counts.categories },
@@ -215,4 +220,12 @@ export function createMemory(source: RecordSource, own: number): Memory {
       };
     },
   };
+  // Only a source that has lessons gives a memory that has them: without, a review is what it was.
+  if (typeof source.lessons !== 'function') return memory;
+  memory.lessons = async (files, asOf): Promise<MemoryLessons> => {
+    const read = keptLessons(await source.lessons!(asOf), own);
+    const chosen = lessonsFor(files, read.records);
+    return { lessons: chosen.lessons, cut: { lessons: chosen.cut, names: chosen.names, records: read.cut } };
+  };
+  return memory;
 }
