@@ -5,7 +5,7 @@
 // result is read field by field inside a guard, cleaned, cut and wrapped with the review's token.
 import type { AuditEntry, McpServer, McpState, McpStatus, PullRequestInfo, ToolCall, ToolDefinition } from '../types.ts';
 import { cutAt } from '../context/extensions.ts';
-import { stripControl, wrapData } from '../context/untrusted.ts';
+import { deleteToken, stripControl, wrapData } from '../context/untrusted.ts';
 
 export const TOOL_NAME_CHARS = 64;               // the longest function name an endpoint takes
 export const TOOL_DESCRIPTION_CHARS = 1_000;
@@ -156,13 +156,6 @@ export function offerTools(server: string, allowed: string[], listed: unknown, t
   return { offered, audit, problem };
 }
 
-// Deletion can join the pieces around an occurrence into a new one, so it is repeated until none is left.
-function deleteToken(text: string, token: string): string {
-  let result = text;
-  while (result.includes(token)) result = result.replaceAll(token, '');
-  return result;
-}
-
 // A result's text as it is shown, before it is cut: stripped first, since an invisible character can hide a token
 // that stripping then joins; made well formed; the token deleted; trimmed.
 const cleanResult = (text: string, token: string): string => deleteToken(stripControl(text).text.toWellFormed(), token).trim();
@@ -282,13 +275,14 @@ const SHORT_CODE = /^[a-z][a-z0-9_]{0,39}$/;
 const CODE_CHARS = 30;   // the longest code of a server's or a client's that is kept
 const isKeptCode = (v: unknown): v is string => typeof v === 'string' && v.length <= CODE_CHARS && SHORT_CODE.test(v);
 
-type Settled = { kind: 'value'; value: unknown } | { kind: 'error'; error: unknown } | { kind: 'timeout' };
+type Settled = { kind: 'value'; value: unknown } | { kind: 'error'; error: unknown } | { kind: 'timeout' } | { kind: 'stopped' };
 
 // Starts `start` with a signal that aborts at `ms`, and stops waiting at `ms` whatever it does. Never rejects.
 // What `start` returns is only ever resolved into a promise of our own, so a hostile thenable, or a throw
 // before any promise is returned, is a rejection here and never a throw. `late` is given a value that
-// arrives after the limit.
-function within(start: (signal: AbortSignal) => unknown, ms: number, late?: (value: unknown) => void): Promise<Settled> {
+// arrives after the limit. While it runs, `running` holds a function that aborts its signal and ends it as
+// `stopped` at once.
+function within(start: (signal: AbortSignal) => unknown, ms: number, late?: (value: unknown) => void, running?: Set<() => void>): Promise<Settled> {
   return new Promise((resolve) => {
     const controller = new AbortController();
     let done = false;
@@ -296,8 +290,14 @@ function within(start: (signal: AbortSignal) => unknown, ms: number, late?: (val
       if (done) return;
       done = true;
       clearTimeout(timer);
+      running?.delete(stop);
       resolve(settled);
     };
+    const stop = (): void => {
+      controller.abort();
+      finish({ kind: 'stopped' });
+    };
+    running?.add(stop);
     const timer = setTimeout(() => {
       controller.abort();
       finish({ kind: 'timeout' });
@@ -374,7 +374,7 @@ const openCode = (settled: Settled): string => {
 // The code of what a sent call gave, or the message when it gave a result. Never throws.
 function readAnswer(fn: string, settled: Settled, token: string): { content: string; reason: string } | { code: string } {
   if (settled.kind === 'timeout') return { code: 'timeout' };
-  if (settled.kind === 'error') return { code: 'failed' };
+  if (settled.kind !== 'value') return { code: 'failed' };
   try {
     const answer = settled.value;
     if (typeof answer !== 'object' || answer === null) return { code: 'failed' };
@@ -453,6 +453,7 @@ export async function openTools(servers: McpServer[], pr: PullRequestInfo, limit
   let left = MCP_CALLS_PER_REVIEW;
   let withheld = false;
   let closing: Promise<void> | null = null;
+  const running = new Set<() => void>();   // one stop for each call under way
 
   const refuse = (subject: string, reason: string, content: string, stop: ToolOutcome['stop'] = null): ToolOutcome =>
     ({ content, audit: { stage: 'tools', action: 'tool_call_refused', subject, reason }, stop, sent: false });
@@ -472,7 +473,12 @@ export async function openTools(servers: McpServer[], pr: PullRequestInfo, limit
     left -= 1;
     state.calls += 1;
     const session = state.session;
-    const settled = await within((signal) => Reflect.apply(session.call, session.self, [tool, args, signal]), callMs);
+    const settled = await within((signal) => Reflect.apply(session.call, session.self, [tool, args, signal]), callMs, undefined, running);
+    // A call that ends once the close has begun, stopped by it or not, changes nothing: what the statuses say
+    // at the close stays. Its caller is told it failed as closed.
+    if (closing !== null || settled.kind === 'stopped') {
+      return { content: failedText('closed'), audit: { stage: 'tools', action: 'tool_call', subject, reason: 'closed' }, stop: 'tool_error', sent: true };
+    }
     const answer = readAnswer(subject, settled, token);
     if ('content' in answer) return { content: answer.content, audit: { stage: 'tools', action: 'tool_call', subject, reason: answer.reason }, stop: null, sent: true };
     state.failed = true;
@@ -500,6 +506,8 @@ export async function openTools(servers: McpServer[], pr: PullRequestInfo, limit
     },
     close() {
       closing ??= (async () => {
+        // Every call under way is stopped before any session is closed, so no request outlives the review.
+        for (const stop of [...running]) stop();
         const sessions = states.flatMap((s) => (s.session === null ? [] : [s.session]));
         await Promise.all(sessions.map((session) => closeSession(session, closeMs)));
       })();

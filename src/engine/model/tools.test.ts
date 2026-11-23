@@ -734,3 +734,35 @@ test('closing closes every session once, at the same time, whatever a close does
   await partial.close();
   assert.deepEqual(closes(missing), [['close']]);
 });
+
+test('closing stops every call still under way, and the statuses do not change after it', async () => {
+  const hanging = fake('docs', ['search'], { answer: () => never() });
+  const tools = await openTools([hanging.server], pr, { callMs: 200 });
+  const started = performance.now();
+  const pending = tools.run(call('docs__search'), TOKEN, true);
+  const signal = hanging.signals[1]!;
+  tools.withhold('skipped', 'no_room');
+  await tools.close();
+  assert.equal(signal.aborted, true);
+  const atClose = tools.statuses();
+  assert.deepEqual(atClose, { docs: { status: 'skipped', code: 'no_room', calls: 1 } });
+  const outcome = await pending;
+  assert.ok(performance.now() - started < 150);
+  assert.equal(outcome.content, failedText('closed'));
+  assert.deepEqual(outcome.audit, { stage: 'tools', action: 'tool_call', subject: 'docs__search', reason: 'closed' });
+  assert.equal(outcome.stop, 'tool_error');
+  assert.equal(outcome.sent, true);
+  await wait(220);
+  assert.deepEqual(tools.statuses(), atClose);
+  assert.deepEqual(tools.audit, []);
+  assert.deepEqual(closes(hanging), [['close']]);
+
+  // A call that settles with an error while the sessions are being closed changes nothing either.
+  let fail!: (answer: McpAnswer) => void;
+  const late = fake('docs', ['search'], { answer: () => new Promise<McpAnswer>((r) => { fail = r; }), close: async () => { fail({ ok: false, code: 'rpc_32603' }); await wait(1); } });
+  const other = await openTools([late.server], pr, { callMs: 200 });
+  const running = other.run(call('docs__search'), TOKEN, true);
+  await other.close();
+  assert.equal((await running).audit.reason, 'closed');
+  assert.deepEqual(other.statuses(), { docs: { status: 'ok', code: 'ok', calls: 1 } });
+});
