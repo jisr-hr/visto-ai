@@ -14,7 +14,9 @@ import type { ShownThread } from './context/threads.ts';
 import { buildMessages, fixedTokens, headerStripCounts } from './context/prompt.ts';
 import { MEASURE_TOKEN } from './context/section.ts';
 import { callBatch } from './model/call.ts';
-import type { BatchAnswer } from './model/call.ts';
+import type { BatchAnswer, ToolLoop } from './model/call.ts';
+import { TOOL_ROOM_MARGIN_TOKENS, TOOL_ROOM_TOKENS, TOOL_RULES, openTools, toolRoomTokens } from './model/tools.ts';
+import type { ReviewTools } from './model/tools.ts';
 import type { SubmitReviewArgs } from './model/submit-review.ts';
 import { NOTHING_READ, filesToSend } from './plan.ts';
 import { inPool } from './pool.ts';
@@ -31,7 +33,8 @@ import { shownOf } from './score/shown.ts';
 import type { ScoredBy, ScoreEntry, ScoreHistory } from './score/types.ts';
 import { askScorer, summariesOf } from './scorer/ask.ts';
 import type {
-  AcceptanceRow, AuditEntry, ChangedFile, Discussed, EarlierThread, Effort, ExtensionStatus, Finding, NotReviewed, PullRequestInfo, RepoConfig, ReviewDeps, ReviewInput, ReviewResult, Severity, Side, Source, Usage,
+  AcceptanceRow, AuditEntry, ChangedFile, Discussed, EarlierThread, Effort, ExtensionStatus, Finding, NotReviewed, PullRequestInfo, RepoConfig, ReviewDeps, ReviewInput, ReviewResult, Severity, Side, Source,
+  ToolDefinition, Usage,
 } from './types.ts';
 
 const CONCURRENCY = 2;
@@ -121,6 +124,15 @@ interface Run {
   lastOverview: string | undefined; // the last review's overview, shown in every call's header; undefined when there is none to show
   extension: ExtensionContext | undefined; // what the context providers gave, as it is shown in every call's header; undefined when nothing is
   withAcceptance: boolean; // the criteria are shown: the run's calls take the tool with rows
+  tools: Offered | undefined; // the servers' tools, when the review offers them; undefined when it offers none
+}
+
+// The tools a review offers, shared by its batches: one count of calls for the whole review (5.4, 12).
+interface Offered {
+  review: ReviewTools;
+  definitions: ToolDefinition[]; // never empty
+  system: string;                // the system message of a call that is offered them: the contract, then the rules for tools
+  withheld: boolean;             // set once the endpoint refused them: no call is offered them from then on (call 21)
 }
 
 // A failing logger must never change a review.
@@ -132,23 +144,34 @@ function safeLog(deps: ReviewDeps, entry: Record<string, unknown>): void {
   }
 }
 
-async function oneCall(run: Run, files: FileContext[], firstFileNumber: number, batchIndex: number): Promise<BatchAnswer> {
+// `withTools`: the batch's first call, which is offered the review's tools while they are not withheld. Every
+// other call is made as in a review with no server. `given` says whether this one was offered them.
+async function oneCall(run: Run, files: FileContext[], firstFileNumber: number, batchIndex: number, withTools = false): Promise<BatchAnswer & { given: boolean }> {
   const batch: Batch = { files, tokens: 0 };
+  const offered = withTools && run.tools !== undefined && !run.tools.withheld ? run.tools : undefined;
+  const loop: ToolLoop | undefined = offered === undefined ? undefined : {
+    definitions: offered.definitions,
+    run: (call, open) => offered.review.run(call, run.token, open),
+    now: () => run.deps.clock().getTime(),
+    room: TOOL_ROOM_TOKENS - TOOL_ROOM_MARGIN_TOKENS,
+  };
   const messages = buildMessages({
-    contract: run.deps.contract, pr: run.pr, fileCount: run.fileCount, firstFileNumber, batch,
+    contract: offered === undefined ? run.deps.contract : offered.system, pr: run.pr, fileCount: run.fileCount, firstFileNumber, batch,
     batchIndex, batchCount: run.batchCount, token: run.token, ...(run.lastOverview === undefined ? {} : { lastOverview: run.lastOverview }),
     ...(run.extension === undefined ? {} : { extension: run.extension }),
   });
   const answer = await callBatch(
     { messages, effort: run.effort, timeoutMs: run.limits.modelTimeoutSeconds * 1000, prPaths: files.map((f) => f.file.path), ...(run.withThreads ? { withThreads: true } : {}),
-      ...(run.withAcceptance ? { withAcceptance: true } : {}), ...(run.deps.toolChoice === undefined ? {} : { toolChoice: run.deps.toolChoice }) },
+      ...(run.withAcceptance ? { withAcceptance: true } : {}), ...(run.deps.toolChoice === undefined ? {} : { toolChoice: run.deps.toolChoice }),
+      ...(loop === undefined ? {} : { tools: loop }) },
     run.deps.model,
   );
   safeLog(run.deps, {
     event: 'model_call', files: files.length, effort: run.effort, code: answer.ok ? 'ok' : answer.code, usage: answer.usage,
     model: answer.models.at(-1) ?? null, provider: answer.providers.at(-1) ?? null,
+    ...(loop === undefined ? {} : { tool_calls: answer.audit.filter((e) => e.stage === 'tools' && e.action === 'tool_call').length }),
   });
-  return answer;
+  return { ...answer, given: loop !== undefined };
 }
 
 // Never rejects: an unexpected error is recorded in `ctl`, which stops every worker from starting more work.
@@ -187,7 +210,7 @@ async function attempt(run: Run, ctl: Control, out: BatchOutcome, batch: Batch, 
     if (code === 'auth' || code === 'no_credit') ctl.stopped = true;
   };
 
-  const first = await oneCall(run, batch.files, firstFileNumber, batchIndex);
+  const first = await oneCall(run, batch.files, firstFileNumber, batchIndex, true);
   take(first, batch.files);
   if (first.ok) return;
   if (first.code === 'auth' || first.code === 'no_credit') ctl.stopped = true;
@@ -209,6 +232,13 @@ async function attempt(run: Run, ctl: Control, out: BatchOutcome, batch: Batch, 
       const answer = await oneCall(run, part, number, batchIndex);
       take(answer, part);
       if (!answer.ok) giveUp(answer.code, part);
+      // A first call offered tools that the endpoint refused, and a second try without them that worked: the
+      // endpoint is taken to refuse the tools, which are withheld for the rest of the review (call 21).
+      if (answer.ok && first.given && first.code === 'provider' && run.tools !== undefined && !run.tools.withheld) {
+        run.tools.withheld = true;
+        run.tools.review.withhold('error', 'model_refused_tools');
+        out.audit.push({ stage: 'model', action: 'tools_refused', subject: 'batch', reason: 'provider' });
+      }
     }
     number += part.length;
   }
@@ -328,14 +358,32 @@ function chooseRoom(
   return { packed, shown, audit };
 }
 
+// What a review asked of its dependencies: the providers' statuses once they are asked, and the servers' tools once they are opened.
+interface Asked { statuses?: Record<string, ExtensionStatus>; tools?: ReviewTools }
+
 export async function review(input: ReviewInput, deps: ReviewDeps): Promise<ReviewResult> {
-  // Set once the providers are asked: every result returned from then on says how each of them did.
-  const asked: { statuses?: Record<string, ExtensionStatus> } = {};
-  const result = await reviewOnce(input, deps, asked);
-  return asked.statuses === undefined ? result : { ...result, dependencies: { ...result.dependencies, extensions: asked.statuses } };
+  // Set once the providers are asked, or the servers opened: every result returned from then on says how each of them did.
+  const asked: Asked = {};
+  let result: ReviewResult;
+  try {
+    result = await reviewOnce(input, deps, asked);
+  } finally {
+    // Every session is ended before the review returns, whatever happened; a close that fails changes nothing.
+    if (asked.tools !== undefined) {
+      try {
+        await asked.tools.close();
+      } catch {
+        // ignored on purpose: close never rejects, and the review is not failed if it did
+      }
+    }
+  }
+  if (asked.statuses !== undefined) result = { ...result, dependencies: { ...result.dependencies, extensions: asked.statuses } };
+  // Read once the sessions are closed: a call ended by the close changes no status.
+  if (asked.tools !== undefined) result = { ...result, dependencies: { ...result.dependencies, mcp: asked.tools.statuses() } };
+  return result;
 }
 
-async function reviewOnce(input: ReviewInput, deps: ReviewDeps, asked: { statuses?: Record<string, ExtensionStatus> }): Promise<ReviewResult> {
+async function reviewOnce(input: ReviewInput, deps: ReviewDeps, asked: Asked): Promise<ReviewResult> {
   let stage: 'context' | 'model' = 'context';
   const sourceErrors = new Set<unknown>(); // what the source rejected with; a caught probe failure is not fatal
   let usage = zeroUsage();
@@ -442,8 +490,30 @@ async function reviewOnce(input: ReviewInput, deps: ReviewDeps, asked: { statuse
         (shown) => input.limits.inputTokensPerCall - fixedTokens(deps.contract, pr, withThreads, lastOverview, shown),
         (b) => packBatches(plan.send, b, input.limits.batchesPerReview),
       );
-    const packed = room.packed;
-    audit.push(...built.audit, ...reuseAudit, ...attached.audit, ...leftOutAudit, ...packed.audit, ...room.audit);
+    let packed = room.packed;
+    // The servers are opened once for the review, only when it will call the model. Their tools are offered only
+    // when their definitions and the room for what the open turns append cost the files nothing (5.3, call 14).
+    const toolsAudit: AuditEntry[] = [];
+    let offered: Offered | undefined;
+    const servers = deps.mcpServers ?? [];
+    if (servers.length > 0 && packed.batches.length > 0) {
+      const opened = await openTools(servers, pr);
+      asked.tools = opened;
+      toolsAudit.push(...opened.audit);
+      if (opened.definitions.length > 0) {
+        const system = `${deps.contract}\n\n${TOOL_RULES}`;
+        const withTools = input.limits.inputTokensPerCall - fixedTokens(system, pr, withThreads, lastOverview, room.shown) - toolRoomTokens(opened.definitions);
+        const again = withTools > 0 ? packBatches(plan.send, withTools, input.limits.batchesPerReview) : null;
+        if (again !== null && JSON.stringify([again.notReviewed, again.audit]) === JSON.stringify([packed.notReviewed, packed.audit])) {
+          packed = again;
+          offered = { review: opened, definitions: opened.definitions, system, withheld: false };
+        } else {
+          opened.withhold('skipped', 'no_room');
+          toolsAudit.push({ stage: 'context', action: 'tools_cut', subject: 'tools', reason: 'over_call_budget' });
+        }
+      }
+    }
+    audit.push(...built.audit, ...reuseAudit, ...attached.audit, ...leftOutAudit, ...packed.audit, ...room.audit, ...toolsAudit);
     // A covered file that found no room was read, as it is, by an earlier review: it is left out too.
     const roomless = plan.send.filter((c) => c.kept?.covered === true && packed.notReviewed.some((n) => n.path === c.file.path && n.reason === 'over_batch_limit'));
     audit.push(...roomless.flatMap(leaveOut));
@@ -471,7 +541,7 @@ async function reviewOnce(input: ReviewInput, deps: ReviewDeps, asked: { statuse
       contexts: built.contexts, limits: input.limits,
       effort: chooseEffort(pr, files, input.repoConfig), token: deps.token(), pr, deps,
       fileCount: packed.batches.reduce((n, b) => n + b.files.length, 0), batchCount: packed.batches.length, withThreads, lastOverview,
-      extension: room.shown, withAcceptance: (room.shown?.criteria.length ?? 0) > 0,
+      extension: room.shown, withAcceptance: (room.shown?.criteria.length ?? 0) > 0, tools: offered,
     };
     const firsts: number[] = [];
     let seen = 0;

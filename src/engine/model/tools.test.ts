@@ -3,7 +3,11 @@ import test from 'node:test';
 import {
   ERROR_EMPTY, ERROR_LINE, failedText, MCP_CALL_MS, MCP_CALLS_PER_REVIEW, MCP_CLOSE_MS, MCP_OPEN_MS, NOT_RUN_ARGUMENTS, NOT_RUN_CAP, NOT_RUN_CLOSED, NOT_RUN_UNKNOWN,
   offerTools, openTools, RESULT_EMPTY, resultMessage, TOOL_ARGUMENTS_CHARS, TOOL_DESCRIPTION_CHARS, TOOL_ITEMS_READ, TOOL_NAME_CHARS, TOOL_RESULT_CHARS, TOOL_SCHEMA_CHARS,
+  TOOL_ROOM_MARGIN_TOKENS, TOOL_ROOM_TOKENS, toolRoomTokens,
 } from './tools.ts';
+import { FINAL_LINE } from './call.ts';
+import { estimateTokens } from '../context/batches.ts';
+import { wrapData } from '../context/untrusted.ts';
 import type { McpAnswer, McpServer, McpSession, PullRequestInfo, ToolCall } from '../types.ts';
 
 const TOKEN = 'abcdef0123456789';
@@ -765,4 +769,14 @@ test('closing stops every call still under way, and the statuses do not change a
   await other.close();
   assert.equal((await running).audit.reason, 'closed');
   assert.deepEqual(other.statuses(), { docs: { status: 'ok', code: 'ok', calls: 1 } });
+});
+
+test('the room kept for tools holds eight cut results, and its margin the result that crosses the line', () => {
+  const one = estimateTokens(JSON.stringify(wrapData(`tool result ${'x'.repeat(TOOL_NAME_CHARS)}`, `${'x'.repeat(TOOL_RESULT_CHARS)} [cut]`, TOKEN)));
+  assert.deepEqual([TOOL_ROOM_TOKENS, TOOL_ROOM_MARGIN_TOKENS], [30_000, 3_000]);
+  assert.ok(TOOL_ROOM_MARGIN_TOKENS >= one + estimateTokens(JSON.stringify(FINAL_LINE)));
+  assert.ok(TOOL_ROOM_TOKENS - TOOL_ROOM_MARGIN_TOKENS >= MCP_CALLS_PER_REVIEW * one);
+  const defs = offerTools('docs', ['search', 'get_page'], [tool('search'), tool('get_page')], none).offered.map((o) => o.definition);
+  assert.equal(toolRoomTokens(defs), estimateTokens(JSON.stringify(defs)) + TOOL_ROOM_TOKENS);
+  assert.equal(toolRoomTokens([]), estimateTokens('[]') + TOOL_ROOM_TOKENS);
 });
