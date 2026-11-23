@@ -512,6 +512,9 @@ async function reviewOnce(input: ReviewInput, deps: ReviewDeps, asked: Asked): P
           toolsAudit.push({ stage: 'context', action: 'tools_cut', subject: 'tools', reason: 'over_call_budget' });
         }
       }
+      // With no tool to call, the sessions are ended now, not after the review: the statuses are final. The close in
+      // `review`'s finally then has nothing left to end.
+      if (offered === undefined) await opened.close();
     }
     audit.push(...built.audit, ...reuseAudit, ...attached.audit, ...leftOutAudit, ...packed.audit, ...room.audit, ...toolsAudit);
     // A covered file that found no room was read, as it is, by an earlier review: it is left out too.
@@ -632,7 +635,13 @@ async function reviewOnce(input: ReviewInput, deps: ReviewDeps, asked: Asked): P
   } catch (error) {
     let code = 'internal_error';
     if (stage === 'context' && sourceErrors.has(error)) code = errorCode(error);
-    const name = error instanceof Error ? error.name : 'unknown';
+    let name = 'unknown';
+    try {
+      // An error whose name cannot be read is named unknown.
+      if (error instanceof Error) name = error.name;
+    } catch {
+      name = 'unknown';
+    }
     safeLog(deps, { event: 'internal_error', stage, name });
     return failedResult(stage, code, usage, audit, 'ok', input.repoConfig.scoreThreshold, due, said, answered);
   }

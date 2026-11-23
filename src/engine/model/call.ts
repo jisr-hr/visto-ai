@@ -231,9 +231,12 @@ async function callWithTools(
       reason = verdict.reason;
       if (attempt === 1) break;
       audit.push({ stage: 'model', action: 'retry', subject: 'batch', reason });
+      // An answer to a request that left the choice to the model is never sent back empty, under forced too: some endpoints
+      // refuse an assistant message with empty content.
+      const shown = rejectedText(judged.answer, auto);
       const asked = request([
         ...judged.asked.messages,
-        { role: 'assistant', content: rejectedText(judged.answer, auto) },
+        { role: 'assistant', content: shown === '' && judged.asked.forcedTool === null ? '(no answer)' : shown },
         rejectionLine(reason),
       ], true);
       const response = await ask(asked);

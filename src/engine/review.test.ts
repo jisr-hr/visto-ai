@@ -2312,14 +2312,19 @@ test('the sessions are closed when the review fails, when a model call throws, a
     assert.deepEqual(docs.log.at(-1), ['close']);
     assert.ok(r.dependencies.mcp !== undefined);
   }
-  // reviewOnce never closes a session itself, and it turns every error into a failed result. An error whose name
-  // throws when it is read escapes even that, and review rejects: the session is closed all the same, last.
+  // reviewOnce turns every error into a failed result, an error whose name throws when it is read included: it ends
+  // as the same failed result as any other unexpected error, and the session is closed all the same, last.
   const hostile = new Error('boom');
   Object.defineProperty(hostile, 'name', { get() { throw new Error('trap'); } });
   const docs = fakeServer();
   const d = deps({ files: [fileA], answers: [callsTools(searchCall('c1')), () => { throw hostile; }], mcpServers: [docs.server] });
   logRequests(d, docs);
-  await assert.rejects(review(own, d), /trap/);
+  const r = await review(own, d);
+  const plainDocs = fakeServer();
+  const plain = await review(own, deps({ files: [fileA], answers: [callsTools(searchCall('c1')), () => { throw new Error('boom'); }], mcpServers: [plainDocs.server] }));
+  assert.deepEqual([r.status, r.failure, r.usage, r.dependencies], [plain.status, plain.failure, plain.usage, plain.dependencies]);
+  assert.equal(r.status, 'failed');
+  assert.ok(d.logged.some((e) => e.event === 'internal_error' && e.name === 'unknown'));
   assert.deepEqual(docs.log, [['open'], ['request'], ['call', 'search', { query: 'cart' }], ['request'], ['close']]);
 });
 
@@ -2572,4 +2577,20 @@ test('with a scorer the scorer is sent no tool and no result', async () => {
   assert.equal(withTools.requests.length, 1);
   assert.deepEqual(withTools.requests, without.requests);
   assert.doesNotMatch(JSON.stringify(withTools.requests), /search result|docs__search/);
+});
+
+test('the sessions are closed at once when no tool can be called: no room, and no named tool offered', async () => {
+  const bare = await unitOf(fileA, false);
+  const noRoom = limitsOf(fixedTokens(SYSTEM_WITH_TOOLS, own.pullRequest) + toolRoomTokens([docsSearch]) + bare);
+  const cases: Array<[FakeServer, ReviewInput, string]> = [
+    [fakeServer(), noRoom, 'no_room'],
+    [fakeServer({ tools: ['get_page'], listed: ['search'] }), own, 'tool_not_listed'],
+  ];
+  for (const [docs, inp, code] of cases) {
+    const d = withContent(deps({ files: [fileA], answers: [answerOnA], mcpServers: [docs.server] }));
+    logRequests(d, docs);
+    const r = await review(inp, d);
+    assert.deepEqual(docs.log, [['open'], ['close'], ['request']], code);
+    assert.equal(r.dependencies.mcp!.docs!.code, code);
+  }
 });

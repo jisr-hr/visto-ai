@@ -5,7 +5,7 @@
 // result is read field by field inside a guard, cleaned, cut and wrapped with the review's token.
 import type { AuditEntry, McpServer, McpState, McpStatus, PullRequestInfo, ToolCall, ToolDefinition } from '../types.ts';
 import { estimateTokens } from '../context/batches.ts';
-import { cutAt } from '../context/extensions.ts';
+import { cutAt, FROM_FORK, ORIGIN_UNKNOWN } from '../context/extensions.ts';
 import { deleteToken, stripControl, wrapData } from '../context/untrusted.ts';
 
 export const TOOL_NAME_CHARS = 64;               // the longest function name an endpoint takes
@@ -157,9 +157,14 @@ export function offerTools(server: string, allowed: string[], listed: unknown, t
   return { offered, audit, problem };
 }
 
+// For a tool's result only: every default-ignorable code point, a wider set than stripControl's, which leaves some (U+FE0F,
+// U+034F, U+3164) that would let a server write a look-alike of the end marker. The pull request's own text keeps them.
+const DEFAULT_IGNORABLE = /\p{Default_Ignorable_Code_Point}/gu;
+
 // A result's text as it is shown, before it is cut: stripped first, since an invisible character can hide a token
 // that stripping then joins; made well formed; the token deleted; trimmed.
-const cleanResult = (text: string, token: string): string => deleteToken(stripControl(text).text.toWellFormed(), token).trim();
+const cleanResult = (text: string, token: string): string =>
+  deleteToken(stripControl(text).text.replace(DEFAULT_IGNORABLE, '').toWellFormed(), token).trim();
 
 // The raw text of a result and whether it was cut on the way, or null when it has no shape this reads.
 // May throw, when the result throws as it is read: the caller's guard makes that no result.
@@ -420,7 +425,7 @@ export async function openTools(servers: McpServer[], pr: PullRequestInfo, limit
 
   // A pull request from a fork, or one whose origin is not known, is given no tool: what a tool returns could be posted.
   if (pr.fromFork !== false) {
-    const code = pr.fromFork === true ? 'from_fork' : 'origin_unknown';
+    const code = pr.fromFork === true ? FROM_FORK : ORIGIN_UNKNOWN;
     for (const state of states) state.code = code;
   } else {
     // Every open is started before any is awaited. A session that arrives after its limit is closed at once.

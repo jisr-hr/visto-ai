@@ -502,3 +502,25 @@ test('none of the eight header names the config may not give is sent, in any let
     for (const name of ['content-length', 'host', 'connection', 'transfer-encoding']) assert.equal(c.headers.has(name), false);
   }
 });
+
+test('a reply to a request the server sends during initialize carries the session the answer issued, and an unusable one is not sent', async () => {
+  const initStream = (id: unknown, session: string) =>
+    new Response(
+      `data: ${JSON.stringify({ jsonrpc: '2.0', id: 'p', method: 'ping' })}\n\ndata: ${JSON.stringify({ jsonrpc: '2.0', id, result: INIT })}\n\n`,
+      { headers: { 'Content-Type': 'text/event-stream', 'Mcp-Session-Id': session } },
+    );
+  const reply = () => new Response(null, { status: 202 });
+  const usable = fakeServer({ initialize: (b) => initStream(b.id, 'S1'), undefined: reply });
+  await server(usable).open(signal());
+  const pong = usable.calls[1]!;
+  assert.deepEqual(pong.body, { jsonrpc: '2.0', id: 'p', result: {} });
+  assert.equal(pong.headers.get('mcp-session-id'), 'S1');
+  // the protocol version is not known before the result: the reply goes without it
+  assert.equal(pong.headers.get('mcp-protocol-version'), null);
+  assert.equal(usable.calls[2]!.body!.method, 'notifications/initialized');
+
+  const unusable = fakeServer({ initialize: (b) => initStream(b.id, 'S 1'), undefined: reply });
+  assert.equal(await rejection(server(unusable).open(signal())), 'bad_session_id');
+  assert.deepEqual(unusable.calls[1]!.body, { jsonrpc: '2.0', id: 'p', result: {} });
+  assert.equal(unusable.calls[1]!.headers.get('mcp-session-id'), null);
+});

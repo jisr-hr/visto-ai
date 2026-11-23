@@ -1,7 +1,7 @@
 import type { McpServerConfig } from '../config/load.ts';
 import type { McpAnswer, McpServer, McpSession, McpTool } from '../engine/types.ts';
 import { SET_BY_SERVICE } from './headers.ts';
-import { rpcRequest, rpcSend, type RpcTarget } from './rpc.ts';
+import { rpcRequest, rpcSend, SESSION_HEADER, SESSION_ID, type RpcTarget } from './rpc.ts';
 
 export const PROTOCOL_VERSION = '2025-11-25';
 export const ACCEPTED_VERSIONS = ['2025-11-25', '2025-06-18', '2025-03-26'];
@@ -9,9 +9,7 @@ export const LIST_PAGES_MAX = 10;
 
 const CLIENT_INFO = { name: 'visto-ai', version: '0.0.0' };
 const CLOSE_MS = 1_000; // the end of a failed open, under a limit of the client's own
-const SESSION_ID = /^[\x21-\x7E]{1,1024}$/;
 const VERSION_HEADER = 'MCP-Protocol-Version';
-const SESSION_HEADER = 'Mcp-Session-Id';
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);

@@ -831,3 +831,16 @@ test('a message that lands exactly on the room fills it', async () => {
   await callBatch({ ...args, tools: d }, md);
   assert.deepEqual(md.requests.map((q) => q.forcedTool), [null, null]);
 });
+
+test('under forced with tools offered, an empty answer of an open turn is sent back as (no answer)', async () => {
+  const model = stubModel(prose(''), toolCall(valid));
+  const r = await callBatch({ ...args, tools: stubLoop() }, model);
+  assert.ok(r.ok);
+  assert.deepEqual(model.requests.map((q) => q.forcedTool), [null, SUBMIT_REVIEW]);
+  assert.deepEqual(model.requests[1]!.messages.at(-2), { role: 'assistant', content: '(no answer)' });
+  // an empty answer of a closing turn, which forced submit_review, is sent back as today
+  const closing = stubModel(calls(search('c1')), prose(''), toolCall(valid));
+  assert.ok((await callBatch({ ...args, tools: stubLoop([{ stop: 'tool_error' }]) }, closing)).ok);
+  assert.deepEqual(closing.requests.map((q) => q.forcedTool), [null, SUBMIT_REVIEW, SUBMIT_REVIEW]);
+  assert.deepEqual(closing.requests[2]!.messages.at(-2), { role: 'assistant', content: '' });
+});

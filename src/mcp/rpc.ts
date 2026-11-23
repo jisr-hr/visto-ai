@@ -2,6 +2,8 @@ import { ByteBuffer, eventData } from './sse.ts';
 
 export const MCP_ANSWER_BYTES = 1_048_576; // one answer, as JSON or as a whole event stream; and the body read of a 400
 export const SERVER_REQUESTS_MAX = 8; // requests of the server's own answered during one exchange
+export const SESSION_HEADER = 'Mcp-Session-Id';
+export const SESSION_ID = /^[\x21-\x7E]{1,1024}$/; // a session id the client sends: printable ASCII, no space, at most 1024
 
 export interface RpcTarget {
   url: string;
@@ -160,6 +162,18 @@ async function readJson(body: ReadableStream<Uint8Array>, id: number, headers: H
   return judged.kind === 'answer' ? judged.answer : { ok: false, code: 'bad_answer' };
 }
 
+/**
+ * Where a reply goes while a stream is read. A target that has no session yet (the exchange of `initialize`) is given the session
+ * the HTTP answer issued, when it is usable; an unusable one is not sent. The protocol version is not known before the result, so
+ * such a reply goes without the version header.
+ */
+function replyTarget(target: RpcTarget, headers: Headers): RpcTarget {
+  if (Object.keys(target.headers).some((name) => name.toLowerCase() === SESSION_HEADER.toLowerCase())) return target;
+  const issued = headers.get(SESSION_HEADER);
+  if (issued === null || !SESSION_ID.test(issued)) return target;
+  return { ...target, headers: { ...target.headers, [SESSION_HEADER]: issued } };
+}
+
 async function readStream(target: RpcTarget, body: ReadableStream<Uint8Array>, id: number, headers: Headers, signal: AbortSignal): Promise<RpcAnswer> {
   let answered = 0;
   try {
@@ -174,7 +188,7 @@ async function readStream(target: RpcTarget, body: ReadableStream<Uint8Array>, i
         judged.method === 'ping'
           ? { jsonrpc: '2.0', id: judged.id, result: {} }
           : { jsonrpc: '2.0', id: judged.id, error: { code: -32601, message: 'Method not found' } };
-      await rpcSend(target, reply, signal);
+      await rpcSend(replyTarget(target, headers), reply, signal);
     }
   } catch (error) {
     return { ok: false, code: readFailure(error, signal) };
