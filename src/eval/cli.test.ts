@@ -428,3 +428,43 @@ test('score-noise refuses a run with memory against one without, and two runs wi
   assert.equal(code, 0);
   assert.equal(lines.length, 6);
 });
+
+test('seed-memory needs --history and --config, a database in the config, and a history file outside the project', async () => {
+  const folder = mkdtempSync(tmpdir() + '/');
+  const history = join(folder, 'history.jsonl');
+  writeFileSync(history, serializeCase(historyCase(7, '2026-03-05T12:00:00Z')) + '\n');
+  const withDatabase = join(folder, 'deployment.yml');
+  writeFileSync(withDatabase, 'model:\n  apiKey: { env: MODEL_KEY }\n  model: vendor/model-a\ndatabase:\n  url: { env: DATABASE_URL }\n');
+  const withoutDatabase = join(folder, 'no-database.yml');
+  writeFileSync(withoutDatabase, 'model:\n  apiKey: { env: MODEL_KEY }\n  model: vendor/model-a\n');
+  // No token of the git service in the environment; a database that is never reached, since every case ends before it is opened.
+  const env = { MODEL_KEY: 'k', DATABASE_URL: 'postgres://seed@db.invalid:5432/visto' };
+  const args = (over: Record<string, string> = {}, drop: string[] = []): string[] => {
+    const options: Record<string, string> = { history, config: withDatabase, ...over };
+    for (const name of drop) delete options[name];
+    return ['seed-memory', ...Object.entries(options).flatMap(([k, v]) => [`--${k}`, v])];
+  };
+  const bad: [string, string[], Record<string, string>, string][] = [
+    ['no arguments', ['seed-memory'], env, 'usage: seed-memory needs --history'],
+    ['missing config', args({}, ['config']), env, 'usage: seed-memory needs --config'],
+    ['history inside the project', args({ history: join(projectRoot, 'h.jsonl') }), env, 'usage: --history must be outside the project folder'],
+    ['no database in the config', args({ config: withoutDatabase }), env, 'usage: seed-memory needs a database in the config'],
+    ['config that does not exist', args({ config: join(folder, 'none.yml') }), env, 'usage: cannot read --config'],
+    ['history that does not exist', args({ history: join(folder, 'none.jsonl') }), env, 'usage: cannot read --history'],
+    ['positional argument', [...args(), 'extra'], env, 'usage: seed-memory takes no positional arguments'],
+    ['unknown option', [...args(), '--force'], env, 'usage: unknown option --force'],
+  ];
+  for (const [name, argv, environment, message] of bad) {
+    const [code, lines] = await run(argv, environment);
+    assert.equal(code, 2, name);
+    assert.deepEqual(lines, [message], name);
+  }
+  // The variable the database block names must be set, and the message never quotes its value.
+  const [code, lines] = await run(args(), { MODEL_KEY: 'k' });
+  assert.deepEqual([code, lines], [2, ['config: database.url: environment variable DATABASE_URL is not set']]);
+});
+
+test('the script eval:seed-memory runs the command seed-memory', () => {
+  const scripts = (JSON.parse(readFileSync(join(projectRoot, 'package.json'), 'utf8')) as { scripts: Record<string, string> }).scripts;
+  assert.equal(scripts['eval:seed-memory'], 'node src/eval/cli.ts seed-memory');
+});

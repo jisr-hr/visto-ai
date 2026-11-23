@@ -5,6 +5,8 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ConfigError, contractFile, loadConfig } from '../config/load.ts';
 import type { DeploymentConfig } from '../config/load.ts';
+import { isApplied } from '../db/migrate.ts';
+import { postgresDb } from '../db/postgres.ts';
 import { createModelClient } from '../engine/model/client.ts';
 import { createJevScorer } from '../engine/scorer/jev.ts';
 import type { ReviewDeps } from '../engine/types.ts';
@@ -21,6 +23,7 @@ import { readCaseScores, runBacktest } from './backtest/run.ts';
 import type { BacktestSummary } from './backtest/run.ts';
 import { loadHistory } from './history/file.ts';
 import { runImport } from './history/import.ts';
+import { seedMemory } from './history/seed.ts';
 import { assertOutsideProject, runReplay } from './replay.ts';
 import type { SummaryFile } from './replay.ts';
 
@@ -283,6 +286,35 @@ async function memoryCountCommand(argv: string[], out: (line: string) => void): 
   }
 }
 
+// The importer's database output (7.5, call 29): reads a history file, never the git service, and never migrates.
+async function seedMemoryCommand(argv: string[], env: Record<string, string | undefined>, out: (line: string) => void): Promise<void> {
+  const parsed = parse(argv, ['history', 'config'], []);
+  if (parsed.positional.length > 0) throw new UsageError('usage: seed-memory takes no positional arguments');
+  const get = (name: string): string => {
+    const v = parsed.options.get(name);
+    if (v === undefined) throw new UsageError(`usage: seed-memory needs --${name}`);
+    return v;
+  };
+  const historyPath = get('history');
+  const configPath = get('config');
+  outsideProject(historyPath, projectFolder(), 'history');
+  const config = readable('config', () => loadConfig(configPath, env));
+  if (config.database === null) throw new UsageError('usage: seed-memory needs a database in the config');
+  const { cases } = readable('history', () => loadHistory(historyPath));
+  const db = postgresDb(config.database.url, (entry) => { process.stderr.write(JSON.stringify(entry) + '\n'); });
+  try {
+    if (!(await isApplied(db, '0010_memory'))) throw new Error('database_not_migrated');
+    const seeded = await seedMemory(db, cases, new Date());
+    out(`cases ${seeded.cases}, known ${seeded.known}, activity ${seeded.activity}, signals ${seeded.signals}`);
+  } finally {
+    try {
+      await db.close();
+    } catch {
+      // a close that fails changes nothing of what was written
+    }
+  }
+}
+
 // A file that cannot be read is a usage error; one that is read but invalid is not.
 function readable<T>(name: string, load: () => T): T {
   return readableAs(`--${name}`, load);
@@ -373,7 +405,8 @@ export async function main(argv: string[], env: Record<string, string | undefine
     else if (command === 'import-history') await importHistory(rest, env, out);
     else if (command === 'memory-count') await memoryCountCommand(rest, out);
     else if (command === 'score-compare') scoreCompareCommand(rest, out);
-    else throw new UsageError('usage: cli <replay|compare|import-history|backtest|score-noise|memory-count|score-compare> ...');
+    else if (command === 'seed-memory') await seedMemoryCommand(rest, env, out);
+    else throw new UsageError('usage: cli <replay|compare|import-history|backtest|score-noise|memory-count|score-compare|seed-memory> ...');
     return 0;
   } catch (error) {
     if (error instanceof UsageError) { out(error.message); return 2; }

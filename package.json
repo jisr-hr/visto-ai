@@ -18,6 +18,7 @@
     "eval:score-noise": "node src/eval/cli.ts score-noise",
     "eval:memory-count": "node src/eval/cli.ts memory-count",
     "eval:score-compare": "node src/eval/cli.ts score-compare",
+    "eval:seed-memory": "node src/eval/cli.ts seed-memory",
     "start": "node src/main.ts",
     "dev:send-webhook": "node src/forge/github/send-sample.ts",
     "app:create": "node src/forge/github/create-app.ts"
