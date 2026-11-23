@@ -59,10 +59,12 @@ export async function getPullRequest(db: Db, ref: PullRequestRef): Promise<PullR
 }
 
 /** Every stored pull request whose state is open, with its base branch. */
-export async function openPullRequests(db: Db): Promise<Array<{ ref: PullRequestRef; baseBranch: string }>> {
-  const rows = await db.query<{ service: 'github'; owner: string; repo: string; number: number; base_branch: string }>(
-    `select service, owner, repo, number, base_branch from visto_ai.pull_requests
+export async function openPullRequests(db: Db): Promise<Array<{ ref: PullRequestRef; baseBranch: string; installation: string | null }>> {
+  const rows = await db.query<{ service: 'github'; owner: string; repo: string; number: number; base_branch: string; installation: string | null }>(
+    `select service, owner, repo, number, base_branch, installation from visto_ai.pull_requests
      where state = 'open'
      order by service, owner, repo, number`);
-  return rows.map((r) => ({ ref: { service: r.service, owner: r.owner, repo: r.repo, number: r.number }, baseBranch: r.base_branch }));
+  return rows.map((r) => ({
+    ref: { service: r.service, owner: r.owner, repo: r.repo, number: r.number }, baseBranch: r.base_branch, installation: r.installation,
+  }));
 }

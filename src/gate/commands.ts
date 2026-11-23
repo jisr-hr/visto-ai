@@ -9,7 +9,7 @@ import { mayCommand, skipReasonOf } from '../shell/commands.ts';
 import { MAX_STARTS } from '../shell/runner.ts';
 import { doneFailed, doneRefused, nothingLeft, skipFailed, skipRefused } from './answers.ts';
 import type { SkipRefusal } from './answers.ts';
-import { gatingOf, reviewedOnRequest } from './gating.ts';
+import { gatingOf, reviewWillRun } from './gating.ts';
 import type { Gating } from './gating.ts';
 import { GATE_RETRY_WAITS_MS, planNow } from './job.ts';
 import type { GateJobDeps } from './job.ts';
@@ -31,11 +31,6 @@ interface Ending {
   skip?: { headSha: string; actor: string; reason: string; commentId: string };
 }
 
-/** Whether a review job will run: manual, and asked for by a re-run or by someone D15 lets command; or automatic, on a pull request that is not reviewed only when asked. */
-const willRun = (j: Job, gating: Gating): boolean =>
-  j.trigger === 'manual'
-    ? j.reason === 'rerun' || j.reason === 'rerun_retry' || mayCommand(j.association)
-    : j.trigger === 'automatic' && !reviewedOnRequest(gating);
 
 /** A job finished meanwhile: its end is not stored again and nothing is answered. */
 class Gone extends Error {}
@@ -173,7 +168,7 @@ async function end(job: Job, deps: GateJobDeps, ending: Ending, now: string): Pr
       // pull request reviewed only when asked is about to be dropped as gated (call 25).
       const held = deps.reviewing(job.ref);
       const gating = ending.review;
-      const joins = jobs.some((j) => willRun(j, gating) && (j.status === 'pending' || (j.status === 'running' && held)));
+      const joins = jobs.some((j) => reviewWillRun(j, gating) && (j.status === 'pending' || (j.status === 'running' && held)));
       if (joins) {
         outcome = 'coalesced';
       } else {
@@ -186,7 +181,7 @@ async function end(job: Job, deps: GateJobDeps, ending: Ending, now: string): Pr
     }
     if (ending.skip !== undefined) await recordSkip(tx, { ref: job.ref, ...ending.skip, at: now });
     if (!(await finishJob(tx, job.id, ending.status, outcome, now))) throw new Gone();
-    if (ending.ask) await askGate(tx, job.ref, now);
+    if (ending.ask) await askGate(tx, job.ref, now, undefined, { installation: job.installation });
     return outcome;
   });
 }

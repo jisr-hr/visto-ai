@@ -35,7 +35,7 @@ const settingsIn = (mode: 'enforce' | 'shadow' | 'bypass') => (name: string): Re
 const gateJobs = async (d: Db): Promise<number[]> =>
   (await d.query<{ number: number }>("select number from visto_ai.jobs where kind = 'gate' and status = 'pending' order by number")).map((r) => r.number);
 
-test('at start the check is asked for where the record and the config disagree, or a review was under way', async () => {
+test('at start the check of every stored open gated pull request is asked for, whatever its record says', async () => {
   const states: Array<[number, ['enforce' | 'shadow' | 'bypass', GateState] | null]> = [
     [1, null], [2, ['enforce', 'passed']], [3, ['bypass', 'bypassed']], [4, ['enforce', 'reviewing']], [5, ['enforce', 'paused']],
   ];
@@ -56,14 +56,14 @@ test('at start the check is asked for where the record and the config disagree, 
   };
 
   const enforce = await prepare();
-  assert.equal(await sweepGate(enforce, settingsIn('enforce'), at(10)), 4);
-  assert.deepEqual(await gateJobs(enforce), [1, 3, 4, 5]);
+  assert.equal(await sweepGate(enforce, settingsIn('enforce'), at(10)), 5);
+  assert.deepEqual(await gateJobs(enforce), [1, 2, 3, 4, 5]);
   const job = await enforce.query<{ run_at: Date; reason: string; trigger: string }>("select run_at, reason, trigger from visto_ai.jobs where number = 1");
   assert.deepEqual([job[0]!.run_at.toISOString(), job[0]!.reason, job[0]!.trigger], [at(10), 'sync', 'automatic']);
 
   const bypass = await prepare();
-  assert.equal(await sweepGate(bypass, settingsIn('bypass'), at(10)), 4);
-  assert.deepEqual(await gateJobs(bypass), [1, 2, 4, 5]);
+  assert.equal(await sweepGate(bypass, settingsIn('bypass'), at(10)), 5);
+  assert.deepEqual(await gateJobs(bypass), [1, 2, 3, 4, 5]);
 
   const none = await db();
   assert.equal(await sweepGate(none, settingsIn('enforce'), at(10)), 0);
@@ -89,13 +89,29 @@ test('the pull requests with a review waiting are asked for, and a running revie
   assert.deepEqual(gate.map((r) => [r.repo, r.number, r.run_at.toISOString()]), [['shop', 3, at(0)], ['shop', 1, at(10)]]);
 });
 
-test('at start a check whose newest record says failed is asked for again, and one that says a settled state is not', async () => {
+test('at start every recorded state is asked for again but closed and not_found, under any mode', async () => {
   const d = await db();
   const states: GateState[] = ['failed', 'passed', 'blocked', 'waiting', 'skipped', 'bypassed', 'closed', 'not_found'];
   for (const [i, state] of states.entries()) {
     await savePullRequest(d, facts(refOf(i + 1)));
     await recordEvaluation(d, { ...evaluation(refOf(i + 1), 'enforce', state), code: state === 'failed' ? 'github_500' : null });
   }
-  assert.equal(await sweepGate(d, settingsIn('enforce'), at(10)), 1);
-  assert.deepEqual(await gateJobs(d), [1]);
+  assert.equal(await sweepGate(d, settingsIn('enforce'), at(10)), 6);
+  assert.deepEqual(await gateJobs(d), [1, 2, 3, 4, 5, 6]);
+  // A closed or gone record outranks a change of mode: its next event asks.
+  const shadow = await db();
+  await savePullRequest(shadow, facts(refOf(1)));
+  await recordEvaluation(shadow, evaluation(refOf(1), 'enforce', 'closed'));
+  assert.equal(await sweepGate(shadow, settingsIn('shadow'), at(10)), 0);
+});
+
+test('the sweep renews a sync left waiting from a long stop and gives it the stored installation', async () => {
+  const d = await db();
+  await savePullRequest(d, facts(refOf(1), { installation: '42' }));
+  const old = (await askGate(d, refOf(1), at(-90_000)))!;
+  await d.query('update visto_ai.jobs set starts = 2 where id = $1', [old]);
+  assert.equal(await sweepGate(d, settingsIn('enforce'), at(0)), 1);
+  const row = await d.query<{ id: number; starts: number; created_at: Date; run_at: Date; installation: string | null }>(
+    "select id, starts, created_at, run_at, installation from visto_ai.jobs where kind = 'gate' and status = 'pending'");
+  assert.deepEqual(row.map((r) => [r.id, r.starts, r.created_at.toISOString(), r.run_at.toISOString(), r.installation]), [[old, 0, at(0), at(0), '42']]);
 });

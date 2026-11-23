@@ -84,13 +84,14 @@ export async function receive(
           const known = await getPullRequest(tx, ref);
           return known === null || gatingOf(settingsOf(ref), known.baseBranch) !== 'off';
         };
-        const ask = async (ref: PullRequestRef, runAt?: string): Promise<void> => {
-          if (await askGate(tx, ref, nowIso, runAt) !== null) queued.gate = true;
+        // The sync carries the installation the event came through, when it names one.
+        const ask = async (ref: PullRequestRef, installation: string | null | undefined, runAt?: string): Promise<void> => {
+          if (await askGate(tx, ref, nowIso, runAt, { installation: installation ?? null }) !== null) queued.gate = true;
         };
         // A thread event, and a reply, by anyone: also when capture ignores it as a bot's.
         const event = reading.event;
         if ((event.kind === 'thread' || (event.kind === 'inline_comment' && event.comment.replyTo !== null)) && await liveForStored(event.ref)) {
-          await ask(event.ref, new Date(receivedAt.getTime() + GATE_SETTLE_MS).toISOString());
+          await ask(event.ref, event.installation, new Date(receivedAt.getTime() + GATE_SETTLE_MS).toISOString());
         }
         if (capture.outcome === 'handled') {
           if (capture.pullRequest) {
@@ -114,7 +115,7 @@ export async function receive(
               // The event's own base decides whether its pull request is gated, whatever the trigger decided.
               const own = reading.event.facts;
               if (GATE_ACTIONS.has(reading.event.action) && liveFor(own.ref) && gatingOf(settingsOf(own.ref), own.baseBranch) !== 'off') {
-                await ask(own.ref);
+                await ask(own.ref, own.installation);
               }
             }
           }
@@ -136,7 +137,7 @@ export async function receive(
             if (command === 'review') {
               await review('command');
               queued.command = 'review';
-              if (mayCommand(comment.association) && await liveForStored(ref)) await ask(ref);
+              if (mayCommand(comment.association) && await liveForStored(ref)) await ask(ref, installation);
             } else if (command === 'done' && settingsOf(ref).gate.enabled) {
               if (deps.dryRun) await review('done');
               else await gateCommand('done', '');

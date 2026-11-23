@@ -85,9 +85,10 @@ export type ForgeEvent =
   | { kind: 'ping' }
   | { kind: 'pull_request'; action: PullRequestAction; facts: PullRequestFacts }
   | { kind: 'review'; ref: PullRequestRef; review: HumanReview }
-  | { kind: 'inline_comment'; ref: PullRequestRef; comment: HumanInlineComment }
+  // installation: the app installation the event came through, when the event names one (a gate job asked by it carries it)
+  | { kind: 'inline_comment'; ref: PullRequestRef; installation?: string | null; comment: HumanInlineComment }
   | { kind: 'general_comment'; ref: PullRequestRef; installation: string | null; comment: GeneralComment }
-  | { kind: 'thread'; ref: PullRequestRef; action: 'resolved' | 'unresolved'; thread: string; rootComment: string | null; actor: string; actorIsBot: boolean }
+  | { kind: 'thread'; ref: PullRequestRef; installation?: string | null; action: 'resolved' | 'unresolved'; thread: string; rootComment: string | null; actor: string; actorIsBot: boolean }
   | { kind: 'check_rerun'; ref: PullRequestRef; installation: string | null; app: string; check: string; headSha: string; actor: string }
   | { kind: 'ignored'; reason: 'unknown_event' | 'unknown_action' | 'not_a_pull_request' | 'malformed' };
 export type WebhookReading =

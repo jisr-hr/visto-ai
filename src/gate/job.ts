@@ -16,7 +16,7 @@ import { MAX_STARTS } from '../shell/runner.ts';
 import { checkText, countsOf, planAfter, planBefore, sameCheck } from './check.ts';
 import { runGateCommand } from './commands.ts';
 import type { CheckPlan } from './check.ts';
-import { gatingOf, reviewedOnRequest } from './gating.ts';
+import { gatingOf, reviewWillRun } from './gating.ts';
 import type { Gating } from './gating.ts';
 import type { KeyedLock } from './lock.ts';
 import { evaluateGate, refusedInline, reviewedRun } from './rule.ts';
@@ -43,8 +43,8 @@ export interface GateJobDeps {
 
 /** Whether a review of the pull request is under way, from its unfinished review jobs. `held`: a review job of it is running in this process. */
 export function underWay(jobs: Job[], gating: Gating, held: boolean): 'running' | 'pending' | null {
-  // A push's job on a pull request reviewed only when asked is about to be dropped as gated: no review.
-  const counted = jobs.filter((j) => !(j.trigger === 'automatic' && reviewedOnRequest(gating)));
+  // Only a review that will run: not a stranger's waiting command, nor a push's job about to be dropped as gated.
+  const counted = jobs.filter((j) => reviewWillRun(j, gating));
   if (held && counted.some((j) => j.status === 'running')) return 'running';
   if (counted.some((j) => j.status === 'pending')) return 'pending';
   return null;
@@ -181,7 +181,7 @@ export async function runGateJob(job: Job, deps: GateJobDeps): Promise<void> {
       if (finished) entry.outcome = end.outcome;
       if (finished && end.ask === true) {
         try {
-          await askGate(deps.db, job.ref, now());
+          await askGate(deps.db, job.ref, now(), undefined, { installation: job.installation });
           try { deps.onQueued(); } catch { /* the runners look at their next tick */ }
         } catch {
           // The job is finished: the request for the check is lost, and the next event or start asks again.
@@ -229,8 +229,9 @@ async function work(job: Job, deps: GateJobDeps, entry: Entry, log: (e: Record<s
   if (deps.dryRun) return { kind: 'finish', status: 'dropped', outcome: 'dry_run' };
   const settings = deps.settingsFor(`${job.ref.owner}/${job.ref.repo}`);
   if (!settings.gate.enabled) return { kind: 'finish', status: 'dropped', outcome: 'gate_off' };
-  if (job.installation === null) seen.stored = await getPullRequest(db, job.ref);
-  const installation = job.installation ?? seen.stored?.installation ?? null;
+  // The stored pull request's installation, else the job's own: a pull request the service stores no row for gets its check too.
+  seen.stored = await getPullRequest(db, job.ref);
+  const installation = seen.stored?.installation ?? job.installation ?? null;
   if (installation === null) return { kind: 'finish', status: 'dropped', outcome: 'no_installation' };
   if (COMMANDS.has(job.reason)) return { kind: 'command', installation, settings };
   if (job.reason !== 'sync') return { kind: 'finish', status: 'done', outcome: 'unknown_reason', ask: true };

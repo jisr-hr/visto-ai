@@ -81,13 +81,14 @@ test('review', () => {
 
 test('inline comment', () => {
   assert.deepEqual(eventOf('pull_request_review_comment', inlinePayload()), {
-    kind: 'inline_comment', ref,
+    kind: 'inline_comment', ref, installation: null,
     comment: {
       id: '21', author: 'octo-dev', authorIsBot: false, association: 'none', at: TI, commit: 'abc123', path: 'a.ts',
       side: 'RIGHT', line: 4, startLine: null, fileLevel: false, replyTo: null, body: 'nit',
     },
   });
   assert.deepEqual(eventOf('pull_request_review_comment', inlinePayload({}, 'edited')), { kind: 'ignored', reason: 'unknown_action' });
+  assert.equal((eventOf('pull_request_review_comment', { ...inlinePayload(), installation: { id: 99 } }) as { installation: unknown }).installation, '99');
 });
 
 test('general comment', () => {
@@ -105,11 +106,12 @@ test('general comment', () => {
 
 test('thread', () => {
   const want = (action: string, rootComment: string | null) => ({
-    kind: 'thread', ref, action, thread: 'PRRT_x', rootComment, actor: 'octo-dev', actorIsBot: false,
+    kind: 'thread', ref, installation: null, action, thread: 'PRRT_x', rootComment, actor: 'octo-dev', actorIsBot: false,
   });
   assert.deepEqual(eventOf('pull_request_review_thread', threadPayload()), want('resolved', '21'));
   assert.deepEqual(eventOf('pull_request_review_thread', threadPayload('unresolved', [])), want('unresolved', null));
   assert.deepEqual(eventOf('pull_request_review_thread', threadPayload('edited')), { kind: 'ignored', reason: 'unknown_action' });
+  assert.equal((eventOf('pull_request_review_thread', { ...threadPayload(), installation: { id: 99 } }) as { installation: unknown }).installation, '99');
 });
 
 test('an unknown event', () => assert.deepEqual(eventOf('deployment', {}), { kind: 'ignored', reason: 'unknown_event' }));

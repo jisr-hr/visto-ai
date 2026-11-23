@@ -184,7 +184,7 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps): Pr
     if (!settings.gate.enabled) return;
     const stored = await getPullRequest(db, job.ref);
     if (stored !== null && gatingOf(settings, stored.baseBranch) === 'off') return;
-    await askGate(db, job.ref, clock().toISOString());
+    await askGate(db, job.ref, clock().toISOString(), undefined, { installation: job.installation });
     void gateRunner.tick();
   }
   const { listener, idle } = createListener({

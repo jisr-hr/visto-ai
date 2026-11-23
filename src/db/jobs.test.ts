@@ -332,6 +332,35 @@ test('asking for the check stores one sync, moves a waiting sync to the new time
   assert.deepEqual((await unfinishedJobs(db)).filter((j) => j.ref.number === 8), [before]);
   await db.close();
 });
+test('a sync carries the installation it was asked with, also onto a waiting one that has none, and only the sweep renews a waiting one', async () => {
+  const db = await testDb();
+  const first = (await askGate(db, REF, at(0)))!;
+  assert.equal((await getJob(db, first))?.installation, null);
+  assert.equal(await askGate(db, REF, at(1), undefined, { installation: '99' }), first);
+  assert.equal((await getJob(db, first))?.installation, '99');
+  // A waiting sync that has one keeps it.
+  assert.equal(await askGate(db, REF, at(2), undefined, { installation: '77' }), first);
+  assert.equal((await getJob(db, first))?.installation, '99');
+  const other = { ...REF, number: 8 };
+  const stored = (await askGate(db, other, at(0), undefined, { installation: '42' }))!;
+  assert.equal((await getJob(db, stored))?.installation, '42');
+
+  // A sync two starts old, from a long stop: an ask keeps its starts and its age; the sweep's ask renews both.
+  await claimJob(db, first, at(3));
+  assert.equal(await requeueJob(db, first, at(4), at(3), false), 'requeued');
+  assert.equal(await askGate(db, REF, at(5)), first);
+  assert.deepEqual([(await getJob(db, first))?.starts, (await getJob(db, first))?.createdAt], [1, at(0)]);
+  assert.equal(await askGate(db, REF, at(90_000), undefined, { renew: true }), first);
+  assert.deepEqual([(await getJob(db, first))?.starts, (await getJob(db, first))?.createdAt, (await getJob(db, first))?.runAt], [0, at(90_000), at(90_000)]);
+  // A waiting command is never renewed.
+  const third = { ...REF, number: 9 };
+  const command = (await enqueueJob(db, gate({ ref: third, reason: 'skip' })))!;
+  const before = await getJob(db, command);
+  assert.equal(await askGate(db, third, at(9), undefined, { renew: true, installation: '1' }), null);
+  assert.deepEqual(await getJob(db, command), before);
+  await db.close();
+});
+
 test('the unfinished review jobs of a pull request are listed, never a gate job, a finished one or another pull request\'s', async () => {
   const db = await testDb();
   const done = (await enqueueJob(db, job()))!;

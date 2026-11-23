@@ -377,3 +377,16 @@ test('a delivery seen twice asks once', async () => {
   assert.deepEqual(await deliver(rerun(), 'k1', { settings: GATED }), { status: 202, body: 'duplicate' });
   assert.equal((await gateJobs()).length, 1);
 });
+test('a sync carries the installation the event came through, and a later event fills it in when the first named none', async () => {
+  await deliver(pr('opened', { installation: '42' }), 'd1', { settings: GATED });
+  assert.deepEqual((await gateJobs()).map((j) => [j.reason, j.installation]), [['sync', '42']]);
+  const other = await testDb();
+  try {
+    await deliver(thread(), 't1', { database: other, settings: GATED });
+    assert.deepEqual((await gateJobs(other)).map((j) => j.installation), [null]);
+    await deliver({ ...inline(), installation: '99' } as ForgeEvent, 'r1', { database: other, settings: GATED });
+    assert.deepEqual((await gateJobs(other)).map((j) => j.installation), ['99']);
+    await deliver(said('/review'), 'c1', { database: other, settings: GATED });
+    assert.deepEqual((await gateJobs(other)).map((j) => j.installation), ['99']);
+  } finally { await other.close(); }
+});

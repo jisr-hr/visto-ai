@@ -8,20 +8,23 @@ import { gatingOf } from './gating.ts';
 
 const keyOf = (ref: PullRequestRef): string => `${ref.service}/${ref.owner.toLowerCase()}/${ref.repo.toLowerCase()}#${ref.number}`;
 
-/** The recorded states the sweep asks again for: a review under way or paused, and a check that failed (call 52). */
-const ASKED_AGAIN = new Set(['reviewing', 'paused', 'failed']);
+/** The recorded states the sweep leaves alone: a pull request a sync found closed or gone; its next event asks (call 52). */
+const LEFT_ALONE = new Set(['closed', 'not_found']);
 
-/** Asks for the check of each stored open pull request that is gated and whose newest recorded evaluation is absent, was made under another mode, or says reviewing, paused or failed. Returns how many. */
+/**
+ * Asks for the check of every stored open pull request that is gated, unless its newest recorded evaluation says
+ * closed or not_found. A sync writes only on a difference, so an unchanged pull request costs reads and no write.
+ * The ask renews a sync that already waits, and carries the stored installation. Returns how many.
+ */
 export async function sweepGate(db: Db, settingsFor: (fullName: string) => RepoSettings, now: string): Promise<number> {
   const open = await openPullRequests(db);
   const newest = new Map((await lastEvaluations(db)).map((e) => [keyOf(e.ref), e]));
   let asked = 0;
-  for (const { ref, baseBranch } of open) {
-    const gating = gatingOf(settingsFor(`${ref.owner}/${ref.repo}`), baseBranch);
-    if (gating === 'off') continue;
+  for (const { ref, baseBranch, installation } of open) {
+    if (gatingOf(settingsFor(`${ref.owner}/${ref.repo}`), baseBranch) === 'off') continue;
     const last = newest.get(keyOf(ref));
-    if (last !== undefined && last.mode === gating && !ASKED_AGAIN.has(last.state)) continue;
-    await askGate(db, ref, now);
+    if (last !== undefined && LEFT_ALONE.has(last.state)) continue;
+    await askGate(db, ref, now, undefined, { installation, renew: true });
     asked += 1;
   }
   return asked;
@@ -34,7 +37,7 @@ export async function askWaiting(db: Db, settingsFor: (fullName: string) => Repo
     if (job.kind !== 'review' || job.status !== 'pending') continue;
     const key = keyOf(job.ref);
     if (asked.has(key) || !settingsFor(`${job.ref.owner}/${job.ref.repo}`).gate.enabled) continue;
-    await askGate(db, job.ref, now);
+    await askGate(db, job.ref, now, undefined, { installation: job.installation });
     asked.add(key);
   }
   return asked.size;

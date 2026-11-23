@@ -78,11 +78,11 @@ test('a merged pull request keeps its merge facts', async () => {
   assert.deepEqual(await getPullRequest(db, ref), merged);
   await db.close();
 });
-test('the open pull requests are listed with their base branch', async () => {
+test('the open pull requests are listed with their base branch and installation', async () => {
   const db = await testDb();
   await savePullRequest(db, facts({ ref: { ...ref, owner: 'Acme' }, baseBranch: 'release' }));
   await savePullRequest(db, facts({ ref: { ...ref, number: 8 }, state: 'closed', closedAt: '2026-03-01T11:00:00.000Z' }));
   await savePullRequest(db, facts({ ref: { ...ref, number: 9 }, state: 'merged', mergedAt: '2026-03-01T11:00:00.000Z' }));
-  assert.deepEqual(await openPullRequests(db), [{ ref, baseBranch: 'release' }]);
+  assert.deepEqual(await openPullRequests(db), [{ ref, baseBranch: 'release', installation: '55' }]);
   await db.close();
 });

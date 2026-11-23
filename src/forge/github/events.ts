@@ -138,7 +138,7 @@ function build(name: string, p: Record<string, unknown>): ForgeEvent {
       const comment = inlineCommentOf(raw);
       short(comment.id);
       short(comment.replyTo);
-      return { kind: 'inline_comment', ref, comment: { ...comment, at: iso(comment.at) } };
+      return { kind: 'inline_comment', ref, installation: installationOf(p), comment: { ...comment, at: iso(comment.at) } };
     }
     case 'issue_comment': {
       if (p.action !== 'created') return unknownAction;
@@ -164,7 +164,7 @@ function build(name: string, p: Record<string, unknown>): ForgeEvent {
       const threadId = str(thread.node_id);
       short(threadId);
       const sender = authorOf(p.sender);
-      return { kind: 'thread', ref, action: p.action, thread: threadId, rootComment, actor: sender.author, actorIsBot: sender.authorIsBot };
+      return { kind: 'thread', ref, installation: installationOf(p), action: p.action, thread: threadId, rootComment, actor: sender.author, actorIsBot: sender.authorIsBot };
     }
     case 'check_run':
       return checkRunEvent(p);

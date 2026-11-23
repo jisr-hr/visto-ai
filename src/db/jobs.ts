@@ -98,21 +98,28 @@ export async function reviewJobsOf(db: Db, ref: PullRequestRef): Promise<Job[]> 
 }
 
 /**
- * Stores a gate job of reason `sync` for the pull request, due at `runAt` (at `now` when not given). A pending sync is
- * kept as it is and only takes this time. null when a pending command of the gate stands in the slot: it asks again
- * when it ends. Not `enqueueJob` with `replace`, which would set a waiting sync's starts back to 0.
+ * Stores a gate job of reason `sync` for the pull request, due at `runAt` (at `now` when not given), with the
+ * installation given. A pending sync is kept as it is and only takes this time, and the installation when it has none.
+ * With `renew` (the sweep at start only) a pending sync also takes `now` as its creation time and its starts go back
+ * to 0, so that one left from a long stop is neither too old nor out of starts. null when a pending command of the
+ * gate stands in the slot: it asks again when it ends. Not `enqueueJob` with `replace`, which would set a waiting
+ * sync's starts back to 0 on every ask.
  */
-export async function askGate(db: Db, ref: PullRequestRef, now: string, runAt?: string): Promise<number | null> {
+export async function askGate(
+  db: Db, ref: PullRequestRef, now: string, runAt?: string, more: { installation?: string | null; renew?: boolean } = {},
+): Promise<number | null> {
+  const renew = more.renew === true ? ', starts = 0, created_at = excluded.created_at' : '';
   const rows = await db.query<{ id: number }>(
     `insert into visto_ai.jobs (service, owner, repo, number, kind, reason, head_sha, status, run_at, starts, created_at, delivery,
                                 trigger, requested_by, comment_id, association, installation)
      values ($1, $2, $3, $4, 'gate', 'sync', '', 'pending', $5::timestamptz, 0, $6::timestamptz, null,
-             'automatic', null, null, null, null)
+             'automatic', null, null, null, $7)
      on conflict (service, owner, repo, number, kind) where status = 'pending'
-     do update set run_at = excluded.run_at
+     do update set run_at = excluded.run_at, installation = coalesce(visto_ai.jobs.installation, excluded.installation)${renew}
      where visto_ai.jobs.trigger = 'automatic'
      returning id`,
-    [ref.service, storable(ref.owner).toLowerCase(), storable(ref.repo).toLowerCase(), ref.number, runAt ?? now, now]);
+    [ref.service, storable(ref.owner).toLowerCase(), storable(ref.repo).toLowerCase(), ref.number, runAt ?? now, now,
+      storableOrNull(more.installation ?? null)]);
   return rows[0]?.id ?? null;
 }
 

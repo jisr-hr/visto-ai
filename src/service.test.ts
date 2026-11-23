@@ -6,7 +6,7 @@ import type { Db, InstanceLock } from './db/types.ts';
 import { loadMigrations, MIGRATIONS_DIR, migrate } from './db/migrate.ts';
 import { askGate, claimJob, enqueueJob, finishJob, getJob, unfinishedJobs } from './db/jobs.ts';
 import type { Job } from './db/jobs.ts';
-import { savePullRequest } from './db/pull-requests.ts';
+import { getPullRequest, savePullRequest } from './db/pull-requests.ts';
 import { NO_COUNTS, recordEvaluation } from './db/gate.ts';
 import { recordRun } from './db/review-runs.ts';
 import type { RunRecord } from './db/review-runs.ts';
@@ -162,6 +162,8 @@ async function harness(options: Options = {}) {
     now: options.now ?? at(0),
     /** The pull request as GitHub has it now; a test may move its head. */
     live: LIVE as LivePullRequest,
+    /** What the review answers for this input, when it answers; else `result`. */
+    resultFor: undefined as ((input: ReviewInput) => ReviewResult | undefined) | undefined,
     /** The threads GitHub has; listThreads rejects while this is undefined. */
     threads: options.threads ?? (options.github === true ? [] : undefined) as ReviewThread[] | undefined,
     onListen: undefined as (() => Promise<void>) | undefined,
@@ -286,7 +288,7 @@ async function harness(options: Options = {}) {
         inputs.push(input);
         reviewCalled();
         if (options.holdReview === true) await reviewHeld;
-        return options.result ?? okResult();
+        return h.resultFor?.(input) ?? options.result ?? okResult();
       },
       lineUrl: () => 'https://git.example.test/x',
       commentUrl: (_ref, commentId) => `https://git.example.test/c/${commentId}`,
@@ -661,8 +663,6 @@ test('the app is asked for what the configured gate needs', async () => {
 const manual = (over = {}) => job({ reason: 'command', headSha: '', trigger: 'manual' as const, requestedBy: 'octo-lead', commentId: '31', association: 'member', installation: '99', ...over });
 const jobOf = async (db: Db, id: number): Promise<Job> => (await getJob(db, id))!;
 const gateEntries = (logged: Array<Record<string, unknown>>) => logged.filter((e) => e.event === 'gate');
-/** A record of the check waiting at h1 under enforce, so that the sweep at start leaves the pull request alone. */
-const recordedWaiting = (db: Db) => recordEvaluation(db, { ref: REF, headSha: 'h1', at: at(0), mode: 'enforce', state: 'waiting', code: null, run: null, counts: NO_COUNTS });
 
 test('a gate job runs while reviews are paused', async () => {
   const h = await harness({ gate: true });
@@ -729,7 +729,7 @@ test('in dry run the gate is given checks and a writer that refuse every call, a
 test('a gate job the runner drops as too old raises the alert', async () => {
   const h = await harness({ gate: true });
   await migrate(h.db, loadMigrations(MIGRATIONS_DIR));
-  await savePullRequest(h.db, facts());
+  // No stored pull request: the sweep at start, which renews a waiting sync, leaves this one to the runner.
   const old = (await askGate(h.db, REF, at(-90_000)))!;
   await (await h.start()).settled;
   await h.until(async () => (await jobOf(h.db, old)).status === 'dropped');
@@ -751,8 +751,7 @@ test('with the gate off a review job that leaves the runner reads nothing for th
   // With the gate on the same review is followed by a read of the stored pull request and a request for the check.
   const on = await harness({ gate: true, threads: [] });
   await migrate(on.db, loadMigrations(MIGRATIONS_DIR));
-  await savePullRequest(on.db, facts());
-  await recordedWaiting(on.db);
+  // No stored pull request, so that the sweep at start asks for nothing; the sync asked for carries the review job's installation.
   const onId = (await enqueueJob(on.db, manual()))!;
   await (await on.start()).settled;
   on.queries.length = 0;
@@ -764,8 +763,7 @@ test('when a review job has left the runner the check is asked for and decided',
   // Published: one gate job ran after it and wrote the check from the review.
   const ok = await harness({ gate: true, threads: [] });
   await migrate(ok.db, loadMigrations(MIGRATIONS_DIR));
-  await savePullRequest(ok.db, facts());
-  await recordedWaiting(ok.db);
+  // No stored pull request, so that the sweep at start asks for nothing; the sync asked for carries the review job's installation.
   await enqueueJob(ok.db, manual());
   await (await ok.start()).settled;
   await ok.published();
@@ -777,8 +775,7 @@ test('when a review job has left the runner the check is asked for and decided',
   // Failed: the check says so with its code.
   const failed = await harness({ gate: true, result: { ...okResult(), status: 'failed', failure: { stage: 'model', code: 'timeout' }, findings: [] } });
   await migrate(failed.db, loadMigrations(MIGRATIONS_DIR));
-  await savePullRequest(failed.db, facts());
-  await recordedWaiting(failed.db);
+  // No stored pull request, so that the sweep at start asks for nothing; the sync asked for carries the review job's installation.
   await enqueueJob(failed.db, manual());
   await (await failed.start()).settled;
   await failed.until(() => failed.written().length > 0);
@@ -803,8 +800,7 @@ test('when a review job has left the runner the check is asked for and decided',
 test('a review job that is dropped as too old leaves the check to be decided', async () => {
   const h = await harness({ gate: true });
   await migrate(h.db, loadMigrations(MIGRATIONS_DIR));
-  await savePullRequest(h.db, facts());
-  await recordedWaiting(h.db);
+  // No stored pull request, so that the sweep at start asks for nothing; the sync asked for carries the review job's installation.
   const old = (await enqueueJob(h.db, manual({ runAt: at(-90_000), now: at(-90_000) })))!;
   await (await h.start()).settled;
   await h.until(() => h.written().length > 0);
@@ -825,7 +821,7 @@ test('a review whose record failed leaves no Reviewing behind', async () => {
 test('a gate job the runner gives up raises the alert once and asks for nothing', async () => {
   const h = await harness({ gate: true });
   await migrate(h.db, loadMigrations(MIGRATIONS_DIR));
-  await savePullRequest(h.db, facts());
+  // No stored pull request: the sweep at start, which renews a waiting sync, leaves this one to the runner.
   const first = (await askGate(h.db, REF, at(0)))!;
   await h.db.query('update visto_ai.jobs set starts = 3 where id = $1', [first]);
   await (await h.start()).settled;
@@ -880,7 +876,7 @@ test('a sweep that cannot read the database fails the start', async () => {
   await assert.rejects(h.start(), /db_down/);
   assert.equal(h.events.includes('listen'), false);
 });
-test('a pull request whose check needed no write after a change of mode is not asked for at every start', async () => {
+test('a pull request whose check needed no write is asked for at every start, and writes and records nothing more', async () => {
   const h = await harness({ gate: true });
   await migrate(h.db, loadMigrations(MIGRATIONS_DIR));
   await savePullRequest(h.db, facts());
@@ -897,8 +893,10 @@ test('a pull request whose check needed no write after a change of mode is not a
   ]);
   const second = await h.start();
   await second.settled;
-  assert.deepEqual(h.logged.filter((e) => e.event === 'gate_sweep'), [{ event: 'gate_sweep', asked: 1 }, { event: 'gate_sweep', asked: 0 }]);
-  assert.deepEqual(await pending(h.db, 'gate'), [{ reason: 'sync', status: 'done' }]);
+  await h.until(async () => (await pending(h.db, 'gate')).every((j) => j.status === 'done'));
+  assert.deepEqual(h.logged.filter((e) => e.event === 'gate_sweep'), [{ event: 'gate_sweep', asked: 1 }, { event: 'gate_sweep', asked: 1 }]);
+  assert.deepEqual(await pending(h.db, 'gate'), [{ reason: 'sync', status: 'done' }, { reason: 'sync', status: 'done' }]);
+  assert.deepEqual([h.written(), (await h.db.query('select id from visto_ai.gate_evaluations')).length], [[], 2]);
 });
 test('a start in bypass says so and raises its alert once', async () => {
   const yaml = 'repositories:\n  defaults: { gate: { enabled: true, branches: [main], mode: bypass } }\n';
@@ -944,8 +942,7 @@ test('when reviews are paused a waiting review\'s check says why, and says Revie
 test('a pause that begins asks for the checks of the waiting reviews, and one whose asking fails is logged and tried again', async () => {
   const h = await harness({ gate: true });
   await migrate(h.db, loadMigrations(MIGRATIONS_DIR));
-  await savePullRequest(h.db, facts());
-  await recordedWaiting(h.db);
+  // No stored pull request, so that the sweep at start asks for nothing; the sync asked for carries the review job's installation.
   await (await h.start()).settled;
   await h.flush();
   // A review job that is stored while reviews run, and then the daily limit is reached before it starts.
@@ -956,8 +953,7 @@ test('a pause that begins asks for the checks of the waiting reviews, and one wh
   // A start while paused, when the gate's jobs cannot be stored: logged, and each pass asks again.
   const quiet = await harness({ gate: true, failQuery: "'gate', 'sync'" });
   await migrate(quiet.db, loadMigrations(MIGRATIONS_DIR));
-  await savePullRequest(quiet.db, facts());
-  await recordedWaiting(quiet.db);
+  // No stored pull request: the sweep at start, whose ask would fail too, asks for nothing.
   await recordRun(quiet.db, run({ startedAt: at(0), usage: { ...run().usage, cost: 50 } }));
   await enqueueJob(quiet.db, manual());
   await (await quiet.start()).settled;
@@ -1068,4 +1064,117 @@ test('a whole round on a gated pull request', async () => {
     ['h1', 'Waiting for /done'], ['h1', 'Reviewing'], ['h1', '1 blocking finding is open'], ['h1', '1 finding, none blocking'],
     ['h2', 'Waiting for /done'], ['h2', 'Skipped by @octo-lead'],
   ]);
+});
+
+// The sweep at start, a sync's installation, a failed review of an old head, and what counts as under way.
+
+type Harnessed = Awaited<ReturnType<typeof harness>>;
+const replyOf = (h: Harnessed, id: string, seconds: number): ForgeEvent => {
+  const thread = h.threads![0]!;
+  thread.comments.push({ id, node: `n${id}`, author: 'octo-dev', authorIsBot: false, byApp: false, reviewId: null, body: 'Fixed by hand.', at: at(seconds) });
+  return { kind: 'inline_comment', ref: REF, installation: '99', comment: {
+    id, author: 'octo-dev', authorIsBot: false, association: 'none', at: at(seconds), commit: 'h1', path: thread.path, side: thread.side,
+    line: thread.line, startLine: null, fileLevel: false, replyTo: thread.comments[0]!.id, body: 'Fixed by hand.' } };
+};
+const resolvedOf = (h: Harnessed): ForgeEvent => {
+  const thread = h.threads![0]!;
+  thread.resolved = true;
+  return { kind: 'thread', ref: REF, installation: '99', action: 'resolved', thread: thread.id, rootComment: thread.comments[0]!.id, actor: 'octo-dev', actorIsBot: false };
+};
+/** A reply and a resolve in the review's one thread, then the wait for the check: green. */
+async function answerAndResolve(h: Harnessed, from: number): Promise<void> {
+  h.now = at(from);
+  await h.webhook(replyOf(h, '8101', from), `r${from}`);
+  await h.webhook(resolvedOf(h), `t${from}`);
+  h.now = at(from + 3);
+  await h.runTimer(TICK_MS);
+  await h.until(() => titleOn(h, 'h1') === '1 finding, none blocking');
+}
+/** Opened, /done, a review with one major, then a reply and a resolve: the check is green. */
+async function greenRound(h: Harnessed): Promise<void> {
+  await h.webhook(pr('opened'), 'g1');
+  await h.until(() => titleOn(h, 'h1') === 'Waiting for /done');
+  await h.webhook(general('31', '/done'), 'g2');
+  await h.until(() => titleOn(h, 'h1') === '1 blocking finding is open');
+  await answerAndResolve(h, 10);
+}
+
+test('a thread unresolved while the service was down is seen at the next start', async () => {
+  const h = await harness({ gate: true, github: true, result: majorResult() });
+  const first = await h.start();
+  await first.settled;
+  await greenRound(h);
+  await first.stop();
+  h.threads![0]!.resolved = false;
+  await (await h.start()).settled;
+  await h.until(() => titleOn(h, 'h1') === '1 blocking finding is open');
+  assert.deepEqual(h.logged.filter((e) => e.event === 'gate_sweep').at(-1), { event: 'gate_sweep', asked: 1 });
+});
+test('clearing by reply switched off at a restart is applied at the start', async () => {
+  const options = { gate: true, github: true, result: majorResult(), repositoriesYaml: GATE_YAML };
+  const h = await harness(options);
+  const first = await h.start();
+  await first.settled;
+  await greenRound(h);
+  await first.stop();
+  options.repositoriesYaml = 'repositories:\n  defaults: { gate: { enabled: true, branches: [main], clearByReply: false } }\n';
+  await (await h.start()).settled;
+  await h.until(() => titleOn(h, 'h1') === '1 blocking finding is open');
+});
+test('a push received in dry run gets its check at the next start out of it', async () => {
+  const options: { gate: boolean; github: boolean; result: ReviewResult; dryRun?: boolean } = { gate: true, github: true, result: majorResult() };
+  const h = await harness(options);
+  const first = await h.start();
+  await first.settled;
+  await greenRound(h);
+  await first.stop();
+  options.dryRun = true;
+  const dry = await h.start();
+  await dry.settled;
+  h.live = { ...LIVE, info: { ...LIVE.info, headSha: 'h2' } };
+  await h.webhook(pr('synchronize', { headSha: 'h2', updatedAt: at(20) }), 'd-push');
+  await dry.stop();
+  assert.equal(titleOn(h, 'h2'), undefined);
+  options.dryRun = false;
+  await (await h.start()).settled;
+  await h.until(() => titleOn(h, 'h2') === 'Waiting for /done');
+});
+test('a sync left waiting from a stop of more than a day is renewed by the sweep and runs', async () => {
+  const h = await harness({ gate: true });
+  await migrate(h.db, loadMigrations(MIGRATIONS_DIR));
+  await savePullRequest(h.db, facts());
+  const old = (await askGate(h.db, REF, at(-90_000)))!;
+  await h.db.query('update visto_ai.jobs set starts = 2 where id = $1', [old]);
+  await (await h.start()).settled;
+  await h.until(async () => (await jobOf(h.db, old)).status === 'done');
+  assert.equal((await jobOf(h.db, old)).outcome, 'synced');
+  assert.deepEqual([said(h), h.logged.filter((e) => e.event === 'alert' && e.code === 'gate_check_failed')], [[['h1', 'Waiting for /done']], []]);
+});
+test('a pull request the service stores no row for gets its check from a /done, and a reply and a resolve turn it green', async () => {
+  const h = await harness({ gate: true, github: true, result: majorResult() });
+  await (await h.start()).settled;
+  await h.webhook(general('31', '/done'), 'c1');
+  await h.until(() => titleOn(h, 'h1') === '1 blocking finding is open');
+  assert.deepEqual([h.writes.filter((w) => w[0] === 'publishReview'), await getPullRequest(h.db, REF)], [[['publishReview', 'h1']], null]);
+  await answerAndResolve(h, 10);
+  assert.equal(h.held.get('h1')!.conclusion, 'success');
+});
+test('a /done that joined the review of an older head that then fails is answered by a review of the new head', async () => {
+  const h = await harness({ gate: true, github: true, holdReview: true });
+  h.resultFor = (input) => (input.pullRequest.headSha === 'h1' ? { ...okResult(), status: 'failed', failure: { stage: 'model', code: 'timeout' }, findings: [] } : undefined);
+  await (await h.start()).settled;
+  await h.webhook(pr('opened'), 'd1');
+  await h.webhook(general('31', '/done'), 'd2');
+  await h.reviewed();
+  // A push, then a second /done that joins the running review of h1.
+  h.live = { ...LIVE, info: { ...LIVE.info, headSha: 'h2' } };
+  await h.webhook(pr('synchronize', { headSha: 'h2', updatedAt: at(5) }), 'd3');
+  await h.webhook(general('33', '/done'), 'd4');
+  await h.until(() => h.writes.some((w) => w[0] === 'react' && w[1] === '33'));
+  h.releaseReview();
+  await h.until(() => titleOn(h, 'h2') === '1 finding, none blocking');
+  const reviews = await h.db.query<{ reason: string; outcome: string }>("select reason, outcome from visto_ai.jobs where kind = 'review' order by id");
+  assert.deepEqual(reviews, [{ reason: 'done', outcome: 'failed' }, { reason: 'done_retry', outcome: 'published' }]);
+  assert.deepEqual(h.inputs.map((i) => i.pullRequest.headSha), ['h1', 'h2']);
+  assert.deepEqual(h.writes.filter((w) => w[0] === 'comment'), [['comment', '@octo-lead The review did not finish (`review_failed`).']]);
 });

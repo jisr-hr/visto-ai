@@ -580,3 +580,17 @@ test('a completed check that must say another conclusion, and a check not yet co
       [[held.id, 'in_progress'], [held.id, 'completed'], [held.id, 'queued']], held.id);
   }
 });
+
+test('a stranger\'s waiting /review, about to be refused, is no review under way: a green check stays green, paused or not', async () => {
+  for (const [paused, claim] of [['spend_limit', false], [null, false], [null, true]] as const) {
+    const h = await harness({ paused });
+    await storeRun(h.db, { findings: [] });
+    const id = await enqueueJob(h.db, {
+      ref: REF, reason: 'command', headSha: '', runAt: at(0), now: at(0), delivery: null, replace: true, trigger: 'manual',
+      requestedBy: 'stranger-1', commentId: '35', association: 'none', installation: '99',
+    });
+    if (claim) await claimJob(h.db, id!, at(0));
+    await h.run();
+    assert.deepEqual(writes(h).map((w) => [w.status, w.conclusion, w.title]), [['completed', 'success', 'No blocking findings']], `${paused} ${claim}`);
+  }
+});
