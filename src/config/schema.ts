@@ -238,6 +238,7 @@ export const configSchema = z
     database: database.optional(),
     server: server.prefault({}),
     dryRun: z.boolean().default(true),
+    learning: z.boolean().default(false),
     alerts: alerts.optional(),
     extensions: extensions.default([]),
     mcpServers: mcpServers.default([]),
