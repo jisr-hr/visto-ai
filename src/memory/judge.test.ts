@@ -278,3 +278,113 @@ test('two texts that are equal folded restate each other, however few words they
   assert.equal(restates('Keep it.', ['Keep that.']), false);
   assert.equal(restates('alpha bravo charlie', ['alpha bravo charlie delta']), false);
 });
+
+test('a single call to another function is no verdict, whatever its arguments, and is asked for again', async () => {
+  for (const first of [
+    response({ toolName: 'other', toolArguments: VERDICT }),
+    response({ toolName: SUBMIT_VERDICT, toolArguments: VERDICT, toolCalls: [{ id: '1', name: 'other', arguments: VERDICT }] }),
+  ]) {
+    const m = model([first, response({ text: 'prose' })]);
+    const asked = await askJudge(m, input(), TOKEN, true, 1000);
+    assert.equal(asked.ok, false);
+    assert.equal(m.requests.length, 2);
+    assert.equal(m.requests[1]!.messages.at(-1)!.content, 'Your answer was rejected: not_a_tool_call. Call submit_verdict again.');
+  }
+});
+
+test('the reply and the finding are cut at 2,000 characters in the request', () => {
+  const content = judgeMessages(input({ finding: 'f'.repeat(2_001), reply: 'r'.repeat(2_001) }), TOKEN)[1]!.content;
+  assert.ok(content.includes(`<<<data t0k finding>>>\n${'f'.repeat(2_000)} [cut]\n<<<end t0k>>>`));
+  assert.ok(content.includes(`<<<data t0k reply>>>\n${'r'.repeat(2_000)} [cut]\n<<<end t0k>>>`));
+});
+
+test('the rejected answer sent back is cut at exactly 2,000 characters', async () => {
+  const m = model([response({ text: 'p'.repeat(2_001) }), called(VERDICT)]);
+  await askJudge(m, input(), TOKEN, false, 1000);
+  assert.equal(m.requests[1]!.messages[2]!.content, 'p'.repeat(2_000));
+  const exact = model([response({ text: 'q'.repeat(2_000) }), called(VERDICT)]);
+  await askJudge(exact, input(), TOKEN, false, 1000);
+  assert.equal(exact.requests[1]!.messages[2]!.content, 'q'.repeat(2_000));
+});
+
+test('a lesson that is true or an object is a bad lesson', () => {
+  for (const lesson of [true, {}]) assert.deepEqual(readVerdict(JSON.stringify({ classification: 'noise', lesson })), { ok: false, reason: 'bad_lesson' });
+});
+
+test('an entry that is no object is passed over, and the finding after it is found', () => {
+  assert.equal(findingBody(posted, [null, stored()]), 'The result of find may be null here.');
+  assert.equal(findingBody(posted, [5, 'x', stored()]), 'The result of find may be null here.');
+});
+
+test('the quote is compared folded, with an invisible character inside it', () => {
+  assert.equal(lessonOf(answer({ quote: 'it throws Not\u200bFound, so the check' }), REPLY, PATH).outcome, 'lesson');
+  assert.equal(lessonOf(answer({ quote: 'it throws NotFound, so the check' }), { ...REPLY, body: 'find never returns null; it throws Not\u200bFound, so the check would be dead code' }, PATH).outcome, 'lesson');
+});
+
+test('the quote must be in what the judge was sent: beyond the cut of 2,000 characters it is not', () => {
+  const S = 'find throws NotFound, so the null check would be dead code';
+  const far = { ...REPLY, body: `${'y '.repeat(1_100)}${S}` };
+  assert.deepEqual(lessonOf(answer({ quote: S }), far, PATH), { outcome: 'quote_not_in_reply' });
+  const near = { ...REPLY, body: `${'y '.repeat(900)}${S}` };
+  assert.equal(lessonOf(answer({ quote: S }), near, PATH).outcome, 'lesson');
+});
+
+// A model that answers with each value in turn, whatever it is: undefined included.
+function raw(steps: unknown[]) {
+  const requests: ModelRequest[] = [];
+  let next = 0;
+  return {
+    requests,
+    complete: async (request: ModelRequest): Promise<ModelResponse> => {
+      requests.push(structuredClone(request));
+      if (next >= steps.length) throw new Error('no more steps');
+      next += 1;
+      return steps[next - 1] as ModelResponse;
+    },
+  };
+}
+
+test('a response of any shape is read without a throw: one that is no answer is asked for again', async () => {
+  const shapes: unknown[] = [undefined, null, {}, response({ toolCalls: [null, 5] as never }), response({ toolCalls: [null, { id: '2', name: SUBMIT_VERDICT, arguments: 'x' }] as never })];
+  for (const shape of shapes) {
+    const once = raw([shape, called(VERDICT)]);
+    const asked = await askJudge(once, input(), TOKEN, true, 1000);
+    assert.equal(asked.ok, true);
+    assert.equal(once.requests.length, 2);
+    assert.match(once.requests[1]!.messages.at(-1)!.content, /^Your answer was rejected: (not_a_tool_call|not_json)\. Call submit_verdict again\.$/);
+    const twice = raw([shape, shape]);
+    const failed = await askJudge(twice, input(), TOKEN, true, 1000);
+    assert.equal(failed.ok, false);
+    if (!failed.ok) assert.equal(failed.code, 'invalid_output');
+    assert.equal(twice.requests.length, 2);
+  }
+  const bare = raw([undefined, called(VERDICT)]);
+  await askJudge(bare, input(), TOKEN, true, 1000);
+  assert.equal(bare.requests[1]!.messages.at(-1)!.content, 'Your answer was rejected: not_a_tool_call. Call submit_verdict again.');
+});
+
+test('the bounds of a restatement: words of five or more, four of them on each side, half of the smaller set shared', () => {
+  // Four words of five letters on each side, two shared: exactly half.
+  assert.equal(restates('alpha bravo charl delta', ['alpha bravo xxxxx yyyyy']), true);
+  // One shared of four: under half.
+  assert.equal(restates('alpha bravo charl delta', ['alpha zzzzz xxxxx yyyyy']), false);
+  // Three words on one side, all shared: too few, on either side.
+  assert.equal(restates('alpha bravo charl', ['alpha bravo charl delta']), false);
+  assert.equal(restates('alpha bravo charl delta', ['alpha bravo charl']), false);
+  // Words of four letters are not words; of five they are.
+  assert.equal(restates('alpha bravo abcd efgh', ['alpha bravo wxyz stuv']), false);
+  assert.equal(restates('alpha bravo abcde efghi', ['alpha bravo vwxyz stuvw']), true);
+  // Words of six letters are words too: four of six, two shared.
+  assert.equal(restates('alphas bravos charls deltas', ['alphas bravos xxxxxx yyyyyy']), true);
+  // Digits count as word characters.
+  assert.equal(restates('a1234 b1234 c1234 d1234', ['a1234 b1234 x1234 y1234']), true);
+  // Case is ignored.
+  assert.equal(restates('ALPHA BRAVO charl delta', ['alpha bravo xxxxx yyyyy']), true);
+  // Sets of unequal size: half of the smaller (4) is shared, though not half of the larger (8).
+  assert.equal(restates('alpha bravo charl delta', ['alpha bravo xxxxx yyyyy zzzzz wwwww vvvvv uuuuu']), true);
+  assert.equal(restates('alpha bravo xxxxx yyyyy zzzzz wwwww vvvvv uuuuu', ['alpha bravo charl delta']), true);
+  // Unequal sizes, under half of the smaller: one of four shared.
+  assert.equal(restates('alpha bravo charl delta', ['alpha xxxxx yyyyy zzzzz wwwww vvvvv uuuuu ttttt']), false);
+  // Five words against four, two shared: half of the smaller (4), not of the larger (5).
+  assert.equal(restates('alpha bravo charl delta echos', ['alpha bravo xxxxx yyyyy']), true);
+});
