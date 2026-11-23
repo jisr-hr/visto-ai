@@ -1,7 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { testDb } from './testing.ts';
-import { lastEvaluation, NO_COUNTS, recordEvaluation, recordSkip, skipOf } from './gate.ts';
+import { evaluatedUnstored, lastEvaluation, NO_COUNTS, recordEvaluation, recordSkip, skipOf } from './gate.ts';
+import { askGate } from './jobs.ts';
+import { savePullRequest } from './pull-requests.ts';
 import type { Evaluation, Skip } from './gate.ts';
 
 const REF = { service: 'github', owner: 'acme', repo: 'shop', number: 7 } as const;
@@ -37,5 +39,39 @@ test('a skip is stored once for a comment, and the newest skip of a head is the 
   assert.deepEqual(await skipOf(db, REF, 'h1'), { actor: 'octo-dev', reason: 'late fix' });
   assert.equal(await skipOf(db, REF, 'h2'), null);
   assert.equal(await skipOf(db, { ...REF, number: 8 }, 'h1'), null);
+  await db.close();
+});
+
+test('the pull requests with no stored row come with their newest evaluation\'s state and their newest job\'s installation', async () => {
+  const db = await testDb();
+  const ref = (number: number) => ({ ...REF, number });
+  const doneJob = async (number: number, installation: string | null, seconds: number): Promise<void> => {
+    const id = (await askGate(db, ref(number), at(seconds), undefined, { installation }))!;
+    await db.query("update visto_ai.jobs set status = 'done' where id = $1", [id]);
+  };
+  // 7: three rows, the newest says blocked; jobs 11, 12 and then one with none: 12 is the newest with one.
+  await recordEvaluation(db, evaluation({ ref: ref(7), state: 'passed' }));
+  await recordEvaluation(db, evaluation({ ref: ref(7), state: 'waiting', at: at(5) }));
+  await recordEvaluation(db, evaluation({ ref: ref(7), state: 'blocked', at: at(9) }));
+  await doneJob(7, '11', 0);
+  await doneJob(7, '12', 1);
+  await doneJob(7, null, 2);
+  // 5: two rows, the newest says bypassed, and no job with an installation.
+  await recordEvaluation(db, evaluation({ ref: ref(5), state: 'failed', code: 'github_502' }));
+  await recordEvaluation(db, evaluation({ ref: ref(5), state: 'bypassed' }));
+  await doneJob(5, null, 0);
+  // 6: rows and a job, but a stored row: not listed.
+  await recordEvaluation(db, evaluation({ ref: ref(6), state: 'passed' }));
+  await doneJob(6, '13', 0);
+  await savePullRequest(db, {
+    ref: ref(6), author: 'octo-dev', authorIsBot: false, baseBranch: 'main', headBranch: 'feat', headSha: 'h1', draft: false, state: 'open',
+    mergedAt: null, closedAt: null, mergeCommit: null, installation: '13', updatedAt: at(0),
+  });
+  // A job of another pull request with an installation does not count for 5.
+  await doneJob(8, '14', 0);
+  assert.deepEqual(await evaluatedUnstored(db), [
+    { ref: ref(5), state: 'bypassed', installation: null },
+    { ref: ref(7), state: 'blocked', installation: '12' },
+  ]);
   await db.close();
 });

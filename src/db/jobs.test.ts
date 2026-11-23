@@ -332,15 +332,17 @@ test('asking for the check stores one sync, moves a waiting sync to the new time
   assert.deepEqual((await unfinishedJobs(db)).filter((j) => j.ref.number === 8), [before]);
   await db.close();
 });
-test('a sync carries the installation it was asked with, also onto a waiting one that has none, and only the sweep renews a waiting one', async () => {
+test('a sync carries the installation it was asked with, the newest onto a waiting one, and only the sweep renews a waiting one', async () => {
   const db = await testDb();
   const first = (await askGate(db, REF, at(0)))!;
   assert.equal((await getJob(db, first))?.installation, null);
   assert.equal(await askGate(db, REF, at(1), undefined, { installation: '99' }), first);
   assert.equal((await getJob(db, first))?.installation, '99');
-  // A waiting sync that has one keeps it.
+  // The newest installation wins (the app installed again has a new id); an ask that brings none leaves it.
   assert.equal(await askGate(db, REF, at(2), undefined, { installation: '77' }), first);
-  assert.equal((await getJob(db, first))?.installation, '99');
+  assert.equal((await getJob(db, first))?.installation, '77');
+  assert.equal(await askGate(db, REF, at(3)), first);
+  assert.equal((await getJob(db, first))?.installation, '77');
   const other = { ...REF, number: 8 };
   const stored = (await askGate(db, other, at(0), undefined, { installation: '42' }))!;
   assert.equal((await getJob(db, stored))?.installation, '42');

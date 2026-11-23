@@ -102,7 +102,7 @@ test('at start every recorded state is asked for again, closed and not_found too
   assert.deepEqual(await gateJobs(d), [1, 2, 3, 4, 5, 6, 7, 8]);
 });
 
-test('the sweep renews a sync left waiting from a long stop and gives it the stored installation', async () => {
+test('the sweep renews a sync left waiting from a long stop and gives a stored pull request no installation: the job falls back to the stored one', async () => {
   const d = await db();
   await savePullRequest(d, facts(refOf(1), { installation: '42' }));
   const old = (await askGate(d, refOf(1), at(-90_000)))!;
@@ -110,7 +110,7 @@ test('the sweep renews a sync left waiting from a long stop and gives it the sto
   assert.equal(await sweepGate(d, settingsIn('enforce'), at(0)), 1);
   const row = await d.query<{ id: number; starts: number; created_at: Date; run_at: Date; installation: string | null }>(
     "select id, starts, created_at, run_at, installation from visto_ai.jobs where kind = 'gate' and status = 'pending'");
-  assert.deepEqual(row.map((r) => [r.id, r.starts, r.created_at.toISOString(), r.run_at.toISOString(), r.installation]), [[old, 0, at(0), at(0), '42']]);
+  assert.deepEqual(row.map((r) => [r.id, r.starts, r.created_at.toISOString(), r.run_at.toISOString(), r.installation]), [[old, 0, at(0), at(0), null]]);
 });
 
 test('at start a pull request the service stores no row for, but whose check the gate wrote, is asked for with the installation of its newest job', async () => {
@@ -130,5 +130,5 @@ test('at start a pull request the service stores no row for, but whose check the
   assert.equal(await sweepGate(d, settingsIn('enforce'), at(10)), 2);
   const asked = await d.query<{ repo: string; number: number; installation: string | null }>(
     "select repo, number, installation from visto_ai.jobs where kind = 'gate' and status = 'pending' order by number");
-  assert.deepEqual(asked.map((r) => [r.repo, r.number, r.installation]), [['shop', 1, '42'], ['shop', 4, '99']]);
+  assert.deepEqual(asked.map((r) => [r.repo, r.number, r.installation]), [['shop', 1, '42'], ['shop', 4, null]]);
 });

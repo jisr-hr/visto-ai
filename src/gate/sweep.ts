@@ -15,14 +15,16 @@ const UNSTORED_LEFT = new Set(['closed', 'not_found']);
  * Asks for the check of every stored open pull request that is gated, whatever its newest recorded evaluation says,
  * and of every pull request the service stores no row for whose check the gate wrote, in a repository whose gate is
  * enabled, unless its last sync found it closed or gone. A sync writes only on a difference, so an unchanged pull
- * request costs reads and no write. The ask renews a sync that already waits, and carries the stored installation, or
- * for a pull request with no row the installation of its newest job that has one. Returns how many.
+ * request costs reads and no write. The ask renews a sync that already waits. For a stored pull request it carries no
+ * installation: the job falls back to the stored one, and a later ask that merges into it brings a newer one (the app
+ * installed again). For a pull request with no row it carries the installation of its newest job that has one, since
+ * there is no row to fall back to. Returns how many.
  */
 export async function sweepGate(db: Db, settingsFor: (fullName: string) => RepoSettings, now: string): Promise<number> {
   let asked = 0;
-  for (const { ref, baseBranch, installation } of await openPullRequests(db)) {
+  for (const { ref, baseBranch } of await openPullRequests(db)) {
     if (gatingOf(settingsFor(`${ref.owner}/${ref.repo}`), baseBranch) === 'off') continue;
-    await askGate(db, ref, now, undefined, { installation, renew: true });
+    await askGate(db, ref, now, undefined, { renew: true });
     asked += 1;
   }
   // No stored row, so no base branch: the sync reads the live pull request and decides whether it is gated.

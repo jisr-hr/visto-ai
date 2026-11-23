@@ -162,6 +162,8 @@ async function harness(options: Options = {}) {
     now: options.now ?? at(0),
     /** The pull request as GitHub has it now; a test may move its head. */
     live: LIVE as LivePullRequest,
+    /** The installations GitHub no longer knows (the app was installed again): a read or a write of the pull request through one is a 404. */
+    gone: new Set<string>(),
     /** What the review answers for this input, when it answers; else `result`. */
     resultFor: undefined as ((input: ReviewInput) => ReviewResult | undefined) | undefined,
     /** The threads GitHub has; listThreads rejects while this is undefined. */
@@ -199,7 +201,7 @@ async function harness(options: Options = {}) {
         events.push('lock');
         return options.lock === null ? null : lock;
       },
-      forge: { readPullRequest: () => Promise.resolve(h.live), sourceFor: () => Promise.resolve({} as Source) },
+      forge: { readPullRequest: (_ref, installation) => (h.gone.has(installation) ? Promise.reject(new Error('github_404')) : Promise.resolve(h.live)), sourceFor: () => Promise.resolve({} as Source) },
       hooks: {
         listSince: async (since) => {
           listedSince.push(since);
@@ -234,8 +236,9 @@ async function harness(options: Options = {}) {
         listReviewComments: async (_ref, _installation, reviewId) => { writes.push(['listReviewComments']); return postedComments.get(reviewId) ?? []; },
         react: async (_ref, _installation, commentId, reaction) => { writes.push(['react', commentId, reaction]); },
         comment: async (_ref, _installation, body) => { writes.push(['comment', body]); },
-        listThreads: async () => {
+        listThreads: async (_ref, installation) => {
           writes.push(['listThreads']);
+          if (h.gone.has(installation)) throw new Error('github_404');
           if (h.threads === undefined) throw new Error('not_expected');
           return h.threads;
         },
@@ -246,11 +249,13 @@ async function harness(options: Options = {}) {
       checks: {
         async findCheck(_ref, installation, commit, name) {
           checked.push(['findCheck', installation, commit, name]);
+          if (h.gone.has(installation)) throw new Error('github_404');
           if (options.holdCheck !== undefined) await options.holdCheck;
           return held.get(commit) ?? null;
         },
         async writeCheck(_ref, installation, check) {
           checked.push(['writeCheck', installation, check]);
+          if (h.gone.has(installation)) throw new Error('github_404');
           // As GitHub does, with the adapter's guard in its place: a completed run is not reopened by an update.
           const before = check.id === null ? undefined : [...held.values()].find((c) => c.id === check.id);
           if (before !== undefined && before.status === 'completed' && check.status !== 'completed') {
@@ -1069,17 +1074,17 @@ test('a whole round on a gated pull request', async () => {
 // The sweep at start, a sync's installation, a failed review of an old head, and what counts as under way.
 
 type Harnessed = Awaited<ReturnType<typeof harness>>;
-const replyOf = (h: Harnessed, id: string, seconds: number): ForgeEvent => {
+const replyOf = (h: Harnessed, id: string, seconds: number, installation = '99'): ForgeEvent => {
   const thread = h.threads![0]!;
   thread.comments.push({ id, node: `n${id}`, author: 'octo-dev', authorIsBot: false, byApp: false, reviewId: null, body: 'Fixed by hand.', at: at(seconds) });
-  return { kind: 'inline_comment', ref: REF, installation: '99', comment: {
+  return { kind: 'inline_comment', ref: REF, installation, comment: {
     id, author: 'octo-dev', authorIsBot: false, association: 'none', at: at(seconds), commit: 'h1', path: thread.path, side: thread.side,
     line: thread.line, startLine: null, fileLevel: false, replyTo: thread.comments[0]!.id, body: 'Fixed by hand.' } };
 };
-const resolvedOf = (h: Harnessed): ForgeEvent => {
+const resolvedOf = (h: Harnessed, installation = '99'): ForgeEvent => {
   const thread = h.threads![0]!;
   thread.resolved = true;
-  return { kind: 'thread', ref: REF, installation: '99', action: 'resolved', thread: thread.id, rootComment: thread.comments[0]!.id, actor: 'octo-dev', actorIsBot: false };
+  return { kind: 'thread', ref: REF, installation, action: 'resolved', thread: thread.id, rootComment: thread.comments[0]!.id, actor: 'octo-dev', actorIsBot: false };
 };
 /** A reply and a resolve in the review's one thread, then the wait for the check: green. */
 async function answerAndResolve(h: Harnessed, from: number): Promise<void> {
@@ -1227,4 +1232,26 @@ test('a pull request the service stores no row for, whose check the gate wrote i
   await (await h.start()).settled;
   await h.until(() => titleOn(h, 'h1') === 'Waiting for /done');
   assert.deepEqual(h.logged.filter((e) => e.event === 'gate_sweep').at(-1), { event: 'gate_sweep', asked: 1 });
+});
+test('after the app is installed again, a reply and a resolve that arrive through the new installation turn a blocked check green', async () => {
+  const h = await harness({ gate: true, github: true, result: majorResult() });
+  const first = await h.start();
+  await first.settled;
+  await h.webhook(pr('opened'), 'g1');
+  await h.webhook(general('31', '/done'), 'g2');
+  await h.until(() => titleOn(h, 'h1') === '1 blocking finding is open');
+  await first.stop();
+  // Installed again: the stored row still names 99, which GitHub no longer knows; events come through 100.
+  h.gone.add('99');
+  h.now = at(10);
+  await (await h.start()).settled;
+  // The sweep's sync tried the stored installation and was put back; the reply and the resolve arrive within its wait.
+  await h.until(async () => (await h.db.query<{ starts: number }>("select starts from visto_ai.jobs where kind = 'gate' and status = 'pending'"))[0]?.starts === 1);
+  await h.webhook(replyOf(h, '8101', 10, '100'), 'r10');
+  await h.webhook(resolvedOf(h, '100'), 't10');
+  h.now = at(13);
+  // The tick of the service started second (the first one's timer was cancelled at its stop).
+  await h.timers.filter((t) => t.ms === TICK_MS && !t.cancelled).at(-1)!.work();
+  await h.until(() => titleOn(h, 'h1') === '1 finding, none blocking');
+  assert.equal(h.held.get('h1')!.conclusion, 'success');
 });

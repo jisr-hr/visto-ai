@@ -594,3 +594,14 @@ test('a stranger\'s waiting /review, about to be refused, is no review under way
     assert.deepEqual(writes(h).map((w) => [w.status, w.conclusion, w.title]), [['completed', 'success', 'No blocking findings']], `${paused} ${claim}`);
   }
 });
+
+test('the sweep\'s sync for a stored pull request carries no installation, and the job uses the stored one', async () => {
+  const h = await harness({ installation: '42' });
+  await finishJob(h.db, h.job.id, 'dropped', 'other', at(0));
+  assert.equal(await sweepGate(h.db, () => SETTINGS, at(100)), 1);
+  const job = (await h.claimNext(at(100)))!;
+  assert.equal(job.installation, null);
+  await h.run(job);
+  assert.deepEqual(h.calls.filter((c) => c[0] === 'readPullRequest').map((c) => c[2]), ['42']);
+  assert.deepEqual(await statusOf(h, job.id), ['done', 'synced']);
+});

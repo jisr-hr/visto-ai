@@ -54,14 +54,17 @@ export async function lastEvaluation(db: Db, ref: PullRequestRef): Promise<{ hea
  */
 export async function evaluatedUnstored(db: Db): Promise<Array<{ ref: PullRequestRef; state: string; installation: string | null }>> {
   const rows = await db.query<{ service: 'github'; owner: string; repo: string; number: number; state: string; installation: string | null }>(
-    `select distinct on (e.service, e.owner, e.repo, e.number) e.service, e.owner, e.repo, e.number, e.state,
+    // The newest row of each pull request is picked first; the installation is then looked up for those rows only.
+    `select n.service, n.owner, n.repo, n.number, n.state,
             (select j.installation from visto_ai.jobs j
-              where j.service = e.service and j.owner = e.owner and j.repo = e.repo and j.number = e.number and j.installation is not null
+              where j.service = n.service and j.owner = n.owner and j.repo = n.repo and j.number = n.number and j.installation is not null
               order by j.id desc limit 1) as installation
-     from visto_ai.gate_evaluations e
-     where not exists (select 1 from visto_ai.pull_requests p
-                       where p.service = e.service and p.owner = e.owner and p.repo = e.repo and p.number = e.number)
-     order by e.service, e.owner, e.repo, e.number, e.id desc`);
+     from (select distinct on (e.service, e.owner, e.repo, e.number) e.service, e.owner, e.repo, e.number, e.state
+           from visto_ai.gate_evaluations e
+           where not exists (select 1 from visto_ai.pull_requests p
+                             where p.service = e.service and p.owner = e.owner and p.repo = e.repo and p.number = e.number)
+           order by e.service, e.owner, e.repo, e.number, e.id desc) n
+     order by n.service, n.owner, n.repo, n.number`);
   return rows.map((r) => ({ ref: { service: r.service, owner: r.owner, repo: r.repo, number: r.number }, state: r.state, installation: r.installation }));
 }
 
