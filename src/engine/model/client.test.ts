@@ -386,6 +386,22 @@ test('a call with no id, no name or an id already used is passed over, and more 
   assert.equal((many.assistant!.tool_calls as unknown[]).length, 16);
   assert.deepEqual(many.assistant!.tool_calls, usable(16));
 });
+test('an entry that cannot be used does not block its id: a later call with the same id is kept', async () => {
+  const later = { id: 'a', function: { name: 'n', arguments: '{}' } };
+  const { client, queue } = setup();
+  queue(json(200, answer({ content: null, tool_calls: [{ id: 'a', function: {} }, later] })));
+  const r = await client.complete(req);
+  assert.deepEqual(r.toolCalls, [{ id: 'a', name: 'n', arguments: '{}' }]);
+  assert.deepEqual(r.assistant!.tool_calls, [later]);
+});
+test('an answer whose content is a list of parts, beside tool calls, is echoed with null content', async () => {
+  const call = { id: 'c1', function: { name: 'docs__search', arguments: '{}' } };
+  const { client, queue } = setup();
+  queue(json(200, answer({ content: [{ type: 'text', text: 'Looking.' }], tool_calls: [call] })));
+  const r = await client.complete(req);
+  assert.equal(r.text, null);
+  assert.deepEqual(r.assistant, { role: 'assistant', content: null, tool_calls: [call] });
+});
 test('arguments that are no text are kept as null', async () => {
   const { client, queue } = setup();
   queue(json(200, answer({

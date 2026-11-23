@@ -696,8 +696,12 @@ test('a server that is badly written is refused by key, and no issue holds a val
     const issues = mcpIssues(mcp(entry(`name: docs\n    url: '${bad}'\n    tools: [search]\n`)));
     assert.deepEqual(issues, [URL_ISSUE], bad);
   }
+  for (const bad of ["' https://docs.example.test/mcp'", "'https://docs.example.test/mcp '", '"https://docs.example.test/\\nmcp"', '"https://docs.example.test/\\tmcp"', '"https://docs.example.test/m\\x01cp"']) {
+    assert.deepEqual(mcpIssues(mcp(entry(`name: docs\n    url: ${bad}\n    tools: [search]\n`))), [URL_ISSUE], bad);
+  }
+  const TOOLS_MESSAGE = 'must name 1 to 20 tools';
   const TOOLS = 'mcpServers.0.tools: must name 1 to 20 tools';
-  assert.deepEqual(mcpIssues(mcp(entry('name: docs\n    url: https://docs.example.test/mcp\n'))).length > 0, true);
+  assert.deepEqual(mcpIssues(mcp(entry('name: docs\n    url: https://docs.example.test/mcp\n'))), ['mcpServers.0.tools: ' + TOOLS_MESSAGE]);
   assert.deepEqual(mcpIssues(mcp(entry('name: docs\n    url: https://docs.example.test/mcp\n    tools: []\n'))), [TOOLS]);
   const tools = (list: string): string[] => mcpIssues(mcp(entry(`name: docs\n    url: https://docs.example.test/mcp\n    tools: ${list}\n`)));
   assert.deepEqual(tools(JSON.stringify(Array.from({ length: 21 }, (_, i) => `t${i}`))), [TOOLS]);
@@ -716,6 +720,10 @@ test('a server that is badly written is refused by key, and no issue holds a val
   const headers = (h: string): string[] => mcpIssues(mcp(entry(`name: docs\n    url: https://docs.example.test/mcp\n    tools: [search]\n    headers: ${h}\n`)));
   const NAMEH = 'must be a header name of letters, digits and hyphens, at most 100';
   assert.deepEqual(headers("{ 'X Team': a }"), [`mcpServers.0.headers.X Team: ${NAMEH}`]);
+  const control = headers('{ "X\\r\\nA": v }');
+  assert.equal(control.length, 1);
+  assert.ok(!/[\x00-\x1f\x7f]/.test(control[0]!), 'one line, no raw control character');
+  assert.equal(control[0], `mcpServers.0.headers."X\\r\\nA": ${NAMEH}`);
   assert.deepEqual(headers(JSON.stringify({ ['x'.repeat(101)]: 'a' })), [`mcpServers.0.headers.${'x'.repeat(101)}: ${NAMEH}`]);
   for (const reserved of ['Content-Type', 'ACCEPT', 'Host', 'content-length', 'Connection', 'Transfer-Encoding', 'Mcp-Session-Id', 'mcp-protocol-version']) {
     assert.deepEqual(headers(`{ ${reserved}: a }`), [`mcpServers.0.headers.${reserved}: is set by the service`], reserved);

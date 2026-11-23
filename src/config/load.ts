@@ -182,7 +182,8 @@ export function parseConfig(yamlText: string, env: Record<string, string | undef
   if (!result.success) {
     throw new ConfigError(
       result.error.issues.map((i) => {
-        const where = i.path.map(String).join('.');
+        // A key outside printable ASCII is shown escaped, so an issue stays one line.
+        const where = i.path.map((k) => (/^[\x20-\x7E]*$/.test(String(k)) ? String(k) : JSON.stringify(String(k)))).join('.');
         const unknown = i.code === 'unrecognized_keys' ? ` (${i.keys.join(', ')})` : '';
         return `${where === '' ? '(root)' : where}: ${i.message}${unknown}`;
       }),

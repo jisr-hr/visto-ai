@@ -103,7 +103,7 @@ const SET_BY_SERVICE = new Set([
 
 /** A server's address: http or https, with no user name and no password (a secret goes in a header). */
 function isServerUrl(value: string): boolean {
-  if (!isHttpUrl(value)) return false;
+  if (!/^[\x21-\x7E]+$/.test(value) || !isHttpUrl(value)) return false;
   const { username, password } = new URL(value);
   return username === '' && password === '';
 }
