@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { testDb } from './testing.ts';
-import { lastEvaluation, lastEvaluations, NO_COUNTS, recordEvaluation, recordSkip, skipOf } from './gate.ts';
+import { lastEvaluation, NO_COUNTS, recordEvaluation, recordSkip, skipOf } from './gate.ts';
 import type { Evaluation, Skip } from './gate.ts';
 
 const REF = { service: 'github', owner: 'acme', repo: 'shop', number: 7 } as const;
@@ -14,17 +14,14 @@ const skip = (over: Partial<Skip> = {}): Skip => ({
   ref: { ...REF, owner: 'Acme' }, headSha: 'h1', actor: 'octo-lead', reason: 'hotfix', commentId: '41', at: at(0), ...over,
 });
 
-test('an evaluation is stored with its counts, and the newest is read back for one pull request and for each', async () => {
+test('an evaluation is stored with its counts, and the newest is read back for its pull request', async () => {
   const db = await testDb();
   const counts = { blocking: 1, clearedByReview: 2, clearedByReply: 3, silentResolves: 4, unknownThreads: 5, findings: 6, notReviewed: 7, withoutThread: 8, refusedInline: 9 };
   await recordEvaluation(db, evaluation());
   await recordEvaluation(db, evaluation({ headSha: 'h2', at: at(5), mode: 'shadow', state: 'failed', code: 'github_502', run: 4, counts }));
   await recordEvaluation(db, evaluation({ ref: { ...REF, number: 8, repo: 'Shop' }, state: 'passed' }));
   assert.deepEqual(await lastEvaluation(db, REF), { headSha: 'h2', mode: 'shadow', state: 'failed', code: 'github_502' });
-  assert.deepEqual(await lastEvaluations(db), [
-    { ref: REF, mode: 'shadow', state: 'failed' },
-    { ref: { ...REF, number: 8 }, mode: 'enforce', state: 'passed' },
-  ]);
+  assert.deepEqual(await lastEvaluation(db, { ...REF, number: 8 }), { headSha: 'h1', mode: 'enforce', state: 'passed', code: null });
   assert.equal(await lastEvaluation(db, { ...REF, number: 9 }), null);
   const [row] = await db.query(
     `select owner, run, blocking, cleared_by_review, cleared_by_reply, silent_resolves, unknown_threads, findings, not_reviewed, without_thread, refused_inline

@@ -47,15 +47,6 @@ export async function lastEvaluation(db: Db, ref: PullRequestRef): Promise<{ hea
   return r === undefined ? null : { headSha: r.head_sha, mode: r.mode, state: r.state, code: r.code };
 }
 
-/** The newest evaluation of each pull request that has one. */
-export async function lastEvaluations(db: Db): Promise<Array<{ ref: PullRequestRef; mode: string; state: string }>> {
-  const rows = await db.query<{ service: 'github'; owner: string; repo: string; number: number; mode: string; state: string }>(
-    `select distinct on (service, owner, repo, number) service, owner, repo, number, mode, state
-     from visto_ai.gate_evaluations
-     order by service, owner, repo, number, id desc`);
-  return rows.map((r) => ({ ref: { service: r.service, owner: r.owner, repo: r.repo, number: r.number }, mode: r.mode, state: r.state }));
-}
-
 /**
  * The pull requests the gate recorded an evaluation for and the service stores no row of (opened before the app was
  * installed), with the state of the newest evaluation and the installation of the newest job of the pull request that
