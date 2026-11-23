@@ -62,6 +62,21 @@ export interface ScoreAnswer {
 }
 export interface Scorer { score(request: ScoreRequest): Promise<ScoreAnswer> }
 
+export type ExtensionState = 'ok' | 'empty' | 'skipped' | 'error';
+export interface ExtensionStatus { status: ExtensionState; code: string } // code: a short code
+/** What a context provider answers. Nothing of it is trusted: the engine checks it field by field. */
+export interface ContextAnswer {
+  status: ExtensionState;
+  code?: string;          // a short code that says why, such as no_ticket
+  label?: string;         // names the text for the model, such as "ticket SHOP-12"
+  text?: string;
+  criteria?: string[];    // acceptance criteria, one for each entry
+}
+export interface ContextProvider {
+  name: string;           // the module's name
+  provide(pr: PullRequestInfo, signal: AbortSignal): Promise<ContextAnswer>;
+}
+
 export interface ReviewDeps {
   source: Source;
   model: ModelClient;
@@ -94,7 +109,7 @@ export interface ReviewResult {
   usage: Usage;
   models: string[];           // models that answered, distinct, in first-seen order
   providers: string[];        // upstream providers that answered, distinct, in first-seen order
-  dependencies: { model: 'ok' | 'error' };
+  dependencies: { model: 'ok' | 'error'; extensions?: Record<string, ExtensionStatus> }; // extensions: absent when no provider was asked
   audit: AuditEntry[];
   scores: FileScore[];        // one per changed file; empty when the review failed
   verdict: Verdict;
