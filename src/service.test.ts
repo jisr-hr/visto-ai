@@ -20,6 +20,11 @@ import type { RequestLike, ResponseLike } from './shell/http.ts';
 import { checkText } from './gate/check.ts';
 import type { LoadedExtension } from './extensions/types.ts';
 import { createFeedback } from './shell/feedback.ts';
+import { LEARN_MS } from './shell/learning.ts';
+import { recordActivity } from './db/human-activity.ts';
+import type { Activity } from './db/human-activity.ts';
+import { addRecords } from './db/memory-records.ts';
+import type { HumanInlineComment } from './forge/types.ts';
 
 const REF = { service: 'github', owner: 'acme', repo: 'shop', number: 7 } as const;
 const at = (seconds: number): string => new Date(Date.parse('2026-03-01T10:00:00.000Z') + seconds * 1000).toISOString();
@@ -91,6 +96,8 @@ interface Options {
   member?: boolean;
   /** The modules the service is given; none when not given. */
   extensions?: LoadedExtension[];
+  /** true to switch learning on; the config's own value (off) when not given. */
+  learning?: boolean;
 }
 interface Timer { ms: number; work: () => Promise<void>; cancelled: boolean }
 
@@ -107,6 +114,8 @@ async function harness(options: Options = {}) {
   const events: string[] = [];
   const timers: Timer[] = [];
   const inputs: ReviewInput[] = [];
+  /** The dependencies each review was given, in the order of `inputs`. */
+  const reviewDeps: ReviewDeps[] = [];
   const fetched: string[] = [];
   const listedSince: string[] = [];
   const logged: Array<Record<string, unknown>> = [];
@@ -151,6 +160,7 @@ async function harness(options: Options = {}) {
       return real.transaction((tx) => work({ ...tx, query: (text, params) => (allQueries.push([text, params ?? []]), tx.query(text, params)) }));
     },
     close: () => {
+      h.beforeClose?.();
       events.push('close');
       if (options.closeNever === true) return never();
       if (options.closeError !== undefined) return Promise.reject(options.closeError);
@@ -160,7 +170,7 @@ async function harness(options: Options = {}) {
   const lock: InstanceLock = { release: async () => { events.push('release'); } };
 
   const h = {
-    db, queries, allQueries, events, order, lacksCalls, gateCalls, checked, held, timers, inputs, fetched, listedSince, logged, writes,
+    db, queries, allQueries, reviewDeps, events, order, lacksCalls, gateCalls, checked, held, timers, inputs, fetched, listedSince, logged, writes,
     port: 0,
     /** What the clock reads; a test may move it. */
     now: options.now ?? at(0),
@@ -175,6 +185,8 @@ async function harness(options: Options = {}) {
     onListen: undefined as (() => Promise<void>) | undefined,
     beforeListing: undefined as (() => Promise<void>) | undefined,
     beforeTransaction: undefined as (() => Promise<void>) | undefined,
+    /** Called when the database is being closed, before anything else. */
+    beforeClose: undefined as (() => void) | undefined,
     releaseReview: () => { releaseReview(); },
     reviewed: () => reviewed,
     published: () => published,
@@ -182,7 +194,8 @@ async function harness(options: Options = {}) {
       const yaml = options.repositoriesYaml ?? (options.gate === true ? GATE_YAML : undefined);
       const base = yaml === undefined ? config : serviceConfig(parseConfig(BASE_YAML + yaml, ENV));
       const dry = options.dryRun ?? options.gate !== true;
-      const service = await startService(dry ? base : { ...base, dryRun: false }, {
+      const learned = options.learning === true ? { ...base, learning: true } : base;
+      const service = await startService(dry ? learned : { ...learned, dryRun: false }, {
       db, appInfo,
       reader: { read: () => ({ ok: true as const, delivery: delivered, name: current.kind, action: current.kind === 'pull_request' ? current.action : null, event: current }) },
       clock: () => new Date(h.now),
@@ -293,8 +306,9 @@ async function harness(options: Options = {}) {
         return () => { timer.cancelled = true; };
       },
       engineDeps: (source) => ({ source }) as ReviewDeps,
-      review: async (input) => {
+      review: async (input, given) => {
         inputs.push(input);
+        reviewDeps.push(given);
         reviewCalled();
         if (options.holdReview === true) await reviewHeld;
         return h.resultFor?.(input) ?? options.result ?? okResult();
@@ -1426,4 +1440,205 @@ test('with no server named the service makes no server health', async () => {
   await threeReviews(h, [failing, failing, { docs: { status: 'ok', code: 'ok', calls: 1 } }]);
   assert.deepEqual(alertsOf(h, 'mcp_error', 'mcp_ok'), []);
   assert.deepEqual(h.logged.filter((e) => e.event === 'review').map((e) => e.mcp), [failing, failing, { docs: { status: 'ok', code: 'ok', calls: 1 } }]);
+});
+
+// Learning (Task 9).
+const TAX = 'src/billing/tax.ts';
+const inlineBy = (over: Partial<HumanInlineComment> = {}): ForgeEvent => ({
+  kind: 'inline_comment', ref: REF, installation: '99', comment: {
+    id: 'ic-1', author: 'octo-lead', authorIsBot: false, association: 'member', at: at(60), commit: 'h1', path: TAX, side: 'RIGHT',
+    line: 12, startLine: null, fileLevel: false, replyTo: null, body: 'check the rounding here', ...over,
+  },
+});
+const stored = (over: Partial<Activity> = {}): Activity => ({
+  ref: REF, kind: 'inline_comment', sourceId: 'ic-1', author: 'octo-lead', association: 'member', state: null,
+  body: 'check the rounding here', path: TAX, side: 'RIGHT', line: 12, startLine: null, fileLevel: false,
+  commit: 'h1', replyTo: null, thread: null, at: at(-7200), delivery: 'd-0', ...over,
+});
+/** A stored result whose one block, lines 10 to 14 of the file, was scored `score` under a threshold of 70. */
+const scoredBlock = (score: number) => ({
+  scores: [{ path: TAX, previousPath: null, diffHash: 'd', changeSummary: '', changedLines: 3, wholeFile: null, fileLevel: null, finalScore: score, covered: true,
+    blocks: [{ id: 'B1', hunk: 'B1', hunkHash: 'h-low', hash: 'h-low', changedLines: 3, span: { side: 'RIGHT', first: 10, last: 14 },
+      lines: { LEFT: [], RIGHT: [[10, 14]] }, entry: { score, category: 'refactor', reason: 'moves a helper' } }] }],
+  verdict: { threshold: 70 },
+});
+const closedFacts = (seconds: number) => ({ state: 'closed' as const, closedAt: at(seconds), updatedAt: at(seconds) });
+const memoryRows = async (h: { db: Db }) =>
+  h.db.query<{ number: number; source_ref: string; missed: boolean }>('select number, source_ref, missed from visto_ai.memory_records order by id');
+const ranAt = async (h: { db: Db }): Promise<Date | null> =>
+  (await h.db.query<{ ran_at: Date | null }>("select ran_at from visto_ai.learning where work = 'signals'"))[0]?.ran_at ?? null;
+/** The learning timer. It has the upkeep's interval, and is registered after it, by the start. */
+const learnTimer = (h: { timers: Timer[] }): Timer => {
+  const both = h.timers.filter((t) => t.ms === LEARN_MS);
+  assert.equal(both.length, 2);
+  return both[1]!;
+};
+const ofLearning = (logged: Array<Record<string, unknown>>) =>
+  logged.filter((e) => typeof e.event === 'string' && (e.event.startsWith('learning') || e.event.startsWith('memory')));
+
+test('with learning off nothing of learning runs: no timer, no log line, no row, no alert', async () => {
+  const h = await harness();
+  await (await h.start()).settled;
+  assert.deepEqual(await h.webhook(pr('opened'), 'd1'), { status: 202, body: 'accepted' });
+  await h.reviewed();
+  await h.until(() => h.logged.some((e) => e.event === 'review'));
+  assert.deepEqual(await h.webhook(inlineBy(), 'd2'), { status: 202, body: 'accepted' });
+  assert.deepEqual(await h.webhook(pr('closed', closedFacts(120)), 'd3'), { status: 202, body: 'accepted' });
+  h.now = at(40 * 3600);
+  for (const timer of [...h.timers]) await timer.work();
+  await h.flush();
+  // The service's own statements, before this test reads anything.
+  assert.deepEqual(h.allQueries.filter(([text]) => /visto_ai\.learning|memory_records|learned_at|learn_attempts/.test(text)), []);
+  assert.deepEqual(h.timers.map((t) => t.ms), [TICK_MS, UPKEEP_MS, BEAT_MS]);
+  assert.deepEqual(ofLearning(h.logged), []);
+  assert.equal(h.logged.some((e) => e.event === 'alert' && /^(learning|memory)/.test(String(e.code))), false);
+  assert.equal(h.logged.some((e) => e.event === 'start_step_failed'), false);
+  assert.deepEqual(await h.db.query('select 1 from visto_ai.learning'), []);
+  assert.deepEqual(await memoryRows(h), []);
+  assert.equal(h.reviewDeps.length, 1);
+  assert.equal('memory' in h.reviewDeps[0]!, false);
+  assert.equal(h.logged.find((e) => e.event === 'review')!.memory, undefined);
+});
+
+test('with learning on, the start logs what the work has done so far and a first pass runs', async () => {
+  const h = await harness({ learning: true });
+  await (await h.start()).settled;
+  await h.until(async () => (await ranAt(h)) !== null);
+  const events = h.logged.map((e) => e.event);
+  assert.deepEqual(h.logged.filter((e) => e.event === 'learning_state'), [
+    { event: 'learning_state', since: at(0), last_ran: null, examined: 0, added: 0, retired: 0, failed: 0 },
+  ]);
+  assert.ok(events.indexOf('learning_state') > events.indexOf('app_check'));
+  assert.equal(LEARN_MS, UPKEEP_MS);
+  assert.deepEqual(h.timers.map((t) => t.ms).sort(), [TICK_MS, UPKEEP_MS, LEARN_MS, BEAT_MS].sort());
+  learnTimer(h);
+  assert.equal((await ranAt(h))!.toISOString(), at(0));
+});
+
+test('at start the first pass learns what closed while the service was down', async () => {
+  const h = await harness({ learning: true, now: at(2 * 86_400) });
+  await migrate(h.db, loadMigrations(MIGRATIONS_DIR));
+  await savePullRequest(h.db, facts(closedFacts(-3600)));
+  await recordActivity(h.db, stored());
+  await (await h.start()).settled;
+  await h.until(async () => (await memoryRows(h)).length > 0);
+  assert.deepEqual(await memoryRows(h), [{ number: 7, source_ref: `7:file:${TAX}`, missed: false }]);
+  assert.deepEqual(h.logged.filter((e) => e.event === 'webhook'), []);
+});
+
+test('a comment inside a block scored below the threshold is recorded when its delivery arrives, without waiting for the timer', async () => {
+  const h = await harness({ learning: true, now: at(600) });
+  await migrate(h.db, loadMigrations(MIGRATIONS_DIR));
+  await savePullRequest(h.db, facts());
+  await recordRun(h.db, run({ headSha: 'h1', result: scoredBlock(35) }));
+  await (await h.start()).settled;
+  await h.until(async () => (await ranAt(h)) !== null);
+  assert.deepEqual(await memoryRows(h), []);
+  assert.deepEqual(await h.webhook(inlineBy(), 'd2'), { status: 202, body: 'accepted' });
+  await h.until(async () => (await memoryRows(h)).length > 0);
+  assert.deepEqual(await memoryRows(h), [{ number: 7, source_ref: `7:h-low:${TAX}`, missed: true }]);
+});
+
+test('a pass that fails is logged with a code, and after 36 hours learning_stale is raised once', async () => {
+  const h = await harness({ learning: true, failQuery: 'learn_attempts < $1' });
+  await (await h.start()).settled;
+  await h.until(() => h.logged.some((e) => e.event === 'learning_failed'));
+  const failed = h.logged.filter((e) => e.event === 'learning_failed');
+  assert.deepEqual(failed.map((e) => Object.keys(e)), [['event', 'reason']]);
+  assert.match(String(failed[0]!.reason), /^[a-z][a-z0-9_]{0,39}$/);
+  h.now = at(37 * 3600);
+  await learnTimer(h).work();
+  await learnTimer(h).work();
+  assert.deepEqual(alertsOf(h, 'learning_stale'), [{ event: 'alert', code: 'learning_stale', hours: 37 }]);
+  assert.equal(h.logged.filter((e) => e.event === 'learning_failed').length, 3);
+  assert.equal(await ranAt(h), null);
+});
+
+test('a start step that fails still leaves the timer, and the stale alert, in place', async () => {
+  const h = await harness({ learning: true, failQuery: 'insert into visto_ai.learning' });
+  await (await h.start()).settled;
+  assert.deepEqual(h.logged.filter((e) => e.event === 'start_step_failed'), [
+    { event: 'start_step_failed', step: 'learning', error: 'Error', code: null, reason: 'db_down' },
+  ]);
+  assert.equal(h.logged.some((e) => e.event === 'learning_state'), false);
+  learnTimer(h);
+  assert.equal(h.timers.some((t) => t.ms === BEAT_MS), true);
+  h.now = at(37 * 3600);
+  await learnTimer(h).work();
+  assert.deepEqual(alertsOf(h, 'learning_stale'), [{ event: 'alert', code: 'learning_stale', hours: 37 }]);
+});
+
+test('stop waits for a pass under way and starts none after it', async () => {
+  const h = await harness({ learning: true, now: at(2 * 86_400) });
+  await migrate(h.db, loadMigrations(MIGRATIONS_DIR));
+  await savePullRequest(h.db, facts(closedFacts(-3600)));
+  await recordActivity(h.db, stored());
+  let release!: () => void;
+  const gate = new Promise<void>((done) => { release = done; });
+  let entered = false;
+  // After the recovery: the pass's own transaction waits.
+  h.onListen = async () => { h.beforeTransaction = async () => { entered = true; await gate; }; };
+  let learnedAtClose: boolean | null = null;
+  h.beforeClose = () => { learnedAtClose ??= h.logged.some((e) => e.event === 'learning'); };
+  const service = await h.start();
+  await service.settled;
+  await h.until(() => entered);
+  const batches = () => h.allQueries.filter(([text]) => text.includes('learn_attempts < $1')).length;
+  const stopped = service.stop();
+  await h.flush();
+  assert.equal(h.events.includes('close'), false);
+  release();
+  await stopped;
+  assert.equal(learnedAtClose, true);
+  assert.deepEqual(await memoryRows(h), [{ number: 7, source_ref: `7:file:${TAX}`, missed: false }]);
+  const read = batches();
+  await learnTimer(h).work();
+  await h.flush();
+  assert.equal(batches(), read);
+});
+
+test('stop waits for a pass that never settles at most CLOSE_WAIT_MS', async (t) => {
+  const h = await harness({ learning: true, now: at(2 * 86_400) });
+  await migrate(h.db, loadMigrations(MIGRATIONS_DIR));
+  await savePullRequest(h.db, facts(closedFacts(-3600)));
+  await recordActivity(h.db, stored());
+  let entered = false;
+  h.onListen = async () => { h.beforeTransaction = async () => { entered = true; await never(); }; };
+  const service = await h.start();
+  await service.settled;
+  await h.until(() => entered);
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const stopped = service.stop();
+  for (let i = 0; i < 20 && !h.events.includes('close'); i += 1) await h.flush();
+  assert.equal(h.events.includes('close'), false);
+  for (let i = 0; i < 20 && !h.events.includes('close'); i += 1) {
+    t.mock.timers.tick(CLOSE_WAIT_MS);
+    await h.flush();
+  }
+  await stopped;
+  assert.equal(h.events.includes('close'), true);
+});
+
+test('a review of a repository with a record is given it', async () => {
+  const errored = { ...okResult(), dependencies: { model: 'ok' as const, memory: { status: 'error' as const, code: 'timeout', lines: 0 } } };
+  const h = await harness({ learning: true, result: errored });
+  await migrate(h.db, loadMigrations(MIGRATIONS_DIR));
+  await addRecords(h.db, { service: 'github', owner: 'acme', repo: 'shop' }, [{
+    kind: 'human_signal', sourceRef: `8:file:${TAX}`, number: 8, path: TAX, directory: 'src/billing', category: null, reason: null,
+    missed: false, excerpt: '', comment: 'ic-9', createdAt: at(-86_400), expiresAt: at(180 * 86_400),
+  }]);
+  await (await h.start()).settled;
+  for (const [i, head] of ['h1', 'h2'].entries()) {
+    h.live = { ...LIVE, info: { ...LIVE.info, headSha: head } };
+    h.now = at(i * 3600);
+    await h.webhook(pr(i === 0 ? 'opened' : 'synchronize', { headSha: head, updatedAt: at(i * 3600) }), `d${i + 1}`);
+    h.now = at(i * 3600 + 600);
+    await h.runTimer(TICK_MS);
+    await h.until(() => h.logged.filter((e) => e.event === 'review').length === i + 1);
+  }
+  const memory = h.reviewDeps[0]!.memory!;
+  assert.notEqual(memory, undefined);
+  const blocks = await memory.blocks([{ path: TAX, previousPath: null }], new Date(at(600)), new AbortController().signal);
+  assert.deepEqual(blocks.pullRequest.map((l) => l.ref), [`8:file:${TAX}`]);
+  assert.deepEqual(alertsOf(h, 'memory_error', 'memory_ok'), [{ event: 'alert', code: 'memory_error', reason: 'timeout' }]);
 });
