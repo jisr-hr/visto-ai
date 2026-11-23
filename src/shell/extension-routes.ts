@@ -11,7 +11,10 @@ const MAX_HEADER_VALUE = 2_000;
 const HEADER_NAME = /^[A-Za-z0-9-]{1,64}$/;
 // Printable ASCII only: no control character, and nothing the runtime would refuse to write.
 const HEADER_VALUE = /^[\x20-\x7e]*$/;
-const OWNED = new Set(['connection', 'content-length', 'transfer-encoding', 'cache-control', 'x-content-type-options']);
+const OWNED = new Set([
+  'connection', 'content-length', 'transfer-encoding', 'cache-control', 'x-content-type-options',
+  'keep-alive', 'upgrade', 'trailer', 'te', 'date',
+]);
 
 /** The answer as the listener may write it, or null. Read field by field: a getter that throws is a wrong shape. */
 function check(value: unknown): CheckedAnswer | null {

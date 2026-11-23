@@ -15,8 +15,17 @@ async function tell(notifier: Notifier, notice: ReviewNotice, timeoutMs: number)
   } catch (error) {
     // the signal aborts only when the limit passed first
     if ((given as AbortSignal | null)?.aborted === true) return { name: notifier.name, ok: false, code: 'timeout' };
-    const message = error instanceof Error ? error.message : '';
-    return { name: notifier.name, ok: false, code: isShortCode(message) ? message : 'notifier_failed' };
+    return { name: notifier.name, ok: false, code: failureCode(error) };
+  }
+}
+
+/** The error's message when it is a short code other than `ok`, else notifier_failed. A value that throws when it is read is notifier_failed. */
+function failureCode(error: unknown): string {
+  try {
+    const message: unknown = error instanceof Error ? error.message : '';
+    return typeof message === 'string' && message !== 'ok' && isShortCode(message) ? message : 'notifier_failed';
+  } catch {
+    return 'notifier_failed';
   }
 }
 

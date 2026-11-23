@@ -156,6 +156,11 @@ test('an answer of the wrong shape is a 500, and the headers the service owns ar
     headers: { 'Cache-Control': 'public', Connection: 'close', 'Content-Length': '5', 'X-Content-Type-Options': 'x', 'Transfer-Encoding': 'chunked' },
   }))], { log });
   assert.deepEqual(await owned.get('chat')!(REQUEST).answer, { status: 200, headers: {}, body: '' });
+  const hop = createExtensionRoutes([module('chat', async () => ({
+    status: 200,
+    headers: { 'Keep-Alive': 'timeout=5', Upgrade: 'websocket', Trailer: 'x-b', TE: 'trailers', Date: 'Sun, 01 Mar 2026 10:00:00 GMT', 'x-a': 'b' },
+  }))], { log });
+  assert.deepEqual(await hop.get('chat')!(REQUEST).answer, { status: 200, headers: { 'x-a': 'b' }, body: '' });
   const edges = createExtensionRoutes([module('chat', async () => ({
     status: 599, headers: { ...Object.fromEntries(Object.keys(many).slice(0, 20).map((k) => [k, 'v'])), }, body: '',
   }))], { log });

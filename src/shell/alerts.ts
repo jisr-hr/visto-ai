@@ -24,13 +24,15 @@ export function createAlerts(deps: {
     try { deps.log(entry); } catch { /* a logger that throws stops nothing */ }
   }
 
-  async function post(webhook: string, code: string, details: Record<string, string | number | boolean | null>): Promise<void> {
+  /** `at` is null when the clock could not be read: the post then fails as it did when the clock was read here. */
+  async function post(webhook: string, code: string, at: string | null, details: Record<string, string | number | boolean | null>): Promise<void> {
     let status: number | null = null;
     try {
+      if (at === null) throw new Error('clock');
       const res = await deps.fetch(webhook, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ source: 'visto-ai', code, at: deps.clock().toISOString(), details }),
+        body: JSON.stringify({ source: 'visto-ai', code, at, details }),
         redirect: 'manual',
         signal: AbortSignal.timeout(ALERT_TIMEOUT_MS),
       });
@@ -60,11 +62,19 @@ export function createAlerts(deps: {
 
   function alert(code: string, details: Record<string, string | number | boolean | null> = {}): void {
     safeLog({ event: 'alert', code, ...details });
-    if (deps.webhook !== null) track(post(deps.webhook, code, details));
-    if (sinks.length === 0) return;
+    if (deps.webhook === null && sinks.length === 0) return;
+    // One read of the clock: the webhook and every sink get the same time.
+    let at: string | null;
+    try {
+      at = deps.clock().toISOString();
+    } catch {
+      at = null;
+    }
+    if (deps.webhook !== null) track(post(deps.webhook, code, at, details));
+    if (sinks.length === 0 || at === null) return;
     let notice: AlertNotice;
     try {
-      notice = { code, at: deps.clock().toISOString(), details: structuredClone(details) };
+      notice = { code, at, details: structuredClone(details) };
     } catch {
       return;
     }

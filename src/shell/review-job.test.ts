@@ -2191,3 +2191,18 @@ test('a result with no statuses, or damaged ones, tells the health nothing and l
   await runReviewJob(unread.job, unread.deps);
   assert.deepEqual([unread.noted, reviewLine(unread).extensions], [[], null]);
 });
+
+test('a notifier that throws a value that cannot be read is one notice line with notifier_failed', async () => {
+  const calls: Calls = [];
+  const badMessage = Object.create(Error.prototype, { message: { get() { throw new Error('boom'); } } }) as Error;
+  const badProto = new Proxy({}, { getPrototypeOf() { throw new Error('boom'); } });
+  const h = await live({
+    noticeTimeoutMs: 5,
+    notifiers: [notifier('chat', calls, () => Promise.reject(badMessage)), notifier('pager', calls, () => Promise.reject(badProto))],
+  });
+  await runReviewJob(h.job, h.deps);
+  assert.deepEqual([(await getJob(db, h.job.id))?.outcome, calls.length], ['published', 2]);
+  const lines = noticeLines(h);
+  assert.equal(lines.length, 1);
+  assert.deepEqual([lines[0]?.event, lines[0]?.sent, lines[0]?.results], ['notice', true, { chat: 'notifier_failed', pager: 'notifier_failed' }]);
+});

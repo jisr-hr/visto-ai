@@ -1,6 +1,6 @@
-import test from 'node:test';
+import test, { mock } from 'node:test';
 import assert from 'node:assert/strict';
-import { createAlerts } from './alerts.ts';
+import { ALERT_TIMEOUT_MS, createAlerts } from './alerts.ts';
 import type { AlertNotice } from '../extensions/types.ts';
 
 type Sink = { name: string; alert(notice: AlertNotice, signal: AbortSignal): Promise<void> };
@@ -138,4 +138,71 @@ test('no sink is called when the alert has no webhook and no sinks list', async 
   h.alert('model_ok');
   await h.settled();
   assert.deepEqual([h.logged, h.calls.length], [[{ event: 'alert', code: 'model_ok' }], 0]);
+});
+
+test('the time of an alert is read once, and the sinks get the time the webhook gets', async () => {
+  let reads = 0;
+  const posted: string[] = [];
+  const told: string[] = [];
+  const { alert, settled } = createAlerts({
+    webhook: 'https://alerts.example.test/in',
+    fetch: (async (_url: string | URL | Request, init?: RequestInit) => { posted.push(JSON.parse(String(init?.body)).at); return new Response(''); }) as typeof fetch,
+    clock: () => { reads += 1; return new Date(Date.UTC(2026, 2, 1, 10, 0, reads)); },
+    log: () => {},
+    sinks: [{ name: 'pager', async alert(notice) { told.push(notice.at); } }],
+  });
+  alert('spend_80');
+  await settled();
+  assert.deepEqual([reads, posted, told], [1, ['2026-03-01T10:00:01.000Z'], ['2026-03-01T10:00:01.000Z']]);
+});
+
+test('a clock that throws is a failed post, as before, and no sink is told', async () => {
+  const logged: Array<Record<string, unknown>> = [];
+  let told = 0;
+  const { alert, settled } = createAlerts({
+    webhook: 'https://alerts.example.test/in', fetch: (async () => new Response('')) as typeof fetch,
+    clock: () => { throw new Error('clock'); }, log: (e) => { logged.push(e); },
+    sinks: [{ name: 'pager', async alert() { told += 1; } }],
+  });
+  alert('spend_80');
+  await settled();
+  assert.deepEqual([logged, told], [[{ event: 'alert', code: 'spend_80' }, { event: 'alert_failed', code: 'spend_80', status: null }], 0]);
+});
+
+test('a sink that settles after its limit is logged once', async () => {
+  const finish: Array<() => void> = [];
+  const h = setup(null, new Response(''), undefined, { sinkTimeoutMs: 5, sinks: [
+    { name: 'pager', alert() { return new Promise<void>((_resolve, reject) => { finish.push(() => reject(new Error('late'))); }); } },
+    { name: 'chat', alert() { return new Promise<void>((resolve) => { finish.push(resolve); }); } },
+  ] });
+  h.alert('spend_80');
+  await h.settled();
+  for (const f of finish) f();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(h.logged, [
+    { event: 'alert', code: 'spend_80' },
+    { event: 'alert_failed', code: 'spend_80', extension: 'pager', reason: 'timeout' },
+    { event: 'alert_failed', code: 'spend_80', extension: 'chat', reason: 'timeout' },
+  ]);
+});
+
+test('with no limit given each sink has 5 seconds', async () => {
+  assert.equal(ALERT_TIMEOUT_MS, 5_000);
+  mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    let signal: AbortSignal | null = null;
+    const h = setup(null, new Response(''), undefined, { sinks: [
+      { name: 'pager', alert(_notice, s) { signal = s; return new Promise<void>(() => {}); } },
+    ] });
+    h.alert('spend_80');
+    const settled = h.settled();
+    mock.timers.tick(4_999);
+    assert.equal((signal as AbortSignal | null)?.aborted, false);
+    mock.timers.tick(1);
+    assert.equal((signal as AbortSignal | null)?.aborted, true);
+    await settled;
+    assert.deepEqual(h.logged.at(-1), { event: 'alert_failed', code: 'spend_80', extension: 'pager', reason: 'timeout' });
+  } finally {
+    mock.timers.reset();
+  }
 });

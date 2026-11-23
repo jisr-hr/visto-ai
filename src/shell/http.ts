@@ -138,18 +138,22 @@ export function createListener(
       Object.defineProperty(headers, lower, { value: Array.isArray(v) ? v[0] : v, enumerable: true, writable: true, configurable: true });
     }
     const request: RouteRequest = { method: req.method ?? '', path: rest === '' ? '/' : rest, query, headers, body: read.body };
-    let handled: ReturnType<ExtensionRoute>;
+    // Both read inside the guard: a route that returns no object, or one whose fields throw, gives its place back.
+    let settled: Promise<void>;
+    let answered: Promise<CheckedAnswer>;
     try {
-      handled = route(request);
+      const handled = route(request);
+      settled = handled.settled;
+      answered = handled.answer;
     } catch {
       giveBack();
       return answerModule(res, MODULE_FAILED);
     }
     // Not awaited: the caller is answered at the handler's limit, the place waits for the handler itself.
-    Promise.resolve(handled.settled).then(giveBack, giveBack);
+    Promise.resolve(settled).then(giveBack, giveBack);
     let result: CheckedAnswer;
     try {
-      result = await handled.answer;
+      result = await answered;
     } catch {
       result = MODULE_FAILED;
     }

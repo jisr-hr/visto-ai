@@ -1,6 +1,6 @@
-import test from 'node:test';
+import test, { mock } from 'node:test';
 import assert from 'node:assert/strict';
-import { sendNotice, type Notifier } from './notify.ts';
+import { NOTICE_TIMEOUT_MS, sendNotice, type Notifier } from './notify.ts';
 import type { ReviewNotice } from '../extensions/types.ts';
 
 const notice = (): ReviewNotice => ({
@@ -68,4 +68,48 @@ test('a notifier that changes its notice changes nobody else\'s, nor the caller\
 
 test('with no notifier nothing is called and nothing is thrown', async () => {
   assert.deepEqual(await sendNotice([], notice()), []);
+});
+
+test('a thrown value whose message cannot be read is notifier_failed, and sendNotice still resolves', async () => {
+  const badMessage = Object.create(Error.prototype, { message: { get() { throw new Error('boom'); } } }) as Error;
+  const badProto = new Proxy({}, { getPrototypeOf() { throw new Error('boom'); } });
+  const outcomes = await sendNotice([
+    { name: 'chat', notify() { throw badMessage; } },
+    { name: 'tickets', async notify() { throw badProto; } },
+    { name: 'example', async notify() {} },
+  ], notice(), 5);
+  assert.deepEqual(outcomes, [
+    { name: 'chat', ok: false, code: 'notifier_failed' },
+    { name: 'tickets', ok: false, code: 'notifier_failed' },
+    { name: 'example', ok: true, code: 'ok' },
+  ]);
+});
+
+test('a notifier that throws Error(\'ok\') is notifier_failed', async () => {
+  assert.deepEqual(await sendNotice([{ name: 'chat', async notify() { throw new Error('ok'); } }], notice()), [{ name: 'chat', ok: false, code: 'notifier_failed' }]);
+});
+
+test('a notifier that settles after its limit has one outcome, timeout', async () => {
+  let finish!: (fail: boolean) => void;
+  const outcomes = await sendNotice([{ name: 'chat', notify() { return new Promise<void>((resolve, reject) => { finish = (fail) => { if (fail) reject(new Error('late_failure')); else resolve(); }; }); } }], notice(), 5);
+  finish(true);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(outcomes, [{ name: 'chat', ok: false, code: 'timeout' }]);
+});
+
+test('with no limit given each notifier has 10 seconds', async () => {
+  assert.equal(NOTICE_TIMEOUT_MS, 10_000);
+  mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    let signal: AbortSignal | null = null;
+    const sent = sendNotice([{ name: 'chat', notify(_n, s) { signal = s; return new Promise<void>(() => {}); } }], notice());
+    await Promise.resolve();
+    mock.timers.tick(9_999);
+    assert.equal((signal as AbortSignal | null)?.aborted, false);
+    mock.timers.tick(1);
+    assert.equal((signal as AbortSignal | null)?.aborted, true);
+    assert.deepEqual(await sent, [{ name: 'chat', ok: false, code: 'timeout' }]);
+  } finally {
+    mock.timers.reset();
+  }
 });

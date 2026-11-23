@@ -512,3 +512,27 @@ test('a handler that never settles keeps its place after its caller was answered
   await idle();
   assert.equal(next.out.written?.body, 'back');
 });
+
+test('the two headers of the service are written over the module\'s own', async () => {
+  const chat = readyRoute({ status: 200, headers: { 'cache-control': 'public', 'x-content-type-options': 'x' }, body: 'fine' });
+  const out = await send(request('GET', '/extensions/chat'), { webhook: async () => ok, extensions: new Map([['chat', chat.route]]) });
+  assert.deepEqual(out.written, { status: 200, body: 'fine', headers: MODULE_HEADERS });
+});
+
+test('a route that returns no object is answered 500, and its place is given back', async () => {
+  const shapes: Array<() => unknown> = [
+    () => undefined,
+    () => Object.defineProperty({ answer: Promise.resolve({ status: 200, headers: {}, body: '' }) }, 'settled', { get() { throw new Error('settled'); } }),
+    () => Object.defineProperty({ settled: Promise.resolve() }, 'answer', { get() { throw new Error('answer'); } }),
+  ];
+  for (const shape of shapes) {
+    const route = shape as unknown as Route;
+    const { listener, idle } = createListener({ webhook: async () => ok, extensions: new Map([['chat', route]]) }, { maxExtensionInFlight: 1 });
+    for (let n = 0; n < 2; n += 1) {
+      const { res, out } = response();
+      listener(request('GET', '/extensions/chat'), res);
+      await idle();
+      assert.deepEqual([out.written?.status, out.written?.body], [500, 'internal_error'], `shape ${shapes.indexOf(shape)}, request ${n}`);
+    }
+  }
+});
