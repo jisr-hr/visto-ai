@@ -14,6 +14,10 @@ import {
 } from '../engine/context/memory.ts';
 import { CATEGORIES } from '../engine/score/types.ts';
 import { LESSONS_READ, lessonsFor, newestLessons, type LiveLesson } from './lessons.ts';
+import { readTime } from './time.ts';
+
+// The one reader of a time in the memory part lives in a module of its own; its importers keep reading it from here.
+export { readTime };
 
 export const RECORDS_READ = 5_000;            // live records of one repository that are read
 
@@ -31,27 +35,7 @@ export function dayStart(at: Date): Date {
   return new Date(Date.UTC(at.getUTCFullYear(), at.getUTCMonth(), at.getUTCDate()));
 }
 
-// An ISO time that names its zone: Z, or an offset of hours and minutes. A time with no zone would be read in the
-// host's own zone, and give another day on another machine.
-const ZONED_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,9})?)?(Z|[+-]\d{2}:\d{2})$/;
 const KNOWN_CATEGORIES: ReadonlySet<string> = new Set(CATEGORIES);
-
-const FIRST_TIME = Date.parse('0001-01-01T00:00:00Z');   // the database takes no time before the year 1
-
-/**
- * The one reader of a time in the memory part: an ISO time that names its zone, as milliseconds; null for anything
- * else, a time with no zone included, one before the year 1, one whose day as written is not a day of the calendar
- * (2026-02-30), and one that cannot be written back as YYYY-MM-DD.
- */
-export function readTime(value: unknown): number | null {
-  if (typeof value !== 'string' || !ZONED_TIME.test(value)) return null;
-  const ms = Date.parse(value);
-  if (!Number.isFinite(ms) || ms < FIRST_TIME) return null;
-  const day = value.slice(0, 10);
-  const written = Date.parse(`${day}T00:00:00Z`);
-  if (!Number.isFinite(written) || new Date(written).toISOString().slice(0, 10) !== day) return null;
-  return /^\d{4}-\d{2}-\d{2}T/.test(new Date(ms).toISOString()) ? ms : null;
-}
 
 // The time of a record, or null when its `createdAt` is no time.
 const timeOf = (record: LiveRecord): number | null => readTime(record.createdAt);
@@ -191,7 +175,9 @@ function kept<T extends { number: number; createdAt: string }>(entries: T[], own
   return { records: [...withTime, ...without].slice(0, limit), cut: true };
 }
 const keptRecords = (records: LiveRecord[], own: number) => kept(records, own, RECORDS_READ, (list) => dated(list).map((entry) => entry.record));
-const keptLessons = (lessons: LiveLesson[], own: number) => kept(lessons, own, LESSONS_READ, (list) => newestLessons(list).map((entry) => entry.lesson));
+// An entry that is no object is passed over before anything of it is read.
+const keptLessons = (lessons: LiveLesson[], own: number) =>
+  kept(lessons.filter((lesson) => typeof lesson === 'object' && lesson !== null), own, LESSONS_READ, (list) => newestLessons(list).map((entry) => entry.lesson));
 
 /** A memory over one repository's records, for a review of the pull request `own`. */
 export function createMemory(source: RecordSource, own: number): Memory {

@@ -4,7 +4,7 @@
 import type { MemoryLesson } from '../engine/types.ts';
 import { MEMORY_NAME } from '../engine/context/memory.ts';
 import { LESSONS_SHOWN, lessonText } from '../engine/context/lessons.ts';
-import { readTime } from './select.ts';
+import { readTime } from './time.ts';
 
 export const LESSON_DAYS = 90;
 export const LESSONS_READ = 1_000;         // live lessons of one repository that are read
@@ -30,6 +30,8 @@ const text = (value: unknown) => (typeof value === 'string' ? value : '');
 export function newestLessons(lessons: LiveLesson[]): Array<{ lesson: LiveLesson; ms: number }> {
   const out: Array<{ lesson: LiveLesson; ms: number }> = [];
   for (const lesson of lessons) {
+    // An entry that is no object is passed over, like one whose time cannot be read.
+    if (typeof lesson !== 'object' || lesson === null) continue;
     const ms = readTime(lesson.createdAt);
     if (ms !== null) out.push({ lesson, ms });
   }
@@ -41,10 +43,10 @@ export function newestLessons(lessons: LiveLesson[]): Array<{ lesson: LiveLesson
 
 const directories = (path: string): string[] => path.split('/').slice(0, -1);
 
-// The number of leading directories two paths share.
+// The number of leading directories two paths share. An empty segment is no directory: the count stops at it.
 function shared(a: string[], b: string[]): number {
   let n = 0;
-  while (n < a.length && n < b.length && a[n] === b[n]) n += 1;
+  while (n < a.length && n < b.length && a[n] !== '' && a[n] === b[n]) n += 1;
   return n;
 }
 

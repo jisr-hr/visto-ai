@@ -17,10 +17,14 @@ const NOT_GENERAL = [/#\d/, /:\/\//];
 // The score, a person's review, or an approval (call 4): a filter on words, which catches a judge that strays into scoring.
 const NAMES_THE_SCORE = /\bscor(e|es|ed|ing)\b|\bhuman review\b|\bneeds? a (human|person)\b|\bauto-?approv|\bautomatic(ally)? approv|\bapprovable\b/i;
 
+// Every default-ignorable code point, a wider set than stripControl's, which leaves some (U+034F, U+FE0F, U+3164) in place:
+// one inside a word or between a mark and a digit would pass a check here and be shown all the same.
+const DEFAULT_IGNORABLE = /\p{Default_Ignorable_Code_Point}/gu;
+
 /** The one cleaner and checker of a lesson's text, where a lesson is made and where it is shown. A text is never cut to fit. */
 export function lessonText(raw: unknown): { ok: true; text: string } | { ok: false; code: LessonRefusal } {
   if (typeof raw !== 'string' || raw.length > 4 * LESSON_CHARS) return { ok: false, code: 'not_a_rule' };
-  const text = cleanLine(raw, 4 * LESSON_CHARS).text;
+  const text = cleanLine(raw.replace(DEFAULT_IGNORABLE, ''), 4 * LESSON_CHARS).text;
   if (text.length < LESSON_MIN_CHARS || text.length > LESSON_CHARS) return { ok: false, code: 'not_a_rule' };
   if (NOT_GENERAL.some((pattern) => pattern.test(text))) return { ok: false, code: 'not_a_rule' };
   if (NAMES_THE_SCORE.test(text)) return { ok: false, code: 'names_the_score' };

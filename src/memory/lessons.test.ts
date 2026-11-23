@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { LESSONS_SHOWN } from '../engine/context/lessons.ts';
-import { fileType, LESSON_DAYS, LESSONS_READ, lessonsFor, type LiveLesson } from './lessons.ts';
+import { fileType, LESSON_DAYS, LESSONS_READ, lessonsFor, newestLessons, type LiveLesson } from './lessons.ts';
 
 let serial = 0;
 const TEXT = 'Do not report a missing null check on what OrderStore.find returns: it throws.';
@@ -117,4 +117,31 @@ test('a lesson whose time cannot be read is passed over, and the order of what i
   const shuffled = [lessons[4]!, undated[1]!, lessons[1]!, lessons[5]!, undated[0]!, lessons[0]!, lessons[3]!, undated[3]!, lessons[2]!, undated[2]!];
   assert.deepEqual(lessonsFor(files, shuffled), want);
   assert.deepEqual(lessonsFor(files, [...lessons].reverse()), want);
+});
+
+test('the deepest share with any changed file decides, not the last file given', () => {
+  const deep = lesson('src/billing/tax/old.ts', day(2));
+  const shallow = lesson('src/billing/fees.ts', day(3));
+  // The first file shares three directories with deep, the second only one: deep is still first.
+  const got = lessonsFor([file('src/billing/tax/rates.ts'), file('src/cart/add.ts')], [shallow, deep]);
+  assert.deepEqual(got.lessons.map((l) => l.ref), [deep.ref, shallow.ref]);
+  const flipped = lessonsFor([file('src/cart/add.ts'), file('src/billing/tax/rates.ts')], [shallow, deep]);
+  assert.deepEqual(flipped.lessons.map((l) => l.ref), [deep.ref, shallow.ref]);
+});
+
+test('an empty segment of a path is no directory, and shares nothing', () => {
+  const rooted = lesson('/b/y.ts', day(2));
+  assert.deepEqual(lessonsFor([file('/a/x.md')], [rooted]), { lessons: [], cut: 0, names: 0 });
+  const doubled = lesson('src//a.ts', day(3));
+  assert.deepEqual(lessonsFor([file('src/b.md')], [doubled]).lessons, [shown(doubled, 'directory')]);
+  assert.deepEqual(lessonsFor([file('src//c.md')], [lesson('src/d.ts', day(4))]).lessons.map((l) => l.why), ['directory']);
+});
+
+test('entries that are no object are passed over by both functions', () => {
+  const good = [lesson('src/cart/add.ts', day(3)), lesson('src/cart/b.ts', day(4))];
+  const junk = [null, 'src/cart/add.ts', 5, undefined, [] as unknown] as unknown as LiveLesson[];
+  const files = [file('src/cart/add.ts')];
+  assert.deepEqual(lessonsFor(files, [junk[0]!, good[0]!, junk[1]!, junk[2]!, good[1]!, junk[3]!]), lessonsFor(files, good));
+  assert.deepEqual(newestLessons([...junk, ...good]), newestLessons(good));
+  assert.equal(newestLessons(junk).length, 0);
 });
