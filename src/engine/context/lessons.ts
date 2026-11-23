@@ -48,6 +48,8 @@ export interface LessonsContext { lessons: MemoryLesson[] }
 interface Asked { context: LessonsContext | undefined; status: LessonsStatus; audit: AuditEntry[] }
 
 const DAY = /^\d{4}-\d{2}-\d{2}$/;
+// Entries of a context that lessonsPart reads at most, as many as the lookup reads of an answer.
+const PART_READ = 1_000;
 const WHY: ReadonlySet<unknown> = new Set(['file', 'directory', 'type']);
 
 const audit = (action: string, subject: string, reason: string): AuditEntry => ({ stage: 'context', action, subject, reason });
@@ -111,20 +113,41 @@ export function askLessons(memory: Memory, files: Array<{ path: string; previous
  * LESSONS_SHOWN are shown, and with none left the part is ''.
  */
 export function lessonsPart(context: LessonsContext, token: string): string {
-  const list: unknown = record(context)?.lessons;
-  if (!Array.isArray(list)) return '';
+  // Read by index up to its length, and no further than the lookup reads a list: no iterator of the context is run.
+  // A list that cannot be read gives the part ''; an entry whose reading throws is left out.
+  let list: unknown;
+  let length: unknown;
+  try {
+    list = record(context)?.lessons;
+    if (!Array.isArray(list)) return '';
+    length = (list as { length: unknown }).length;
+  } catch {
+    return '';
+  }
+  if (!whole(length) || length < 0) return '';
   const shown: string[] = [];
-  for (const entry of list) {
-    if (shown.length === LESSONS_SHOWN) break;
-    const e = record(entry);
-    if (e === undefined) continue;
-    const { path, day, text } = e;
-    if (typeof path !== 'string' || !MEMORY_NAME.test(path) || typeof day !== 'string' || !DAY.test(day)) continue;
-    const checked = lessonText(text);
-    if (!checked.ok) continue;
-    const n = shown.length + 1;
-    // MEMORY_NAME refuses a backtick, so a path cannot close its code span; the text stands between markers with the token deleted.
-    shown.push(`Lesson L${n}, from a finding on \`${path}\`, ${day}:\n${wrapData(`lesson L${n}`, checked.text, token)}`);
+  for (let i = 0; i < Math.min(length, PART_READ) && shown.length < LESSONS_SHOWN; i += 1) {
+    let line: string | undefined;
+    try {
+      line = shownLesson((list as unknown[])[i], shown.length + 1, token);
+    } catch {
+      line = undefined;
+    }
+    if (line !== undefined) shown.push(line);
   }
   return shown.length === 0 ? '' : [LESSON_RULES, ...shown].join('\n\n');
+}
+
+// One lesson under its line, or undefined when its path, day or text would be refused.
+function shownLesson(entry: unknown, n: number, token: string): string | undefined {
+  const e = record(entry);
+  if (e === undefined) return undefined;
+  const path: unknown = e.path;
+  const day: unknown = e.day;
+  const text: unknown = e.text;
+  if (typeof path !== 'string' || !MEMORY_NAME.test(path) || typeof day !== 'string' || !DAY.test(day)) return undefined;
+  const checked = lessonText(text);
+  if (!checked.ok) return undefined;
+  // MEMORY_NAME refuses a backtick, so a path cannot close its code span; the text stands between markers with the token deleted.
+  return `Lesson L${n}, from a finding on \`${path}\`, ${day}:\n${wrapData(`lesson L${n}`, checked.text, token)}`;
 }

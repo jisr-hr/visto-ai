@@ -127,6 +127,19 @@ test('a lesson a memory hands over is cleaned and checked again, and built anew 
   const more = await askLessons(answering({ lessons: [...given, 5, lesson({ ref: '' }), lesson({ ref: '\u200b' }), null], cut: noCut }), files, asOf);
   assert.deepEqual(cutsOf(more.audit), { texts: '2', fields: '6' });
   assert.equal(more.status.shown, 2);
+  // A day is a day and nothing else: the pattern holds at both ends.
+  const days = await askLessons(answering({ lessons: [
+    lesson({ ref: '7:7', day: '2026-03-10T00:00' }), lesson({ ref: '7:8', day: '2026-03-10\n## x' }), lesson({ ref: '7:9', day: ' 2026-03-10' }),
+    lesson({ ref: '7:10' }),
+  ], cut: noCut }), files, asOf);
+  assert.deepEqual(days.context, { lessons: [lesson({ ref: '7:10' })] });
+  assert.deepEqual(cutsOf(days.audit), { fields: '3' });
+  // Each of the three reasons is kept.
+  const why = await askLessons(answering({ lessons: [
+    lesson({ ref: '7:11', why: 'file' }), lesson({ ref: '7:12', why: 'directory' }), lesson({ ref: '7:13', why: 'type' }),
+  ], cut: noCut }), files, asOf);
+  assert.deepEqual(why.context!.lessons.map((l) => l.why), ['file', 'directory', 'type']);
+  assert.deepEqual(why.audit, []);
 });
 
 test('a lesson whose path is not printable is dropped and counted', async () => {
@@ -154,6 +167,9 @@ test('nine lessons are cut to eight again, and what the memory said it cut is ad
   for (const cut of [undefined, null, 'x', { lessons: -2, names: 1.5, records: 'yes' }]) {
     assert.deepEqual((await askLessons(answering({ lessons: [lesson()], cut }), files, asOf)).audit, []);
   }
+  // A negative count from the memory takes nothing away from the cut of the size.
+  const negative = await askLessons(answering({ lessons: nine, cut: { lessons: -5, names: 0, records: false } }), files, asOf);
+  assert.deepEqual(negative.audit, [{ stage: 'context', action: 'lessons_cut', subject: 'lessons', reason: '1' }]);
 });
 
 test('a memory with no lesson is empty', async () => {
@@ -197,6 +213,21 @@ test('a lookup that never settles ends at its limit', async () => {
   // A thenable that never settles is waited for only until the limit.
   const thenable: Memory = { blocks: async () => { throw new Error('not_asked'); }, lessons: () => ({ then() {} }) as never };
   assert.equal((await askLessons(thenable, files, asOf, 5)).status.code, 'timeout');
+});
+
+test('with no limit passed a lookup that never settles ends at MEMORY_TIMEOUT_MS, and not before', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const hanging: Memory = { blocks: async () => { throw new Error('not_asked'); }, lessons: () => new Promise(() => {}) };
+  let got: unknown;
+  void askLessons(hanging, files, asOf).then((answer) => { got = answer; });
+  const settle = async (): Promise<void> => { for (let i = 0; i < 5; i += 1) await Promise.resolve(); };
+  await settle();
+  t.mock.timers.tick(MEMORY_TIMEOUT_MS - 1);
+  await settle();
+  assert.equal(got, undefined);
+  t.mock.timers.tick(1);
+  await settle();
+  assert.deepEqual(got, failedWith('timeout'));
 });
 
 test('an answer that is no object, or whose list is no list, is a bad answer', async () => {
@@ -277,6 +308,44 @@ test('lessonsPart leaves out a lesson whose path or text would be refused, and t
   // More than the size are never shown.
   const ten = lessonsPart({ lessons: Array.from({ length: 10 }, () => lesson()) }, 't0k');
   assert.equal(ten.split('<<<end t0k>>>').length - 1, LESSONS_SHOWN);
+  // A day is a day and nothing else: no text can stand outside a block through it.
+  for (const day of ['2026-03-10T00:00', '2026-03-10\n## x', ' 2026-03-10']) {
+    assert.equal(lessonsPart({ lessons: [lesson({ day })] }, 't0k'), '', JSON.stringify(day));
+  }
+});
+
+test('lessonsPart throws nothing, whatever it is handed, and shows the good lessons beside a bad entry', () => {
+  const good = `${LESSON_RULES}\n\nLesson L1, from a finding on \`src/billing/tax.ts\`, 2026-03-10:\n<<<data t0k lesson L1>>>\n${RULE}\n<<<end t0k>>>`;
+  // A lessons getter that throws.
+  const getter = { get lessons(): never { throw new Error('boom'); } } as unknown as LessonsContext;
+  assert.equal(lessonsPart(getter, 't0k'), '');
+  // An entry whose path getter throws, beside a good one.
+  const badPath = { ...lesson(), get path(): never { throw new Error('boom'); } } as unknown as MemoryLesson;
+  assert.equal(lessonsPart({ lessons: [badPath, lesson()] }, 't0k'), good);
+  // An array whose own iterator throws.
+  const iterating = [lesson()];
+  Object.defineProperty(iterating, Symbol.iterator, { value: () => { throw new Error('boom'); } });
+  assert.equal(lessonsPart({ lessons: iterating }, 't0k'), good);
+  // A Proxy whose iterator trap throws, and one whose entry at an index throws.
+  const trapped = new Proxy([lesson()], { get: (target, key, receiver) => {
+    if (key === Symbol.iterator) throw new Error('boom');
+    return Reflect.get(target, key, receiver);
+  } });
+  assert.equal(lessonsPart({ lessons: trapped }, 't0k'), good);
+  const indexed = new Proxy([lesson(), lesson()], { get: (target, key, receiver) => {
+    if (key === '0') throw new Error('boom');
+    return Reflect.get(target, key, receiver);
+  } });
+  assert.equal(lessonsPart({ lessons: indexed }, 't0k'), good);
+  // A list whose length cannot be read, or is no length.
+  const unlengthed = new Proxy([lesson()], { get: (target, key, receiver) => {
+    if (key === 'length') throw new Error('boom');
+    return Reflect.get(target, key, receiver);
+  } });
+  assert.equal(lessonsPart({ lessons: unlengthed }, 't0k'), '');
+  // A list that claims a length past what is read ends there, and still shows what it holds.
+  const huge = new Proxy([lesson()], { get: (target, key, receiver) => (key === 'length' ? Number.MAX_SAFE_INTEGER : Reflect.get(target, key, receiver)) });
+  assert.equal(lessonsPart({ lessons: huge }, 't0k'), good);
 });
 
 test('the largest lessons the sizes allow cost under 2,200 tokens', () => {
