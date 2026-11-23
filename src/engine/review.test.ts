@@ -2783,7 +2783,8 @@ test('when both cannot be shown, memory keeps its place and the extension contex
 });
 
 test('the entries of memory stand in the audit after those of the packing and before those of the room for extension context', async () => {
-  const answer = memoryAnswer(twoLines, true, { directories: 0, categories: 0, lines: 4, names: 0, records: true });
+  // No lists: the full file must cost more than memory, and with the lists it no longer does.
+  const answer = memoryAnswer(twoLines, false, { directories: 0, categories: 0, lines: 4, names: 0, records: true });
   const bare = await unitOf(fileA, false);
   assert.ok((await unitOf(fileA, true)) - bare > memoryTokens(answer));
   const d = withContent(deps({ files: [fileA], answers: [answerOnA], memory: memoryOf(answer), contextProviders: [ticketProvider()] }));
@@ -2915,7 +2916,7 @@ test('memory changes no score by itself: with the same answers the scores are th
   const plain = await review(own, deps({ files: [fileT], answers: [scored] }));
   const d = deps({ files: [fileT], answers: [scored], memory: memoryOf(answer) });
   const r = await review(own, d);
-  assert.ok(d.model.requests[0]!.messages[2]!.content.includes('changed | src/t.ts | 2026-03-10 | business_rule | missed'));
+  assert.ok(d.model.requests[0]!.messages[2]!.content.includes('changed | `src/t.ts` | 2026-03-10 | business_rule | missed'));
   assert.deepEqual(r.dependencies.memory, { status: 'ok', code: 'ok', lines: 3 });
   assert.deepEqual([r.scores, r.verdict], [plain.scores, plain.verdict]);
   assert.equal(r.verdict.needsHuman, false);
@@ -2977,7 +2978,7 @@ test('the stub answers each batch from its own files, whatever paths the memory 
   const d = deps({ files: [fileA, fileB], answerFor: { 'src/a.ts': answerOnA, 'src/b.ts': answerOnB }, memory: memoryOf(answer) });
   const r = await review(await memoryRoom(answer, 1.5), d);
   assert.equal(d.model.requests.length, 2);
-  assert.ok(d.model.requests.every((q) => q.messages[2]!.content.includes('changed | src/b.ts') && !q.messages[2]!.content.includes('src/a.ts')));
+  assert.ok(d.model.requests.every((q) => q.messages[2]!.content.includes('changed | `src/b.ts`') && !q.messages[2]!.content.includes('src/a.ts')));
   assert.deepEqual(r.findings.map((f) => f.path), ['src/a.ts']);
   assert.deepEqual([r.overview.includes('src/a.ts has a problem.'), r.overview.includes('src/b.ts is fine.')], [true, true]);
 });
