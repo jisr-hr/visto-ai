@@ -368,7 +368,7 @@ test('a directory is matched whole, never by its first letters', () => {
 });
 
 test('a time the database cannot hold is no time', () => {
-  for (const value of ['0000-06-01T00:00:00Z', '2026-02-30T00:00:00Z', '2026-02-29T12:00:00Z', '2026-04-31T00:00:00+02:00', '0001-01-01T00:00:00+05:00']) {
+  for (const value of ['0000-06-01T00:00:00Z', '0000-12-31T23:59:59Z', '2026-02-30T00:00:00Z', '2026-02-29T12:00:00Z', '2026-04-31T00:00:00+02:00', '0001-01-01T00:00:00+05:00']) {
     assert.equal(readTime(value), null, value);
   }
   assert.equal(readTime('0001-01-01T00:00:00Z'), Date.parse('0001-01-01T00:00:00Z'));

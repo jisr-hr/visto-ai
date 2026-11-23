@@ -1126,3 +1126,42 @@ test('a wake that asks while a tick\'s pass is under way makes the pass that fol
   learning.stop();
   await db.close();
 });
+
+test('a wake after a counted pass does not count', async () => {
+  const db = await testDb();
+  await savePullRequest(db, closed());
+  await recordActivity(db, comment());
+  const gates = [held(), held()];
+  let passes = 0;
+  const failing = recordsFail(db);
+  const gated = wrap(failing, {
+    query: async <R,>(text: string, params?: unknown[]) => {
+      if (FIRST_BATCH(text, params)) {
+        passes += 1;
+        const gate = gates[passes - 1];
+        if (gate !== undefined) await gate.promise;
+      }
+      return failing.query<R>(text, params);
+    },
+  });
+  const until = async (n: number) => {
+    for (let i = 0; i < 200 && passes < n; i += 1) await new Promise((resolve) => setTimeout(resolve, 2));
+    assert.equal(passes, n);
+  };
+  const logged: Array<Record<string, unknown>> = [];
+  const learning = createLearning({ db: gated, clock: fixed(plus(CLOSED, HOUR_MS)), log: (e) => { logged.push(e); }, alert: () => {} });
+  learning.wake();
+  await until(1);
+  const ticked = learning.tick();
+  gates[0]!.release();
+  await bounded(ticked, 5_000);
+  await until(2);
+  learning.wake();
+  gates[1]!.release();
+  await bounded(learning.idle(), 5_000);
+  assert.equal(passes, 3);
+  assert.deepEqual(failedAttempts(logged), [0, 1, 1]);
+  assert.equal(await attemptsOf(db, 7), 1);
+  learning.stop();
+  await db.close();
+});

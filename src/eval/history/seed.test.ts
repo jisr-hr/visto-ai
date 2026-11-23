@@ -380,4 +380,9 @@ test('a case with an inline line or start line that cannot be stored stops the s
   assert.equal(stored.line, 2_147_483_647);
   assert.equal(stored.start_line, 2_147_483_647);
   await db.close();
+  // And the smallest.
+  const low = await testDb();
+  await seedMemory(low, [lineOf({ line: -2_147_483_648 })], NOW);
+  assert.equal((await activityRows(low)).find((r) => r.source_id === 'i8b')!.line, -2_147_483_648);
+  await low.close();
 });
