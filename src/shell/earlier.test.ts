@@ -67,6 +67,23 @@ test("the app resolved it only when the thread also holds the app's own reply wi
     settled({ resolved: true, resolvedByApp: false, comments: [ROOT, reply('visto-test', { byApp: true, authorIsBot: true, body: MARKED })] }),
   ], [false, true, false, false, false]);
 });
+test('with replies not settling, only a thread the app resolved with its hidden line is settled', () => {
+  const MARKED = 'Answered.\n\n<!-- visto-ai: review=402 head=h2 -->';
+  const byApp = reply('visto-test', { byApp: true, authorIsBot: true, body: MARKED });
+  const cases: Array<Partial<ReviewThread>> = [
+    { resolved: true, comments: [ROOT, reply('octo-dev')] },
+    { resolved: true, resolvedByApp: true, comments: [ROOT, byApp] },
+    { resolved: true, resolvedByApp: true, comments: [ROOT, reply('octo-dev'), byApp] },
+    { resolved: true, resolvedByApp: true, comments: [ROOT, reply('octo-dev')] },
+    { resolved: false, resolvedByApp: false, comments: [ROOT, byApp, reply('octo-dev')] },
+  ];
+  const settled = (over: Partial<ReviewThread>, replySettles?: boolean) =>
+    earlierOf({ ...args([thread(over)]), ...(replySettles === undefined ? {} : { replySettles }) }).threads[0]!.settled;
+  assert.deepEqual(cases.map((c) => settled(c, false)), [false, true, true, false, false]);
+  // replySettles absent, or true: today's answer
+  assert.deepEqual(cases.map((c) => settled(c)), [true, true, true, true, false]);
+  assert.deepEqual(cases.map((c) => settled(c, true)), [true, true, true, true, false]);
+});
 test('a thread listed twice is handed on once, as first listed', () => {
   const out = earlierOf(args([thread(), thread({ line: 99 })]));
   assert.deepEqual(out.threads.map((t) => [t.id, t.line]), [['PRRT_1', 12]]);

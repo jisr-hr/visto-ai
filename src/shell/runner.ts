@@ -1,6 +1,7 @@
 import { claimJob, dropJobIfUnchanged, dueJobs, finishJob } from '../db/jobs.ts';
-import type { Job } from '../db/jobs.ts';
+import type { Job, JobKind } from '../db/jobs.ts';
 import type { Db } from '../db/types.ts';
+import type { PullRequestRef } from '../forge/types.ts';
 
 export const MAX_STARTS = 3;
 export const MAX_AGE_MS = 24 * 3_600_000;
@@ -9,10 +10,14 @@ type Log = (entry: Record<string, unknown>) => void;
 
 export interface RunnerDeps {
   db: Db; concurrency: number; clock: () => Date; log: (entry: Record<string, unknown>) => void;
+  /** The lane of the queue this runner takes its jobs from. */
+  kind: JobKind;
   /** false: start nothing now. */
   mayStart: () => Promise<boolean>;
   /** Takes one claimed job to its end and writes its outcome. */
   run: (job: Job) => Promise<void>;
+  /** Told when a job has left the runner: its run ended (resolved or threw), or it was dropped as too old or out of starts. */
+  onLeft?: (job: Job, how: 'ended' | 'too_old' | 'attempts_exhausted') => Promise<void>;
 }
 export interface Runner {
   /** Starts due jobs while there is a free place. Resolves when the claims are made, not when the jobs end. A call made while one is under way is folded into one more pass, and resolves when that pass has ended. */
@@ -20,6 +25,8 @@ export interface Runner {
   /** From now on nothing is started. Resolves when the pass under way, if any, has ended and no job is running. */
   drain(): Promise<void>;
   running(): number;
+  /** Whether a job of that pull request is running in this process. */
+  holds(ref: PullRequestRef): boolean;
 }
 
 /** The error's name and, when it is a string, its code. Never its message. */
@@ -31,7 +38,7 @@ function describe(err: unknown): { error: string; code: string | null } {
   };
 }
 
-const keyOf = (j: Job): string => `${j.ref.service}/${j.ref.owner}/${j.ref.repo}#${j.ref.number}`;
+const keyOf = (ref: PullRequestRef): string => `${ref.service}/${ref.owner.toLowerCase()}/${ref.repo.toLowerCase()}#${ref.number}`;
 
 export function createRunner(deps: RunnerDeps): Runner {
   const { db } = deps;
@@ -50,15 +57,26 @@ export function createRunner(deps: RunnerDeps): Runner {
 
   const free = (): boolean => keys.size < deps.concurrency;
 
+  /** Tells `onLeft`, when given. Its failure is logged and changes nothing. */
+  const left = async (job: Job, how: 'ended' | 'too_old' | 'attempts_exhausted'): Promise<void> => {
+    if (deps.onLeft === undefined) return;
+    try {
+      await deps.onLeft(job, how);
+    } catch (err) {
+      log({ event: 'runner_failed', job: job.id, ...describe(err) });
+    }
+  };
+
   /** Drops the job as it was listed. false when it was replaced or taken meanwhile: a later pass sees it again. */
-  const dropped = async (job: Job, reason: string, now: Date): Promise<boolean> => {
+  const dropped = async (job: Job, reason: 'too_old' | 'attempts_exhausted', now: Date): Promise<boolean> => {
     if (!(await dropJobIfUnchanged(db, job, reason, now.toISOString()))) return false;
     log({ event: 'job', job: job.id, repo: `${job.ref.owner}/${job.ref.repo}`, number: job.ref.number, outcome: 'dropped', reason });
+    await left(job, reason);
     return true;
   };
 
   const start = (job: Job): void => {
-    const key = keyOf(job);
+    const key = keyOf(job.ref);
     keys.add(key);
     const ended: Promise<void> = (async () => {
       try {
@@ -74,6 +92,7 @@ export function createRunner(deps: RunnerDeps): Runner {
       } finally {
         keys.delete(key);
       }
+      await left(job, 'ended');
     })().finally(() => {
       ends.delete(ended);
       void tick();
@@ -92,9 +111,9 @@ export function createRunner(deps: RunnerDeps): Runner {
     }
     let progressed = false;
     const now = deps.clock();
-    for (const due of await dueJobs(db, now.toISOString(), deps.concurrency)) {
+    for (const due of await dueJobs(db, now.toISOString(), deps.concurrency, deps.kind)) {
       if (draining || !free()) break;
-      if (keys.has(keyOf(due))) continue;
+      if (keys.has(keyOf(due.ref))) continue;
       if (Date.parse(due.createdAt) < now.getTime() - MAX_AGE_MS) {
         if (await dropped(due, 'too_old', now)) progressed = true;
         continue;
@@ -136,6 +155,7 @@ export function createRunner(deps: RunnerDeps): Runner {
   return {
     tick,
     running: () => keys.size,
+    holds: (ref) => keys.has(keyOf(ref)),
     async drain(): Promise<void> {
       draining = true;
       for (;;) {

@@ -67,6 +67,41 @@ const threshold = z.number().int().min(1).max(100);
 /** How a head after a review is reviewed. */
 const newHead = z.enum(['full', 'incremental']);
 
+const gateFields = {
+  enabled: z.boolean(),
+  branches: z.array(z.string().min(1).max(200)).max(50),
+  checkName: z.string().regex(/^[\x20-\x7E]{1,100}$/, { message: 'must be 1 to 100 printable ASCII characters' }),
+  mode: z.enum(['enforce', 'shadow', 'bypass']),
+  clearByReply: z.boolean(),
+  skipTeam: z.string().regex(/^[A-Za-z0-9-]{1,39}\/[A-Za-z0-9._-]{1,100}$/, { message: 'must be <org>/<team-slug>' }).nullable(),
+  requiredChecks: z.array(z.string().min(1).max(200)).max(20),
+};
+
+/** The merge gate (section 9). Every key has its default, so a block that is not written is a gate that is off. */
+const gate = z
+  .object({
+    enabled: gateFields.enabled.default(false),
+    branches: gateFields.branches.default([]),
+    checkName: gateFields.checkName.default('AI Review'),
+    mode: gateFields.mode.default('enforce'),
+    clearByReply: gateFields.clearByReply.default(true),
+    skipTeam: gateFields.skipTeam.default(null),
+    requiredChecks: gateFields.requiredChecks.default([]),
+  })
+  .strict();
+
+const gateOverride = z
+  .object({
+    enabled: gateFields.enabled.optional(),
+    branches: gateFields.branches.optional(),
+    checkName: gateFields.checkName.optional(),
+    mode: gateFields.mode.optional(),
+    clearByReply: gateFields.clearByReply.optional(),
+    skipTeam: gateFields.skipTeam.optional(),
+    requiredChecks: gateFields.requiredChecks.optional(),
+  })
+  .strict();
+
 const repoConfig = z
   .object({
     primaryBranches: z.array(z.string().min(1)).default(['main', 'master']),
@@ -74,6 +109,7 @@ const repoConfig = z
     ignoredAuthors: z.array(z.string().min(1)).default(['dependabot[bot]']),
     baseBranches: z.array(z.string().min(1)).default([]),
     newHead: newHead.optional(),
+    gate: gate.prefault({}),
   })
   .strict();
 
@@ -84,6 +120,7 @@ const repoOverride = z
     ignoredAuthors: z.array(z.string().min(1)).optional(),
     baseBranches: z.array(z.string().min(1)).optional(),
     newHead: newHead.optional(),
+    gate: gateOverride.optional(),
   })
   .strict();
 

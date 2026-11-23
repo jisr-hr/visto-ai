@@ -1,22 +1,34 @@
 import type { RepoSettings } from '../config/load.ts';
 import { recordActivity } from '../db/human-activity.ts';
-import { enqueueJob } from '../db/jobs.ts';
+import { askGate, enqueueJob } from '../db/jobs.ts';
 import { getPullRequest, savePullRequest } from '../db/pull-requests.ts';
 import { recordDelivery } from '../db/deliveries.ts';
 import type { Db } from '../db/types.ts';
-import type { WebhookReader } from '../forge/types.ts';
+import type { PullRequestRef, WebhookReader } from '../forge/types.ts';
+import { gatingOf } from '../gate/gating.ts';
 import { captureOf } from './capture.ts';
 import { commandOf, mayCommand } from './commands.ts';
 import { triggerOf } from './triggers.ts';
+
+/** How long a thread event or a reply waits for the next one before the check is looked at. */
+export const GATE_SETTLE_MS = 3_000;
 
 export interface HttpAnswer { status: number; body: string }
 export interface ReceiveDeps {
   db: Db; reader: WebhookReader; clock: () => Date; log: (entry: Record<string, unknown>) => void;
   settingsFor: (fullName: string) => RepoSettings;   // "owner/name"
-  onQueued: () => void;                              // called after the commit, once per delivery that stored or replaced a job
+  /** Called after the commit, once per delivery that stored or replaced a review job, or stored a gate job or moved a waiting one's time; also when the delivery itself is recorded as ignored. */
+  onQueued: () => void;
+  /** In dry run no gate job is stored: /done is a /review, the skip and a re-run are nothing. */
+  dryRun: boolean;
+  /** The service's own app id: a re-run of any other app's check is not ours. */
+  appId: string;
 }
 
-interface Queued { job: 'queued' | 'delayed' | null; skip: string | null; command: 'review' | null }
+/** job: the review job; gate: a gate job was stored or took this delivery's time. */
+interface Queued { job: 'queued' | 'delayed' | null; skip: string | null; command: 'review' | 'done' | 'skip' | 'rerun' | null; gate: boolean }
+
+const GATE_ACTIONS = new Set(['opened', 'reopened', 'ready_for_review', 'synchronize', 'retargeted']);
 
 interface Who { delivery: string | null; name: string | null; action: string | null }
 const NOBODY: Who = { delivery: null, name: null, action: null };
@@ -61,7 +73,26 @@ export async function receive(
           outcome: capture.outcome, reason: capture.outcome === 'ignored' ? capture.reason : null,
         });
         if (!fresh) return null;
-        const queued: Queued = { job: null, skip: null, command: null };
+        const queued: Queued = { job: null, skip: null, command: null, gate: false };
+        const nowIso = receivedAt.toISOString();
+        const settingsOf = (ref: PullRequestRef) => deps.settingsFor(`${ref.owner}/${ref.repo}`);
+        // The gate is live for a repository: not in dry run, and its gate enabled.
+        const liveFor = (ref: PullRequestRef): boolean => !deps.dryRun && settingsOf(ref).gate.enabled;
+        // For a pull request: and its base is gated; a pull request the service does not store counts as gated.
+        const liveForStored = async (ref: PullRequestRef): Promise<boolean> => {
+          if (!liveFor(ref)) return false;
+          const known = await getPullRequest(tx, ref);
+          return known === null || gatingOf(settingsOf(ref), known.baseBranch) !== 'off';
+        };
+        // The sync carries the installation the event came through, when it names one.
+        const ask = async (ref: PullRequestRef, installation: string | null | undefined, runAt?: string): Promise<void> => {
+          if (await askGate(tx, ref, nowIso, runAt, { installation: installation ?? null }) !== null) queued.gate = true;
+        };
+        // A thread event, and a reply, by anyone: also when capture ignores it as a bot's.
+        const event = reading.event;
+        if ((event.kind === 'thread' || (event.kind === 'inline_comment' && event.comment.replyTo !== null)) && await liveForStored(event.ref)) {
+          await ask(event.ref, event.installation, new Date(receivedAt.getTime() + GATE_SETTLE_MS).toISOString());
+        }
         if (capture.outcome === 'handled') {
           if (capture.pullRequest) {
             const newest = await savePullRequest(tx, capture.pullRequest);
@@ -81,19 +112,54 @@ export async function receive(
                 });
                 if (id !== null) queued.job = trigger.delaySeconds > 0 ? 'delayed' : 'queued';
               }
+              // The event's own base decides whether its pull request is gated, whatever the trigger decided.
+              const own = reading.event.facts;
+              if (GATE_ACTIONS.has(reading.event.action) && liveFor(own.ref) && gatingOf(settingsOf(own.ref), own.baseBranch) !== 'off') {
+                await ask(own.ref, own.installation);
+              }
             }
           }
           if (capture.activity) await recordActivity(tx, capture.activity);
-          if (reading.event.kind === 'general_comment' && commandOf(reading.event.comment.body) === 'review') {
+          const command = reading.event.kind === 'general_comment' ? commandOf(reading.event.comment.body) : null;
+          if (reading.event.kind === 'general_comment' && command !== null) {
             const { ref, installation, comment } = reading.event;
-            const now = receivedAt.toISOString();
-            const id = await enqueueJob(tx, {
-              ref, reason: 'command', headSha: '', runAt: now, now, delivery: reading.delivery,
-              replace: mayCommand(comment.association),
-              trigger: 'manual', requestedBy: comment.author, commentId: comment.id, association: comment.association, installation,
-            });
-            queued.command = 'review';
-            if (id !== null) queued.job = 'queued';
+            const now = nowIso;
+            const manual = {
+              runAt: now, now, delivery: reading.delivery, replace: mayCommand(comment.association),
+              trigger: 'manual' as const, requestedBy: comment.author, commentId: comment.id, association: comment.association, installation,
+            };
+            const review = async (reason: string): Promise<void> => {
+              if (await enqueueJob(tx, { ref, reason, headSha: '', ...manual }) !== null) queued.job = 'queued';
+            };
+            const gateCommand = async (reason: 'done' | 'skip', headSha: string): Promise<void> => {
+              if (await enqueueJob(tx, { ref, kind: 'gate', reason, headSha, ...manual }) !== null) queued.gate = true;
+            };
+            if (command === 'review') {
+              await review('command');
+              queued.command = 'review';
+              if (mayCommand(comment.association) && await liveForStored(ref)) await ask(ref, installation);
+            } else if (command === 'done' && settingsOf(ref).gate.enabled) {
+              if (deps.dryRun) await review('done');
+              else await gateCommand('done', '');
+              queued.command = 'done';
+            } else if (command === 'skip' && liveFor(ref)) {
+              // The head the service knew when the comment arrived (call 46); '' when it stores none.
+              const known = await getPullRequest(tx, ref);
+              await gateCommand('skip', known?.headSha ?? '');
+              queued.command = 'skip';
+            }
+          }
+          if (reading.event.kind === 'check_rerun') {
+            const e = reading.event;
+            // Only a re-run of this app's own check, under the configured name.
+            if (liveFor(e.ref) && e.app === deps.appId && e.check === settingsOf(e.ref).gate.checkName) {
+              const id = await enqueueJob(tx, {
+                ref: e.ref, kind: 'gate', reason: 'rerun', headSha: e.headSha, runAt: nowIso, now: nowIso, delivery: reading.delivery, replace: true,
+                trigger: 'manual', requestedBy: e.actor, commentId: null, association: null, installation: e.installation,
+              });
+              if (id !== null) queued.gate = true;
+              queued.command = 'rerun';
+            }
           }
         }
         return queued;
@@ -106,20 +172,24 @@ export async function receive(
       note(who, 'duplicate', null);
       return { status: 202, body: 'duplicate' };
     }
-    if (capture.outcome === 'ignored') {
-      note(who, 'ignored', capture.reason);
-      return { status: 202, body: 'ignored' };
-    }
-    if (reading.event.kind === 'pull_request') note(who, 'accepted', null, { job: stored.job, skip: stored.skip });
-    else if (stored.command !== null) note(who, 'accepted', null, { command: stored.command, job: stored.job });
-    else note(who, 'accepted', null);
-    if (stored.job !== null) {
+    const gate = stored.gate ? { gate: true } : {};
+    const wake = (): void => {
+      if (stored.job === null && !stored.gate) return;
       try {
         deps.onQueued();
       } catch {
         // a wake-up that fails changes nothing
       }
+    };
+    if (capture.outcome === 'ignored') {
+      note(who, 'ignored', capture.reason, gate);
+      wake();
+      return { status: 202, body: 'ignored' };
     }
+    if (reading.event.kind === 'pull_request') note(who, 'accepted', null, { job: stored.job, skip: stored.skip, ...gate });
+    else if (stored.command !== null) note(who, 'accepted', null, { command: stored.command, job: stored.job, ...gate });
+    else note(who, 'accepted', null, gate);
+    wake();
     return { status: 202, body: 'accepted' };
   } catch (err) {
     note(who, 'failed', 'internal_error', describe(err));

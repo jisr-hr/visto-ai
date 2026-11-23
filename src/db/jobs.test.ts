@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { testDb } from './testing.ts';
 import type { Db } from './types.ts';
-import { claimJob, deleteFinishedJobs, dropJobIfUnchanged, dueJobs, enqueueJob, finishJob, getJob, requeueJob, unfinishedJobs } from './jobs.ts';
+import { askGate, claimJob, deleteFinishedJobs, dropJobIfUnchanged, dueJobs, enqueueJob, finishJob, getJob, requeueJob, reviewJobsOf, unfinishedJobs } from './jobs.ts';
 
 const REF = { service: 'github', owner: 'acme', repo: 'shop', number: 7 } as const;
 const at = (seconds: number): string => new Date(Date.parse('2026-03-01T10:00:00.000Z') + seconds * 1000).toISOString();
@@ -18,7 +18,7 @@ test('a second trigger for a pull request replaces its pending job and starts it
   const second = (await enqueueJob(db, job({ reason: 'synchronize', headSha: 'h2', runAt: at(240), now: at(60), delivery: 'd2' })))!;
   assert.equal(second, first);
   assert.deepEqual(await unfinishedJobs(db), [{
-    id: first, ref: REF, reason: 'synchronize', headSha: 'h2',
+    id: first, ref: REF, kind: 'review', reason: 'synchronize', headSha: 'h2',
     trigger: 'automatic', requestedBy: null, commentId: null, association: null, installation: null, status: 'pending', outcome: null, runAt: at(240), starts: 0, createdAt: at(60),
   }]);
   await db.close();
@@ -52,8 +52,8 @@ test('dueJobs returns pending jobs whose time has come, earliest first, up to th
   await enqueueJob(db, job({ runAt: at(10) }));
   await enqueueJob(db, job({ ref: { ...REF, number: 8 }, runAt: at(5) }));
   await enqueueJob(db, job({ ref: { ...REF, number: 9 }, runAt: at(600) }));
-  assert.deepEqual((await dueJobs(db, at(10), 5)).map((j) => j.ref.number), [8, 7]);
-  assert.deepEqual((await dueJobs(db, at(10), 1)).map((j) => j.ref.number), [8]);
+  assert.deepEqual((await dueJobs(db, at(10), 5, 'review')).map((j) => j.ref.number), [8, 7]);
+  assert.deepEqual((await dueJobs(db, at(10), 1, 'review')).map((j) => j.ref.number), [8]);
   await db.close();
 });
 test('claimJob counts a start and succeeds once', async () => {
@@ -84,7 +84,7 @@ test('finishJob ends a job once and keeps its outcome', async () => {
 test('dropJobIfUnchanged drops a pending job that is as it was listed', async () => {
   const db = await testDb();
   const id = (await enqueueJob(db, job()))!;
-  const [listed] = await dueJobs(db, at(0), 5);
+  const [listed] = await dueJobs(db, at(0), 5, 'review');
   assert.equal(await dropJobIfUnchanged(db, listed!, 'too_old', at(3)), true);
   const j = await getJob(db, id);
   assert.deepEqual([j?.status, j?.outcome], ['dropped', 'too_old']);
@@ -94,7 +94,7 @@ test('dropJobIfUnchanged leaves a job that was replaced after it was listed', as
   const db = await testDb();
   const id = (await enqueueJob(db, job()))!;
   await db.query('update visto_ai.jobs set starts = 3 where id = $1', [id]);
-  const [listed] = await dueJobs(db, at(0), 5);
+  const [listed] = await dueJobs(db, at(0), 5, 'review');
   await enqueueJob(db, job({ reason: 'synchronize', headSha: 'h2', runAt: at(5), now: at(1) }));
   assert.equal(await dropJobIfUnchanged(db, listed!, 'attempts_exhausted', at(3)), false);
   const j = await getJob(db, id);
@@ -133,7 +133,11 @@ test('requeueJob treats a unique violation on its first statement as superseded'
     return [];
   } } as unknown as Db;
   assert.equal(await requeueJob(fake, 1, at(0), at(0), false), 'superseded');
-  assert.match(texts[1]!, /'dropped'/);
+  assert.equal(texts.length, 3);
+  assert.match(texts[1]!, /j\.kind = 'gate'/);
+  assert.match(texts[1]!, /j\.trigger = 'manual'/);
+  assert.match(texts[2]!, /update visto_ai\.jobs set status = 'dropped', outcome = 'superseded'/);
+  assert.match(texts[2]!, /where id = \$1 and status = 'running'/);
 });
 test('deleteFinishedJobs removes finished jobs older than the time given and no others', async () => {
   const db = await testDb();
@@ -193,5 +197,181 @@ test('an automatic job is read back with no requester', async () => {
   const id = (await enqueueJob(db, job()))!;
   const j = await getJob(db, id);
   assert.deepEqual([j?.trigger, j?.requestedBy, j?.commentId, j?.association, j?.installation], ['automatic', null, null, null, null]);
+  await db.close();
+});
+
+const gate = (over = {}) => manual({ kind: 'gate' as const, reason: 'done', ...over });
+const sync = async (db: Db, now = at(0)): Promise<number> => (await askGate(db, REF, now))!;
+
+test('a job has a kind, and one stored without it is a review job', async () => {
+  const db = await testDb();
+  const review = (await enqueueJob(db, job()))!;
+  const command = (await enqueueJob(db, gate()))!;
+  await db.query(
+    `insert into visto_ai.jobs (service, owner, repo, number, reason, head_sha, status, run_at, starts, created_at, trigger)
+     values ('github', 'acme', 'shop', 8, 'opened', 'h1', 'pending', $1::timestamptz, 0, $1::timestamptz, 'automatic')`, [at(0)]);
+  const bySql = (await unfinishedJobs(db)).find((j) => j.ref.number === 8)!;
+  assert.deepEqual([(await getJob(db, review))?.kind, (await getJob(db, command))?.kind, bySql.kind], ['review', 'gate', 'review']);
+  await db.close();
+});
+test('a pull request can have a pending review job and a pending gate job, and one of each at most', async () => {
+  const db = await testDb();
+  const review = (await enqueueJob(db, job()))!;
+  const command = (await enqueueJob(db, gate()))!;
+  assert.notEqual(review, command);
+  assert.deepEqual((await unfinishedJobs(db)).map((j) => [j.id, j.kind, j.status]), [[review, 'review', 'pending'], [command, 'gate', 'pending']]);
+  assert.equal(await enqueueJob(db, gate({ reason: 'skip', replace: false })), null);
+  const reviewBefore = await getJob(db, review);
+  assert.equal(await enqueueJob(db, gate({ reason: 'skip', commentId: '32', runAt: at(5), now: at(5) })), command);
+  const replaced = await getJob(db, command);
+  assert.deepEqual([replaced?.reason, replaced?.commentId, replaced?.runAt], ['skip', '32', at(5)]);
+  assert.deepEqual(await getJob(db, review), reviewBefore);
+  assert.equal((await unfinishedJobs(db)).length, 2);
+  await db.close();
+});
+test('the due jobs are listed for one kind', async () => {
+  const db = await testDb();
+  await enqueueJob(db, job());
+  const command = (await enqueueJob(db, gate()))!;
+  assert.deepEqual((await dueJobs(db, at(10), 5, 'gate')).map((j) => [j.id, j.kind]), [[command, 'gate']]);
+  assert.deepEqual((await dueJobs(db, at(10), 5, 'review')).map((j) => j.kind), ['review']);
+  await db.close();
+});
+test('a review job put back is superseded by a waiting review job as before, and never by a gate job', async () => {
+  const db = await testDb();
+  const cut = (await enqueueJob(db, manual()))!;
+  await claimJob(db, cut, at(1));
+  const waiting = (await enqueueJob(db, job({ reason: 'synchronize', headSha: 'h2', runAt: at(2), now: at(2) })))!;
+  assert.equal(await requeueJob(db, cut, at(60), at(9), false), 'superseded');
+  assert.deepEqual([(await getJob(db, cut))?.outcome, (await getJob(db, waiting))?.status], ['superseded', 'pending']);
+
+  const other = { ...REF, number: 8 };
+  const alone = (await enqueueJob(db, manual({ ref: other })))!;
+  await claimJob(db, alone, at(1));
+  const command = (await enqueueJob(db, gate({ ref: other })))!;
+  assert.equal(await requeueJob(db, alone, at(60), at(9), false), 'requeued');
+  assert.deepEqual([(await getJob(db, alone))?.status, (await getJob(db, command))?.status], ['pending', 'pending']);
+  await db.close();
+});
+test('a gate command put back takes the slot of a waiting sync, and loses it only to a later command', async () => {
+  const db = await testDb();
+  const command = (await enqueueJob(db, gate()))!;
+  await claimJob(db, command, at(1));
+  const waiting = await sync(db, at(2));
+  assert.equal(await requeueJob(db, command, at(60), at(9), false), 'requeued');
+  const dropped = await getJob(db, waiting);
+  assert.deepEqual([dropped?.status, dropped?.outcome], ['dropped', 'superseded']);
+  assert.deepEqual([(await getJob(db, command))?.status, (await getJob(db, command))?.runAt], ['pending', at(60)]);
+
+  await claimJob(db, command, at(60));
+  const later = (await enqueueJob(db, gate({ reason: 'skip', commentId: '33', runAt: at(61), now: at(61) })))!;
+  const laterBefore = await getJob(db, later);
+  assert.equal(await requeueJob(db, command, at(90), at(62), false), 'superseded');
+  assert.deepEqual([(await getJob(db, command))?.status, (await getJob(db, command))?.outcome], ['dropped', 'superseded']);
+  assert.deepEqual(await getJob(db, later), laterBefore);
+  await db.close();
+});
+test('a gate command put back while a sync is stored between the two statements takes the slot all the same', async () => {
+  const db = await testDb();
+  const command = (await enqueueJob(db, gate()))!;
+  await claimJob(db, command, at(1));
+  await sync(db, at(2));
+  let raced = false;
+  const racing: Db = { ...db, query: async (text, params) => {
+    const rows = await db.query(text, params);
+    if (!raced && text.includes("p.trigger = 'automatic'")) {
+      raced = true;
+      await askGate(db, REF, at(3));
+    }
+    return rows as never;
+  } };
+  assert.equal(await requeueJob(racing, command, at(60), at(9), false), 'requeued');
+  const left = await unfinishedJobs(db);
+  assert.deepEqual([raced, left.map((j) => [j.id, j.status])], [true, [[command, 'pending']]]);
+  await db.close();
+});
+test('a sync put back beside a waiting sync hands it its starts', async () => {
+  const db = await testDb();
+  const running = await sync(db);
+  await claimJob(db, running, at(1));
+  await db.query('update visto_ai.jobs set starts = 2 where id = $1', [running]);
+  const waiting = await sync(db, at(2));
+  assert.equal(await requeueJob(db, running, at(60), at(9), false), 'superseded');
+  assert.deepEqual([(await getJob(db, running))?.outcome, (await getJob(db, waiting))?.starts], ['superseded', 2]);
+
+  const other = { ...REF, number: 8 };
+  const second = (await askGate(db, other, at(0)))!;
+  await claimJob(db, second, at(1));
+  await db.query('update visto_ai.jobs set starts = 2 where id = $1', [second]);
+  const busier = (await askGate(db, other, at(2)))!;
+  await db.query('update visto_ai.jobs set starts = 3 where id = $1', [busier]);
+  assert.equal(await requeueJob(db, second, at(60), at(9), false), 'superseded');
+  assert.equal((await getJob(db, busier))?.starts, 3);
+  await db.close();
+});
+test('asking for the check stores one sync, moves a waiting sync to the new time without touching its starts, and leaves a waiting command in place', async () => {
+  const db = await testDb();
+  const first = await sync(db, at(0));
+  assert.equal(await askGate(db, REF, at(1), at(4)), first);
+  assert.deepEqual(await unfinishedJobs(db), [{
+    id: first, ref: REF, kind: 'gate', reason: 'sync', headSha: '', trigger: 'automatic',
+    requestedBy: null, commentId: null, association: null, installation: null, status: 'pending', outcome: null,
+    runAt: at(4), starts: 0, createdAt: at(0),
+  }]);
+  for (const t of [4, 5]) {
+    await claimJob(db, first, at(t));
+    assert.equal(await requeueJob(db, first, at(t + 1), at(t), false), 'requeued');
+  }
+  assert.equal(await askGate(db, REF, at(6), at(9)), first);
+  assert.deepEqual([(await getJob(db, first))?.starts, (await getJob(db, first))?.runAt], [2, at(9)]);
+
+  const other = { ...REF, number: 8 };
+  const command = (await enqueueJob(db, gate({ ref: other, reason: 'skip' })))!;
+  const before = await getJob(db, command);
+  assert.equal(await askGate(db, other, at(7)), null);
+  assert.deepEqual((await unfinishedJobs(db)).filter((j) => j.ref.number === 8), [before]);
+  await db.close();
+});
+test('a sync carries the installation it was asked with, the newest onto a waiting one, and only the sweep renews a waiting one', async () => {
+  const db = await testDb();
+  const first = (await askGate(db, REF, at(0)))!;
+  assert.equal((await getJob(db, first))?.installation, null);
+  assert.equal(await askGate(db, REF, at(1), undefined, { installation: '99' }), first);
+  assert.equal((await getJob(db, first))?.installation, '99');
+  // The newest installation wins (the app installed again has a new id); an ask that brings none leaves it.
+  assert.equal(await askGate(db, REF, at(2), undefined, { installation: '77' }), first);
+  assert.equal((await getJob(db, first))?.installation, '77');
+  assert.equal(await askGate(db, REF, at(3)), first);
+  assert.equal((await getJob(db, first))?.installation, '77');
+  const other = { ...REF, number: 8 };
+  const stored = (await askGate(db, other, at(0), undefined, { installation: '42' }))!;
+  assert.equal((await getJob(db, stored))?.installation, '42');
+
+  // A sync two starts old, from a long stop: an ask keeps its starts and its age; the sweep's ask renews both.
+  await claimJob(db, first, at(3));
+  assert.equal(await requeueJob(db, first, at(4), at(3), false), 'requeued');
+  assert.equal(await askGate(db, REF, at(5)), first);
+  assert.deepEqual([(await getJob(db, first))?.starts, (await getJob(db, first))?.createdAt], [1, at(0)]);
+  assert.equal(await askGate(db, REF, at(90_000), undefined, { renew: true }), first);
+  assert.deepEqual([(await getJob(db, first))?.starts, (await getJob(db, first))?.createdAt, (await getJob(db, first))?.runAt], [0, at(90_000), at(90_000)]);
+  // A waiting command is never renewed.
+  const third = { ...REF, number: 9 };
+  const command = (await enqueueJob(db, gate({ ref: third, reason: 'skip' })))!;
+  const before = await getJob(db, command);
+  assert.equal(await askGate(db, third, at(9), undefined, { renew: true, installation: '1' }), null);
+  assert.deepEqual(await getJob(db, command), before);
+  await db.close();
+});
+
+test('the unfinished review jobs of a pull request are listed, never a gate job, a finished one or another pull request\'s', async () => {
+  const db = await testDb();
+  const done = (await enqueueJob(db, job()))!;
+  await finishJob(db, done, 'done', 'reviewed', at(1));
+  const running = (await enqueueJob(db, job({ now: at(2) })))!;
+  await claimJob(db, running, at(2));
+  const pending = (await enqueueJob(db, job({ headSha: 'h2', now: at(3) })))!;
+  await enqueueJob(db, gate());
+  await enqueueJob(db, job({ ref: { ...REF, number: 8 } }));
+  assert.deepEqual((await reviewJobsOf(db, { ...REF, owner: 'Acme' })).map((j) => [j.id, j.status]), [[running, 'running'], [pending, 'pending']]);
   await db.close();
 });

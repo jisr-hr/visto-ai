@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import type { DeploymentConfig } from '../config/load.ts';
+import { GATE_OFF, type DeploymentConfig } from '../config/load.ts';
 import { SUBMIT_REVIEW } from '../engine/model/submit-review.ts';
 import type { ChangedFile, ModelClient, ModelResponse, ReviewDeps, Source } from '../engine/types.ts';
 import type { EvalCase } from './cases.ts';
@@ -19,7 +19,7 @@ const config: DeploymentConfig = {
   scorer: null,
   app: null, database: null, server: { port: 8080 }, dryRun: false, alerts: null,
   limits: { inputTokensPerCall: 200_000, batchesPerReview: 6, spendPerDay: 50, queueConcurrency: 2 },
-  repositories: { defaults: { primaryBranches: ['main'], scoreThreshold: 70, ignoredAuthors: [], baseBranches: [], newHead: null, inlineNotes: false }, overrides: {} },
+  repositories: { defaults: { primaryBranches: ['main'], scoreThreshold: 70, ignoredAuthors: [], baseBranches: [], newHead: null, inlineNotes: false, gate: GATE_OFF }, overrides: {} },
 };
 
 const mkCase = (pr: number, extra: Partial<EvalCase> = {}): EvalCase => ({

@@ -1,4 +1,4 @@
-import type { AppIdentity, AppInfo, FeatureOff } from '../types.ts';
+import type { AppIdentity, AppInfo, FeatureOff, GateNeeds } from '../types.ts';
 import type { AppAuth } from './app-auth.ts';
 import { isObject, jsonOf } from './http.ts';
 
@@ -6,7 +6,7 @@ const READ = new Set(['read', 'write', 'admin']);
 const WRITE = new Set(['write', 'admin']);
 
 /** What the app lacks, one entry for each permission or event a feature needs and the app has not got. */
-export function missingFor(info: AppInfo, dryRun: boolean): FeatureOff[] {
+export function missingFor(info: AppInfo, dryRun: boolean, gate?: GateNeeds): FeatureOff[] {
   const missing: FeatureOff[] = [];
   const need = (feature: FeatureOff['feature'], permission: string, level: 'read' | 'write'): void => {
     if (!(level === 'read' ? READ : WRITE).has(info.permissions[permission] ?? '')) missing.push({ feature, missing: `${permission}:${level}` });
@@ -22,6 +22,14 @@ export function missingFor(info: AppInfo, dryRun: boolean): FeatureOff[] {
   if (!dryRun) need('commands', 'issues', 'write');
   subscribe('commands', 'issue_comment');
   for (const event of ['pull_request_review', 'pull_request_review_comment', 'pull_request_review_thread', 'issue_comment']) subscribe('capture', event);
+  if (!dryRun && gate !== undefined) {
+    if (gate.check) {
+      need('gate', 'checks', 'write');
+      subscribe('gate', 'check_run');
+    }
+    if (gate.statuses) need('gate', 'statuses', 'read');
+    if (gate.members) need('gate', 'members', 'read');
+  }
   return missing;
 }
 
@@ -67,7 +75,7 @@ export function createAppInfo(opts: { auth: AppAuth; fetch: typeof fetch; apiBas
 
   return {
     read,
-    lacks: async (dryRun) => missingFor(await read(), dryRun),
+    lacks: async (dryRun, gate) => missingFor(await read(), dryRun, gate),
     canResolve: async () => WRITE.has((await read()).permissions.contents ?? ''),
   };
 }

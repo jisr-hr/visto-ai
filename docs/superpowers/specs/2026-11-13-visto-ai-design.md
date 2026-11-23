@@ -567,7 +567,7 @@ Acknowledgement: an eyes reaction when a command is accepted. On refusal or fail
 ### 8.2 Queue
 
 - Stored in Postgres. Pending, delayed and running jobs all survive a restart.
-- Fixed concurrency, and never two jobs for the same pull request at once.
+- Fixed concurrency, and never two review jobs for the same pull request at once. The gate's jobs (section 9) are a second lane of the same queue: they call no model, they are not paused with the reviews, one of them may run beside a review job of the same pull request, and never two of them for one pull request at once.
 - Before a job runs, the pull request's live head is read. An automatic job for a head that has moved is dropped. *Fix:* the predecessor took this from an in-memory map that only pushes updated.
 - A job is started at most 3 times.
 - **Shutdown** drains: no new jobs start, webhooks are still accepted and stored, and running reviews get a bounded time to finish. A job cut short stays marked as running.

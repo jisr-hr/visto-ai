@@ -85,9 +85,11 @@ export type ForgeEvent =
   | { kind: 'ping' }
   | { kind: 'pull_request'; action: PullRequestAction; facts: PullRequestFacts }
   | { kind: 'review'; ref: PullRequestRef; review: HumanReview }
-  | { kind: 'inline_comment'; ref: PullRequestRef; comment: HumanInlineComment }
+  // installation: the app installation the event came through, when the event names one (a gate job asked by it carries it)
+  | { kind: 'inline_comment'; ref: PullRequestRef; installation?: string | null; comment: HumanInlineComment }
   | { kind: 'general_comment'; ref: PullRequestRef; installation: string | null; comment: GeneralComment }
-  | { kind: 'thread'; ref: PullRequestRef; action: 'resolved' | 'unresolved'; thread: string; rootComment: string | null; actor: string; actorIsBot: boolean }
+  | { kind: 'thread'; ref: PullRequestRef; installation?: string | null; action: 'resolved' | 'unresolved'; thread: string; rootComment: string | null; actor: string; actorIsBot: boolean }
+  | { kind: 'check_rerun'; ref: PullRequestRef; installation: string | null; app: string; check: string; headSha: string; actor: string }
   | { kind: 'ignored'; reason: 'unknown_event' | 'unknown_action' | 'not_a_pull_request' | 'malformed' };
 export type WebhookReading =
   | { ok: false; reason: 'bad_signature' | 'not_json' | 'no_delivery_id' | 'no_event_name' }
@@ -102,11 +104,13 @@ export interface AppInfo {
   permissions: Record<string, string>;       // as the git service names them: { pull_requests: 'write', contents: 'read', ... }
   events: string[];                          // the events the app is subscribed to
 }
-export interface FeatureOff { feature: 'reviews' | 'publishing' | 'resolving' | 'commands' | 'capture'; missing: string }
+/** What the configured gate uses of the app; all false when no gate is configured. */
+export interface GateNeeds { check: boolean; statuses: boolean; members: boolean }
+export interface FeatureOff { feature: 'reviews' | 'publishing' | 'resolving' | 'commands' | 'capture' | 'gate'; missing: string }
 export interface AppIdentity {
   read(): Promise<AppInfo>;
   /** What the app lacks: one entry for each permission or event a feature needs and the app has not got. */
-  lacks(dryRun: boolean): Promise<FeatureOff[]>;
+  lacks(dryRun: boolean, gate?: GateNeeds): Promise<FeatureOff[]>;
   /** True when the app may resolve a review thread: its `contents` permission is write or admin. */
   canResolve(): Promise<boolean>;
 }
@@ -150,4 +154,28 @@ export interface ForgeWriter {
   editThreadComment(installation: string, commentNode: string, body: string): Promise<void>;
   /** Marks a thread resolved. Sent once. */
   resolveThread(installation: string, threadId: string): Promise<void>;
+}
+
+export interface OwnCheck {
+  id: string;
+  status: 'queued' | 'in_progress' | 'completed';
+  conclusion: string | null;         // as the git service names it; null while the check is not completed
+  title: string; summary: string;    // '' when the check has none
+}
+export interface CheckWrite {
+  id: string | null;                 // the check to rewrite; null creates one on `commit`
+  commit: string; name: string;
+  status: 'queued' | 'in_progress' | 'completed';
+  conclusion: 'success' | 'action_required' | 'failure' | null;   // set exactly when the status is completed
+  title: string; summary: string;
+}
+export interface ForgeChecks {
+  /** The app's own check of that name on a commit, the newest when there are several; null when there is none. Rejects with a short code. */
+  findCheck(ref: PullRequestRef, installation: string, commit: string, name: string): Promise<OwnCheck | null>;
+  /** Creates the check, or rewrites the one named by `id`. Sent once. Rejects with a short code and says nothing about whether it took effect. */
+  writeCheck(ref: PullRequestRef, installation: string, check: CheckWrite): Promise<{ id: string }>;
+  /** Those of `names` that are green on the commit: every commit status and newest check run of that name says success, and at least one reports it. Rejects with a short code. */
+  greenChecks(ref: PullRequestRef, installation: string, commit: string, names: string[]): Promise<string[]>;
+  /** Whether `login` is an active member of the team `<org>/<slug>`. Rejects with a short code when the git service did not say. */
+  isTeamMember(installation: string, team: string, login: string): Promise<boolean>;
 }

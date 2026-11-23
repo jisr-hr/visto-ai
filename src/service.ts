@@ -1,14 +1,22 @@
 import { loadMigrations, MIGRATIONS_DIR, migrate } from './db/migrate.ts';
 import { beat, readHeartbeat } from './db/heartbeat.ts';
-import { deleteFinishedJobs } from './db/jobs.ts';
+import { askGate, deleteFinishedJobs } from './db/jobs.ts';
+import type { Job } from './db/jobs.ts';
+import { getPullRequest } from './db/pull-requests.ts';
 import type { Db, InstanceLock } from './db/types.ts';
-import { repoSettingsFor } from './config/load.ts';
+import { gateUseOf, repoSettingsFor } from './config/load.ts';
 import type { ServiceConfig } from './config/load.ts';
 import type { ReviewDeps, ReviewInput, ReviewResult } from './engine/types.ts';
-import type { AppIdentity, ForgeAccess, ForgeWriter, HookDeliveries, Source, WebhookReader } from './forge/types.ts';
+import type { AppIdentity, ForgeAccess, ForgeChecks, ForgeWriter, HookDeliveries, Source, WebhookReader } from './forge/types.ts';
+import { gatingOf } from './gate/gating.ts';
+import { runGateJob } from './gate/job.ts';
+import type { GateJobDeps } from './gate/job.ts';
+import { createKeyedLock } from './gate/lock.ts';
+import { askWaiting, sweepGate } from './gate/sweep.ts';
 import { ALERT_TIMEOUT_MS, createAlerts } from './shell/alerts.ts';
-import { isShortCode } from './shell/codes.ts';
-import { dryWriter } from './shell/dry-writer.ts';
+import type { Alert } from './shell/alerts.ts';
+import { codeOf, isShortCode } from './shell/codes.ts';
+import { dryChecks, dryWriter } from './shell/dry-writer.ts';
 import { createListener } from './shell/http.ts';
 import type { RequestLike, ResponseLike } from './shell/http.ts';
 import { checkModelKey, createModelHealth } from './shell/model-health.ts';
@@ -30,6 +38,8 @@ export interface ServiceDeps {
   forge: ForgeAccess; hooks: HookDeliveries;
   /** What writes to the git service. In dry run the review job is given a writer that refuses every call instead. */
   writer: ForgeWriter;
+  /** The check runs, statuses and team membership the gate reads and writes. In dry run the gate is given checks that refuse every call instead. */
+  checks: ForgeChecks;
   /** What the app is allowed to do; asked once at start. */
   appInfo: AppIdentity;
   fetch: typeof fetch;
@@ -49,6 +59,8 @@ export const UPKEEP_MS = 300_000;
 export const DRAIN_WAIT_MS = 600_000;
 export const LOOKBACK_MARGIN_MS = 120_000;
 export const JOB_KEEP_MS = 14 * 86_400_000;
+/** The places of the gate's runner. */
+export const GATE_CONCURRENCY = 4;
 
 /** The error's name and, when it is a string, its code. Never its message. */
 function why(error: unknown): { error: string; code: string | null } {
@@ -73,10 +85,15 @@ async function within(ms: number, work: Promise<unknown>): Promise<'done' | 'tim
   }
 }
 
+/** What the gate is given to reach GitHub: in dry run, checks and a writer whose every call rejects; else the ones given. */
+export function gateForge(dryRun: boolean, checks: ForgeChecks, writer: ForgeWriter): { checks: ForgeChecks; writer: ForgeWriter } {
+  return dryRun ? { checks: dryChecks(), writer: dryWriter() } : { checks, writer };
+}
+
 /**
  * Takes the lock, migrates, recovers, then listens; the work that follows listening is not waited for.
  * `settled` resolves when the work that follows listening has had its first try: the key check, the app check, the redelivery attempt and, when that worked, the first beat.
- * `stop` drains the runner (at most DRAIN_WAIT_MS), closes the listener and waits for requests in flight (at most STOP_WAIT_MS),
+ * `stop` drains both runners (at most DRAIN_WAIT_MS between them), closes the listener and waits for requests in flight (at most STOP_WAIT_MS),
  * beats once more, waits for alerts, closes the database and releases the lock. It never rejects.
  */
 export async function startService(config: ServiceConfig, deps: ServiceDeps): Promise<{ stop(): Promise<void>; settled: Promise<void> }> {
@@ -102,13 +119,78 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps): Pr
     dryRun: config.dryRun, writer: config.dryRun ? dryWriter() : deps.writer, engineDeps: deps.engineDeps, review: deps.review, lineUrl: deps.lineUrl, health, spend,
     commentUrl: deps.commentUrl, canResolve: () => deps.appInfo.canResolve(),
   };
+  // gate_check_failed is raised once for each reason in a run of the service.
+  const raisedGate = new Set<string>();
+  const gateAlert: Alert = (code, details) => {
+    const key = `${code}:${String(details?.reason ?? null)}`;
+    if (raisedGate.has(key)) return;
+    raisedGate.add(key);
+    alert(code, details);
+  };
+  /** Why reviews do not start now, as the short code the gate jobs are given; null when they do. */
+  async function pauseCode(): Promise<string | null> {
+    if (health.paused(clock())) return 'model_error';
+    return (await spend.level()) === 'limit' ? 'spend_limit' : null;
+  }
+  /** Whether the gate is in use here: out of dry run, with some repository's gate enabled. */
+  const gateLive = !config.dryRun && gateUseOf(config).check;
+  /** The pause the review runner's last pass saw; null at start. */
+  let pauseSeen: string | null = null;
+  /** When the pause begins, ends or changes, the checks of the waiting reviews are asked for. A failure is logged, and the next pass tries again. */
+  async function mayStartReview(): Promise<boolean> {
+    const code = await pauseCode();
+    if (gateLive && code !== pauseSeen) {
+      try {
+        await askWaiting(db, settingsFor, clock().toISOString());
+        pauseSeen = code;
+        void gateRunner.tick();
+      } catch (error) {
+        say({ event: 'gate_ask_failed', reason: codeOf(error) });
+      }
+    }
+    return code === null;
+  }
   const runner = createRunner({
-    db, concurrency: config.limits.queueConcurrency, clock, log: say,
-    mayStart: async () => !health.paused(clock()) && (await spend.level()) !== 'limit',
+    db, kind: 'review', concurrency: config.limits.queueConcurrency, clock, log: say,
+    mayStart: mayStartReview,
     run: (job) => runReviewJob(job, reviewDeps),
+    onLeft: reviewLeft,
   });
+  const gateDeps: GateJobDeps = {
+    db, forge: deps.forge, ...gateForge(config.dryRun, deps.checks, deps.writer),
+    clock, log: say, settingsFor, dryRun: config.dryRun,
+    paused: pauseCode,
+    reviewing: (ref) => runner.holds(ref),
+    commentUrl: deps.commentUrl, alert: gateAlert, lock: createKeyedLock(),
+    onQueued: () => { tickBoth(); },
+  };
+  // Never paused with the reviews.
+  const gateRunner = createRunner({
+    db, kind: 'gate', concurrency: GATE_CONCURRENCY, clock, log: say,
+    mayStart: async () => true,
+    run: (job) => runGateJob(job, gateDeps),
+    onLeft: async (_job, how) => {
+      if (how !== 'ended') gateAlert('gate_check_failed', { reason: how });
+    },
+  });
+  function tickBoth(): void {
+    void runner.tick();
+    void gateRunner.tick();
+  }
+  /** A review job has left its runner, however it left: the check of a gated pull request is asked for. With the gate off nothing is read. */
+  async function reviewLeft(job: Job): Promise<void> {
+    if (config.dryRun) return;
+    const settings = settingsFor(`${job.ref.owner}/${job.ref.repo}`);
+    if (!settings.gate.enabled) return;
+    const stored = await getPullRequest(db, job.ref);
+    if (stored !== null && gatingOf(settings, stored.baseBranch) === 'off') return;
+    await askGate(db, job.ref, clock().toISOString(), undefined, { installation: job.installation });
+    void gateRunner.tick();
+  }
   const { listener, idle } = createListener({
-    webhook: (headers, body) => receive({ db, reader: deps.reader, clock, log: say, settingsFor, onQueued: () => { void runner.tick(); } }, headers, body),
+    webhook: (headers, body) => receive({
+      db, reader: deps.reader, clock, log: say, settingsFor, onQueued: tickBoth, dryRun: config.dryRun, appId: config.app.id,
+    }, headers, body),
   });
 
   // 1 to 4: the lock, the migrations, the recovery, the listener.
@@ -128,6 +210,8 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps): Pr
   try {
     await migrate(db, loadMigrations(MIGRATIONS_DIR));
     await recoverJobs(db, clock(), say);
+    // The checks the record and the config disagree on, or that a review left under way, are asked for.
+    if (gateLive) say({ event: 'gate_sweep', asked: await sweepGate(db, settingsFor, clock().toISOString()) });
     listening = await deps.listen(listener, config.server.port);
   } catch (error) {
     try {
@@ -144,6 +228,12 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps): Pr
     } catch {
       // the start failure is the one to report
     }
+  }
+
+  // A repository in bypass is said at each start.
+  if (!config.dryRun && gateUseOf(config).bypass) {
+    say({ event: 'gate_bypass' });
+    alert('gate_bypass');
   }
 
   // 5 to 8: what follows listening.
@@ -173,7 +263,7 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps): Pr
 
   async function appCheck(): Promise<void> {
     if (ending) return;
-    const lacking = await deps.appInfo.lacks(config.dryRun);
+    const lacking = await deps.appInfo.lacks(config.dryRun, gateUseOf(config));
     if (ending) return;
     if (lacking.length === 0) say({ event: 'app_check', missing: 0 });
     for (const { feature, missing } of lacking) {
@@ -232,9 +322,9 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps): Pr
     await redeliveryThenBeat('upkeep_failed');
   }
 
-  every(TICK_MS, () => runner.tick());
+  every(TICK_MS, async () => { await Promise.all([runner.tick(), gateRunner.tick()]); });
   every(UPKEEP_MS, upkeep);
-  void runner.tick();
+  tickBoth();
   const settled = (async () => {
     await guarded('start_step_failed', 'key_check', keyCheck);
     await guarded('start_step_failed', 'app_check', appCheck);
@@ -251,7 +341,9 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps): Pr
       }
     }
     try {
-      if (await within(DRAIN_WAIT_MS, runner.drain()) === 'timeout') say({ event: 'drain_timeout', running: runner.running() });
+      if (await within(DRAIN_WAIT_MS, Promise.all([runner.drain(), gateRunner.drain()])) === 'timeout') {
+        say({ event: 'drain_timeout', running: runner.running() + gateRunner.running() });
+      }
     } catch (error) {
       say({ event: 'drain_failed', ...why(error) });
     }

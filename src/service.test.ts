@@ -4,16 +4,20 @@ import { generateKeyPairSync } from 'node:crypto';
 import { pgliteDb } from './db/pglite.ts';
 import type { Db, InstanceLock } from './db/types.ts';
 import { loadMigrations, MIGRATIONS_DIR, migrate } from './db/migrate.ts';
-import { claimJob, enqueueJob, finishJob, getJob, unfinishedJobs } from './db/jobs.ts';
+import { askGate, claimJob, enqueueJob, finishJob, getJob, unfinishedJobs } from './db/jobs.ts';
+import type { Job } from './db/jobs.ts';
+import { getPullRequest, savePullRequest } from './db/pull-requests.ts';
+import { NO_COUNTS, recordEvaluation } from './db/gate.ts';
 import { recordRun } from './db/review-runs.ts';
 import type { RunRecord } from './db/review-runs.ts';
 import { beat, readHeartbeat } from './db/heartbeat.ts';
 import { serviceConfig, parseConfig } from './config/load.ts';
-import type { AppIdentity, FeatureOff, ForgeEvent, HookDelivery, LivePullRequest, PullRequestAction, PullRequestFacts, Source } from './forge/types.ts';
+import type { AppIdentity, FeatureOff, ForgeChecks, ForgeEvent, ForgeWriter, HookDelivery, LivePullRequest, OwnCheck, PostedComment, PullRequestAction, PullRequestFacts, ReviewThread, Source } from './forge/types.ts';
 import type { ReviewDeps, ReviewInput, ReviewResult } from './engine/types.ts';
-import { BEAT_MS, CLOSE_WAIT_MS, DRAIN_WAIT_MS, startService, STOP_WAIT_MS, TICK_MS, UPKEEP_MS } from './service.ts';
+import { BEAT_MS, CLOSE_WAIT_MS, DRAIN_WAIT_MS, gateForge, startService, STOP_WAIT_MS, TICK_MS, UPKEEP_MS } from './service.ts';
 import type { Listening } from './service.ts';
 import type { RequestLike, ResponseLike } from './shell/http.ts';
+import { checkText } from './gate/check.ts';
 
 const REF = { service: 'github', owner: 'acme', repo: 'shop', number: 7 } as const;
 const at = (seconds: number): string => new Date(Date.parse('2026-03-01T10:00:00.000Z') + seconds * 1000).toISOString();
@@ -47,9 +51,11 @@ const okResult = (): ReviewResult => ({
 });
 
 const appKey = generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey.export({ type: 'pkcs8', format: 'pem' }) as string;
-const config = serviceConfig(parseConfig(
-  'model:\n  apiKey: { env: K }\n  model: vendor/model-a\napp:\n  id: 12345\n  privateKey: { env: A }\n  webhookSecret: { env: S }\ndatabase:\n  url: { env: U }\nserver:\n  port: 9191\nlimits:\n  spendPerDay: 50\ndryRun: true\n',
-  { K: 'k', A: appKey, S: 's', U: 'postgres://u:p@db.example.test/d' }));
+const BASE_YAML = 'model:\n  apiKey: { env: K }\n  model: vendor/model-a\napp:\n  id: 12345\n  privateKey: { env: A }\n  webhookSecret: { env: S }\ndatabase:\n  url: { env: U }\nserver:\n  port: 9191\nlimits:\n  spendPerDay: 50\ndryRun: true\n';
+const ENV = { K: 'k', A: appKey, S: 's', U: 'postgres://u:p@db.example.test/d' };
+const config = serviceConfig(parseConfig(BASE_YAML, ENV));
+/** The gate enabled on main for every repository. */
+const GATE_YAML = 'repositories:\n  defaults: { gate: { enabled: true, branches: [main] } }\n';
 
 const never = (): Promise<never> => new Promise(() => {});
 
@@ -63,8 +69,24 @@ interface Options {
   lacks?: FeatureOff[] | Error;
   /** false to leave dry run; true when not given. */
   dryRun?: boolean;
+  /** Repository settings added to the deployment file (the text after `dryRun: true`). */
+  repositoriesYaml?: string;
   /** The key route's answer waits for this when given. */
   keyGate?: Promise<void>;
+  /** The gate enabled on main (GATE_YAML); it also leaves dry run unless `dryRun` is given. */
+  gate?: boolean;
+  /** What the writer's listThreads answers; it rejects when not given. */
+  threads?: ReviewThread[];
+  /** Every statement outside a transaction whose text holds this rejects. */
+  failQuery?: string;
+  /** What the review answers; okResult() when not given. */
+  result?: ReviewResult;
+  /** findCheck waits for this when given. */
+  holdCheck?: Promise<void>;
+  /** A fake GitHub that keeps each posted review's inline comments, reads them back, and opens a thread for each (`h.threads`, a list from the start). */
+  github?: boolean;
+  /** What isTeamMember answers; it rejects when not given. */
+  member?: boolean;
 }
 interface Timer { ms: number; work: () => Promise<void>; cancelled: boolean }
 
@@ -86,6 +108,10 @@ async function harness(options: Options = {}) {
   const logged: Array<Record<string, unknown>> = [];
   const writes: unknown[][] = [];
   const listings = [...(options.listings ?? [])];
+  /** The text of every statement outside a transaction. */
+  const queries: string[] = [];
+  /** Every statement, inside a transaction or not, with its parameters. */
+  const allQueries: Array<[string, unknown[]]> = [];
   let listener: ((req: RequestLike, res: ResponseLike) => void) | null = null;
   let current: ForgeEvent = PING;
   let delivered = 'd-1';
@@ -97,18 +123,28 @@ async function harness(options: Options = {}) {
   const published = new Promise<void>((done) => { publishCalled = done; });
   const order: string[] = [];
   const lacksCalls: boolean[] = [];
+  const gateCalls: unknown[] = [];
+  /** Every call of the checks, as [name, ...args]. */
+  const checked: unknown[][] = [];
+  /** The checks GitHub holds, by commit. */
+  const held = new Map<string, OwnCheck>();
+  /** The inline comments of each review posted, by the review's id. */
+  const postedComments = new Map<string, PostedComment[]>();
+  let reviewsPosted = 0;
+  let commentsPosted = 0;
+  let newRuns = 0;
   const appInfo: AppIdentity = {
     read: () => Promise.reject(new Error('not_used')),
     canResolve: () => Promise.resolve(false),
-    lacks: (dryRun) => (order.push('lacks'), lacksCalls.push(dryRun), options.lacks instanceof Error ? Promise.reject(options.lacks) : Promise.resolve(options.lacks ?? [])),
+    lacks: (dryRun, gate) => (order.push('lacks'), lacksCalls.push(dryRun), gateCalls.push(gate), options.lacks instanceof Error ? Promise.reject(options.lacks) : Promise.resolve(options.lacks ?? [])),
   };
 
   const db: Db = {
-    query: (text, params) => real.query(text, params),
+    query: (text, params) => (queries.push(text), allQueries.push([text, params ?? []]), options.failQuery !== undefined && text.includes(options.failQuery) ? Promise.reject(new Error('db_down')) : real.query(text, params)),
     script: (sql) => (options.migrationError === undefined ? real.script(sql) : Promise.reject(options.migrationError)),
     transaction: async (work) => {
       if (h.beforeTransaction !== undefined) await h.beforeTransaction();
-      return real.transaction(work);
+      return real.transaction((tx) => work({ ...tx, query: (text, params) => (allQueries.push([text, params ?? []]), tx.query(text, params)) }));
     },
     close: () => {
       events.push('close');
@@ -120,10 +156,18 @@ async function harness(options: Options = {}) {
   const lock: InstanceLock = { release: async () => { events.push('release'); } };
 
   const h = {
-    db, events, order, lacksCalls, timers, inputs, fetched, listedSince, logged, writes,
+    db, queries, allQueries, events, order, lacksCalls, gateCalls, checked, held, timers, inputs, fetched, listedSince, logged, writes,
     port: 0,
     /** What the clock reads; a test may move it. */
     now: options.now ?? at(0),
+    /** The pull request as GitHub has it now; a test may move its head. */
+    live: LIVE as LivePullRequest,
+    /** The installations GitHub no longer knows (the app was installed again): a read or a write of the pull request through one is a 404. */
+    gone: new Set<string>(),
+    /** What the review answers for this input, when it answers; else `result`. */
+    resultFor: undefined as ((input: ReviewInput) => ReviewResult | undefined) | undefined,
+    /** The threads GitHub has; listThreads rejects while this is undefined. */
+    threads: options.threads ?? (options.github === true ? [] : undefined) as ReviewThread[] | undefined,
     onListen: undefined as (() => Promise<void>) | undefined,
     beforeListing: undefined as (() => Promise<void>) | undefined,
     beforeTransaction: undefined as (() => Promise<void>) | undefined,
@@ -131,7 +175,10 @@ async function harness(options: Options = {}) {
     reviewed: () => reviewed,
     published: () => published,
     start: async () => {
-      const service = await startService(options.dryRun === false ? { ...config, dryRun: false } : config, {
+      const yaml = options.repositoriesYaml ?? (options.gate === true ? GATE_YAML : undefined);
+      const base = yaml === undefined ? config : serviceConfig(parseConfig(BASE_YAML + yaml, ENV));
+      const dry = options.dryRun ?? options.gate !== true;
+      const service = await startService(dry ? base : { ...base, dryRun: false }, {
       db, appInfo,
       reader: { read: () => ({ ok: true as const, delivery: delivered, name: current.kind, action: current.kind === 'pull_request' ? current.action : null, event: current }) },
       clock: () => new Date(h.now),
@@ -154,7 +201,7 @@ async function harness(options: Options = {}) {
         events.push('lock');
         return options.lock === null ? null : lock;
       },
-      forge: { readPullRequest: () => Promise.resolve(LIVE), sourceFor: () => Promise.resolve({} as Source) },
+      forge: { readPullRequest: (_ref, installation) => (h.gone.has(installation) ? Promise.reject(new Error('github_404')) : Promise.resolve(h.live)), sourceFor: () => Promise.resolve({} as Source) },
       hooks: {
         listSince: async (since) => {
           listedSince.push(since);
@@ -167,15 +214,65 @@ async function harness(options: Options = {}) {
         redeliver: () => Promise.resolve(),
       },
       writer: {
-        publishReview: async (_ref, _installation, draft) => { writes.push(['publishReview', draft.commit]); publishCalled(); return { id: '501' }; },
+        publishReview: async (_ref, _installation, draft) => {
+          writes.push(['publishReview', draft.commit]);
+          const id = String(501 + reviewsPosted);
+          reviewsPosted += 1;
+          if (options.github === true) {
+            const posted = draft.comments.map((c) => {
+              const commentId = String(8001 + commentsPosted);
+              commentsPosted += 1;
+              h.threads!.push({ id: `t${commentId}`, path: c.path, side: c.side, line: c.line, resolved: false, resolvedByApp: false, comments: [
+                { id: commentId, node: `n${commentId}`, author: 'visto-test[bot]', authorIsBot: true, byApp: true, reviewId: id, body: c.body, at: h.now },
+              ] });
+              return { id: commentId, path: c.path, side: c.side, line: c.line, body: c.body };
+            });
+            postedComments.set(id, posted);
+          }
+          publishCalled();
+          return { id };
+        },
         listOwnReviews: async () => { writes.push(['listOwnReviews']); return []; },
-        listReviewComments: async () => { writes.push(['listReviewComments']); return []; },
-        react: async () => { writes.push(['react']); },
-        comment: async () => { writes.push(['comment']); },
-        listThreads: () => Promise.reject(new Error('not_expected')),
+        listReviewComments: async (_ref, _installation, reviewId) => { writes.push(['listReviewComments']); return postedComments.get(reviewId) ?? []; },
+        react: async (_ref, _installation, commentId, reaction) => { writes.push(['react', commentId, reaction]); },
+        comment: async (_ref, _installation, body) => { writes.push(['comment', body]); },
+        listThreads: async (_ref, installation) => {
+          writes.push(['listThreads']);
+          if (h.gone.has(installation)) throw new Error('github_404');
+          if (h.threads === undefined) throw new Error('not_expected');
+          return h.threads;
+        },
         replyToThread: () => Promise.reject(new Error('not_expected')),
         editThreadComment: () => Promise.reject(new Error('not_expected')),
         resolveThread: () => Promise.reject(new Error('not_expected')),
+      },
+      checks: {
+        async findCheck(_ref, installation, commit, name) {
+          checked.push(['findCheck', installation, commit, name]);
+          if (h.gone.has(installation)) throw new Error('github_404');
+          if (options.holdCheck !== undefined) await options.holdCheck;
+          return held.get(commit) ?? null;
+        },
+        async writeCheck(_ref, installation, check) {
+          checked.push(['writeCheck', installation, check]);
+          if (h.gone.has(installation)) throw new Error('github_404');
+          // As GitHub does, with the adapter's guard in its place: a completed run is not reopened by an update.
+          const before = check.id === null ? undefined : [...held.values()].find((c) => c.id === check.id);
+          if (before !== undefined && before.status === 'completed' && check.status !== 'completed') {
+            held.set(check.commit, { ...before, title: check.title, summary: check.summary });
+            throw new Error('check_not_rewritten');
+          }
+          // A new run of the name becomes the one findCheck answers.
+          const id = check.id ?? String(701 + newRuns++);
+          held.set(check.commit, { id, status: check.status, conclusion: check.conclusion, title: check.title, summary: check.summary });
+          return { id };
+        },
+        greenChecks: async () => { checked.push(['greenChecks']); throw new Error('not_expected'); },
+        isTeamMember: async () => {
+          checked.push(['isTeamMember']);
+          if (options.member === undefined) throw new Error('not_expected');
+          return options.member;
+        },
       },
       fetch: (async (url: string | URL | Request) => {
         fetched.push(String(url));
@@ -196,7 +293,7 @@ async function harness(options: Options = {}) {
         inputs.push(input);
         reviewCalled();
         if (options.holdReview === true) await reviewHeld;
-        return okResult();
+        return h.resultFor?.(input) ?? options.result ?? okResult();
       },
       lineUrl: () => 'https://git.example.test/x',
       commentUrl: (_ref, commentId) => `https://git.example.test/c/${commentId}`,
@@ -218,6 +315,19 @@ async function harness(options: Options = {}) {
     flush: async () => {
       for (let i = 0; i < 5; i += 1) await new Promise((done) => setImmediate(done));
     },
+    /** Waits until `ready` answers true, for at most five seconds. */
+    until: async (ready: () => boolean | Promise<boolean>) => {
+      const end = Date.now() + 5_000;
+      while (!(await ready())) {
+        if (Date.now() > end) throw new Error('not reached within 5 seconds');
+        await new Promise((done) => { setTimeout(done, 5).unref(); });
+      }
+    },
+    /** The gate jobs, oldest first. */
+    gateJobs: async () => (await h.db.query<{ id: number }>("select id from visto_ai.jobs where kind = 'gate' order by id"))
+      .map((r) => r.id),
+    /** The checks written, in order. */
+    written: () => checked.filter((c) => c[0] === 'writeCheck').map((c) => c[2] as { title: string; status: string; conclusion: string | null; commit: string }),
   };
   return h;
 }
@@ -541,4 +651,607 @@ test('a logger that throws changes nothing about stop', async () => {
   await service.settled;
   await service.stop();
   assert.deepEqual(h.events.slice(-2), ['close', 'release']);
+});
+test('the app is asked for what the configured gate needs', async () => {
+  const on = await harness({
+    repositoriesYaml: 'repositories:\n  defaults: { gate: { enabled: true, branches: [main], skipTeam: acme/release-managers } }\n',
+  });
+  await (await on.start()).settled;
+  assert.deepEqual(on.gateCalls, [{ check: true, statuses: false, members: true, bypass: false }]);
+  const off = await harness();
+  await (await off.start()).settled;
+  assert.deepEqual(off.gateCalls, [{ check: false, statuses: false, members: false, bypass: false }]);
+});
+
+// The gate's runner beside the reviews.
+
+const manual = (over = {}) => job({ reason: 'command', headSha: '', trigger: 'manual' as const, requestedBy: 'octo-lead', commentId: '31', association: 'member', installation: '99', ...over });
+const jobOf = async (db: Db, id: number): Promise<Job> => (await getJob(db, id))!;
+const gateEntries = (logged: Array<Record<string, unknown>>) => logged.filter((e) => e.event === 'gate');
+
+test('a gate job runs while reviews are paused', async () => {
+  const h = await harness({ gate: true });
+  await migrate(h.db, loadMigrations(MIGRATIONS_DIR));
+  await savePullRequest(h.db, facts());
+  await recordRun(h.db, run({ startedAt: at(0), usage: { ...run().usage, cost: 50 } }));
+  const review = (await enqueueJob(h.db, manual()))!;
+  const sync = (await askGate(h.db, REF, at(0)))!;
+  const service = await h.start();
+  await service.settled;
+  await h.until(async () => (await jobOf(h.db, sync)).status === 'done');
+  await h.runTimer(TICK_MS);
+  await h.flush();
+  assert.deepEqual([h.inputs.length, (await jobOf(h.db, review)).status, (await jobOf(h.db, sync)).outcome], [0, 'pending', 'synced']);
+  assert.deepEqual(h.written().map((c) => [c.commit, c.status, c.title]), [['h1', 'queued', 'Review waiting: reviews are paused (spend_limit)']]);
+});
+test('stop waits for a gate job as it waits for a review', async () => {
+  let release!: () => void;
+  const holdCheck = new Promise<void>((done) => { release = done; });
+  const h = await harness({ gate: true, holdCheck });
+  await migrate(h.db, loadMigrations(MIGRATIONS_DIR));
+  await savePullRequest(h.db, facts());
+  const sync = (await askGate(h.db, REF, at(0)))!;
+  const service = await h.start();
+  await service.settled;
+  await h.until(() => h.checked.length > 0);
+  const stopping = service.stop();
+  await h.flush();
+  assert.equal(h.events.includes('listener-close'), false);
+  release();
+  await stopping;
+  assert.deepEqual(h.events.slice(-3), ['listener-close', 'close', 'release']);
+  assert.deepEqual([(await jobOf(h.db, sync)).outcome, h.written().map((c) => c.title)], ['synced', ['Waiting for /done']]);
+});
+test('in dry run a stored gate job is dropped, and neither the checks nor the writer it was given can be reached', async () => {
+  const h = await harness({ gate: true, dryRun: true });
+  await migrate(h.db, loadMigrations(MIGRATIONS_DIR));
+  await savePullRequest(h.db, facts());
+  const sync = (await askGate(h.db, REF, at(0)))!;
+  const service = await h.start();
+  await service.settled;
+  await h.until(async () => (await jobOf(h.db, sync)).status === 'dropped');
+  assert.equal((await jobOf(h.db, sync)).outcome, 'dry_run');
+  assert.deepEqual([h.checked, h.writes], [[], []]);
+});
+test('in dry run the gate is given checks and a writer that refuse every call, and out of it the ones the service was given', async () => {
+  const calls: string[] = [];
+  const checks: ForgeChecks = {
+    findCheck: async () => { calls.push('findCheck'); return null; }, writeCheck: async () => { calls.push('writeCheck'); return { id: '1' }; },
+    greenChecks: async () => { calls.push('greenChecks'); return []; }, isTeamMember: async () => { calls.push('isTeamMember'); return true; },
+  };
+  const writer = { listThreads: async () => { calls.push('listThreads'); return []; } } as unknown as ForgeWriter;
+  const dry = gateForge(true, checks, writer);
+  for (const call of [
+    () => dry.checks.findCheck(REF, '99', 'h1', 'AI Review'), () => dry.checks.writeCheck(REF, '99', { id: null, commit: 'h1', name: 'AI Review', status: 'queued', conclusion: null, title: 't', summary: 's' }),
+    () => dry.checks.greenChecks(REF, '99', 'h1', ['build']), () => dry.checks.isTeamMember('99', 'acme/release-managers', 'octo-lead'),
+    () => dry.writer.listThreads(REF, '99'), () => dry.writer.react(REF, '99', '31', 'eyes'), () => dry.writer.comment(REF, '99', 'x'),
+  ]) await assert.rejects(call(), /dry_run/);
+  assert.deepEqual(calls, []);
+  const live = gateForge(false, checks, writer);
+  assert.equal(live.checks, checks);
+  assert.equal(live.writer, writer);
+});
+test('a gate job the runner drops as too old raises the alert', async () => {
+  const h = await harness({ gate: true });
+  await migrate(h.db, loadMigrations(MIGRATIONS_DIR));
+  // No stored pull request: the sweep at start, which renews a waiting sync, leaves this one to the runner.
+  const old = (await askGate(h.db, REF, at(-90_000)))!;
+  await (await h.start()).settled;
+  await h.until(async () => (await jobOf(h.db, old)).status === 'dropped');
+  await h.flush();
+  assert.equal((await jobOf(h.db, old)).outcome, 'too_old');
+  assert.deepEqual(h.logged.filter((e) => e.event === 'alert' && e.code === 'gate_check_failed'), [{ event: 'alert', code: 'gate_check_failed', reason: 'too_old' }]);
+  assert.deepEqual(h.checked, []);
+});
+test('with the gate off a review job that leaves the runner reads nothing for the gate', async () => {
+  const off = await harness({ dryRun: false });
+  await migrate(off.db, loadMigrations(MIGRATIONS_DIR));
+  await savePullRequest(off.db, facts());
+  const id = (await enqueueJob(off.db, manual()))!;
+  await (await off.start()).settled;
+  await off.published();
+  await off.until(async () => (await jobOf(off.db, id)).status === 'done');
+  await off.flush();
+  assert.deepEqual(off.queries.filter((q) => q.includes('from visto_ai.pull_requests') || q.includes("'gate'")), []);
+  // With the gate on the same review is followed by a read of the stored pull request and a request for the check.
+  const on = await harness({ gate: true, threads: [] });
+  await migrate(on.db, loadMigrations(MIGRATIONS_DIR));
+  // No stored pull request, so that the sweep at start asks for nothing; the sync asked for carries the review job's installation.
+  const onId = (await enqueueJob(on.db, manual()))!;
+  await (await on.start()).settled;
+  on.queries.length = 0;
+  await on.published();
+  await on.until(async () => (await jobOf(on.db, onId)).status === 'done' && (await on.gateJobs()).length === 1);
+  assert.ok(on.queries.some((q) => q.includes('from visto_ai.pull_requests')));
+});
+test('when a review job has left the runner the check is asked for and decided', async () => {
+  // Published: one gate job ran after it and wrote the check from the review.
+  const ok = await harness({ gate: true, threads: [] });
+  await migrate(ok.db, loadMigrations(MIGRATIONS_DIR));
+  // No stored pull request, so that the sweep at start asks for nothing; the sync asked for carries the review job's installation.
+  await enqueueJob(ok.db, manual());
+  await (await ok.start()).settled;
+  await ok.published();
+  await ok.until(() => ok.written().length > 0);
+  await ok.until(async () => (await ok.gateJobs()).length === 1 && (await jobOf(ok.db, (await ok.gateJobs())[0]!)).status === 'done');
+  assert.deepEqual(ok.written().map((c) => [c.commit, c.status, c.conclusion, c.title]), [['h1', 'completed', 'success', 'No blocking findings']]);
+  assert.equal((await jobOf(ok.db, (await ok.gateJobs())[0]!)).outcome, 'synced');
+
+  // Failed: the check says so with its code.
+  const failed = await harness({ gate: true, result: { ...okResult(), status: 'failed', failure: { stage: 'model', code: 'timeout' }, findings: [] } });
+  await migrate(failed.db, loadMigrations(MIGRATIONS_DIR));
+  // No stored pull request, so that the sweep at start asks for nothing; the sync asked for carries the review job's installation.
+  await enqueueJob(failed.db, manual());
+  await (await failed.start()).settled;
+  await failed.until(() => failed.written().length > 0);
+  assert.deepEqual(failed.written().map((c) => [c.status, c.conclusion, c.title]), [['completed', 'failure', 'Review failed (timeout): comment /done to retry']]);
+
+  // With the gate off, and against a branch the gate does not list: no gate job, no gate entry, no call of the checks.
+  // With a gate configured for another branch the sweep at start says it asked for nothing (Task 12, rule 1).
+  for (const [options, swept] of [[{ dryRun: false }, []], [{ dryRun: false, repositoriesYaml: 'repositories:\n  defaults: { gate: { enabled: true, branches: [release] } }\n' }, ['gate_sweep']]] as const) {
+    const off = await harness(options);
+    await migrate(off.db, loadMigrations(MIGRATIONS_DIR));
+    await savePullRequest(off.db, facts());
+    const id = (await enqueueJob(off.db, manual()))!;
+    await (await off.start()).settled;
+    await off.published();
+    await off.until(async () => (await jobOf(off.db, id)).status === 'done');
+    await off.flush();
+    assert.deepEqual([await off.gateJobs(), gateEntries(off.logged), off.checked], [[], [], []]);
+    assert.deepEqual(off.logged.map((e) => e.event), ['recovery', ...swept, 'model_check', 'app_check', 'readback', 'review']);
+    assert.deepEqual(off.logged.filter((e) => e.event === 'gate_sweep'), swept.map(() => ({ event: 'gate_sweep', asked: 0 })));
+  }
+});
+test('a review job that is dropped as too old leaves the check to be decided', async () => {
+  const h = await harness({ gate: true });
+  await migrate(h.db, loadMigrations(MIGRATIONS_DIR));
+  // No stored pull request, so that the sweep at start asks for nothing; the sync asked for carries the review job's installation.
+  const old = (await enqueueJob(h.db, manual({ runAt: at(-90_000), now: at(-90_000) })))!;
+  await (await h.start()).settled;
+  await h.until(() => h.written().length > 0);
+  assert.deepEqual([(await jobOf(h.db, old)).outcome, (await h.gateJobs()).length], ['too_old', 1]);
+  assert.deepEqual(h.written().map((c) => [c.status, c.title]), [['queued', 'Waiting for /done']]);
+});
+test('a review whose record failed leaves no Reviewing behind', async () => {
+  const h = await harness({ gate: true, failQuery: 'insert into visto_ai.review_runs' });
+  await migrate(h.db, loadMigrations(MIGRATIONS_DIR));
+  await savePullRequest(h.db, facts());
+  const id = (await enqueueJob(h.db, manual()))!;
+  await (await h.start()).settled;
+  await h.reviewed();
+  await h.until(() => h.written().length > 0);
+  assert.equal((await jobOf(h.db, id)).status, 'running');
+  assert.deepEqual(h.written().map((c) => [c.status, c.title]), [['queued', 'Waiting for /done']]);
+});
+test('a gate job the runner gives up raises the alert once and asks for nothing', async () => {
+  const h = await harness({ gate: true });
+  await migrate(h.db, loadMigrations(MIGRATIONS_DIR));
+  // No stored pull request: the sweep at start, which renews a waiting sync, leaves this one to the runner.
+  const first = (await askGate(h.db, REF, at(0)))!;
+  await h.db.query('update visto_ai.jobs set starts = 3 where id = $1', [first]);
+  await (await h.start()).settled;
+  await h.until(async () => (await jobOf(h.db, first)).status === 'dropped');
+  await h.flush();
+  assert.deepEqual([(await jobOf(h.db, first)).outcome, await h.gateJobs()], ['attempts_exhausted', [first]]);
+  const second = (await askGate(h.db, REF, at(0)))!;
+  await h.db.query('update visto_ai.jobs set starts = 3 where id = $1', [second]);
+  await h.runTimer(TICK_MS);
+  await h.until(async () => (await jobOf(h.db, second)).status === 'dropped');
+  await h.flush();
+  assert.deepEqual(await h.gateJobs(), [first, second]);
+  assert.deepEqual(h.logged.filter((e) => e.event === 'alert' && e.code === 'gate_check_failed'), [{ event: 'alert', code: 'gate_check_failed', reason: 'attempts_exhausted' }]);
+  assert.deepEqual(h.checked, []);
+});
+
+// The service keeps the checks true.
+
+const said = (h: { written: () => Array<{ commit: string; title: string }> }) => h.written().map((c) => [c.commit, c.title]);
+const titleOn = (h: { held: Map<string, OwnCheck> }, commit: string): string | undefined => h.held.get(commit)?.title;
+const general = (id: string, body: string, author = 'octo-lead'): ForgeEvent =>
+  ({ kind: 'general_comment', ref: REF, installation: '99', comment: { id, author, authorIsBot: false, association: 'member', at: at(0), body } });
+const majorResult = (): ReviewResult => ({ ...okResult(), findings: [{ ...okResult().findings[0]!, severity: 'major', body: 'Check the total.' }] });
+const pending = async (db: Db, kind: string): Promise<Array<{ reason: string; status: string }>> =>
+  db.query<{ reason: string; status: string }>('select reason, status from visto_ai.jobs where kind = $1 order by id', [kind]);
+
+test('the sweep comes after the recovery and before the listener, and not in dry run or with no gate', async () => {
+  const h = await harness({ gate: true });
+  await migrate(h.db, loadMigrations(MIGRATIONS_DIR));
+  await savePullRequest(h.db, facts());
+  let atListen: unknown[] = [];
+  h.onListen = async () => { atListen = h.logged.map((e) => e.event); };
+  await (await h.start()).settled;
+  assert.deepEqual(atListen, ['recovery', 'gate_sweep']);
+  assert.deepEqual(h.logged.filter((e) => e.event === 'gate_sweep'), [{ event: 'gate_sweep', asked: 1 }]);
+  await h.until(() => h.written().length > 0);
+  assert.deepEqual(said(h), [['h1', 'Waiting for /done']]);
+
+  for (const options of [{ gate: true, dryRun: true }, { dryRun: false }]) {
+    const other = await harness(options);
+    await migrate(other.db, loadMigrations(MIGRATIONS_DIR));
+    await savePullRequest(other.db, facts());
+    await (await other.start()).settled;
+    await other.runTimer(TICK_MS);
+    await other.flush();
+    assert.deepEqual([other.logged.filter((e) => e.event === 'gate_sweep'), await other.gateJobs(), other.checked], [[], [], []]);
+    assert.deepEqual(gateQueries(other.allQueries), [], JSON.stringify(options));
+  }
+});
+test('a sweep that cannot read the database fails the start', async () => {
+  const h = await harness({ gate: true, failQuery: 'from visto_ai.gate_evaluations' });
+  await assert.rejects(h.start(), /db_down/);
+  assert.equal(h.events.includes('listen'), false);
+});
+test('a pull request whose check needed no write is asked for at every start, and writes and records nothing more', async () => {
+  const h = await harness({ gate: true });
+  await migrate(h.db, loadMigrations(MIGRATIONS_DIR));
+  await savePullRequest(h.db, facts());
+  await recordEvaluation(h.db, { ref: REF, headSha: 'h1', at: at(0), mode: 'shadow', state: 'waiting', code: null, run: null, counts: NO_COUNTS });
+  const wanted = checkText({ state: 'waiting' }, { head: 'h1', canSkip: false, clearByReply: true, retrying: true, threadUrl: () => '' });
+  h.held.set('h1', { id: '71', ...wanted });
+  const first = await h.start();
+  await first.settled;
+  await h.until(async () => (await pending(h.db, 'gate')).some((j) => j.status === 'done'));
+  await first.stop();
+  const rows = await h.db.query<{ mode: string; state: string }>('select mode, state from visto_ai.gate_evaluations order by id');
+  assert.deepEqual([h.logged.filter((e) => e.event === 'gate_sweep'), h.written(), rows], [
+    [{ event: 'gate_sweep', asked: 1 }], [], [{ mode: 'shadow', state: 'waiting' }, { mode: 'enforce', state: 'waiting' }],
+  ]);
+  const second = await h.start();
+  await second.settled;
+  await h.until(async () => (await pending(h.db, 'gate')).every((j) => j.status === 'done'));
+  assert.deepEqual(h.logged.filter((e) => e.event === 'gate_sweep'), [{ event: 'gate_sweep', asked: 1 }, { event: 'gate_sweep', asked: 1 }]);
+  assert.deepEqual(await pending(h.db, 'gate'), [{ reason: 'sync', status: 'done' }, { reason: 'sync', status: 'done' }]);
+  assert.deepEqual([h.written(), (await h.db.query('select id from visto_ai.gate_evaluations')).length], [[], 2]);
+});
+test('a start in bypass says so and raises its alert once', async () => {
+  const yaml = 'repositories:\n  defaults: { gate: { enabled: true, branches: [main], mode: bypass } }\n';
+  const h = await harness({ dryRun: false, repositoriesYaml: yaml });
+  const service = await h.start();
+  await service.settled;
+  await h.runTimer(TICK_MS);
+  await h.runTimer(UPKEEP_MS);
+  assert.deepEqual(h.logged.filter((e) => e.event === 'gate_bypass' || (e.event === 'alert' && e.code === 'gate_bypass')), [
+    { event: 'gate_bypass' }, { event: 'alert', code: 'gate_bypass' },
+  ]);
+  // Not in dry run, and not with the gate in another mode.
+  for (const options of [{ dryRun: true, repositoriesYaml: yaml }, { gate: true }]) {
+    const other = await harness(options);
+    await (await other.start()).settled;
+    assert.deepEqual(other.logged.filter((e) => e.event === 'gate_bypass' || e.code === 'gate_bypass'), []);
+  }
+});
+test('when reviews are paused a waiting review\'s check says why, and says Reviewing again when they resume', async () => {
+  const h = await harness({ gate: true, github: true, holdReview: true });
+  const service = await h.start();
+  await service.settled;
+  await h.webhook(pr('opened'), 'd1');
+  await h.until(() => titleOn(h, 'h1') === 'Waiting for /done');
+  // The daily limit is reached; then a /done asks for a review, which waits.
+  await recordRun(h.db, run({ startedAt: at(0), usage: { ...run().usage, cost: 50 } }));
+  await h.webhook(general('31', '/done'), 'd2');
+  await h.until(() => titleOn(h, 'h1') === 'Review waiting: reviews are paused (spend_limit)');
+  await h.runTimer(TICK_MS);
+  assert.deepEqual([h.inputs.length, (await pending(h.db, 'review')).map((j) => j.status)], [0, ['pending']]);
+  // The next UTC day: the pause ends, the check says Reviewing, and the review runs.
+  h.now = at(86_400);
+  await h.runTimer(TICK_MS);
+  await h.until(() => titleOn(h, 'h1') === 'Reviewing');
+  await h.reviewed();
+  h.releaseReview();
+  await h.until(() => titleOn(h, 'h1') === '1 finding, none blocking');
+  assert.deepEqual(said(h), [
+    ['h1', 'Waiting for /done'], ['h1', 'Review waiting: reviews are paused (spend_limit)'], ['h1', 'Reviewing'], ['h1', '1 finding, none blocking'],
+  ]);
+  assert.equal(h.logged.some((e) => e.event === 'gate_ask_failed'), false);
+});
+test('a pause that begins asks for the checks of the waiting reviews, and one whose asking fails is logged and tried again', async () => {
+  const h = await harness({ gate: true });
+  await migrate(h.db, loadMigrations(MIGRATIONS_DIR));
+  // No stored pull request, so that the sweep at start asks for nothing; the sync asked for carries the review job's installation.
+  await (await h.start()).settled;
+  await h.flush();
+  // A review job that is stored while reviews run, and then the daily limit is reached before it starts.
+  await recordRun(h.db, run({ startedAt: at(0), usage: { ...run().usage, cost: 50 } }));
+  await enqueueJob(h.db, manual());
+  await h.runTimer(TICK_MS);
+  await h.until(() => titleOn(h, 'h1') === 'Review waiting: reviews are paused (spend_limit)');
+  // A start while paused, when the gate's jobs cannot be stored: logged, and each pass asks again.
+  const quiet = await harness({ gate: true, failQuery: "'gate', 'sync'" });
+  await migrate(quiet.db, loadMigrations(MIGRATIONS_DIR));
+  // No stored pull request: the sweep at start, whose ask would fail too, asks for nothing.
+  await recordRun(quiet.db, run({ startedAt: at(0), usage: { ...run().usage, cost: 50 } }));
+  await enqueueJob(quiet.db, manual());
+  await (await quiet.start()).settled;
+  await quiet.runTimer(TICK_MS);
+  const failed = quiet.logged.filter((e) => e.event === 'gate_ask_failed');
+  assert.ok(failed.length >= 2);
+  assert.deepEqual(failed[0], { event: 'gate_ask_failed', reason: 'db_down' });
+  assert.deepEqual([quiet.inputs.length, await quiet.gateJobs()], [0, []]);
+});
+/** The statements that belong to the gate: a sweep's read of the open pull requests, the gate's tables, a gate job stored. */
+const gateQueries = (all: Array<[string, unknown[]]>): string[] => all
+  .filter(([text, params]) => (text.includes('from visto_ai.pull_requests') && text.includes("where state = 'open'"))
+    || text.includes('gate_evaluations') || text.includes('gate_overrides')
+    || (text.includes('insert into visto_ai.jobs') && (text.includes("'gate'") || params.includes('gate'))))
+  .map(([text]) => text);
+
+test('with no gate a pause and its end ask for nothing', async () => {
+  const h = await harness({ dryRun: false });
+  await (await h.start()).settled;
+  await h.webhook(pr('opened', { draft: true }), 'd1');
+  await recordRun(h.db, run({ startedAt: at(0), usage: { ...run().usage, cost: 50 } }));
+  h.queries.length = 0;
+  await h.runTimer(TICK_MS);
+  h.now = at(86_400);
+  await h.runTimer(TICK_MS);
+  await h.flush();
+  assert.deepEqual([h.queries.filter((q) => q.includes("status in ('pending', 'running')") || q.includes('gate')), h.checked], [[], []]);
+  assert.deepEqual(h.logged.filter((e) => typeof e.event === 'string' && e.event.startsWith('gate')), []);
+  // Every statement since before the start, inside a transaction or not: nothing of the gate, and the pull request is only stored.
+  assert.deepEqual(gateQueries(h.allQueries), []);
+  assert.deepEqual(h.allQueries.filter(([text]) => text.includes('visto_ai.pull_requests')).map(([text]) => text.trim().split(/\s+/).slice(0, 3).join(' ')), ['insert into visto_ai.pull_requests']);
+});
+test('a /done that joined the review of an older head is answered by a review of the new one', async () => {
+  const h = await harness({ gate: true, github: true, holdReview: true });
+  const service = await h.start();
+  await service.settled;
+  await h.webhook(pr('opened'), 'd1');
+  await h.webhook(general('31', '/done'), 'd2');
+  await h.reviewed();
+  await h.until(() => titleOn(h, 'h1') === 'Reviewing');
+  // A push: the head is h2, and a review of the pull request is still under way.
+  h.live = { ...LIVE, info: { ...LIVE.info, headSha: 'h2' } };
+  await h.webhook(pr('synchronize', { headSha: 'h2', updatedAt: at(5) }), 'd3');
+  await h.until(() => titleOn(h, 'h2') === 'Reviewing');
+  const onH1 = h.written().filter((c) => c.commit === 'h1').length;
+  // A second /done joins the running review: its eyes, and no new job.
+  await h.webhook(general('33', '/done'), 'd4');
+  await h.until(() => h.writes.some((w) => w[0] === 'react' && w[1] === '33'));
+  assert.deepEqual((await pending(h.db, 'review')).map((j) => [j.reason, j.status]), [['done', 'running']]);
+  h.releaseReview();
+  await h.until(() => h.held.get('h2')?.status === 'completed');
+  const reviews = await h.db.query<{ reason: string; outcome: string }>("select reason, outcome from visto_ai.jobs where kind = 'review' order by id");
+  assert.deepEqual(reviews, [{ reason: 'done', outcome: 'head_moved' }, { reason: 'done_retry', outcome: 'published' }]);
+  assert.deepEqual([h.inputs.map((i) => i.pullRequest.headSha), titleOn(h, 'h2')], [['h1', 'h2'], '1 finding, none blocking']);
+  assert.equal(h.written().filter((c) => c.commit === 'h1').length, onH1);
+  assert.deepEqual(h.writes.filter((w) => w[0] === 'react'), [['react', '31', 'eyes'], ['react', '33', 'eyes']]);
+});
+test('a whole round on a gated pull request', async () => {
+  const h = await harness({
+    dryRun: false, github: true, member: true, holdReview: true, result: majorResult(),
+    repositoriesYaml: 'repositories:\n  defaults: { gate: { enabled: true, branches: [main], skipTeam: acme/release-managers } }\n',
+  });
+  const service = await h.start();
+  await service.settled;
+  // Opened: no review, the check waits for /done.
+  await h.webhook(pr('opened'), 'd1');
+  await h.until(() => titleOn(h, 'h1') === 'Waiting for /done');
+  assert.equal(h.inputs.length, 0);
+  // /done: eyes, Reviewing, one review posted with a major, then the check blocks.
+  await h.webhook(general('31', '/done'), 'd2');
+  await h.until(() => titleOn(h, 'h1') === 'Reviewing');
+  h.releaseReview();
+  await h.until(() => titleOn(h, 'h1') === '1 blocking finding is open');
+  assert.deepEqual([h.inputs.length, h.writes.filter((w) => w[0] === 'publishReview'), h.held.get('h1')!.conclusion], [1, [['publishReview', 'h1']], 'action_required']);
+  assert.deepEqual(h.writes.find((w) => w[0] === 'react'), ['react', '31', 'eyes']);
+  // A reply by the author and a resolve: green three seconds later, with no review.
+  const thread = h.threads![0]!;
+  thread.comments.push({ id: '8101', node: 'n8101', author: 'octo-dev', authorIsBot: false, byApp: false, reviewId: null, body: 'Fixed by hand.', at: at(10) });
+  thread.resolved = true;
+  h.now = at(10);
+  await h.webhook({ kind: 'inline_comment', ref: REF, comment: {
+    id: '8101', author: 'octo-dev', authorIsBot: false, association: 'none', at: at(10), commit: 'h1', path: thread.path, side: thread.side,
+    line: thread.line, startLine: null, fileLevel: false, replyTo: '8001', body: 'Fixed by hand.' } }, 'd3');
+  await h.webhook({ kind: 'thread', ref: REF, action: 'resolved', thread: thread.id, rootComment: '8001', actor: 'octo-dev', actorIsBot: false }, 'd4');
+  await h.runTimer(TICK_MS);
+  await h.flush();
+  assert.equal(titleOn(h, 'h1'), '1 blocking finding is open');
+  h.now = at(13);
+  await h.runTimer(TICK_MS);
+  await h.until(() => titleOn(h, 'h1') === '1 finding, none blocking');
+  assert.deepEqual([h.inputs.length, h.held.get('h1')!.conclusion], [1, 'success']);
+  // A push: the new commit's check waits for /done, and the old commit's is not rewritten.
+  const onH1 = h.written().filter((c) => c.commit === 'h1').length;
+  h.live = { ...LIVE, info: { ...LIVE.info, headSha: 'h2' } };
+  await h.webhook(pr('synchronize', { headSha: 'h2', updatedAt: at(20) }), 'd5');
+  await h.until(() => titleOn(h, 'h2') === 'Waiting for /done');
+  // A skip by a member of the team.
+  await h.webhook(general('32', '/ai-review-skip hotfix, checked by hand'), 'd6');
+  await h.until(() => titleOn(h, 'h2') === 'Skipped by @octo-lead');
+  // A re-run of that check: one more review, and the check still says skipped.
+  await h.webhook({ kind: 'check_rerun', ref: REF, installation: '99', app: '12345', check: 'AI Review', headSha: 'h2', actor: 'octo-dev' }, 'd7');
+  await h.until(async () => (await pending(h.db, 'review')).some((j) => j.reason === 'rerun' && j.status === 'done'));
+  await h.until(async () => (await pending(h.db, 'gate')).every((j) => j.status === 'done'));
+  assert.deepEqual([h.inputs.map((i) => i.pullRequest.headSha), h.writes.filter((w) => w[0] === 'publishReview')], [['h1', 'h2'], [['publishReview', 'h1'], ['publishReview', 'h2']]]);
+  assert.deepEqual([titleOn(h, 'h2'), h.held.get('h2')!.conclusion], ['Skipped by @octo-lead', 'success']);
+  assert.equal(h.written().filter((c) => c.commit === 'h1').length, onH1);
+  assert.deepEqual(said(h), [
+    ['h1', 'Waiting for /done'], ['h1', 'Reviewing'], ['h1', '1 blocking finding is open'], ['h1', '1 finding, none blocking'],
+    ['h2', 'Waiting for /done'], ['h2', 'Skipped by @octo-lead'],
+  ]);
+});
+
+// The sweep at start, a sync's installation, a failed review of an old head, and what counts as under way.
+
+type Harnessed = Awaited<ReturnType<typeof harness>>;
+const replyOf = (h: Harnessed, id: string, seconds: number, installation = '99'): ForgeEvent => {
+  const thread = h.threads![0]!;
+  thread.comments.push({ id, node: `n${id}`, author: 'octo-dev', authorIsBot: false, byApp: false, reviewId: null, body: 'Fixed by hand.', at: at(seconds) });
+  return { kind: 'inline_comment', ref: REF, installation, comment: {
+    id, author: 'octo-dev', authorIsBot: false, association: 'none', at: at(seconds), commit: 'h1', path: thread.path, side: thread.side,
+    line: thread.line, startLine: null, fileLevel: false, replyTo: thread.comments[0]!.id, body: 'Fixed by hand.' } };
+};
+const resolvedOf = (h: Harnessed, installation = '99'): ForgeEvent => {
+  const thread = h.threads![0]!;
+  thread.resolved = true;
+  return { kind: 'thread', ref: REF, installation, action: 'resolved', thread: thread.id, rootComment: thread.comments[0]!.id, actor: 'octo-dev', actorIsBot: false };
+};
+/** A reply and a resolve in the review's one thread, then the wait for the check: green. */
+async function answerAndResolve(h: Harnessed, from: number): Promise<void> {
+  h.now = at(from);
+  await h.webhook(replyOf(h, '8101', from), `r${from}`);
+  await h.webhook(resolvedOf(h), `t${from}`);
+  h.now = at(from + 3);
+  await h.runTimer(TICK_MS);
+  await h.until(() => titleOn(h, 'h1') === '1 finding, none blocking');
+}
+/** Opened, /done, a review with one major, then a reply and a resolve: the check is green. */
+async function greenRound(h: Harnessed): Promise<void> {
+  await h.webhook(pr('opened'), 'g1');
+  await h.until(() => titleOn(h, 'h1') === 'Waiting for /done');
+  await h.webhook(general('31', '/done'), 'g2');
+  await h.until(() => titleOn(h, 'h1') === '1 blocking finding is open');
+  await answerAndResolve(h, 10);
+}
+
+test('a thread unresolved while the service was down is seen at the next start', async () => {
+  const h = await harness({ gate: true, github: true, result: majorResult() });
+  const first = await h.start();
+  await first.settled;
+  await greenRound(h);
+  await first.stop();
+  h.threads![0]!.resolved = false;
+  await (await h.start()).settled;
+  await h.until(() => titleOn(h, 'h1') === '1 blocking finding is open');
+  assert.deepEqual(h.logged.filter((e) => e.event === 'gate_sweep').at(-1), { event: 'gate_sweep', asked: 1 });
+});
+test('clearing by reply switched off at a restart is applied at the start', async () => {
+  const options = { gate: true, github: true, result: majorResult(), repositoriesYaml: GATE_YAML };
+  const h = await harness(options);
+  const first = await h.start();
+  await first.settled;
+  await greenRound(h);
+  await first.stop();
+  options.repositoriesYaml = 'repositories:\n  defaults: { gate: { enabled: true, branches: [main], clearByReply: false } }\n';
+  await (await h.start()).settled;
+  await h.until(() => titleOn(h, 'h1') === '1 blocking finding is open');
+});
+test('a push received in dry run gets its check at the next start out of it', async () => {
+  const options: { gate: boolean; github: boolean; result: ReviewResult; dryRun?: boolean } = { gate: true, github: true, result: majorResult() };
+  const h = await harness(options);
+  const first = await h.start();
+  await first.settled;
+  await greenRound(h);
+  await first.stop();
+  options.dryRun = true;
+  const dry = await h.start();
+  await dry.settled;
+  h.live = { ...LIVE, info: { ...LIVE.info, headSha: 'h2' } };
+  await h.webhook(pr('synchronize', { headSha: 'h2', updatedAt: at(20) }), 'd-push');
+  await dry.stop();
+  assert.equal(titleOn(h, 'h2'), undefined);
+  options.dryRun = false;
+  await (await h.start()).settled;
+  await h.until(() => titleOn(h, 'h2') === 'Waiting for /done');
+});
+test('a sync left waiting from a stop of more than a day is renewed by the sweep and runs', async () => {
+  const h = await harness({ gate: true });
+  await migrate(h.db, loadMigrations(MIGRATIONS_DIR));
+  await savePullRequest(h.db, facts());
+  const old = (await askGate(h.db, REF, at(-90_000)))!;
+  await h.db.query('update visto_ai.jobs set starts = 2 where id = $1', [old]);
+  await (await h.start()).settled;
+  await h.until(async () => (await jobOf(h.db, old)).status === 'done');
+  assert.equal((await jobOf(h.db, old)).outcome, 'synced');
+  assert.deepEqual([said(h), h.logged.filter((e) => e.event === 'alert' && e.code === 'gate_check_failed')], [[['h1', 'Waiting for /done']], []]);
+});
+test('a pull request the service stores no row for gets its check from a /done, and a reply and a resolve turn it green', async () => {
+  const h = await harness({ gate: true, github: true, result: majorResult() });
+  await (await h.start()).settled;
+  await h.webhook(general('31', '/done'), 'c1');
+  await h.until(() => titleOn(h, 'h1') === '1 blocking finding is open');
+  assert.deepEqual([h.writes.filter((w) => w[0] === 'publishReview'), await getPullRequest(h.db, REF)], [[['publishReview', 'h1']], null]);
+  await answerAndResolve(h, 10);
+  assert.equal(h.held.get('h1')!.conclusion, 'success');
+});
+test('a /done that joined the review of an older head that then fails is answered by a review of the new head', async () => {
+  const h = await harness({ gate: true, github: true, holdReview: true });
+  h.resultFor = (input) => (input.pullRequest.headSha === 'h1' ? { ...okResult(), status: 'failed', failure: { stage: 'model', code: 'timeout' }, findings: [] } : undefined);
+  await (await h.start()).settled;
+  await h.webhook(pr('opened'), 'd1');
+  await h.webhook(general('31', '/done'), 'd2');
+  await h.reviewed();
+  // A push, then a second /done that joins the running review of h1.
+  h.live = { ...LIVE, info: { ...LIVE.info, headSha: 'h2' } };
+  await h.webhook(pr('synchronize', { headSha: 'h2', updatedAt: at(5) }), 'd3');
+  await h.webhook(general('33', '/done'), 'd4');
+  await h.until(() => h.writes.some((w) => w[0] === 'react' && w[1] === '33'));
+  h.releaseReview();
+  await h.until(() => titleOn(h, 'h2') === '1 finding, none blocking');
+  const reviews = await h.db.query<{ reason: string; outcome: string }>("select reason, outcome from visto_ai.jobs where kind = 'review' order by id");
+  assert.deepEqual(reviews, [{ reason: 'done', outcome: 'failed' }, { reason: 'done_retry', outcome: 'published' }]);
+  assert.deepEqual(h.inputs.map((i) => i.pullRequest.headSha), ['h1', 'h2']);
+  // The failed review started over and said nothing: the retry's review is the answer.
+  assert.deepEqual(h.writes.filter((w) => w[0] === 'comment'), []);
+});
+test('a pull request whose last sync found it closed, reopened while the service was in dry run, is asked for at the next start', async () => {
+  const options: { gate: boolean; github: boolean; result: ReviewResult; dryRun?: boolean } = { gate: true, github: true, result: majorResult() };
+  const h = await harness(options);
+  const first = await h.start();
+  await first.settled;
+  await greenRound(h);
+  // GitHub has it closed and the close's own event is late: a reply's sync records closed.
+  h.live = { ...LIVE, state: 'closed' };
+  h.now = at(30);
+  await h.webhook(replyOf(h, '8102', 30), 'r30');
+  h.now = at(33);
+  await h.runTimer(TICK_MS);
+  await h.until(async () => (await h.db.query<{ state: string }>('select state from visto_ai.gate_evaluations order by id desc limit 1'))[0]?.state === 'closed');
+  await first.stop();
+  // In dry run: closed, reopened, and the thread unresolved.
+  options.dryRun = true;
+  const dry = await h.start();
+  await dry.settled;
+  await h.webhook(pr('closed', { state: 'closed', closedAt: at(40), updatedAt: at(40) }), 'p40');
+  h.live = LIVE;
+  await h.webhook(pr('reopened', { updatedAt: at(41) }), 'p41');
+  h.threads![0]!.resolved = false;
+  await dry.stop();
+  assert.equal(titleOn(h, 'h1'), '1 finding, none blocking');
+  options.dryRun = false;
+  await (await h.start()).settled;
+  await h.until(() => titleOn(h, 'h1') === '1 blocking finding is open');
+  assert.deepEqual(h.logged.filter((e) => e.event === 'gate_sweep').at(-1), { event: 'gate_sweep', asked: 1 });
+});
+test('a pull request the service stores no row for, whose check the gate wrote in bypass, is asked for at the next start', async () => {
+  const options = { gate: true, github: true, repositoriesYaml: 'repositories:\n  defaults: { gate: { enabled: true, branches: [main], mode: bypass } }\n' };
+  const h = await harness(options);
+  const first = await h.start();
+  await first.settled;
+  h.threads!.push({ id: 't1', path: 'src/a.ts', side: 'RIGHT', line: 1, resolved: false, resolvedByApp: false, comments: [
+    { id: '8001', node: 'n8001', author: 'octo-lead', authorIsBot: false, byApp: false, reviewId: null, body: 'A question.', at: at(0) },
+  ] });
+  h.now = at(10);
+  await h.webhook(replyOf(h, '8101', 10), 'r10');
+  h.now = at(13);
+  await h.runTimer(TICK_MS);
+  await h.until(() => titleOn(h, 'h1') === 'Gate bypassed');
+  await first.stop();
+  assert.equal(await getPullRequest(h.db, REF), null);
+  options.repositoriesYaml = GATE_YAML;
+  await (await h.start()).settled;
+  await h.until(() => titleOn(h, 'h1') === 'Waiting for /done');
+  assert.deepEqual(h.logged.filter((e) => e.event === 'gate_sweep').at(-1), { event: 'gate_sweep', asked: 1 });
+});
+test('after the app is installed again, a reply and a resolve that arrive through the new installation turn a blocked check green', async () => {
+  const h = await harness({ gate: true, github: true, result: majorResult() });
+  const first = await h.start();
+  await first.settled;
+  await h.webhook(pr('opened'), 'g1');
+  await h.webhook(general('31', '/done'), 'g2');
+  await h.until(() => titleOn(h, 'h1') === '1 blocking finding is open');
+  await first.stop();
+  // Installed again: the stored row still names 99, which GitHub no longer knows; events come through 100.
+  h.gone.add('99');
+  h.now = at(10);
+  await (await h.start()).settled;
+  // The sweep's sync tried the stored installation and was put back; the reply and the resolve arrive within its wait.
+  await h.until(async () => (await h.db.query<{ starts: number }>("select starts from visto_ai.jobs where kind = 'gate' and status = 'pending'"))[0]?.starts === 1);
+  await h.webhook(replyOf(h, '8101', 10, '100'), 'r10');
+  await h.webhook(resolvedOf(h, '100'), 't10');
+  h.now = at(13);
+  // The tick of the service started second (the first one's timer was cancelled at its stop).
+  await h.timers.filter((t) => t.ms === TICK_MS && !t.cancelled).at(-1)!.work();
+  await h.until(() => titleOn(h, 'h1') === '1 finding, none blocking');
+  assert.equal(h.held.get('h1')!.conclusion, 'success');
 });

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { testDb } from './testing.ts';
-import { listActivity, recordActivity } from './human-activity.ts';
+import { commentBody, listActivity, recordActivity } from './human-activity.ts';
 import type { Activity } from './human-activity.ts';
 
 const ref = { service: 'github' as const, owner: 'acme', repo: 'shop', number: 7 };
@@ -78,5 +78,15 @@ test('the limits the reader enforces are values the database accepts', async () 
   assert.equal(await recordActivity(db, long), true);
   assert.equal(await recordActivity(db, early), true);
   assert.deepEqual(await listActivity(db, ref), [early, long]);
+  await db.close();
+});
+test('the text of a stored general comment is read by its id', async () => {
+  const db = await testDb();
+  await recordActivity(db, activity({ kind: 'general_comment', sourceId: 'c-5', state: null, body: '/ai-review-skip hotfix' }));
+  await recordActivity(db, activity({ ref: { ...ref, number: 8 }, kind: 'general_comment', sourceId: 'c-6', state: null, body: 'elsewhere' }));
+  await recordActivity(db, activity({ kind: 'inline_comment', sourceId: 'c-7', state: null, body: 'inline', path: 'src/a.ts', line: 3 }));
+  assert.equal(await commentBody(db, { ...ref, owner: 'Acme' }, 'c-5'), '/ai-review-skip hotfix');
+  assert.equal(await commentBody(db, ref, 'c-6'), null);
+  assert.equal(await commentBody(db, ref, 'c-7'), null);
   await db.close();
 });

@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
 import { generateKeyPairSync } from 'node:crypto';
-import { ConfigError, contractFile, parseConfig, repoConfigFor, repoSettingsFor, serviceConfig } from './load.ts';
+import { ConfigError, GATE_OFF, contractFile, gateUseOf, parseConfig, repoConfigFor, repoSettingsFor, serviceConfig } from './load.ts';
 
 const minimal = 'model:\n  apiKey: { env: MODEL_KEY }\n  model: vendor/model-a\n';
 
@@ -391,7 +391,7 @@ test('serviceConfig accepts a config in dry run and one out of it, and still nam
 });
 test('repoSettingsFor applies an override key by key, and repoConfigFor still returns the two keys the engine reads', () => {
   const c = parseConfig(`${SERVICE_YAML}repositories:\n  overrides:\n    Acme/Shop: { baseBranches: [main], ignoredAuthors: [] }\n`, ENV);
-  assert.deepEqual(repoSettingsFor(c, 'acme/shop'), { primaryBranches: ['main', 'master'], scoreThreshold: 70, ignoredAuthors: [], baseBranches: ['main'], newHead: null, inlineNotes: false });
+  assert.deepEqual(repoSettingsFor(c, 'acme/shop'), { primaryBranches: ['main', 'master'], scoreThreshold: 70, ignoredAuthors: [], baseBranches: ['main'], newHead: null, inlineNotes: false, gate: GATE_OFF });
   assert.deepEqual(repoSettingsFor(c, 'acme/other').ignoredAuthors, ['dependabot[bot]']);
   assert.deepEqual(repoConfigFor(c, 'acme/shop'), { primaryBranches: ['main', 'master'], scoreThreshold: 70 });
 });
@@ -447,4 +447,73 @@ test('the example with its score block switched on turns inline notes off, as wr
   const c = parseConfig(uncomment(example(), '    # score:'), exampleEnv);
   assert.equal(c.repositories.defaults.inlineNotes, false);
   assert.match(example(), /^ {4}# {3}inlineNotes: false$/m);
+});
+
+const GATE_ISSUE = 'must name at least one branch when the gate is enabled';
+const issuesOf = (yaml: string): string[] => {
+  try {
+    parseConfig(yaml, ENV);
+  } catch (e) {
+    if (e instanceof ConfigError) return e.issues;
+    throw e;
+  }
+  return [];
+};
+test('the gate is off unless a repository switches it on, and an override replaces only the keys it sets', () => {
+  assert.deepEqual(parseConfig(SERVICE_YAML, ENV).repositories.defaults.gate, GATE_OFF);
+  const c = parseConfig(
+    `${SERVICE_YAML}repositories:\n  defaults: { gate: { enabled: true, branches: [main], mode: bypass } }\n  overrides:\n    acme/shop: { gate: { branches: [main, release] } }\n`,
+    ENV,
+  );
+  const shop = repoSettingsFor(c, 'Acme/Shop').gate;
+  assert.deepEqual([shop.enabled, shop.branches, shop.mode], [true, ['main', 'release'], 'bypass']);
+  assert.deepEqual(repoSettingsFor(c, 'acme/other').gate.branches, ['main']);
+});
+test('an enabled gate with no branch is refused, for the defaults and for one repository', () => {
+  assert.deepEqual(issuesOf(`${SERVICE_YAML}repositories:\n  defaults: { gate: { enabled: true } }\n`), [`repositories.defaults.gate.branches: ${GATE_ISSUE}`]);
+  assert.ok(
+    issuesOf(`${SERVICE_YAML}repositories:\n  overrides:\n    acme/shop: { gate: { enabled: true } }\n`).includes(`repositories.overrides.acme/shop.gate.branches: ${GATE_ISSUE}`),
+  );
+  const ok = parseConfig(`${SERVICE_YAML}repositories:\n  defaults: { gate: { branches: [main] } }\n  overrides:\n    acme/shop: { gate: { enabled: true } }\n`, ENV);
+  assert.equal(repoSettingsFor(ok, 'acme/shop').gate.enabled, true);
+});
+test('a gate key of the wrong kind, an unknown gate key and a malformed team are refused by name', () => {
+  const bad = [
+    'mode: audit', "checkName: ''", 'checkName: "a\\nb"', 'skipTeam: release-managers', "skipTeam: 'acme/release managers'",
+    `requiredChecks: [${Array.from({ length: 21 }, (_, i) => `c${i}`).join(', ')}]`, 'colour: red',
+  ];
+  for (const key of bad) {
+    const issues = issuesOf(`${SERVICE_YAML}repositories:\n  defaults: { gate: { ${key} } }\n`);
+    assert.ok(issues.length > 0, key);
+    for (const issue of issues) {
+      assert.ok(issue.startsWith('repositories.defaults.gate'), issue);
+      for (const value of ['audit', 'release-managers', 'release managers']) assert.ok(!issue.includes(value), issue);
+      if (key.startsWith('colour')) assert.ok(!/\bred\b/.test(issue), issue);
+    }
+  }
+});
+test('what of the gate is in use is read from every repository', () => {
+  const none = gateUseOf(parseConfig(SERVICE_YAML, ENV));
+  assert.deepEqual(none, { check: false, statuses: false, members: false, bypass: false });
+  const one = parseConfig(`${SERVICE_YAML}repositories:\n  overrides:\n    acme/shop: { gate: { enabled: true, branches: [main], requiredChecks: [build] } }\n`, ENV);
+  assert.deepEqual(gateUseOf(one), { check: true, statuses: true, members: false, bypass: false });
+  const all = parseConfig(`${SERVICE_YAML}repositories:\n  defaults: { gate: { enabled: true, branches: [main], mode: bypass, skipTeam: acme/release-managers } }\n`, ENV);
+  assert.deepEqual(gateUseOf(all), { check: true, statuses: false, members: true, bypass: true });
+  const off = parseConfig(`${SERVICE_YAML}repositories:\n  defaults: { gate: { skipTeam: acme/release-managers } }\n`, ENV);
+  assert.equal(gateUseOf(off).members, false);
+  const idle = parseConfig(`${SERVICE_YAML}repositories:\n  defaults: { gate: { enabled: false, branches: [main], mode: bypass, skipTeam: acme/release-managers, requiredChecks: [build] } }\n`, ENV);
+  assert.deepEqual(gateUseOf(idle), { check: false, statuses: false, members: false, bypass: false });
+});
+test('bad gate defaults are reported once, even when an override sets only the mode', () => {
+  assert.throws(
+    () => parseConfig(`${SERVICE_YAML}repositories:\n  defaults: { gate: { enabled: true } }\n  overrides:\n    acme/shop: { gate: { mode: shadow } }\n`, ENV),
+    (e: ConfigError) => e.issues.length === 1 && e.issues[0]!.includes('defaults'),
+  );
+});
+test('the example with its gate block switched on parses to a gate on main', () => {
+  const c = parseConfig(uncomment(example(), '    # gate:'), exampleEnv);
+  assert.deepEqual(c.repositories.defaults.gate, {
+    enabled: true, branches: ['main'], checkName: 'AI Review', mode: 'enforce', clearByReply: true, skipTeam: 'acme/release-managers', requiredChecks: ['build'],
+  });
+  assert.deepEqual(parseConfig(uncomment(example(), '    # score:'), exampleEnv).repositories.defaults.gate, GATE_OFF);
 });

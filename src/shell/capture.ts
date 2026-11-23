@@ -24,6 +24,8 @@ export function captureOf(event: ForgeEvent, delivery: string, receivedAt: Date)
       return { outcome: 'ignored', reason: event.reason };
     case 'pull_request':
       return { outcome: 'handled', pullRequest: event.facts, activity: null };
+    case 'check_rerun':
+      return { outcome: 'handled', pullRequest: null, activity: null };
     case 'review': {
       const r = event.review;
       if (r.authorIsBot) return BOT;

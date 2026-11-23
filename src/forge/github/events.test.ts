@@ -81,13 +81,14 @@ test('review', () => {
 
 test('inline comment', () => {
   assert.deepEqual(eventOf('pull_request_review_comment', inlinePayload()), {
-    kind: 'inline_comment', ref,
+    kind: 'inline_comment', ref, installation: null,
     comment: {
       id: '21', author: 'octo-dev', authorIsBot: false, association: 'none', at: TI, commit: 'abc123', path: 'a.ts',
       side: 'RIGHT', line: 4, startLine: null, fileLevel: false, replyTo: null, body: 'nit',
     },
   });
   assert.deepEqual(eventOf('pull_request_review_comment', inlinePayload({}, 'edited')), { kind: 'ignored', reason: 'unknown_action' });
+  assert.equal((eventOf('pull_request_review_comment', { ...inlinePayload(), installation: { id: 99 } }) as { installation: unknown }).installation, '99');
 });
 
 test('general comment', () => {
@@ -105,11 +106,12 @@ test('general comment', () => {
 
 test('thread', () => {
   const want = (action: string, rootComment: string | null) => ({
-    kind: 'thread', ref, action, thread: 'PRRT_x', rootComment, actor: 'octo-dev', actorIsBot: false,
+    kind: 'thread', ref, installation: null, action, thread: 'PRRT_x', rootComment, actor: 'octo-dev', actorIsBot: false,
   });
   assert.deepEqual(eventOf('pull_request_review_thread', threadPayload()), want('resolved', '21'));
   assert.deepEqual(eventOf('pull_request_review_thread', threadPayload('unresolved', [])), want('unresolved', null));
   assert.deepEqual(eventOf('pull_request_review_thread', threadPayload('edited')), { kind: 'ignored', reason: 'unknown_action' });
+  assert.equal((eventOf('pull_request_review_thread', { ...threadPayload(), installation: { id: 99 } }) as { installation: unknown }).installation, '99');
 });
 
 test('an unknown event', () => assert.deepEqual(eventOf('deployment', {}), { kind: 'ignored', reason: 'unknown_event' }));
@@ -167,4 +169,49 @@ test('the texts the database indexes are at most MAX_ID_CHARS long', () => {
     assert.deepEqual(eventOf(...make(long)), malformed, `${name}: ${String(MAX_ID_CHARS + 1)}`);
     assert.notDeepEqual(eventOf(...make(ok)), malformed, `${name}: ${String(MAX_ID_CHARS)}`);
   }
+});
+
+const checkRun = (over: Record<string, unknown> = {}, top: Record<string, unknown> = {}) => ({
+  action: 'rerequested', repository: repo(), installation: { id: 99 }, sender: user('octo-lead', 'User'),
+  check_run: { name: 'AI Review', head_sha: 'abc123', external_id: '7', app: { id: 12345 }, pull_requests: [{ number: 9 }], ...over },
+  ...top,
+});
+const rerun = (number: number) => ({
+  kind: 'check_rerun', ref: { ...ref, number }, installation: '99', app: '12345', check: 'AI Review', headSha: 'abc123', actor: 'octo-lead',
+});
+test('a re-run of a check names its pull request by the number the check carries, else by the first one GitHub lists', () => {
+  assert.deepEqual(eventOf('check_run', checkRun()), rerun(7));
+  assert.deepEqual(eventOf('check_run', checkRun({ external_id: '' })), rerun(9));
+  assert.deepEqual(eventOf('check_run', checkRun({ external_id: '0' })), rerun(9));
+  assert.deepEqual(eventOf('check_run', checkRun({ external_id: '12345678901' })), rerun(9));
+  assert.deepEqual(eventOf('check_run', checkRun({ external_id: undefined })), rerun(9));
+  assert.deepEqual(eventOf('check_run', checkRun({ external_id: '7' }, { installation: undefined })), { ...rerun(7), installation: null });
+  // A leading zero still reads as the number; a trailing newline is not a number the check carries.
+  assert.deepEqual(eventOf('check_run', checkRun({ external_id: '07' })), rerun(7));
+  assert.deepEqual(eventOf('check_run', checkRun({ external_id: '7\n' })), rerun(9));
+  assert.deepEqual(eventOf('check_run', checkRun({ external_id: '7', pull_requests: { number: 9 } })), rerun(7));
+  assert.deepEqual(eventOf('check_run', checkRun({ external_id: 'build-41', pull_requests: { number: 9 } })), { kind: 'ignored', reason: 'not_a_pull_request' });
+  assert.deepEqual(eventOf('check_run', checkRun({ external_id: 'build-41', pull_requests: 'x' })), { kind: 'ignored', reason: 'not_a_pull_request' });
+});
+test('a re-run that names no pull request is not one, and another action of a check run is unknown', () => {
+  assert.deepEqual(eventOf('check_run', checkRun({ external_id: 'build-41', pull_requests: undefined })), { kind: 'ignored', reason: 'not_a_pull_request' });
+  assert.deepEqual(eventOf('check_run', checkRun({ external_id: 'build-41', pull_requests: [] })), { kind: 'ignored', reason: 'not_a_pull_request' });
+  for (const action of ['created', 'completed', 'requested_action']) {
+    assert.deepEqual(eventOf('check_run', checkRun({}, { action })), { kind: 'ignored', reason: 'unknown_action' }, action);
+  }
+});
+test('a check run with no name, no app or no head is malformed', () => {
+  const malformed = { kind: 'ignored', reason: 'malformed' };
+  for (const over of [{ name: undefined }, { name: '' }, { app: undefined }, { app: {} }, { head_sha: undefined }, { head_sha: '' }, { app: { id: 'x'.repeat(MAX_ID_CHARS + 1) } }]) {
+    assert.deepEqual(eventOf('check_run', checkRun(over)), malformed, JSON.stringify(over));
+  }
+  assert.deepEqual(eventOf('check_run', checkRun({}, { sender: undefined })), malformed);
+  assert.deepEqual(eventOf('check_run', checkRun({}, { repository: undefined })), malformed);
+  for (const field of ['name', 'head_sha']) {
+    assert.deepEqual(eventOf('check_run', checkRun({ [field]: 'x'.repeat(MAX_ID_CHARS + 1) })), malformed, field);
+    assert.notDeepEqual(eventOf('check_run', checkRun({ [field]: 'x'.repeat(MAX_ID_CHARS) })), malformed, field);
+  }
+});
+test('a re-run of a check suite is not taken in', () => {
+  assert.deepEqual(eventOf('check_suite', { action: 'rerequested', repository: repo(), check_suite: { head_sha: 'abc123', pull_requests: [{ number: 7 }] } }), { kind: 'ignored', reason: 'unknown_event' });
 });

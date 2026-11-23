@@ -47,8 +47,12 @@ export function missedComments(args: { runs: StoredRun[]; stored: Stored[]; thre
   return missed;
 }
 
-/** What the engine is told about the pull request's earlier review and its threads. Only the three finding severities count: a note is no earlier thread, so it is not shown, owes no verdict, gets no reply and is no source of a duplicate. */
-export function earlierOf(args: { last: StoredRun; runs: StoredRun[]; stored: Stored[]; threads: ReviewThread[] }): EarlierState {
+/**
+ * What the engine is told about the pull request's earlier review and its threads. Only the three finding severities count: a note is no earlier thread, so it is not shown, owes no verdict, gets no reply and is no source of a duplicate.
+ * `replySettles` (absent reads as true): whether a person's reply settles a resolved thread; false under the gate with clearing by reply off.
+ */
+export function earlierOf(args: { last: StoredRun; runs: StoredRun[]; stored: Stored[]; threads: ReviewThread[]; replySettles?: boolean }): EarlierState {
+  const replySettles = args.replySettles ?? true;
   const byComment = new Map(args.stored.filter((s) => SEVERITIES.includes(s.severity)).map((s) => [s.commentId, s]));
   const newestFirst = args.runs.filter((r) => r.published).sort((a, b) => b.id - a.id);
   const threads: EarlierThread[] = [];
@@ -74,7 +78,7 @@ export function earlierOf(args: { last: StoredRun; runs: StoredRun[]; stored: St
       openedAt: { head: opened === undefined ? '' : opened.headSha, diffHash: opened === undefined ? null : diffHashOf(opened, row.path) },
       resolved: t.resolved,
       // The app resolved it only when the app's own reply with a marker stands in the thread too: a login alone proves nothing.
-      settled: t.resolved && ((t.resolvedByApp && t.comments.some((c) => c.byApp && hasMarker(c.body))) || replies.some((r) => r.kind === 'person')),
+      settled: t.resolved && ((t.resolvedByApp && t.comments.some((c) => c.byApp && hasMarker(c.body))) || (replySettles && replies.some((r) => r.kind === 'person'))),
       lastVerdict, replies,
     });
   }
