@@ -1,5 +1,6 @@
 import { isBuiltin } from 'node:module';
 import { z } from 'zod';
+import { SET_BY_SERVICE } from '../mcp/headers.ts';
 
 /** A secret is never written in the file; it names the environment variable that holds it. */
 const secretRef = z.object({ env: z.string().min(1) }).strict();
@@ -96,10 +97,6 @@ const extensions = z
       seen.add(entry.name);
     });
   });
-
-const SET_BY_SERVICE = new Set([
-  'accept', 'content-type', 'content-length', 'host', 'connection', 'transfer-encoding', 'mcp-session-id', 'mcp-protocol-version',
-]);
 
 /** A server's address: http or https, with no user name and no password (a secret goes in a header). */
 function isServerUrl(value: string): boolean {

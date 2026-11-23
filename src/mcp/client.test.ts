@@ -486,3 +486,19 @@ test('nothing of a failure is kept but its code, and nothing of a session outliv
   assert.equal(getEventListeners(s, 'abort').length, 0);
   assert.equal(timeouts(), before);
 });
+
+test('none of the eight header names the config may not give is sent, in any letter case', async () => {
+  const refused = ['ACCEPT', 'Content-type', 'content-LENGTH', 'HoSt', 'Connection', 'Transfer-Encoding', 'mcp-Session-ID', 'Mcp-Protocol-VERSION'];
+  const headers: Record<string, string> = { Authorization: 'Bearer t0k' };
+  refused.forEach((name, i) => { headers[name] = `given-${i}`; });
+  const fake = fakeServer();
+  const session = await server(fake, { ...DOCS, headers }).open(signal());
+  await session.call('search', {}, signal());
+  await session.close(signal());
+  assert.equal(fake.calls.length, 5);
+  for (const c of fake.calls) {
+    assert.equal(c.headers.get('authorization'), 'Bearer t0k');
+    for (const name of refused) assert.ok(!(c.headers.get(name) ?? '').includes('given-'), `${name} was sent as given`);
+    for (const name of ['content-length', 'host', 'connection', 'transfer-encoding']) assert.equal(c.headers.has(name), false);
+  }
+});

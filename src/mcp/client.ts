@@ -1,5 +1,6 @@
 import type { McpServerConfig } from '../config/load.ts';
 import type { McpAnswer, McpServer, McpSession, McpTool } from '../engine/types.ts';
+import { SET_BY_SERVICE } from './headers.ts';
 import { rpcRequest, rpcSend, type RpcTarget } from './rpc.ts';
 
 export const PROTOCOL_VERSION = '2025-11-25';
@@ -11,8 +12,6 @@ const CLOSE_MS = 1_000; // the end of a failed open, under a limit of the client
 const SESSION_ID = /^[\x21-\x7E]{1,1024}$/;
 const VERSION_HEADER = 'MCP-Protocol-Version';
 const SESSION_HEADER = 'Mcp-Session-Id';
-/** The names the client writes itself, here or in rpc.ts: a config header of one of these names is not sent. */
-const OWN_HEADERS = new Set(['accept', 'content-type', 'mcp-protocol-version', 'mcp-session-id']);
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -20,9 +19,9 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 /** A failed open, with its short code as the message. */
 class OpenFailure extends Error {}
 
-/** The config's headers, without any the client writes itself. */
+/** The config's headers, without any the client or the platform writes itself, in any letter case. */
 function configHeaders(headers: Record<string, string>): Record<string, string> {
-  return Object.fromEntries(Object.entries(headers).filter(([name]) => !OWN_HEADERS.has(name.toLowerCase())));
+  return Object.fromEntries(Object.entries(headers).filter(([name]) => !SET_BY_SERVICE.has(name.toLowerCase())));
 }
 
 /** Waits for `work` until the signal aborts, whichever comes first. Never rejects; leaves no listener once settled. */

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { ChatMessage, ModelClient, ModelRequest, ModelResponse, ToolCall, ToolDefinition, Usage } from '../types.ts';
+import { estimateTokens } from '../context/batches.ts';
 import { FINAL_LINE, OPEN_TURNS_PER_CALL, callBatch } from './call.ts';
 import type { ToolLoop } from './call.ts';
 import { ProviderError } from './errors.ts';
@@ -756,4 +757,77 @@ test('usage, models and providers add up across the turns', async () => {
   assert.deepEqual(r.usage, { calls: 3, inputTokens: 300, outputTokens: 30, cachedTokens: 15, cost: 1.5 });
   assert.deepEqual(r.models, ['vendor/a', 'vendor/b', 'vendor/c']);
   assert.deepEqual(r.providers, ['Up One', 'Up Two']);
+});
+
+test('a first call to submit_review with no id is the answer, and the calls beside it are dropped', async () => {
+  const loop = stubLoop();
+  const turn: ModelResponse = { ...calls(search('c1'), callOf('c2', 'docs__get_page', '{"id":"p1"}')), toolName: SUBMIT_REVIEW, toolArguments: JSON.stringify(valid) };
+  const model = stubModel(turn);
+  const r = await callBatch({ ...args, tools: loop }, model);
+  assert.ok(r.ok);
+  assert.equal(r.value.overview, 'Looks fine.');
+  assert.equal(model.requests.length, 1);
+  assert.deepEqual(loop.runs, []);
+  assert.deepEqual(r.audit, [{ stage: 'model', action: 'tool_calls_dropped', subject: 'batch', reason: '2' }]);
+});
+
+test('under auto a failing answer read from the first call is not replaced by a later valid submit_review', async () => {
+  const loop = stubLoop();
+  const turn: ModelResponse = { ...calls(search('c1'), submit('c2', valid)), toolName: SUBMIT_REVIEW, toolArguments: JSON.stringify(ungrounded) };
+  const model = stubModel(turn, toolCall(valid));
+  const r = await callBatch({ ...args, toolChoice: 'auto', tools: loop }, model);
+  assert.ok(r.ok);
+  assert.equal(model.requests.length, 2);
+  assert.deepEqual(loop.runs, []);
+  assert.deepEqual(model.requests[1]!.messages.slice(2), [
+    { role: 'assistant', content: JSON.stringify(ungrounded) },
+    { role: 'user', content: `Your answer was rejected: ${UNGROUNDED}. Call submit_review again.` },
+  ]);
+  assert.deepEqual(r.audit.map((e) => [e.action, e.reason]), [['tool_calls_dropped', '2'], ['retry', UNGROUNDED]]);
+});
+
+test('under forced a closing turn that calls another tool beside submit_review is answered by submit_review, and nothing of it is run', async () => {
+  const loop = stubLoop([{ content: 'The tool call failed (timeout).', stop: 'tool_error' }]);
+  const model = stubModel(calls(search('c1')), calls(search('c2', 'again'), submit('c3', valid)));
+  const r = await callBatch({ ...args, tools: loop }, model);
+  assert.ok(r.ok);
+  assert.equal(r.value.overview, 'Looks fine.');
+  assert.equal(model.requests.length, 2);
+  assert.deepEqual(model.requests.map((q) => q.forcedTool), [null, 'submit_review']);
+  assert.deepEqual(loop.runs, [['c1', true]]);
+  assert.deepEqual(r.audit.map((e) => e.action), ['tool_call', 'tools_closed']);
+});
+
+test('a message that lands exactly on the room fills it', async () => {
+  const turn = (...entries: ToolCall[]) => calls(...entries);
+  const one = turn(search('c1'));
+  const two = turn(search('c1'), search('c2'));
+  const tokensOf = (r: ModelResponse) => estimateTokens(JSON.stringify(r.assistant));
+  const exact = 'x'.repeat(298);   // JSON.stringify adds two quotes: 300 characters, 100 tokens
+  assert.equal(estimateTokens(JSON.stringify(exact)), 100);
+  // the assistant message alone reaches the room: its one call is not run
+  const a = stubLoop([], tokensOf(one));
+  const ma = stubModel(one, toolCall(valid));
+  const ra = await callBatch({ ...args, tools: a }, ma);
+  assert.deepEqual(a.runs, [['c1', false]]);
+  assert.deepEqual(ra.audit.at(-1), closed('room'));
+  // the first tool message reaches the room: the second call is not run
+  const b = stubLoop([{ content: exact }], tokensOf(two) + 100);
+  const mb = stubModel(two, toolCall(valid));
+  const rb = await callBatch({ ...args, tools: b }, mb);
+  assert.deepEqual(b.runs, [['c1', true], ['c2', false]]);
+  assert.deepEqual(rb.audit.at(-1), closed('room'));
+  // the last tool message of a turn reaches the room: the next turn must end the call
+  const c = stubLoop([{ content: exact }], tokensOf(one) + 100);
+  const mc = stubModel(one, toolCall(valid));
+  const rc = await callBatch({ ...args, tools: c }, mc);
+  assert.deepEqual(c.runs, [['c1', true]]);
+  assert.deepEqual(mc.requests.map((q) => q.forcedTool), [null, 'submit_review']);
+  assert.deepEqual(mc.requests[1]!.messages.at(-1), final);
+  assert.deepEqual(rc.audit.at(-1), closed('room'));
+  // one token under the room: the turn after is open
+  const d = stubLoop([{ content: exact }], tokensOf(one) + 101);
+  const md = stubModel(one, toolCall(valid));
+  await callBatch({ ...args, tools: d }, md);
+  assert.deepEqual(md.requests.map((q) => q.forcedTool), [null, null]);
 });
