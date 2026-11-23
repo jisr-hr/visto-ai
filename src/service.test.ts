@@ -132,6 +132,7 @@ async function harness(options: Options = {}) {
   const postedComments = new Map<string, PostedComment[]>();
   let reviewsPosted = 0;
   let commentsPosted = 0;
+  let newRuns = 0;
   const appInfo: AppIdentity = {
     read: () => Promise.reject(new Error('not_used')),
     canResolve: () => Promise.resolve(false),
@@ -248,7 +249,14 @@ async function harness(options: Options = {}) {
         },
         async writeCheck(_ref, installation, check) {
           checked.push(['writeCheck', installation, check]);
-          const id = check.id ?? '701';
+          // As GitHub does, with the adapter's guard in its place: a completed run is not reopened by an update.
+          const before = check.id === null ? undefined : [...held.values()].find((c) => c.id === check.id);
+          if (before !== undefined && before.status === 'completed' && check.status !== 'completed') {
+            held.set(check.commit, { ...before, title: check.title, summary: check.summary });
+            throw new Error('check_not_rewritten');
+          }
+          // A new run of the name becomes the one findCheck answers.
+          const id = check.id ?? String(701 + newRuns++);
           held.set(check.commit, { id, status: check.status, conclusion: check.conclusion, title: check.title, summary: check.summary });
           return { id };
         },

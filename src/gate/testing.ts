@@ -211,6 +211,14 @@ export async function harness(options: HarnessOptions = {}): Promise<Harness> {
         await wait();
         const failure = writeFailures.shift();
         if (failure !== undefined) throw failure;
+        // As GitHub does: an update of a completed run to a status that is not completed keeps its status and conclusion
+        // (and takes the texts); the adapter then rejects with check_not_rewritten, which this fake does in its place.
+        const before = check.id === null ? undefined : [...held.values()].find((c) => c.id === check.id);
+        if (before !== undefined && before.status === 'completed' && check.status !== 'completed') {
+          held.set(check.commit, { ...before, title: check.title, summary: check.summary });
+          throw new Error('check_not_rewritten');
+        }
+        // A new run of the name becomes the one findCheck answers.
         const id = check.id ?? String(nextId++);
         held.set(check.commit, { id, status: check.status, conclusion: check.conclusion, title: check.title, summary: check.summary });
         return { id };

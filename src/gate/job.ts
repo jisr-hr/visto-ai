@@ -276,7 +276,10 @@ async function work(job: Job, deps: GateJobDeps, entry: Entry, log: (e: Record<s
     // false only from here on: the check GitHub holds was read and compared.
     entry.wrote = false;
     if (wrote) {
-      await deps.checks.writeCheck(ref, installation, { id: current?.id ?? null, commit: head, name, ...text });
+      // GitHub does not reopen a completed run: one that must wait or review again is replaced by a new run of the
+      // name, which findCheck answers from then on. Every other change updates the run found.
+      const reopen = current !== null && current.status === 'completed' && text.status !== 'completed';
+      await deps.checks.writeCheck(ref, installation, { id: current === null || reopen ? null : current.id, commit: head, name, ...text });
       entry.wrote = true;
     }
     try {

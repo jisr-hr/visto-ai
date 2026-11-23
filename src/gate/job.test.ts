@@ -538,3 +538,45 @@ test('a pull request the database holds as open that is closed or gone is asked 
     assert.equal(finds(h).length + writes(h).length, 0, state);
   }
 });
+
+test('a completed check that must say Reviewing or wait again is replaced by a new run, since GitHub does not reopen one', async () => {
+  const passed: OwnCheck = { id: '71', ...checkText({ state: 'bypassed' }, META) };
+  const blocked: OwnCheck = { id: '72', status: 'completed', conclusion: 'action_required', title: '1 blocking finding is open', summary: 'x' };
+  for (const held of [passed, blocked]) {
+    const h = await harness({ check: held });
+    await reviewJob(h.db, 'manual');
+    await h.run();
+    const reviewing = checkText({ state: 'reviewing' }, META);
+    assert.deepEqual(writes(h), [{ id: null, commit: 'h1', name: 'AI Review', ...reviewing }], held.id);
+    assert.deepEqual(await statusOf(h), ['done', 'synced'], held.id);
+    // The new run is the one GitHub answers from now on: the next look finds it and writes nothing.
+    await again(h, 5);
+    assert.equal(writes(h).length, 1, held.id);
+    assert.equal(h.held.get('h1')!.id, '701', held.id);
+  }
+
+  // Leaving bypass on a head with no review: the bypassed run is replaced by a waiting one.
+  const left = await harness({ check: passed });
+  await recordEvaluation(left.db, { ref: REF, headSha: 'h1', at: at(0), mode: 'bypass', state: 'bypassed', code: null, run: null, counts: NO_COUNTS });
+  await left.run();
+  assert.deepEqual(writes(left).map((w) => [w.id, w.status, w.conclusion, w.title]), [[null, 'queued', null, 'Waiting for /done']]);
+});
+
+test('a completed check that must say another conclusion, and a check not yet completed, are updated in place', async () => {
+  const passed: OwnCheck = { id: '71', ...checkText({ state: 'bypassed' }, META) };
+  const { h } = await blockedHarness({ check: passed });
+  await h.run();
+  assert.deepEqual(writes(h).map((w) => [w.id, w.status, w.conclusion]), [['71', 'completed', 'action_required']]);
+
+  for (const held of [WAITING_CHECK, { id: '73', ...checkText({ state: 'reviewing' }, META) }]) {
+    const toReviewing = await harness({ check: { ...held, title: 'Something else' } });
+    await reviewJob(toReviewing.db, 'manual');
+    await toReviewing.run();
+    const toDone = await blockedHarness({ check: held });
+    await toDone.h.run();
+    const toWaiting = await harness({ check: { ...held, title: 'Something else' } });
+    await toWaiting.run();
+    assert.deepEqual([...writes(toReviewing), ...writes(toDone.h), ...writes(toWaiting)].map((w) => [w.id, w.status]),
+      [[held.id, 'in_progress'], [held.id, 'completed'], [held.id, 'queued']], held.id);
+  }
+});
