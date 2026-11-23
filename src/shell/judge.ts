@@ -37,7 +37,7 @@ export interface Judged {
   givenUp: number;     // replies retired
   failed: number;      // calls that failed at the provider, or gave no verdict
   calls: number; cost: number;   // requests answered, and what they cost
-  more: boolean;       // the queue held replies the run did not take
+  more: boolean;       // the run ended with replies it did not finish: the queue held more than it took, strangers were left over, or a reply it took got no verdict
   end: RunEnd; complete: boolean;   // complete: the end is done or lesson_cap
 }
 
@@ -105,6 +105,15 @@ async function runOnce(deps: Deps, log: Log): Promise<Judged> {
   };
   const now = (): string => deps.clock().toISOString();
   const out: Judged = { judged: 0, lessons: 0, givenUp: 0, failed: 0, calls: 0, cost: 0, more: false, end: 'done', complete: false };
+  const finish = (): Judged => {
+    log({ event: 'lessons', judged: out.judged, lessons: out.lessons, given_up: out.givenUp, failed: out.failed, calls: out.calls, cost: out.cost, more: out.more, end: out.end });
+    return out;
+  };
+  // A run stopped before it began reads nothing.
+  if (stopping()) {
+    out.end = 'stopped';
+    return finish();
+  }
 
   // Rule 1: the run's day, fixed for the whole run.
   const day = dayStart(deps.clock());
@@ -127,6 +136,7 @@ async function runOnce(deps: Deps, log: Log): Promise<Judged> {
   // Rule 2: the cap, counted from the stored verdicts since the run's day began.
   let made = await lessonsMadeSince(db, day.toISOString());
   let inRow = 0;
+  let worked = 0;   // taken replies whose verdict was written
   let end: RunEnd | null = made >= LESSONS_PER_RUN ? 'lesson_cap' : null;
 
   for (const r of end === null ? taken : []) {
@@ -139,12 +149,14 @@ async function runOnce(deps: Deps, log: Log): Promise<Judged> {
     if (stripControl(ownWords(r.body)).text.trim() === '') {
       await noteVerdict(db, { ref: r.ref, reply: r.reply, finding: r.finding, classification: 'noise', outcome: 'no_own_words', attempts: r.attempts, judgedAt: now() });
       out.judged += 1;
+      worked += 1;
       continue;
     }
     const finding = findingBody({ path: r.path, side: r.side, line: r.line, severity: r.severity, quote: r.quote }, r.findings);
     if (finding === null) {
       await noteVerdict(db, { ref: r.ref, reply: r.reply, finding: r.finding, classification: null, outcome: 'finding_unknown', attempts: JUDGE_ATTEMPTS, judgedAt: now() });
       out.givenUp += 1;
+      worked += 1;
       continue;
     }
 
@@ -182,6 +194,7 @@ async function runOnce(deps: Deps, log: Log): Promise<Judged> {
         await noteVerdict(tx, { ref: r.ref, reply: r.reply, finding: r.finding, classification: null, outcome: 'unjudged', attempts, judgedAt: at });
       });
       out.failed += 1;
+      worked += 1;
       if (attempts >= JUDGE_ATTEMPTS) out.givenUp += 1;
       continue;
     }
@@ -200,6 +213,7 @@ async function runOnce(deps: Deps, log: Log): Promise<Judged> {
       if (outcome === 'lesson' && result.outcome === 'lesson') await addRecords(tx, repoOf(r), [lessonRecord(r, result.text, result.quote)]);
     });
     out.judged += 1;
+    worked += 1;
     if (outcome === 'lesson') {
       out.lessons += 1;
       made += 1;
@@ -207,14 +221,14 @@ async function runOnce(deps: Deps, log: Log): Promise<Judged> {
     }
   }
 
-  // Rule 11: the end.
-  out.end = end ?? 'done';
+  // Rule 11: the end. A stop found here too sends nothing more.
+  if (worked < taken.length) out.more = true;
+  out.end = end !== 'stopped' && stopping() ? 'stopped' : end ?? 'done';
   out.complete = out.end === 'done' || out.end === 'lesson_cap';
   const counts = { examined: out.judged, added: out.lessons, retired: out.givenUp, failed: out.failed };
   if (out.complete) await noteLearning(db, WORK_LESSONS, now(), counts);
   else if (out.end !== 'stopped') await addToLearning(db, WORK_LESSONS, now(), counts);
-  log({ event: 'lessons', judged: out.judged, lessons: out.lessons, given_up: out.givenUp, failed: out.failed, calls: out.calls, cost: out.cost, more: out.more, end: out.end });
-  return out;
+  return finish();
 }
 
 export interface Nightly {
