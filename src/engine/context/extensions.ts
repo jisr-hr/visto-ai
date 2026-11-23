@@ -31,6 +31,10 @@ export const ACCEPTANCE_RULES = [
   'A note is one sentence on one line. A criterion that is not met is not a finding by itself: report a finding only when the rules for findings hold.',
 ].join('\n');
 
+/** The codes of a `skipped` the engine writes itself when it asks no provider for the pull request's origin. */
+export const FROM_FORK = 'from_fork';
+export const ORIGIN_UNKNOWN = 'origin_unknown';
+
 const SHORT_CODE = /^[a-z][a-z0-9_]{0,39}$/;
 const STATES: ReadonlySet<string> = new Set(['ok', 'empty', 'skipped', 'error']);
 const CRITERIA_READ = 200;   // entries of one provider's list that are read at all
@@ -38,13 +42,30 @@ const CUT_MARK = ' [cut]';
 
 const isCode = (v: unknown): v is string => typeof v === 'string' && SHORT_CODE.test(v);
 
-// Cuts at `limit` characters without splitting a surrogate pair.
-function cutAt(text: string, limit: number): string {
+/** Cuts at `limit` characters without splitting a surrogate pair. */
+export function cutAt(text: string, limit: number): string {
   if (text.length <= limit) return text;
   let end = limit;
   const last = text.charCodeAt(end - 1);
   if (last >= 0xd800 && last <= 0xdbff) end -= 1;
   return text.slice(0, end);
+}
+
+/** Stripped, made well formed, one line, trimmed, cut at `limit` and trimmed again. `cut` says whether the cut took anything. */
+export function cleanLine(text: string, limit: number): { text: string; removed: number; cut: boolean } {
+  const stripped = stripControl(text);
+  const line = stripped.text.toWellFormed().replace(/\s+/g, ' ').trim();
+  const cut = cutAt(line, limit);
+  return { text: cut.trim(), removed: stripped.removed, cut: cut.length < line.length };
+}
+
+/**
+ * A criterion as it is shown, stored and matched: the one cleaner of a criterion, fresh or stored. A huge one is cut to four
+ * times the limit first, so that it costs nothing to clean; that cut counts as a cut.
+ */
+export function cleanCriterion(raw: string): { text: string; removed: number; cut: boolean } {
+  const clean = cleanLine(cutAt(raw, 4 * CRITERION_CHARS), CRITERION_CHARS);
+  return raw.length > 4 * CRITERION_CHARS ? { ...clean, cut: true } : clean;
 }
 
 // What one provider gave, once read and cleaned on its own; nothing in it can throw when read.
@@ -95,14 +116,13 @@ function readAnswer(name: string, answer: unknown): Read {
   }
   let criteriaCut = 0;
   const lines = entries.map((raw) => {
-    const stripped = stripControl(raw);
-    removed += stripped.removed;
-    const line = stripped.text.toWellFormed().replace(/\s+/g, ' ').trim();
-    const cut = cutAt(line, CRITERION_CHARS);
-    if (cut.length < line.length) criteriaCut += 1;
-    return cut;
+    const clean = cleanCriterion(raw);
+    removed += clean.removed;
+    if (clean.cut) criteriaCut += 1;
+    return clean.text;
   });
-  const shownLabel = cutAt(inlineText(label ?? '').toWellFormed().replace(/[<>]/g, '').trim(), EXTENSION_LABEL_CHARS).trim();
+  // A huge label is cut first too.
+  const shownLabel = cutAt(inlineText(cutAt(label ?? '', 4 * EXTENSION_LABEL_CHARS)).toWellFormed().replace(/[<>]/g, '').trim(), EXTENSION_LABEL_CHARS).trim();
   const anything = body !== '' || lines.some((l) => l !== '');
   return {
     status: anything ? { status: 'ok', code: isCode(code) ? code : 'ok' } : { status: 'empty', code: 'empty' },
@@ -164,7 +184,7 @@ export async function gatherContext(providers: ContextProvider[], pr: PullReques
   Promise<{ context: ExtensionContext; statuses: Record<string, ExtensionStatus>; audit: AuditEntry[] }> {
   // A pull request from a fork, or one whose origin is not known, is given no context: its criteria would be posted.
   if (pr.fromFork !== false) {
-    const code = pr.fromFork === true ? 'from_fork' : 'origin_unknown';
+    const code = pr.fromFork === true ? FROM_FORK : ORIGIN_UNKNOWN;
     return {
       context: { blocks: [], criteria: [] },
       statuses: Object.fromEntries(providers.map((p): [string, ExtensionStatus] => [p.name, { status: 'skipped', code }])),

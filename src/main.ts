@@ -9,7 +9,7 @@ import type { InstanceLock } from './db/types.ts';
 import { createModelClient } from './engine/model/client.ts';
 import { review } from './engine/review.ts';
 import { createJevScorer } from './engine/scorer/jev.ts';
-import { contextProvidersOf, loadExtensions } from './extensions/load.ts';
+import { contextProvidersOf, errorNameOf, loadExtensions } from './extensions/load.ts';
 import type { LoadedExtension } from './extensions/types.ts';
 import { createGithubAccess } from './forge/github/access.ts';
 import { createAppAuth } from './forge/github/app-auth.ts';
@@ -58,6 +58,30 @@ export function boundedFetch(inner: typeof fetch, limitMs: number = GITHUB_CALL_
 }
 
 class UsageError extends Error {}
+
+/** One log line for a rejected promise nobody handled, with the error's name when it is the platform's own, else null. Never throws. */
+export function rejectionHandler(log: (entry: Record<string, unknown>) => void): (reason: unknown) => void {
+  return (reason) => {
+    try {
+      log({ event: 'unhandled_rejection', error: errorNameOf(reason) });
+    } catch {
+      // a logger that throws changes nothing
+    }
+  };
+}
+
+/**
+ * With a module loaded, a promise a part started and left behind cannot end the service: the handler is registered and
+ * returned. With none, nothing is registered and the platform's default stands; null is returned.
+ */
+export function guardRejections(
+  extensions: LoadedExtension[], log: (entry: Record<string, unknown>) => void, register: (handler: (reason: unknown) => void) => void,
+): ((reason: unknown) => void) | null {
+  if (extensions.length === 0) return null;
+  const handler = rejectionHandler(log);
+  register(handler);
+  return handler;
+}
 
 /**
  * Takes the instance lock, then loads the modules. Rejects with Error('another_instance_running') when another instance holds the lock, and `load` is then not called.
@@ -215,6 +239,7 @@ export async function main(argv: string[], env: Record<string, string | undefine
         }
         throw error;
       }
+      guardRejections(extensions, log, (handler) => { process.on('unhandledRejection', handler); });
       const providers = contextProvidersOf(extensions);
       const engine = { ...base, ...(providers.length === 0 ? {} : { contextProviders: providers }) };
       return await startService(config, {

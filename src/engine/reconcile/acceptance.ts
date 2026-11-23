@@ -1,7 +1,6 @@
 // Acceptance rows: what the model said of each criterion it was shown, checked and merged by rule (5.5, 5.7).
 // No model call merges anything, and the service never writes a not_met that no answer gave.
-import { CRITERIA_MAX, CRITERION_CHARS } from '../context/extensions.ts';
-import { stripControl } from '../context/untrusted.ts';
+import { cleanCriterion, cleanLine, CRITERIA_MAX } from '../context/extensions.ts';
 import type { SubmitReviewArgs } from '../model/submit-review.ts';
 import type { AcceptanceRow, AcceptanceStatus, AuditEntry } from '../types.ts';
 
@@ -11,17 +10,8 @@ const NOTE_CHARS = 300;
 const SUBJECT_CHARS = 40;
 const ITEM = /^a?([1-9][0-9]*)$/i;
 
-// Cuts at `limit` characters without splitting a surrogate pair.
-function cutAt(text: string, limit: number): string {
-  if (text.length <= limit) return text;
-  let end = limit;
-  const last = text.charCodeAt(end - 1);
-  if (last >= 0xd800 && last <= 0xdbff) end -= 1;
-  return text.slice(0, end);
-}
-
-// Stripped, made well formed, one line, trimmed and cut: what a fresh criterion and a fresh note are made.
-const oneLine = (text: string, limit: number): string => cutAt(stripControl(text).text.toWellFormed().replace(/\s+/g, ' ').trim(), limit).trim();
+// Stripped, made well formed, one line, trimmed and cut: what a fresh note is made.
+const oneLine = (text: string, limit: number): string => cleanLine(text, limit).text;
 
 interface Kept { index: number; status: AcceptanceStatus; note: string }
 
@@ -142,7 +132,7 @@ export function readAcceptance(value: unknown): AcceptanceRow[] {
       const { criterion, status, note, from } = one as Record<string, unknown>;
       if (typeof criterion !== 'string' || typeof status !== 'string' || !STATUSES.has(status) || typeof note !== 'string') continue;
       // The checks of a fresh row: the criterion and the note cleaned and cut alike, and a claim with no note is no row.
-      const text = oneLine(criterion, CRITERION_CHARS);
+      const text = cleanCriterion(criterion).text;
       const line = oneLine(note, NOTE_CHARS);
       if (text === '' || (line === '' && status !== 'not_verified')) continue;
       rows.push({ criterion: text, status: status as AcceptanceStatus, note: line, from: typeof from === 'string' && FROM.has(from) ? (from as AcceptanceRow['from']) : 'review' });

@@ -38,6 +38,11 @@ function safeField(error: unknown, key: 'name' | 'code'): string | null {
   }
 }
 
+/** The name of a thrown value when it is one of the platform's own error names, else null. Never throws. */
+export function errorNameOf(error: unknown): string | null {
+  return safeField(error, 'name');
+}
+
 function isPath(module: string): boolean {
   return module.startsWith('./') || module.startsWith('../') || module.startsWith('/');
 }

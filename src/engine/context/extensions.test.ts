@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
-  ACCEPTANCE_HEADING, ACCEPTANCE_RULES, CRITERIA_MAX, CRITERION_CHARS, EXTENSION_LABEL_CHARS, EXTENSION_LINE, EXTENSION_TEXT_CHARS, extensionPart, gatherContext,
+  ACCEPTANCE_HEADING, ACCEPTANCE_RULES, cleanCriterion, CRITERIA_MAX, CRITERION_CHARS, cutAt, EXTENSION_LABEL_CHARS, EXTENSION_LINE, EXTENSION_TEXT_CHARS, extensionPart, gatherContext,
 } from './extensions.ts';
 import type { ContextAnswer, ContextProvider, PullRequestInfo } from '../types.ts';
 
@@ -148,6 +148,20 @@ test('criteria are made one line each, cut, said once and capped at 30', async (
   const many = await gatherContext([answering('tickets', { status: 'ok', criteria: Array.from({ length: 31 }, (_, i) => `distinct ${i}`) })], pr);
   assert.equal(many.context.criteria.length, 30);
   assert.deepEqual(many.audit, [{ stage: 'context', action: 'criteria_cut', subject: 'extensions', reason: '1' }]);
+});
+
+test('a criterion is cleaned to its final text by one function, trimmed after its cut', () => {
+  assert.deepEqual(cleanCriterion('word '.repeat(80)), { text: 'word '.repeat(60).trim(), removed: 0, cut: true });
+  assert.deepEqual(cleanCriterion(' a\n  b\u200b '), { text: 'a b', removed: 1, cut: false });
+  assert.equal(cutAt(`${'p'.repeat(CRITERION_CHARS - 1)}\ud83d\ude00`, CRITERION_CHARS), 'p'.repeat(CRITERION_CHARS - 1));
+});
+
+test('a huge criterion or label is cut to four times its limit before it is cleaned', async () => {
+  // Invisible characters over the first four limits, then text: cleaned from the cut part alone, nothing is left of it.
+  const huge = `${'\u200b'.repeat(2_000_000)}tail`;
+  assert.deepEqual(cleanCriterion(huge), { text: '', removed: 4 * CRITERION_CHARS, cut: true });
+  const got = await gatherContext([answering('tickets', { status: 'ok', label: huge, text: 'x', criteria: [huge, 'kept'] })], pr);
+  assert.deepEqual([got.context.blocks[0]!.label, got.context.criteria], ['tickets', ['kept']]);
 });
 
 test('the part wraps each text under its module and label, and nothing in a label or a text ends its block', async () => {

@@ -22,6 +22,7 @@ import type { ModelClient, ModelResponse, ReviewDeps, ReviewInput, ReviewResult,
 import { runReviewJob } from './review-job.ts';
 import type { ReviewJobDeps } from './review-job.ts';
 import type { Notifier } from './notify.ts';
+import { createExtensionHealth } from './extension-health.ts';
 import type { ReviewNotice } from '../extensions/types.ts';
 
 const REF = { service: 'github', owner: 'acme', repo: 'shop', number: 7 } as const;
@@ -2177,6 +2178,26 @@ test('the health is told how each provider did, in dry run too, and the review l
   const resumed = await live({ pullRequest: 9 });
   await runReviewJob(resumed.job, resumed.deps);
   assert.deepEqual([resumed.inputs.length, resumed.noted, reviewLine(resumed).extensions, reviewLine(resumed).resumed], [0, [], EXTENSIONS, true]);
+});
+test('a review of a fork, where no provider was asked, tells the health nothing', async () => {
+  const alerts: unknown[][] = [];
+  const health = createExtensionHealth((code, details) => { alerts.push([code, details]); });
+  const failing = { tickets: { status: 'error' as const, code: 'provider_failed' } };
+  const steps: Array<[number, ReviewResult['dependencies']['extensions']]> = [
+    [31, failing],                                                   // the repository's own pull request: the provider throws
+    [32, { tickets: { status: 'skipped', code: 'from_fork' } }],     // a fork: the provider is not asked
+    [33, { tickets: { status: 'skipped', code: 'origin_unknown' } }], // an origin the read does not say: not asked either
+    [34, failing],                                                   // the next review of its own: still failing
+  ];
+  for (const [number, extensions] of steps) {
+    const h = await harness({ pullRequest: number, result: okResult({ dependencies: { model: 'ok', extensions: extensions! } }) });
+    await runReviewJob(h.job, { ...h.deps, extensionHealth: health });
+  }
+  assert.deepEqual(alerts, [['extension_error', { extension: 'tickets', part: 'context', reason: 'provider_failed' }]]);
+  // A module's own skipped, with a code of its own, is told as today.
+  const own = await harness({ pullRequest: 35, result: okResult({ dependencies: { model: 'ok', extensions: { tickets: { status: 'skipped', code: 'no_ticket' } } } }) });
+  await runReviewJob(own.job, own.deps);
+  assert.deepEqual(own.noted, [['noted', 'tickets', 'context', true, 'no_ticket']]);
 });
 test('a result with no statuses, or damaged ones, tells the health nothing and logs none', async () => {
   const cases: Array<[unknown, unknown, number]> = [[undefined, null, 7], ['x', null, 8], [{ tickets: 5, wiki: { status: 'ok' } }, {}, 9]];

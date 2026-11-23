@@ -2097,6 +2097,19 @@ test('an incremental review keeps what the last review found for a criterion it 
   assert.equal(damaged.model.requests[0]!.messages[1]!.content.includes('The last review left these as'), false);
 });
 
+test('a criterion cut at a space keeps its row at the next review, as one cut inside a word does', async () => {
+  for (const long of ['word '.repeat(80), 'wordss '.repeat(80)]) {
+    const first = deps({ files: [fileA], answers: [withRows(answerOnA, [{ item: 'A1', status: 'not_met', note: 'The handler has no test.' }])], contextProviders: [criteriaProvider([long])] });
+    const r1 = await review(own, first);
+    // Stored and read back, as the shell does.
+    const earlierAcceptance = JSON.parse(JSON.stringify(r1.acceptance)) as ReviewInput['earlierAcceptance'];
+    const second = deps({ files: [fileA], answers: [answerOnA], contextProviders: [criteriaProvider([long])] });
+    const r2 = await review({ ...own, mode: 'incremental', earlierAcceptance }, second);
+    assert.deepEqual(r2.acceptance!.map((row) => [row.status, row.from, row.note]), [['not_met', 'earlier', 'The handler has no test.']], long.slice(0, 6));
+    assert.ok(second.model.requests[0]!.messages[1]!.content.includes('The last review left these as: A1 not_met.'), long.slice(0, 6));
+  }
+});
+
 test('a failed review has no acceptance rows', async () => {
   const r = await review(own, deps({ files: [fileA], answers: [new ProviderError('auth', 'c', 401, null)], contextProviders: [criteriaProvider()] }));
   assert.equal(r.status, 'failed');

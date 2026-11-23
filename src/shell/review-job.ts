@@ -8,6 +8,7 @@ import type { StoredComment } from '../db/review-comments.ts';
 import { adoptableRun, claimNotice, hasOkRun, hasRun, listRuns, markPublished, markPublishTried, recordRun, unpublishedRun } from '../db/review-runs.ts';
 import type { RunRecord, StoredRun } from '../db/review-runs.ts';
 import type { Db } from '../db/types.ts';
+import { FROM_FORK, ORIGIN_UNKNOWN } from '../engine/context/extensions.ts';
 import { renderReview } from '../engine/render/body.ts';
 import type { InlineComment } from '../engine/render/body.ts';
 import { renderNotes } from '../engine/render/notes.ts';
@@ -615,8 +616,9 @@ export async function runReviewJob(job: Job, deps: ReviewJobDeps): Promise<void>
       } catch {
         // a guard that fails changes nothing
       }
-      // How each provider did; in dry run too.
+      // How each provider did; in dry run too. A provider the engine did not ask, for the pull request's origin, did nothing.
       for (const [name, status] of Object.entries(extensionsOf(result) ?? {})) {
+        if (status.status === 'skipped' && (status.code === FROM_FORK || status.code === ORIGIN_UNKNOWN)) continue;
         try {
           deps.extensionHealth?.noted(name, 'context', status.status !== 'error', status.code);
         } catch {

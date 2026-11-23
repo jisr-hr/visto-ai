@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import type { InstanceLock } from './db/types.ts';
 import type { LoadedExtension } from './extensions/types.ts';
-import { boundedFetch, createServer, describeFailure, GITHUB_CALL_MS, HEADERS_TIMEOUT_MS, lockThenLoad, main, REQUEST_TIMEOUT_MS, runUntilSignal } from './main.ts';
+import { boundedFetch, createServer, describeFailure, GITHUB_CALL_MS, guardRejections, HEADERS_TIMEOUT_MS, lockThenLoad, main, rejectionHandler, REQUEST_TIMEOUT_MS, runUntilSignal } from './main.ts';
 
 async function run(argv: string[], env: Record<string, string | undefined> = {}): Promise<{ code: number; lines: string[] }> {
   const lines: string[] = [];
@@ -152,4 +152,27 @@ test('the lock is taken before a module is loaded, and a second instance loads n
   calls.length = 0;
   const done = await lockThenLoad(async () => { calls.push('lock'); return lock; }, load);
   assert.deepEqual([done.lock === lock, done.extensions === modules, calls], [true, true, ['lock', 'load']]);
+});
+
+test('a rejection nobody handled is one log line with the error\'s name, or null, and nothing is thrown', () => {
+  const logged: Array<Record<string, unknown>> = [];
+  const handle = rejectionHandler((entry) => { logged.push(entry); });
+  const named = Object.defineProperty({}, 'name', { get() { throw new Error('secret in a getter'); } });
+  for (const reason of [new Error('token abc123 refused'), new TypeError('x is not a function'), 'a thrown string', named]) handle(reason);
+  assert.deepEqual(logged, [
+    { event: 'unhandled_rejection', error: 'Error' }, { event: 'unhandled_rejection', error: 'TypeError' },
+    { event: 'unhandled_rejection', error: null }, { event: 'unhandled_rejection', error: null },
+  ]);
+  assert.equal(JSON.stringify(logged).includes('abc123'), false);
+  // A logger that throws changes nothing.
+  rejectionHandler(() => { throw new Error('logger down'); })(new Error('x'));
+});
+
+test('the handler is registered only when a module was loaded', () => {
+  const registered: unknown[] = [];
+  assert.equal(guardRejections([], () => {}, (handler) => { registered.push(handler); }), null);
+  assert.equal(registered.length, 0);
+  const modules: LoadedExtension[] = [{ name: 'chat', parts: { notify: async () => {} } }];
+  const handler = guardRejections(modules, () => {}, (h) => { registered.push(h); });
+  assert.deepEqual([typeof handler, registered.length, registered[0] === handler], ['function', 1, true]);
 });
