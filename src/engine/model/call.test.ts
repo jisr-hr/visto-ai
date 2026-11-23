@@ -260,6 +260,7 @@ test('under auto a prose answer is retried once with the reason, and a second on
   const model = stubModel(prose('I reviewed it.'), prose('Still prose.'));
   const r = await callBatch({ ...args, toolChoice: 'auto' }, model);
   assert.equal(model.requests.length, 2);
+  assert.deepEqual(model.requests.map((q) => q.forcedTool), [null, null]);
   assert.ok(!r.ok);
   assert.deepEqual({ ok: r.ok, code: r.code, reason: r.reason }, { ok: false, code: 'invalid_output', reason: 'not_a_tool_call' });
   assert.deepEqual(model.requests[1]!.messages.slice(-2), [
@@ -270,4 +271,60 @@ test('under auto a prose answer is retried once with the reason, and a second on
     { stage: 'model', action: 'retry', subject: 'batch', reason: 'not_a_tool_call' },
     { stage: 'model', action: 'failed', subject: 'batch', reason: 'invalid_output' },
   ]);
+});
+
+const callOf = (id: string, name: string, args: string | null) => ({ id, name, arguments: args });
+const withCalls = (...calls: Array<{ id: string; name: string; arguments: string | null }>): ModelResponse => ({
+  toolName: calls[0]!.name, toolArguments: calls[0]!.arguments, text: null, model: 'm', provider: null, usage: usage(),
+  toolCalls: calls,
+  assistant: { role: 'assistant', content: null, tool_calls: calls.map((c) => ({ id: c.id, type: 'function', function: { name: c.name, arguments: c.arguments } })) },
+});
+
+test('an empty answer is sent back as (no answer) under auto, and as today under forced', async () => {
+  const empty = prose('');
+  const auto = stubModel(empty, toolCall(valid));
+  assert.ok((await callBatch({ ...args, toolChoice: 'auto' }, auto)).ok);
+  assert.deepEqual(auto.requests[1]!.messages.at(-2), { role: 'assistant', content: '(no answer)' });
+  const forced = stubModel(empty, toolCall(valid));
+  assert.ok((await callBatch(args, forced)).ok);
+  assert.deepEqual(forced.requests[1]!.messages.at(-2), { role: 'assistant', content: '' });
+});
+
+test('under auto the answer is the first call to submit_review, wherever it stands', async () => {
+  const one = stubModel(withCalls(callOf('c1', 'docs__search', '{"query":"cart"}'), callOf('c2', SUBMIT_REVIEW, JSON.stringify(valid))));
+  const r = await callBatch({ ...args, toolChoice: 'auto' }, one);
+  assert.ok(r.ok);
+  assert.equal(one.requests.length, 1);
+  assert.equal(r.value.overview, 'Looks fine.');
+  const other = { ...valid, overview: 'Second answer about src/a.ts.' };
+  const two = stubModel(withCalls(callOf('c1', SUBMIT_REVIEW, JSON.stringify(valid)), callOf('c2', SUBMIT_REVIEW, JSON.stringify(other))));
+  const first = await callBatch({ ...args, toolChoice: 'auto' }, two);
+  assert.ok(first.ok);
+  assert.equal(first.value.overview, 'Looks fine.');
+  // a first call to submit_review that is invalid is the answer: a valid later one is not read
+  const bad = stubModel(withCalls(callOf('c1', SUBMIT_REVIEW, JSON.stringify(ungrounded)), callOf('c2', SUBMIT_REVIEW, JSON.stringify(valid))), toolCall(valid));
+  const retried = await callBatch({ ...args, toolChoice: 'auto' }, bad);
+  assert.ok(retried.ok);
+  assert.equal(bad.requests.length, 2);
+  assert.deepEqual(bad.requests[1]!.messages.at(-2), { role: 'assistant', content: JSON.stringify(ungrounded) });
+});
+
+test('under auto an answer that calls only another function is not_a_tool_call, and the retry names that function', async () => {
+  const model = stubModel(withCalls(callOf('c1', 'docs__search', '{"query":"cart"}')), toolCall(valid));
+  const r = await callBatch({ ...args, toolChoice: 'auto' }, model);
+  assert.ok(r.ok);
+  assert.equal(model.requests.length, 2);
+  assert.deepEqual(r.audit, [{ stage: 'model', action: 'retry', subject: 'batch', reason: 'not_a_tool_call' }]);
+  assert.deepEqual(model.requests[1]!.messages.slice(-2), [
+    { role: 'assistant', content: 'called docs__search with {"query":"cart"}' },
+    { role: 'user', content: 'Your answer was rejected: not_a_tool_call. Call submit_review again.' },
+  ]);
+});
+
+test('under forced an answer with several calls is read from its first call, as today', async () => {
+  const model = stubModel(withCalls(callOf('c1', 'docs__search', '{"query":"cart"}'), callOf('c2', SUBMIT_REVIEW, JSON.stringify(valid))), toolCall(valid));
+  const r = await callBatch(args, model);
+  assert.ok(r.ok);
+  assert.equal(model.requests.length, 2);
+  assert.deepEqual(model.requests[1]!.messages.at(-2), { role: 'assistant', content: '{"query":"cart"}' });
 });

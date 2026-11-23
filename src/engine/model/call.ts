@@ -27,17 +27,34 @@ function addUsage(a: Usage, b: Usage): Usage {
 
 type Verdict = { ok: true; value: SubmitReviewArgs } | { ok: false; reason: string };
 
-function judge(response: ModelResponse, prPaths: string[], withThreads: boolean, withAcceptance: boolean): Verdict {
-  if (response.toolName !== SUBMIT_REVIEW || response.toolArguments === null) return { ok: false, reason: 'not_a_tool_call' };
-  const parsed = parseSubmitReview(response.toolArguments, withThreads, withAcceptance);
+// What is judged: under forced, the answer's first call, as read since the start; under auto, its first call to
+// submit_review wherever it stands, the other calls being ignored since no other tool is offered.
+function answerOf(response: ModelResponse, auto: boolean): { name: string | null; arguments: string | null } {
+  if (auto && response.toolCalls !== undefined && response.toolCalls.length > 0) {
+    const submit = response.toolCalls.find((c) => c.name === SUBMIT_REVIEW);
+    return submit ?? { name: response.toolCalls[0]!.name, arguments: response.toolCalls[0]!.arguments };
+  }
+  return { name: response.toolName, arguments: response.toolArguments };
+}
+
+function judge(response: ModelResponse, auto: boolean, prPaths: string[], withThreads: boolean, withAcceptance: boolean): Verdict {
+  const answer = answerOf(response, auto);
+  if (answer.name !== SUBMIT_REVIEW || answer.arguments === null) return { ok: false, reason: 'not_a_tool_call' };
+  const parsed = parseSubmitReview(answer.arguments, withThreads, withAcceptance);
   if (!parsed.ok) return { ok: false, reason: parsed.reason };
   if (!isGrounded(parsed.value, prPaths)) return { ok: false, reason: UNGROUNDED };
   return { ok: true, value: parsed.value };
 }
 
-function rejectedText(response: ModelResponse): string {
-  const text = response.toolArguments ?? response.text ?? '(no answer)';
-  return text.slice(0, MAX_ANSWER_CHARS);
+// Under auto an empty text becomes '(no answer)', since some endpoints refuse an assistant message with empty content,
+// and a call to a function other than submit_review is named with its arguments.
+function rejectedText(response: ModelResponse, auto: boolean): string {
+  if (!auto) return (response.toolArguments ?? response.text ?? '(no answer)').slice(0, MAX_ANSWER_CHARS);
+  const answer = answerOf(response, auto);
+  const text = answer.name !== null && answer.name !== SUBMIT_REVIEW
+    ? `called ${answer.name} with ${answer.arguments ?? '(no arguments)'}`
+    : answer.arguments ?? response.text;
+  return (text === null || text === '' ? '(no answer)' : text).slice(0, MAX_ANSWER_CHARS);
 }
 
 export async function callBatch(
@@ -50,7 +67,8 @@ export async function callBatch(
   const withThreads = args.withThreads === true;
   const withAcceptance = args.withAcceptance === true;
   const tool = submitToolFor(withThreads, withAcceptance);
-  const forcedTool = args.toolChoice === 'auto' ? null : SUBMIT_REVIEW;
+  const auto = args.toolChoice === 'auto';
+  const forcedTool = auto ? null : SUBMIT_REVIEW;
   let usage = zeroUsage();
   const audit: AuditEntry[] = [];
   const models: string[] = [];
@@ -65,14 +83,14 @@ export async function callBatch(
       usage = addUsage(usage, response.usage);
       models.push(response.model);
       if (response.provider !== null) providers.push(response.provider);
-      const verdict = judge(response, args.prPaths, withThreads, withAcceptance);
+      const verdict = judge(response, auto, args.prPaths, withThreads, withAcceptance);
       if (verdict.ok) return { ok: true, value: verdict.value, usage, models, providers, audit };
       reason = verdict.reason;
       if (attempt === 0) {
         audit.push({ stage: 'model', action: 'retry', subject: 'batch', reason });
         messages = [
           ...args.messages,
-          { role: 'assistant', content: rejectedText(response) },
+          { role: 'assistant', content: rejectedText(response, auto) },
           { role: 'user', content: `Your answer was rejected: ${reason.slice(0, MAX_REASON_CHARS)}. Call submit_review again.` },
         ];
       }
