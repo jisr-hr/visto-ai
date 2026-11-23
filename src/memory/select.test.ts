@@ -271,3 +271,68 @@ test('a source that rejects is passed on', async () => {
   }, 7);
   await assert.rejects(second.blocks([file('src/billing/tax.ts')], AS_OF, signal), (error) => error === failure);
 });
+
+test('an empty answer still says what it passed over: a changed file whose path is not printable, and the limit of what is read', async () => {
+  const spaced = await blocksOf([rec(8, 'src/a b.ts', day(1)), rec(9, 'src/a b.ts', day(2))], [file('src/a b.ts')]);
+  assert.deepEqual(spaced.pullRequest, []);
+  assert.deepEqual(spaced.repository, { directories: [], categories: [] });
+  assert.equal(spaced.cut.names, 2);
+  assert.equal(spaced.cut.records, false);
+  const base = Date.parse('2026-03-15T00:00:00.000Z');
+  const many = Array.from({ length: RECORDS_READ + 1 }, (_, i) =>
+    rec(100 + (i % 50), i === RECORDS_READ ? 'src/billing/tax.ts' : 'lib/c.ts', new Date(base - i * 60_000).toISOString()));
+  const limited = await blocksOf(many, [file('src/billing/tax.ts')]);
+  assert.deepEqual(limited.pullRequest, []);
+  assert.equal(limited.cut.records, true);
+  assert.equal(limited.cut.names, 0);
+});
+
+test('a time is read only with its zone: Z or an offset', () => {
+  const at = (createdAt: string) => linesFor([file('src/billing/tax.ts')], [rec(8, 'src/billing/tax.ts', createdAt)]).lines.map((l) => l.day);
+  for (const createdAt of ['2026-03-10T01:00:00', '2026-03-10T01:00:00.000', '2026-03-10', '2026/03/10', 'March 10, 2026', 'Tue, 10 Mar 2026 01:00:00 GMT', '2026-03-10T01:00:00+0200', '']) {
+    assert.deepEqual(at(createdAt), [], createdAt);
+  }
+  assert.deepEqual(at('2026-03-10T01:00:00Z'), ['2026-03-10']);
+  assert.deepEqual(at('2026-03-10T01:00:00.000Z'), ['2026-03-10']);
+  assert.deepEqual(at('2026-03-10T01:00:00+02:00'), ['2026-03-09']);
+  assert.deepEqual(at('2026-03-09T23:30:00-01:00'), ['2026-03-10']);
+  // a record with no time counts for no list either
+  assert.deepEqual(countsOf([rec(8, 'src/billing/a.ts', '2026-03-01T00:00:00'), rec(9, 'src/billing/b.ts', '2026-03-01T00:00:00')]).directories, []);
+});
+
+test('the blocks are the same bytes under any zone of the host', async () => {
+  const saved = process.env.TZ;
+  const records = [
+    rec(8, 'src/billing/tax.ts', '2026-03-10T01:00:00+02:00'), rec(9, 'src/billing/fees.ts', '2026-03-09T22:30:00-01:00'),
+    rec(10, 'src/billing/tax.ts', '2026-03-10T10:00:00Z'), rec(11, 'src/billing/tax.ts', '2026-03-10T01:00:00'),
+  ];
+  const answers: string[] = [];
+  try {
+    for (const zone of ['Pacific/Kiritimati', 'America/Adak', 'UTC']) {
+      process.env.TZ = zone;
+      const moments = ['2026-03-10T00:00:01.000Z', '2026-03-10T12:00:00.000Z', '2026-03-11T00:00:01.000Z'];
+      const got = await Promise.all(moments.map((iso) => blocksOf(records, [file('src/billing/tax.ts')], 7, new Date(iso))));
+      answers.push(JSON.stringify(got));
+      assert.equal(dayStart(new Date('2026-03-10T23:59:59.999Z')).toISOString(), '2026-03-10T00:00:00.000Z', zone);
+    }
+  } finally {
+    if (saved === undefined) delete process.env.TZ;
+    else process.env.TZ = saved;
+  }
+  assert.equal(answers[1], answers[0]);
+  assert.equal(answers[2], answers[0]);
+  const noon = JSON.parse(answers[0]!)[1] as MemoryBlocks;
+  assert.deepEqual(noon.pullRequest.map((l) => l.day), ['2026-03-10', '2026-03-09']);
+  assert.deepEqual(noon.repository.directories, [{ name: 'src/billing', pullRequests: 2 }]);
+});
+
+test('a category the engine does not know is not counted, and takes no place', async () => {
+  const records: LiveRecord[] = [];
+  for (let n = 10; n < 30; n += 1) records.push(rec(n, 'src/billing/tax.ts', day(1 + (n % 20)), { category: 'made_up' }));
+  const real = ['billing', 'calculation', 'dependency', 'feature', 'fix', 'formatting', 'migration', 'other'];
+  for (const category of real) for (const n of [10, 11]) records.push(rec(n, 'src/billing/tax.ts', day(2), { category }));
+  const got = await blocksOf(records, [file('src/billing/tax.ts')]);
+  assert.deepEqual(got.repository.categories.map((c) => c.name), real);
+  assert.equal(got.cut.categories, 0);
+  assert.deepEqual(countsOf([rec(8, 'a/b.ts', day(1), { category: 'IGNORE' }), rec(9, 'a/b.ts', day(1), { category: 'IGNORE' })]).categories, []);
+});

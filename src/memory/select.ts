@@ -12,6 +12,7 @@ import {
   MEMORY_NAME,
   MEMORY_NEAR_PER_FILE,
 } from '../engine/context/memory.ts';
+import { CATEGORIES } from '../engine/score/types.ts';
 
 export const RECORDS_READ = 5_000;            // live records of one repository that are read
 
@@ -27,9 +28,14 @@ export function dayStart(at: Date): Date {
   return new Date(Date.UTC(at.getUTCFullYear(), at.getUTCMonth(), at.getUTCDate()));
 }
 
+// An ISO time that names its zone: Z, or an offset of hours and minutes. A time with no zone would be read in the
+// host's own zone, and give another day on another machine.
+const ZONED_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,9})?)?(Z|[+-]\d{2}:\d{2})$/;
+const KNOWN_CATEGORIES: ReadonlySet<string> = new Set(CATEGORIES);
+
 // The time of a record, or null when its `createdAt` is no time (or one that cannot be written as YYYY-MM-DD).
 function timeOf(record: LiveRecord): number | null {
-  if (typeof record.createdAt !== 'string') return null;
+  if (typeof record.createdAt !== 'string' || !ZONED_TIME.test(record.createdAt)) return null;
   const ms = Date.parse(record.createdAt);
   if (!Number.isFinite(ms)) return null;
   return /^\d{4}-\d{2}-\d{2}T/.test(new Date(ms).toISOString()) ? ms : null;
@@ -138,7 +144,8 @@ export function countsOf(records: LiveRecord[]): { directories: MemoryCount[]; c
   const categories = new Map<string, Set<number>>();
   for (const { record } of dated(records)) {
     if (typeof record.directory === 'string') tally(directories, record.directory, record.number);
-    if (typeof record.category === 'string') tally(categories, record.category, record.number);
+    // Only a category of the engine's list: one it would drop later must not take a place first.
+    if (typeof record.category === 'string' && KNOWN_CATEGORIES.has(record.category)) tally(categories, record.category, record.number);
   }
   // A directory that is not printable is never listed; it is counted when its count would have listed it.
   const shown = new Map<string, Set<number>>();
@@ -168,8 +175,9 @@ export function createMemory(source: RecordSource, own: number): Memory {
     async blocks(files, asOf, signal): Promise<MemoryBlocks> {
       const now = kept(await source.live(asOf), own);
       const lines = linesFor(files, now.records);
+      // Nothing is shown, and the answer still says what was passed over: the unprintable records, and the read's limit.
       if (lines.lines.length === 0) {
-        return { repository: { directories: [], categories: [] }, pullRequest: [], cut: { directories: 0, categories: 0, lines: 0, names: 0, records: false } };
+        return { repository: { directories: [], categories: [] }, pullRequest: [], cut: { directories: 0, categories: 0, lines: 0, names: lines.names, records: now.cut } };
       }
       // A review that stopped waiting costs no second read.
       signal.throwIfAborted();

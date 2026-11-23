@@ -187,3 +187,15 @@ test('the eval imports nothing of the database, except its command line, the see
     }
   }
 });
+test('the memory part imports the config as types only, and reaches no Node module that loads code', async () => {
+  const file = 'src/memory/x.ts';
+  for (const code of [
+    "import { GATE_OFF } from '../config/load.ts';\nexport const g = GATE_OFF;\n",
+    "import { createRequire } from 'node:module';\nexport const r = createRequire;\n",
+    "import { createRequire } from 'module';\nexport const r = createRequire;\n",
+  ]) {
+    const ids = await lint(code, file);
+    assert.ok(ids.some((id) => id !== null && id.endsWith('no-restricted-imports')), code);
+  }
+  assert.deepEqual(await lint("import type { ServiceConfig } from '../config/load.ts';\nexport type C = ServiceConfig;\n", file), []);
+});

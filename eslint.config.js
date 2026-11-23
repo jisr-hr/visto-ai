@@ -50,7 +50,8 @@ export default tseslint.config(
   {
     files: ['src/memory/**/*.ts'],
     rules: {
-      'no-restricted-imports': ['error', { patterns: memoryForbidden, paths: [...engineNodeForbidden, ...postgresClients] }],
+      'no-restricted-imports': ['error', { patterns: memoryForbidden, paths: [...engineNodeForbidden, 'module', 'node:module', ...postgresClients] }],
+      '@typescript-eslint/no-restricted-imports': ['error', { patterns: [{ group: ['**/config/**'], allowTypeImports: true, message: 'The memory part imports only types of the config.' }] }],
       'no-restricted-syntax': ['error', { selector: 'ImportExpression', message: 'The memory part may not import dynamically.' }],
     },
   },
