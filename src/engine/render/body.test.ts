@@ -930,7 +930,8 @@ test('nothing in a criterion is live, and a note cannot become a mention, HTML o
   const lines = s.split('\n');
   assert.equal(lines.length, 7);
   // the whole criterion stands inside one code span whose fence is longer than any run of backticks in it
-  assert.equal(lines[4], `- **\\[met]** \`\` ${hostile} \`\` \u2014 # Done`);
+  // a note read from the result is one line, as a fresh note is: its fence and its mention stand inert in the middle of it
+  assert.equal(lines[4], `- **\\[met]** \`\` ${hostile} \`\` \u2014 # Done \`\`\` @${ZW}acme/owners`);
   assert.equal(s.includes('@acme'), false);
   assert.equal(lines[5], `- **\\[not met]** \`Second line\` \u2014 @${ZW}acme/owners <${ZW}b>x<${ZW}/b> &${ZW}amp; done`);
   assert.equal(lines[6], '- **\\[not verified]** ```` ```fence ```` _(not judged in this review)_');

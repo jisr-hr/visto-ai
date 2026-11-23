@@ -8,7 +8,7 @@ export interface RawFile { path: string; change_summary: string; score?: number;
 export interface RawVerdict { thread_id: string; verdict: string; reply?: string }
 export interface SubmitReviewArgs {
   overview: string; findings: RawFinding[]; files: RawFile[]; thread_verdicts?: RawVerdict[];
-  acceptance?: unknown[];   // the entries as the model sent them; each is judged in reconcileAcceptance
+  acceptance?: unknown;     // as the model sent it, a list or not; it is judged, row by row, in reconcileAcceptance
 }
 
 const findingSchema = z.object({
@@ -72,9 +72,10 @@ const argsWithThreadsSchema = z.object({
 }).strict();
 
 // The rows a call that shows criteria takes, as the model is told of them. The answer is read more loosely, by
-// the schemas below them: an entry is taken as it comes and judged in reconcileAcceptance, where a bad one costs that row.
-const acceptanceShown = z.array(z.object({ item: z.string(), status: z.string(), note: z.string().optional() })).optional();
-const acceptanceRead = optional(z.array(z.unknown()));
+// the schemas below them: the value is taken as it comes and judged in reconcileAcceptance, where a bad row, or a
+// value that is no list, costs the rows and never the answer (call 11).
+const acceptanceShown = z.array(z.object({ item: z.string(), status: z.enum(['met', 'not_met', 'not_verified']), note: z.string().optional() })).optional();
+const acceptanceRead = optional(z.unknown());
 
 // Two further variants for a call that shows criteria; the JSON of the two above stays what it was.
 const argsWithAcceptanceShown = z.object({ ...argsSchema.shape, acceptance: acceptanceShown }).strict();
@@ -160,7 +161,7 @@ function parseArgs(json: string, withThreads: boolean, withAcceptance: boolean):
   }
   if (withAcceptance) {
     // Absent, or null, reads as absent; nothing of an entry is checked here.
-    const rows = (parsed.data as { acceptance?: unknown[] }).acceptance;
+    const rows = (parsed.data as { acceptance?: unknown }).acceptance;
     if (rows !== undefined) value.acceptance = rows;
   }
   return { ok: true, value };

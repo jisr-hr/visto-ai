@@ -13,14 +13,14 @@ const row = (criterion: string, status: AcceptanceRow['status'], note: string, f
 const NONE = (criterion: string): AcceptanceRow => row(criterion, 'not_verified', '', 'none');
 
 test('a row that is not well formed is dropped by itself, and a number is read as an id', () => {
-  const throwing = { item: 'A1', note: 'x', get status(): string { throw new Error('trap'); } };
+  const throwing = { item: 'A9', note: 'x', get status(): string { throw new Error('trap'); } };
   const listProxy = new Proxy({}, { get: () => { throw new Error('trap'); }, has: () => { throw new Error('trap'); } });
   const got = reconcileAcceptance([answer(
-    5, null, [], { item: {}, status: 'met', note: 'x' }, { item: 'A1' }, { item: 'A1', status: 'met', note: 7 }, throwing, listProxy,
+    5, null, [], { item: {}, status: 'met', note: 'x' }, { item: 'A1' }, { item: 'A3', status: 'met', note: 7 }, throwing, listProxy,
     { item: 2.5, status: 'met', note: 'x' }, { item: 2, status: 'met', note: 'In src/a.ts:3.' },
   )], CRITERIA, [], false);
   assert.deepEqual(dropped(got.audit), [
-    ['row', 'bad_shape'], ['row', 'bad_shape'], ['row', 'bad_shape'], ['row', 'bad_shape'], ['A1', 'bad_shape'], ['A1', 'bad_shape'], ['row', 'bad_shape'],
+    ['row', 'bad_shape'], ['row', 'bad_shape'], ['row', 'bad_shape'], ['row', 'bad_shape'], ['A1', 'bad_shape'], ['A3', 'bad_shape'], ['A9', 'bad_shape'],
     ['row', 'bad_shape'], ['row', 'bad_shape'],
   ]);
   assert.ok(got.audit.every((e) => e.stage === 'reconcile'));
@@ -39,6 +39,16 @@ test('stored rows are read one by one', () => {
     { criterion: 5 }, { criterion: 'c', status: 'done', note: '' }, { criterion: 'c', status: 'met' }, { criterion: '', status: 'met', note: '' },
     null, 'row', { ...good, from: 'x' }, good,
   ]), [{ ...good, from: 'review' }, good]);
+  // A stored row gets the checks a fresh row gets.
+  const long = readAcceptance([{ criterion: 'c', status: 'met', note: Array.from({ length: 1000 }, (_, i) => `line ${i} ${'n'.repeat(90)}`).join('\n') }]);
+  assert.equal(long.length, 1);
+  assert.equal(long[0]!.note.includes('\n'), false);
+  assert.equal(long[0]!.note.length <= 300, true);
+  assert.equal(long[0]!.note.startsWith('line 0 n'), true);
+  assert.deepEqual(readAcceptance([
+    { criterion: 'c', status: 'met', note: '' }, { criterion: 'c', status: 'not_met', note: ' \u200b\n ' }, { criterion: 'c', status: 'not_verified', note: '' },
+    { criterion: 'd', status: 'met', note: ' In\u200b src/a.ts:3. ' },
+  ]), [row('c', 'not_verified', '', 'review'), row('d', 'met', 'In src/a.ts:3.', 'review')]);
   const throwing = { criterion: 'c', note: '', get status(): string { throw new Error('trap'); } };
   assert.deepEqual(readAcceptance([throwing, good]), [good]);
 });
@@ -52,7 +62,7 @@ test('a row counts only for a criterion that was shown, with a status of the thr
   assert.deepEqual(unknown.rows, CRITERIA.map(NONE));
 
   const status = reconcileAcceptance([answer({ item: 'A1', status: 'done', note: 'x' }, { item: 'A1', status: 'MET', note: 'x' })], CRITERIA, [], false);
-  assert.deepEqual(dropped(status.audit), [['A1', 'bad_status'], ['A1', 'bad_status']]);
+  assert.deepEqual(dropped(status.audit), [['A1', 'bad_status'], ['A1', 'repeated']]);
 
   const twice = reconcileAcceptance([answer({ item: 'A1', status: 'met', note: 'First.' }, { item: 'a1', status: 'not_met', note: 'Second.' })], CRITERIA, [], false);
   assert.deepEqual(dropped(twice.audit), [['a1', 'repeated']]);
@@ -77,6 +87,39 @@ test('a row counts only for a criterion that was shown, with a status of the thr
   assert.equal(pair.rows[0]!.note, 'p'.repeat(299));
   const hidden = reconcileAcceptance([answer({ item: 'A1', status: 'met', note: 'In\u200b src/a.ts:3.' })], CRITERIA, [], false);
   assert.equal(hidden.rows[0]!.note, 'In src/a.ts:3.');
+});
+
+test('the first row for an item decides, damaged or not', () => {
+  const firsts: unknown[][] = [
+    [{ item: 'A1', status: 'done' }, { item: 'A1', status: 'met', note: 'In src/a.ts:3.' }],
+    [{ item: 'A1', status: 'met' }, { item: 'A1', status: 'met', note: 'In src/a.ts:3.' }],
+    [{ item: 'A1', status: 'met', note: 7 }, { item: 'A1', status: 'met', note: 'In src/a.ts:3.' }],
+    [{ item: 1 }, { item: 'A1', status: 'met', note: 'In src/a.ts:3.' }],
+  ];
+  for (const rows of firsts) {
+    const got = reconcileAcceptance([answer(...rows)], CRITERIA, [], false);
+    assert.deepEqual(got.rows, CRITERIA.map(NONE), JSON.stringify(rows));
+    assert.deepEqual(dropped(got.audit).at(-1), ['A1', 'repeated'], JSON.stringify(rows));
+  }
+  // A row whose id is not known claims nothing.
+  const unknown = reconcileAcceptance([answer({ item: 'A9', status: 'met', note: 'x' }, { item: 'A1', status: 'met', note: 'In src/a.ts:3.' })], CRITERIA, [], false);
+  assert.deepEqual(unknown.rows[0], row(CRITERIA[0]!, 'met', 'In src/a.ts:3.', 'review'));
+});
+
+test('a list of rows that is no list costs the rows and nothing else', () => {
+  for (const junk of ['x', 5, { item: 'A1', status: 'met', note: 'x' }, true]) {
+    const got = reconcileAcceptance([{ value: { overview: 'Changes src/a.ts.', findings: [], files: [], acceptance: junk } }], CRITERIA, [], false);
+    assert.deepEqual(got.rows, CRITERIA.map(NONE));
+    assert.deepEqual(got.audit, [{ stage: 'reconcile', action: 'acceptance_dropped', subject: 'acceptance', reason: 'bad_shape' }]);
+  }
+  assert.deepEqual(reconcileAcceptance([silent()], CRITERIA, [], false).audit, []);
+});
+
+test('a criterion that is not a string has no row, and nothing is thrown', () => {
+  const criteria = [CRITERIA[0], undefined, 5, {}, CRITERIA[1]] as unknown as string[];
+  const got = reconcileAcceptance([answer({ item: 'A5', status: 'met', note: 'In src/a.ts:3.' }, { item: 'A2', status: 'met', note: 'x' })], criteria, [null, 5] as never, true);
+  assert.deepEqual(got.rows, [NONE(CRITERIA[0]!), row(CRITERIA[1]!, 'met', 'In src/a.ts:3.', 'review')]);
+  assert.deepEqual(reconcileAcceptance([silent()], 'x' as never, [], true).rows, []);
 });
 
 test('rows of several batches are merged by rule', () => {

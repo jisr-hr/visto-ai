@@ -287,6 +287,8 @@ test('criteria alone are shown, and a call that shows them counts the tool that 
   for (const withThreads of [false, true]) {
     const tool = estimateTokens(JSON.stringify(submitToolFor(withThreads, true))) - estimateTokens(JSON.stringify(submitToolFor(withThreads, false)));
     assert.ok(tool > 0);
+    // The budget counts the tool as it is sent, the three statuses of a row included.
+    assert.ok(JSON.stringify(submitToolFor(withThreads, true)).includes('"enum":["met","not_met","not_verified"]'));
     assert.equal(
       fixedTokens('CONTRACT', pr, withThreads, undefined, criteria) - fixedTokens('CONTRACT', pr, withThreads),
       estimateTokens(`\n${extensionPart(criteria, MEASURE_TOKEN)}`) + tool,

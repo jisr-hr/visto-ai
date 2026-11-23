@@ -210,6 +210,7 @@ test('the two tools of today keep their arguments, and two more carry acceptance
     assert.equal(acceptance.type, 'array');
     assert.deepEqual(Object.keys(acceptance.items.properties), ['item', 'status', 'note']);
     assert.deepEqual(acceptance.items.required, ['item', 'status']);
+    assert.deepEqual((acceptance.items.properties as Record<string, unknown>).status, { type: 'string', enum: ['met', 'not_met', 'not_verified'] });
     assert.deepEqual((tool.function.parameters as { required: string[] }).required, ['overview', 'findings', 'files']);
   }
 });
@@ -228,9 +229,12 @@ test('acceptance is read only in a call that asked for it, and no entry of it ca
   const absent = parseSubmitReview(JSON.stringify(ok), false, true);
   assert.ok(absent.ok);
   assert.equal('acceptance' in absent.value, false);
-  const notList = parseSubmitReview(JSON.stringify({ ...ok, acceptance: 'x' }), false, true);
-  assert.ok(!notList.ok);
-  assert.match(notList.reason, /^acceptance: /);
+  // A list that is no list costs no answer: it is judged, and dropped, in reconcileAcceptance.
+  for (const junk of ['x', 5, { item: 'A1' }]) {
+    const notList = parseSubmitReview(JSON.stringify({ ...ok, acceptance: junk }), false, true);
+    assert.ok(notList.ok);
+    assert.deepEqual([notList.value.acceptance, notList.value.findings.length], [junk, 1]);
+  }
   for (const withThreads of [false, true]) {
     const refused = parseSubmitReview(JSON.stringify({ ...ok, acceptance: entries }), withThreads);
     assert.ok(!refused.ok);

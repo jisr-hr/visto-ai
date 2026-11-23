@@ -28,34 +28,53 @@ const dropped = (subject: string, reason: string): AuditEntry => ({ stage: 'reco
 // The rows of one answer that hold, each for the criterion of its index; every other is named in the audit.
 function rowsOf(entries: unknown, count: number, audit: AuditEntry[]): Kept[] {
   const kept: Kept[] = [];
-  if (!Array.isArray(entries)) return kept;
+  if (entries === undefined) return kept;
+  if (!Array.isArray(entries)) {
+    // A value that is no list costs the rows, never the answer.
+    audit.push(dropped('acceptance', 'bad_shape'));
+    return kept;
+  }
   const named = new Set<number>();
   for (const entry of entries as unknown[]) {
-    // Every read of an entry happens here: one that throws as it is read is an entry of the wrong shape.
+    // Every read of an entry happens inside a guard: a read that throws is a row of the wrong shape.
     let item: string | number;
-    let status: string;
-    let note: string;
     try {
       if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) throw new Error('bad_shape');
-      const { item: i, status: s, note: n } = entry as Record<string, unknown>;
+      const i = (entry as Record<string, unknown>).item;
       if (typeof i === 'string') item = i;
       else if (typeof i === 'number' && Number.isInteger(i)) item = i;
       else throw new Error('bad_shape');
-      if (typeof s !== 'string' || (n !== undefined && n !== null && typeof n !== 'string')) {
-        audit.push(dropped(subjectOf(item), 'bad_shape'));
-        continue;
-      }
-      status = s;
-      note = typeof n === 'string' ? n : '';
     } catch {
       audit.push(dropped('row', 'bad_shape'));
       continue;
+    }
+    let status: string | null = null;
+    let note = '';
+    try {
+      const { status: s, note: n } = entry as Record<string, unknown>;
+      if (typeof s === 'string' && (n === undefined || n === null || typeof n === 'string')) {
+        status = s;
+        note = typeof n === 'string' ? n : '';
+      }
+    } catch {
+      status = null;
     }
     const subject = subjectOf(item);
     const id = typeof item === 'number' ? `A${item}` : item.trim();
     const match = ITEM.exec(id);
     const n = match === null ? 0 : Number(match[1]);
-    if (n < 1 || n > count) {
+    const known = n >= 1 && n <= count;
+    // A row whose id is well formed and known claims it, whatever else is wrong with it: the first row for an item decides.
+    if (known && named.has(n)) {
+      audit.push(dropped(subject, 'repeated'));
+      continue;
+    }
+    if (known) named.add(n);
+    if (status === null) {
+      audit.push(dropped(subject, 'bad_shape'));
+      continue;
+    }
+    if (!known) {
       audit.push(dropped(subject, 'unknown_item'));
       continue;
     }
@@ -63,11 +82,6 @@ function rowsOf(entries: unknown, count: number, audit: AuditEntry[]): Kept[] {
       audit.push(dropped(subject, 'bad_status'));
       continue;
     }
-    if (named.has(n)) {
-      audit.push(dropped(subject, 'repeated'));
-      continue;
-    }
-    named.add(n);
     const line = oneLine(note, NOTE_CHARS);
     if (line === '' && status !== 'not_verified') {
       audit.push(dropped(subject, 'no_note'));
@@ -88,26 +102,30 @@ function subjectOf(item: string | number): string {
 export function reconcileAcceptance(answers: Array<{ value: SubmitReviewArgs }>, criteria: string[], earlier: AcceptanceRow[], carry: boolean):
   { rows: AcceptanceRow[]; audit: AuditEntry[] } {
   const audit: AuditEntry[] = [];
-  const said: Kept[][] = criteria.map(() => []);
+  const list: unknown[] = Array.isArray(criteria) ? criteria : [];
+  const before: AcceptanceRow[] = Array.isArray(earlier) ? earlier.filter((r) => typeof r === 'object' && r !== null) : [];
+  const said: Kept[][] = list.map(() => []);
   for (const answer of answers) {
-    for (const one of rowsOf(answer.value.acceptance, criteria.length, audit)) said[one.index]!.push(one);
+    for (const one of rowsOf(answer.value.acceptance, list.length, audit)) said[one.index]!.push(one);
   }
-  const rows = criteria.map((criterion, i): AcceptanceRow => {
-    const given = said[i]!;
-    const notMet = given.find((r) => r.status === 'not_met');
-    const met = given.find((r) => r.status === 'met');
-    if (notMet !== undefined) {
-      if (met !== undefined) audit.push({ stage: 'reconcile', action: 'acceptance_disagreement', subject: `A${i + 1}`, reason: 'not_met' });
-      return { criterion, status: 'not_met', note: notMet.note, from: 'review' };
-    }
-    if (met !== undefined) return { criterion, status: 'met', note: met.note, from: 'review' };
-    const unsure = given[0];
-    if (unsure !== undefined) return { criterion, status: 'not_verified', note: unsure.note, from: 'review' };
-    const before = carry ? earlier.find((r) => r.criterion === criterion && r.from !== 'none') : undefined;
-    if (before !== undefined) return { criterion, status: before.status, note: before.note, from: 'earlier' };
-    return { criterion, status: 'not_verified', note: '', from: 'none' };
-  });
+  // Ids are places in the list as it was shown; a criterion that is not a string has no row.
+  const rows = list.flatMap((criterion, i): AcceptanceRow[] => (typeof criterion === 'string' ? [rowFor(criterion, i, said[i]!, before, carry, audit)] : []));
   return { rows, audit };
+}
+
+function rowFor(criterion: string, i: number, given: Kept[], earlier: AcceptanceRow[], carry: boolean, audit: AuditEntry[]): AcceptanceRow {
+  const notMet = given.find((r) => r.status === 'not_met');
+  const met = given.find((r) => r.status === 'met');
+  if (notMet !== undefined) {
+    if (met !== undefined) audit.push({ stage: 'reconcile', action: 'acceptance_disagreement', subject: `A${i + 1}`, reason: 'not_met' });
+    return { criterion, status: 'not_met', note: notMet.note, from: 'review' };
+  }
+  if (met !== undefined) return { criterion, status: 'met', note: met.note, from: 'review' };
+  const unsure = given[0];
+  if (unsure !== undefined) return { criterion, status: 'not_verified', note: unsure.note, from: 'review' };
+  const before = carry ? earlier.find((r) => r.criterion === criterion && r.from !== 'none') : undefined;
+  if (before !== undefined) return { criterion, status: before.status, note: before.note, from: 'earlier' };
+  return { criterion, status: 'not_verified', note: '', from: 'none' };
 }
 
 /** The rows of a stored result's `acceptance`, each checked: the one reader of stored rows. [] for a value that is no list. */
@@ -119,7 +137,10 @@ export function readAcceptance(value: unknown): AcceptanceRow[] {
       if (typeof one !== 'object' || one === null) continue;
       const { criterion, status, note, from } = one as Record<string, unknown>;
       if (typeof criterion !== 'string' || criterion === '' || typeof status !== 'string' || !STATUSES.has(status) || typeof note !== 'string') continue;
-      rows.push({ criterion, status: status as AcceptanceStatus, note, from: typeof from === 'string' && FROM.has(from) ? (from as AcceptanceRow['from']) : 'review' });
+      // The checks of a fresh row: the note cleaned and cut alike, and a claim with no note is no row.
+      const line = oneLine(note, NOTE_CHARS);
+      if (line === '' && status !== 'not_verified') continue;
+      rows.push({ criterion, status: status as AcceptanceStatus, note: line, from: typeof from === 'string' && FROM.has(from) ? (from as AcceptanceRow['from']) : 'review' });
     } catch {
       // a row that throws when it is read is skipped
     }

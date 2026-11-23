@@ -2018,6 +2018,15 @@ test('a badly shaped row costs that row, and the findings of its answer are kept
   assert.deepEqual(r.audit.filter((e) => e.action === 'acceptance_dropped').map((e) => [e.subject, e.reason]), [['row', 'bad_shape'], ['A2', 'bad_shape']]);
 });
 
+test('rows that are no list cost no answer and no retry', async () => {
+  const d = deps({ files: [fileA], contextProviders: [criteriaProvider()], answers: [withRows(answerOnA, 'x' as never)] });
+  const r = await review(own, d);
+  assert.equal(d.model.requests.length, 1);
+  assert.deepEqual(r.findings.map((f) => [f.path, f.line]), [['src/a.ts', 2]]);
+  assert.deepEqual(r.acceptance, CRITERIA.map(notJudged));
+  assert.deepEqual(r.audit.filter((e) => e.action === 'acceptance_dropped'), [{ stage: 'reconcile', action: 'acceptance_dropped', subject: 'acceptance', reason: 'bad_shape' }]);
+});
+
 test('criteria are shown alone when the texts with them would cost a file something', async () => {
   const full = await unitOf(fileA, true);
   const alone: ExtensionContext = { blocks: [], criteria: CRITERIA.slice(0, 2) };
