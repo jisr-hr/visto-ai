@@ -6,11 +6,21 @@ export type Severity = 'blocker' | 'major' | 'minor';
 export interface AuditEntry { stage: string; action: string; subject: string; reason: string }
 export interface Usage { calls: number; inputTokens: number; outputTokens: number; cachedTokens: number; cost: number }
 
-export interface ChatMessage { role: 'system' | 'user' | 'assistant'; content: string }
+export interface ToolCall { id: string; name: string; arguments: string | null }   // arguments: the JSON text as the model wrote it; null when the endpoint gave no text
+export interface ChatMessage {
+  role: 'system' | 'user' | 'assistant' | 'tool';
+  content: string;
+  toolCallId?: string;                  // on a 'tool' message: the id of the call it answers
+  wire?: Record<string, unknown>;       // on an 'assistant' message that called tools: the message as the endpoint gave it; it is sent in place of this one
+}
 export interface ToolDefinition { type: 'function'; function: { name: string; description: string; parameters: Record<string, unknown> } }
 export type Effort = 'default' | 'elevated';
-export interface ModelRequest { messages: ChatMessage[]; tools: ToolDefinition[]; forcedTool: string; effort: Effort; timeoutMs: number }
-export interface ModelResponse { toolName: string | null; toolArguments: string | null; text: string | null; model: string; provider: string | null; usage: Usage }
+export interface ModelRequest { messages: ChatMessage[]; tools: ToolDefinition[]; forcedTool: string | null; effort: Effort; timeoutMs: number }   // forcedTool null: the model chooses
+export interface ModelResponse {
+  toolName: string | null; toolArguments: string | null; text: string | null; model: string; provider: string | null; usage: Usage;   // as today
+  toolCalls?: ToolCall[];                   // the calls of the answer that have a name and an id of their own, in order; absent: none
+  assistant?: Record<string, unknown>;      // present with toolCalls: the answer's message, to be sent back unchanged before its calls are answered
+}
 export interface ModelClient { complete(request: ModelRequest): Promise<ModelResponse> }
 
 export interface Limits { inputTokensPerCall: number; batchesPerReview: number; modelTimeoutSeconds: number }
