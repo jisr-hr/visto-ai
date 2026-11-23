@@ -140,7 +140,7 @@ test('the comments of a pull request are read oldest first, inline ones only, wi
   await db.close();
 });
 
-test('marking names the comments it marks, and a closed pull request is marked at the later of now and its close', async () => {
+test('marking names the comments it marks, and a closed pull request is marked at its close', async () => {
   const db = await testDb();
   await savePullRequest(db, closed());
   await recordActivity(db, comment({ sourceId: 'c-1' }));
@@ -159,12 +159,12 @@ test('marking names the comments it marks, and a closed pull request is marked a
   assert.equal(await learnedAt(db), CLOSED);
   const later = '2026-03-11T00:00:00.000Z';
   await markLearned(db, REF, ['c-1', 'c-2'], later, CLOSED);
-  assert.equal(await learnedAt(db), later);
+  assert.equal(await learnedAt(db), CLOSED);
   const again = await db.query<{ source_id: string; learned_at: Date }>(
     "select source_id, learned_at from visto_ai.human_activity where number = 7 and kind = 'inline_comment' order by source_id");
   assert.deepEqual(again.map((m) => [m.source_id, m.learned_at.toISOString()]), [['c-1', '2026-03-09T00:00:00.000Z'], ['c-2', later]]);
   await markLearned(db, REF, [], '2026-03-12T00:00:00.000Z', null);
-  assert.equal(await learnedAt(db), later);
+  assert.equal(await learnedAt(db), CLOSED);
   await db.close();
 });
 
@@ -202,5 +202,15 @@ test('two passes noted out of order leave the later time, and the totals still a
   await noteLearning(db, 'signals', '2026-03-02T10:00:00.010Z', { examined: 1, added: 1, retired: 0, failed: 0 });
   await noteLearning(db, 'signals', '2026-03-02T10:00:00.005Z', { examined: 2, added: 0, retired: 1, failed: 1 });
   assert.deepEqual(await readLearning(db, 'signals'), { since: '2026-03-02T10:00:00.010Z', ranAt: '2026-03-02T10:00:00.010Z', examined: 3, added: 1, retired: 1, failed: 1 });
+  await db.close();
+});
+
+test('a closed pull request is marked learned for its close, never for a later now', async () => {
+  const db = await testDb();
+  await savePullRequest(db, closed());
+  await markLearned(db, REF, [], '2026-03-10T12:10:00.000Z', CLOSED);
+  assert.equal(await learnedAt(db), CLOSED);
+  await markLearned(db, REF, [], '2026-03-12T00:00:00.000Z', null);
+  assert.equal(await learnedAt(db), CLOSED);
   await db.close();
 });

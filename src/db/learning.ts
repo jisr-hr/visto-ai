@@ -103,7 +103,7 @@ export async function inlineComments(db: Db, ref: PullRequestRef): Promise<Array
   }));
 }
 
-/** Marks those inline comments as looked at, at `now`; one already marked keeps its time. With `closed`, the pull request is marked as learned at the later of `now` and `closed`. The pull request's failed attempts are set to 0. One statement. */
+/** Marks those inline comments as looked at, at `now`; one already marked keeps its time. With `closed`, the pull request is marked as learned for that close: its learned_at is `closed`, never the service's clock, which may run ahead of the git service's. The pull request's failed attempts are set to 0. One statement. */
 export async function markLearned(db: Db, ref: PullRequestRef, comments: string[], now: string, closed: string | null): Promise<void> {
   const r = lowered(ref);
   await db.query(
@@ -115,7 +115,7 @@ export async function markLearned(db: Db, ref: PullRequestRef, comments: string[
      )
      update visto_ai.pull_requests set
        learn_attempts = 0,
-       learned_at = case when $7::timestamptz is null then learned_at else greatest($5::timestamptz, $7::timestamptz) end
+       learned_at = case when $7::timestamptz is null then learned_at else $7::timestamptz end
      where service = $1 and owner = $2 and repo = $3 and number = $4`,
     [r.service, r.owner, r.repo, r.number, now, JSON.stringify(comments.map(storable)), closed]);
 }

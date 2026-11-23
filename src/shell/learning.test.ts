@@ -10,7 +10,7 @@ import { recordRun } from '../db/review-runs.ts';
 import type { RunRecord } from '../db/review-runs.ts';
 import { recordComments } from '../db/review-comments.ts';
 import { addRecords } from '../db/memory-records.ts';
-import { pullRequestsToLearn, readLearning } from '../db/learning.ts';
+import { noteLearning, pullRequestsToLearn, readLearning } from '../db/learning.ts';
 import { createLearning, LEARN_ATTEMPTS, learnOnce, STALE_AFTER_MS, WORK } from './learning.ts';
 
 const REF: PullRequestRef = { service: 'github', owner: 'acme', repo: 'shop', number: 7 };
@@ -60,6 +60,26 @@ const work = async (db: Db): Promise<number[]> => (await pullRequestsToLearn(db,
 const fixed = (iso: string) => () => new Date(iso);
 const attemptsOf = async (db: Db, number: number): Promise<number> =>
   (await db.query<{ n: number }>('select learn_attempts as n from visto_ai.pull_requests where number = $1', [number]))[0]!.n;
+
+/** Resolves with `work`, or rejects when it has not settled within `ms`. Leaves no timer behind. */
+async function bounded<T>(work: Promise<T>, ms: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const late = new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(`not settled within ${ms} ms`)), ms); });
+  try {
+    return await Promise.race([work, late]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+/** A promise and the function that resolves it. */
+function held(): { promise: Promise<void>; release: () => void } {
+  let release: () => void = () => {};
+  const promise = new Promise<void>((resolve) => { release = resolve; });
+  return { promise, release };
+}
+const FIRST_BATCH = (text: string, params?: unknown[]): boolean => text.includes('learn_attempts < $1') && params?.[1] === true;
+const ANY_BATCH = (text: string): boolean => text.includes('learn_attempts < $1');
+const READ_ROW = (text: string): boolean => text.includes('select since, ran_at');
 
 /** A Db that passes everything to `db`, with some of it replaced. */
 function wrap(db: Db, over: Partial<Db>): Db {
@@ -528,15 +548,16 @@ test('a pass that never settles: the tick returns at its limit, no pass starts o
   const logged: Array<Record<string, unknown>> = [];
   const alerts: Array<[string, unknown]> = [];
   const learning = createLearning({ db: hanging, clock: () => new Date(now), log: (e) => { logged.push(e); }, alert: (code, details) => { alerts.push([code, details]); }, passLimitMs: 5 });
-  await learning.tick();
+  // A limit that is not applied fails here, on a timer of the test's own, rather than hanging the suite.
+  await bounded(learning.tick(), 500);
   assert.equal(started, 1);
   assert.deepEqual(logged, [{ event: 'learning_failed', reason: 'timeout' }]);
-  await learning.tick();
+  await bounded(learning.tick(), 500);
   assert.equal(started, 1);
   learning.wake();
   assert.equal(started, 1);
   now = plus(CLOSED, 38 * HOUR_MS);
-  await learning.tick();
+  await bounded(learning.tick(), 500);
   assert.deepEqual(alerts, [['learning_stale', { hours: 37 }]]);
   assert.equal(started, 1);
   learning.stop();
@@ -664,4 +685,333 @@ test('a pass with nothing to do logs nothing, and no entry holds what a person w
 
 test('the stale limit is 36 hours', () => {
   assert.equal(STALE_AFTER_MS, 36 * HOUR_MS);
+});
+
+// Fix round 1.
+
+test('a tick waits for its own pass, not for the passes later wakes chained behind it', async () => {
+  const db = await testDb();
+  await savePullRequest(db, closed());
+  const gates = [held(), held()];
+  let passes = 0;
+  const gated = wrap(db, {
+    query: async <R,>(text: string, params?: unknown[]) => {
+      if (FIRST_BATCH(text, params)) {
+        passes += 1;
+        const gate = gates[passes - 1];
+        if (gate !== undefined) await gate.promise;
+      }
+      return db.query<R>(text, params);
+    },
+  });
+  const logged: Array<Record<string, unknown>> = [];
+  const learning = createLearning({ db: gated, clock: fixed(plus(CLOSED, HOUR_MS)), log: (e) => { logged.push(e); }, alert: () => {}, passLimitMs: 500 });
+  const waker = setInterval(() => { learning.wake(); }, 2);
+  const releaser = setTimeout(() => { gates[0]!.release(); }, 30);
+  const began = Date.now();
+  try {
+    await bounded(learning.tick(), 1_000);
+  } finally {
+    clearInterval(waker);
+    clearTimeout(releaser);
+  }
+  const took = Date.now() - began;
+  assert.ok(took < 500, `the tick took ${took} ms`);
+  assert.equal(passes, 2);
+  // The pass chained behind it was not told to stop: released now, it learns what was stored meanwhile.
+  await savePullRequest(db, closed({ ref: refOf(8) }));
+  gates[1]!.release();
+  await bounded(learning.idle(), 1_000);
+  assert.deepEqual(await work(db), []);
+  assert.deepEqual(logged.filter((e) => e['event'] === 'learning_failed'), []);
+  learning.stop();
+  await db.close();
+});
+
+test('after stop not one statement reaches the database', async () => {
+  const db = await testDb();
+  await savePullRequest(db, closed());
+  const gate = held();
+  let statements = 0;
+  let batches = 0;
+  const counted = wrap(db, {
+    query: async <R,>(text: string, params?: unknown[]) => {
+      statements += 1;
+      if (ANY_BATCH(text)) {
+        batches += 1;
+        if (batches === 1) await gate.promise;
+      }
+      return db.query<R>(text, params);
+    },
+    transaction: <T,>(work: (tx: Db) => Promise<T>) => {
+      statements += 1;
+      return db.transaction(work);
+    },
+  });
+  const learning = createLearning({ db: counted, clock: fixed(plus(CLOSED, HOUR_MS)), log: () => {}, alert: () => {} });
+  learning.wake();
+  await new Promise((resolve) => setImmediate(resolve));
+  learning.wake();          // during the pass under way: would make one more after it
+  learning.stop();
+  gate.release();
+  await bounded(learning.idle(), 1_000);
+  assert.equal(batches, 1);
+  const before = statements;
+  learning.wake();
+  await bounded(learning.tick(), 1_000);
+  await bounded(learning.idle(), 1_000);
+  assert.equal(statements, before);
+  await db.close();
+});
+
+test('a clock that fails while the learning is made: the 36 hours count from its first good read', async () => {
+  const db = await testDb();
+  let now = T1;
+  let failOnce = true;
+  const clock = () => {
+    if (failOnce) {
+      failOnce = false;
+      throw new Error('clock');
+    }
+    return new Date(now);
+  };
+  const alerts: Array<[string, unknown]> = [];
+  const learning = createLearning({ db: wrap(db, { query: () => Promise.reject(new Error('db_down')) }), clock, log: () => {}, alert: (code, details) => { alerts.push([code, details]); } });
+  await bounded(learning.tick(), 1_000);
+  now = plus(T1, 35 * HOUR_MS);
+  await bounded(learning.tick(), 1_000);
+  assert.deepEqual(alerts, []);
+  now = plus(T1, 37 * HOUR_MS);
+  await bounded(learning.tick(), 1_000);
+  assert.deepEqual(alerts, [['learning_stale', { hours: 37 }]]);
+  learning.stop();
+  await db.close();
+});
+
+test('a tick waits one limit in all, for the stale read and the pass together', async () => {
+  const db = await testDb();
+  const hanging = wrap(db, {
+    query: <R,>(text: string, params?: unknown[]) =>
+      READ_ROW(text) || ANY_BATCH(text) ? new Promise<R[]>(() => {}) : db.query<R>(text, params),
+  });
+  const learning = createLearning({ db: hanging, clock: fixed(T1), log: () => {}, alert: () => {}, passLimitMs: 100 });
+  const began = Date.now();
+  await bounded(learning.tick(), 1_000);
+  const took = Date.now() - began;
+  assert.ok(took < 150, `the tick took ${took} ms`);
+  learning.stop();
+  await db.close();
+});
+
+test('an alert that returns a rejected promise leaves no unhandled rejection, and the tick goes on', async () => {
+  const db = await testDb();
+  const seen: unknown[] = [];
+  const listener = (reason: unknown) => { seen.push(reason); };
+  process.on('unhandledRejection', listener);
+  try {
+    let now = T1;
+    let alerts = 0;
+    const learning = createLearning({
+      db: passFails(db), clock: () => new Date(now), log: () => {},
+      alert: (() => { alerts += 1; return Promise.reject(new Error('x')); }) as unknown as () => void,
+    });
+    now = plus(T1, 37 * HOUR_MS);
+    await bounded(learning.tick(), 1_000);
+    for (let i = 0; i < 3; i += 1) await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(alerts, 1);
+    assert.deepEqual(seen, []);
+    learning.stop();
+  } finally {
+    process.off('unhandledRejection', listener);
+  }
+  await db.close();
+});
+
+test('a pull request is learned for its close, not for the service clock: a close after a reopen is learned with a clock ahead', async () => {
+  const db = await testDb();
+  const C0 = CLOSED;
+  const min = 60_000;
+  const ahead = (ms: number) => fixed(plus(C0, ms + 10 * min));   // the service's clock, 10 minutes ahead of the git service
+  await savePullRequest(db, closed({ closedAt: C0, updatedAt: C0 }));
+  await learnOnce({ db, clock: ahead(0) });
+  await savePullRequest(db, facts({ updatedAt: plus(C0, min) }));
+  await recordActivity(db, comment({ at: plus(C0, 2 * min) }));
+  const open = await learnOnce({ db, clock: ahead(2 * min) });
+  assert.deepEqual([open.examined, open.added], [1, 0]);
+  const again = plus(C0, 3 * min);
+  await savePullRequest(db, closed({ closedAt: again, updatedAt: again }));
+  assert.deepEqual(await work(db), [7]);
+  const atClose = await learnOnce({ db, clock: ahead(3 * min) });
+  assert.equal(atClose.added, 1);
+  assert.deepEqual(await refs(db), ['7:file:src/billing/tax.ts']);
+  assert.deepEqual(await work(db), []);
+  await db.close();
+});
+
+test('a batch smaller than the batch size ends the reading', async () => {
+  const db = await testDb();
+  await savePullRequest(db, closed());
+  let reads = 0;
+  const counted = wrap(db, { query: <R,>(text: string, params?: unknown[]) => { if (ANY_BATCH(text)) reads += 1; return db.query<R>(text, params); } });
+  await learnOnce({ db: counted, clock: fixed(plus(CLOSED, HOUR_MS)), batch: 2 });
+  assert.equal(reads, 1);
+  await db.close();
+});
+
+test('a pass told to stop from the start reads no batch', async () => {
+  const db = await testDb();
+  await savePullRequest(db, closed());
+  let reads = 0;
+  const counted = wrap(db, { query: <R,>(text: string, params?: unknown[]) => { if (ANY_BATCH(text)) reads += 1; return db.query<R>(text, params); } });
+  await learnOnce({ db: counted, clock: fixed(plus(CLOSED, HOUR_MS)), stopping: () => true });
+  assert.equal(reads, 0);
+  assert.deepEqual(await work(db), [7]);
+  await db.close();
+});
+
+test('the cursor is handed on: a pull request that fails is tried once in a pass', async () => {
+  const db = await testDb();
+  for (const number of [7, 8, 9]) await savePullRequest(db, closed({ ref: refOf(number) }));
+  const learned = await learnOnce({ db: failingFor(db, 8), clock: fixed(plus(CLOSED, HOUR_MS)), batch: 2 });
+  assert.equal(await attemptsOf(db, 8), 1);
+  assert.equal(learned.failed, 1);
+  assert.deepEqual(await work(db), [8]);
+  await db.close();
+});
+
+test('only a comment that may count makes the app\'s comments and the runs be read', async () => {
+  for (const [author, association, reads] of [['octo-dev', 'owner', 0], ['octo-lead', 'member', 1]] as const) {
+    const db = await testDb();
+    await savePullRequest(db, closed());
+    await recordActivity(db, comment({ author, association }));
+    let posted = 0;
+    let runs = 0;
+    const counted = wrap(db, {
+      transaction: <T,>(work: (tx: Db) => Promise<T>) => db.transaction((tx) => work(wrap(tx, {
+        query: <R,>(text: string, params?: unknown[]) => {
+          if (text.includes('from visto_ai.review_comments')) posted += 1;
+          if (text.includes('from visto_ai.review_runs')) runs += 1;
+          return tx.query<R>(text, params);
+        },
+      }))),
+    });
+    await learnOnce({ db: counted, clock: fixed(plus(CLOSED, HOUR_MS)) });
+    assert.deepEqual([posted, runs], [reads, reads], author);
+    await db.close();
+  }
+});
+
+test('a stored file-level value of null is not file level: the comment gets its block\'s signal', async () => {
+  const db = await testDb();
+  await savePullRequest(db, closed());
+  await recordRun(db, run({ result: scoredResult([block('h-low', [[10, 14]], 35)]) }));
+  await recordActivity(db, comment({ fileLevel: null }));
+  await learnOnce({ db, clock: fixed(plus(CLOSED, HOUR_MS)) });
+  assert.deepEqual(await refs(db), ['7:h-low:src/billing/tax.ts']);
+  await db.close();
+});
+
+test('the stale check comes before the pass: a row 37 hours old raises the alert at a tick whose pass works', async () => {
+  const db = await testDb();
+  await noteLearning(db, WORK, T1, { examined: 0, added: 0, retired: 0, failed: 0 });
+  const alerts: Array<[string, unknown]> = [];
+  const learning = createLearning({ db, clock: fixed(plus(T1, 37 * HOUR_MS)), log: () => {}, alert: (code, details) => { alerts.push([code, details]); } });
+  await bounded(learning.tick(), 1_000);
+  assert.deepEqual(alerts, [['learning_stale', { hours: 37 }]]);
+  assert.equal((await readLearning(db, WORK))!.ranAt, plus(T1, 37 * HOUR_MS));
+  learning.stop();
+  await db.close();
+});
+
+test('with a row that cannot be read, the 36 hours count from the last pass this process completed', async () => {
+  const db = await testDb();
+  let now = T1;
+  let passesFail = false;
+  const broken = wrap(db, {
+    query: <R,>(text: string, params?: unknown[]) => {
+      if (READ_ROW(text)) return Promise.reject(new Error('db_down'));
+      if (passesFail && ANY_BATCH(text)) return Promise.reject(new Error('db_down'));
+      return db.query<R>(text, params);
+    },
+  });
+  const alerts: Array<[string, unknown]> = [];
+  const learning = createLearning({ db: broken, clock: () => new Date(now), log: () => {}, alert: (code, details) => { alerts.push([code, details]); } });
+  now = plus(T1, 30 * HOUR_MS);
+  await bounded(learning.tick(), 1_000);       // this pass completes
+  passesFail = true;
+  now = plus(T1, 37 * HOUR_MS);
+  await bounded(learning.tick(), 1_000);
+  assert.deepEqual(alerts, []);
+  now = plus(T1, 67 * HOUR_MS);
+  await bounded(learning.tick(), 1_000);
+  assert.deepEqual(alerts, [['learning_stale', { hours: 37 }]]);
+  learning.stop();
+  await db.close();
+});
+
+test('the hours of the stale alert are whole hours, rounded down', async () => {
+  const db = await testDb();
+  const alerts: Array<[string, unknown]> = [];
+  let now = T1;
+  const learning = createLearning({ db: passFails(db), clock: () => new Date(now), log: () => {}, alert: (code, details) => { alerts.push([code, details]); } });
+  now = plus(T1, 37 * HOUR_MS + 40 * 60_000);
+  await bounded(learning.tick(), 1_000);
+  assert.deepEqual(alerts, [['learning_stale', { hours: 37 }]]);
+  learning.stop();
+  await db.close();
+});
+
+test('a pass that passed its limit is told to stop, and reads no further pull request once it goes on', async () => {
+  const db = await testDb();
+  for (const number of [7, 8]) await savePullRequest(db, closed({ ref: refOf(number) }));
+  const gate = held();
+  let transactions = 0;
+  const gated = wrap(db, {
+    transaction: async <T,>(work: (tx: Db) => Promise<T>) => {
+      transactions += 1;
+      if (transactions === 1) await gate.promise;
+      return db.transaction(work);
+    },
+  });
+  const learning = createLearning({ db: gated, clock: fixed(plus(CLOSED, HOUR_MS)), log: () => {}, alert: () => {}, passLimitMs: 5 });
+  await bounded(learning.tick(), 1_000);
+  gate.release();
+  await bounded(learning.idle(), 1_000);
+  assert.equal(transactions, 1);
+  assert.deepEqual(await work(db), [8]);
+  learning.stop();
+  await db.close();
+});
+
+test('idle waits for the pass a wake chained behind the one under way', async () => {
+  const db = await testDb();
+  const gates = [held(), held()];
+  let passes = 0;
+  let ended = 0;
+  const gated = wrap(db, {
+    query: async <R,>(text: string, params?: unknown[]) => {
+      if (FIRST_BATCH(text, params)) {
+        passes += 1;
+        const gate = gates[passes - 1];
+        if (gate !== undefined) await gate.promise;
+      }
+      if (text.includes('insert into visto_ai.learning (work, since, ran_at')) ended += 1;
+      return db.query<R>(text, params);
+    },
+  });
+  const learning = createLearning({ db: gated, clock: fixed(T1), log: () => {}, alert: () => {} });
+  learning.wake();
+  await new Promise((resolve) => setImmediate(resolve));
+  learning.wake();
+  let idle = false;
+  const waiting = learning.idle().then(() => { idle = true; });
+  gates[0]!.release();
+  for (let i = 0; i < 20 && passes < 2; i += 1) await new Promise((resolve) => setTimeout(resolve, 2));
+  assert.equal(passes, 2);
+  assert.equal(idle, false);
+  gates[1]!.release();
+  await bounded(waiting, 1_000);
+  assert.equal(ended, 2);
+  learning.stop();
+  await db.close();
 });

@@ -181,71 +181,87 @@ async function within(work: Promise<unknown>, ms: number): Promise<boolean> {
 export function createLearning(deps: { db: Db; clock: () => Date; log: (entry: Record<string, unknown>) => void; alert: Alert; passLimitMs?: number }): Learning {
   const log = safe(deps.log);
   const limit = deps.passLimitMs ?? PASS_LIMIT_MS;
-  const made = msOf(deps.clock);
+  let made: number | null = null;            // the first time the clock could be read: the 36 hours count from it when nothing else tells
   let lastCompleted: number | null = null;   // when a pass last completed in this process
   let raised = false;                        // learning_stale was raised since a pass last completed
   let stopped = false;
-  let running: Promise<void> | null = null;  // the pass under way
-  let control: { stop: boolean } | null = null;
   let pending = false;                       // one more pass was asked for meanwhile
 
-  function startPass(): void {
+  /** One pass: settles when that pass has ended and the next one, if asked for, has started. */
+  interface Pass { settled: Promise<void>; ctl: { stop: boolean } }
+  let current: Pass | null = null;           // the pass under way
+
+  // The clock's time, remembered as `made` when it is the first that could be read.
+  const now = (): number | null => {
+    const ms = msOf(deps.clock);
+    if (made === null && ms !== null) made = ms;
+    return ms;
+  };
+  now();
+
+  function startPass(): Pass {
     const ctl = { stop: false };
-    control = ctl;
-    running = (async () => {
-      try {
-        await learnOnce({ db: deps.db, clock: deps.clock, log, stopping: () => stopped || ctl.stop });
-        lastCompleted = msOf(deps.clock) ?? lastCompleted;
-        raised = false;
-      } catch {
-        // logged by the pass
-      }
-    })().finally(() => {
-      running = null;
-      control = null;
-      if (pending && !stopped) {
+    const pass: Pass = {
+      ctl,
+      settled: (async () => {
+        try {
+          await learnOnce({ db: deps.db, clock: deps.clock, log, stopping: () => stopped || ctl.stop });
+          lastCompleted = now() ?? lastCompleted;
+          raised = false;
+        } catch {
+          // logged by the pass
+        }
+      })().finally(() => {
+        current = null;
+        const again = pending && !stopped;
         pending = false;
-        startPass();
-      } else {
-        pending = false;
-      }
-    });
+        if (again) current = startPass();
+      }),
+    };
+    return pass;
   }
 
-  function ask(): void {
-    if (stopped) return;
-    if (running === null) startPass();
-    else pending = true;
+  /** The pass this call is for: the one under way, after which one more is asked for, or the one it starts. null after stop. */
+  function ask(): Pass | null {
+    if (stopped) return null;
+    if (current !== null) {
+      pending = true;
+      return current;
+    }
+    current = startPass();
+    return current;
   }
 
   async function idle(): Promise<void> {
-    while (running !== null) await running;
+    while (current !== null) await current.settled;
   }
 
-  // The time the 36 hours count from (rule 9). null: none can be told.
-  async function lastOf(): Promise<number | null> {
-    const fallback = lastCompleted ?? made;
+  // The time the 36 hours count from (rule 9). null: none can be told. The read is waited for until `deadline` at most.
+  async function lastOf(deadline: number): Promise<number | null> {
     let row: { ranAt: string | null; since: string } | null = null;
     try {
-      // A read that hangs is waited for at most the pass limit; one that fails or hangs counts from this process.
-      await within(readLearning(deps.db, WORK).then((r) => { row = r; }), limit);
+      // One that fails or hangs counts from this process.
+      await within(readLearning(deps.db, WORK).then((r) => { row = r; }), Math.max(0, deadline - Date.now()));
     } catch {
       row = null;
     }
+    const fallback = lastCompleted ?? made;
     const found = row as { ranAt: string | null; since: string } | null;
     if (found === null) return fallback;
     const ms = Date.parse(found.ranAt ?? found.since);
     return Number.isFinite(ms) ? ms : fallback;
   }
 
-  async function checkStale(): Promise<void> {
+  async function checkStale(deadline: number): Promise<void> {
     if (raised) return;
-    const last = await lastOf();
-    const now = msOf(deps.clock);
-    if (last === null || now === null || raised || now - last <= STALE_AFTER_MS) return;
+    const last = await lastOf(deadline);
+    const at = now();
+    if (last === null || at === null || raised || at - last <= STALE_AFTER_MS) return;
     raised = true;
     try {
-      deps.alert('learning_stale', { hours: Math.floor((now - last) / HOUR_MS) });
+      // An alert that throws, or returns a promise that rejects, changes nothing.
+      const returned: unknown = deps.alert('learning_stale', { hours: Math.floor((at - last) / HOUR_MS) });
+      void Promise.resolve(returned).catch(() => {});
     } catch {
       // an alert that throws changes nothing
     }
@@ -253,8 +269,8 @@ export function createLearning(deps: { db: Db; clock: () => Date; log: (entry: R
 
   return {
     async start(): Promise<void> {
-      const now = deps.clock().toISOString();
-      const row = await startLearning(deps.db, WORK, now);
+      const at = deps.clock().toISOString();
+      const row = await startLearning(deps.db, WORK, at);
       log({ event: 'learning_state', since: row.since, last_ran: row.ranAt, examined: row.examined, added: row.added, retired: row.retired, failed: row.failed });
     },
     wake(): void {
@@ -265,17 +281,19 @@ export function createLearning(deps: { db: Db; clock: () => Date; log: (entry: R
       }
     },
     async tick(): Promise<void> {
+      if (stopped) return;
+      // One deadline for the whole tick, shared by the stale read and the wait for the pass.
+      const deadline = Date.now() + limit;
       try {
-        await checkStale();
+        await checkStale(deadline);
       } catch {
         // the check never stops a tick
       }
       try {
-        if (stopped) return;
-        ask();
-        if (running === null) return;
-        if (!(await within(idle(), limit))) {
-          if (control !== null) control.stop = true;
+        const own = ask();
+        if (own === null) return;
+        if (!(await within(own.settled, Math.max(0, deadline - Date.now())))) {
+          own.ctl.stop = true;
           log({ event: 'learning_failed', reason: 'timeout' });
         }
       } catch {
