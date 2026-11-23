@@ -12,7 +12,7 @@
 
 **Notes:** the notes file beside this plan is written when the build ends. This plan is the first of two for stage 6 of the build order (section 18). The second is MCP servers and the model's tool loop.
 
-**This plan was reviewed before it was built.** The review found no critical defect and seven important ones, all corrected here: an address under `/extensions/` took a place and read a body with no module named (Task 7, rule 2); a handler past its limit freed its place and kept its body (Task 7, rule 4); module routes shared the webhooks' places, and a `503` given to GitHub is a lost delivery (call 23); one badly shaped acceptance row failed the whole answer (call 11); two time limits could not be tested short (Tasks 8 and 9); the route handler had no signal (call 28); and nothing said that what a provider returns can be posted, nor kept a fork from causing it (call 32). Of sixteen smaller points fourteen were applied; one was owned as a cost and not built (any number of feedback rows for one run, call 25); and one was left (asking the providers while the files are read).
+**This plan was reviewed before it was built.** The review found no critical defect and seven important ones, all corrected here: an address under `/extensions/` took a place and read a body with no module named (Task 7, rule 2); a handler past its limit freed its place and kept its body (Task 7, rule 4); module routes shared the webhooks' places, and a `503` given to GitHub is a lost delivery (call 23); one badly shaped acceptance row failed the whole answer (call 11); two time limits could not be tested short (Tasks 8 and 9); the route handler had no signal (call 28); and nothing said that what a provider returns can be posted, nor kept a fork from causing it (call 32). Of sixteen smaller points fourteen were applied; one was owned as a cost and not built (any number of feedback rows for one run, call 25); and one was left (asking the providers while the files are read). The plan file was corrected as the build went: where a review of a task changed a rule, the rule below states it as built, with a clause on what it was and why it changed.
 
 **Words used below.** *Module*: one entry of the config's `extensions` list, once loaded. *Part*: one of the four functions a module may provide. *Provider*: a module's `context` part. *Notifier*: its `notify` part. *Sink*: its `alert` part. *Criterion*: one acceptance criterion, a single line of text a provider returned. *Row*: what a review says of one criterion. *The header message*: the second message of every model call, which holds the pull request's title and description today and is the same in every batch of one review. *Published*: `review_runs.published` is true. *Short code*: text that matches `/^[a-z][a-z0-9_]{0,39}$/`.
 
@@ -44,9 +44,9 @@ A call marked "(planner)" is the planner's. Every other is the session lead's, r
 **The module**
 
 1. **A module is one entry of `extensions`: `name`, `module`, `options`.** `name` is a short code, unique in the list. `module` is a path, or a package the service can import. It is loaded once at start with `import()`, outside the engine, (planner) after the instance lock is taken, so a second instance that is about to be refused sets up no module; its default export is a function, called once with the module's name, its options, a logger and the function that reports a feedback answer; what it returns holds the parts it provides. A module that cannot be imported, whose export is not a function, whose set-up throws, or that returns the wrong shape stops the start, and the log names it. Cost: one broken module keeps the whole service down, the receiving of webhooks included.
-2. **(planner, asked for by the lead) A secret reaches a module by reference.** Anywhere inside `options`, a mapping whose only key is `env` names an environment variable, and the module is handed that variable's value in its place. A variable that is not set stops the start, as for every other secret. Cost: an option that really is a mapping with the one key `env` cannot be written; and the eval commands, which read the same config and load no module, still need those variables set.
+2. **(planner, asked for by the lead) A secret reaches a module by reference.** Anywhere inside the values of `options` (not `options` itself, ruled in Task 1's review), a mapping whose only key is `env` names an environment variable, and the module is handed that variable's value in its place. A variable that is not set stops the start, as for every other secret. Cost: an option that really is a mapping with the one key `env` cannot be written; and the eval commands, which read the same config and load no module, still need those variables set.
 3. **Under Docker a module file is mounted.** The image holds `src/` and `contract/` only. A path that starts with `./` or `../` is resolved against the config file's folder, so a folder mounted beside the config is named as `./extensions/<file>`. A mounted file can use Node's own modules and `fetch`; an import of a package is resolved from the file's own folder upward, so it reaches no package of the image, not even the service's four. A module that needs one brings its own `node_modules` in the mounted folder, or the adopter builds an image from the service's with the package installed and names the package. Cost: no module is installed for the adopter; a `.ts` file is run by Node with its types stripped, which a file under `node_modules` is not.
-4. **(planner) A module that provides nothing, or returns a key the contract does not know, stops the start.** A misspelt part (`notifier` for `notify`) would otherwise be a module that silently does nothing. The set-up has 30 seconds. Cost: a module written for a later version of the contract does not load on an earlier one.
+4. **(planner) A module that provides nothing, or returns a key the contract does not know, stops the start.** A misspelt part (`notifier` for `notify`) would otherwise be a module that silently does nothing. The import and the set-up have 30 seconds each (as first written only the set-up had a limit, and a module whose top level never settles hung the start). Cost: a module written for a later version of the contract does not load on an earlier one.
 5. **(planner) What a module logs is tagged.** Its lines carry `event: 'extension_log'` and its name, whatever it writes, so it cannot write a line that reads as the service's own. What it puts in them is the operator's business. Cost: a module cannot choose its event name.
 
 **Context**
@@ -70,11 +70,11 @@ A call marked "(planner)" is the planner's. Every other is the session lead's, r
 
 **Notices, alerts, routes, feedback**
 
-19. **A notifier is called once for each published run,** on every path that publishes (a first publication, a review a later start publishes, a run adopted late), in every mode; whether a re-check deserves a message is the module's choice. A stamp on the run's row is written before the call, so a stop of the service can lose a notice and never doubles one. The stamp is a column, `review_runs.notified_at`, that the design's table in 13 does not list; Task 11 adds it there. Each notifier has 10 seconds, they run at the same time, and nothing they do changes the job's outcome. Never in dry run. Cost: a notice lost to a stop, or to a notifier that failed, is not sent again; a notifier that hangs holds a place of the queue for 10 seconds.
+19. **A notifier is called once for each published run,** on every path that publishes (a first publication, a review a later start publishes, a run adopted late), in every mode; whether a re-check deserves a message is the module's choice. A stamp on the run's row is written before the call, so a stop of the service can lose a notice and never doubles one. The stamp is a column, `review_runs.notified_at`, that the design's table in 13 does not list; Task 11 adds it there. Each notifier has 10 seconds, they run at the same time, and nothing they do changes the job's outcome. Never in dry run. Cost: a notice lost to a stop, or to a notifier that failed, is not sent again; a notifier that hangs holds a place of the queue for 10 seconds once for each run adopted late and once more for the live head's own publication (as first written, once).
 20. **The notice carries what a message needs:** the run's id, the repository, the number, the title, the author's login, the head commit, the mode, the trigger, a link to the review and one to the pull request, whether a person must review, the highest score, the findings counted by severity, and the published body. (planner) The counts are of the findings placed on the diff, as the `Overall` line counts them. The title is the author's text and the body holds the model's: both are untrusted, and the module must treat them so. Cost: a module has no other data; what else it needs it reads from the git service itself.
 21. **(planner) The notice is the last thing a job does.** After the publication is recorded and the job finished, the read-back, the thread follow-up and the job's `review` log line come first, then the notice, so the line's `duration_ms` does not count it. A run adopted late is told right after its own read-back, before the live head is reviewed, with that run's head and body and the pull request's present title; that review's line does count it. Cost: a stop during the follow-up loses the notice; and the gate's look at the check, which waits for the job to leave, comes up to 10 seconds later when a notifier hangs.
-22. **Alerts fan out to sinks,** beside the webhook, each under the 5 seconds the webhook has, never in dry run. (planner) A sink that fails is logged and raises no alert of its own, or a broken sink would be told of itself. Cost: a dead sink is seen only in the log.
-23. **Routes live under `/extensions/<name>/`.** The handler gets the method, the path after the prefix, the query string, the headers and the raw body, and the service writes the status, the headers and the body it returns. The body is capped at 1 MiB, and a handler that throws is answered `500 internal_error` with no detail. Module routes do not share the webhooks' places (ruled after the review of this plan; as first written they did, and every `503` given to GitHub is a delivery lost for good while the service runs): each module has its own count of requests in flight, 10 as a starting value, and is answered `503 busy` beyond it. A request for a name that no module with a route has is answered `404 not_found` at once, with nothing counted and nothing read, as any unknown path is today. A handler has 10 seconds: its caller is answered at the limit, and its place stays taken until the handler's own promise settles, so no abandoned handler is ever uncounted. (planner) Its answer is checked before it is written; `cache-control: no-store` and `x-content-type-options: nosniff` are always set. Routes are served in dry run. Cost: a module whose handlers hang answers `503` to its own callers, and to nobody else, until they settle; ten requests of 1 MiB can be held for each module; whether a request is genuine is the module's check alone.
+22. **Alerts fan out to sinks,** beside the webhook, each under the 5 seconds the webhook has, never in dry run. (planner) A sink that fails is logged and raises no alert of its own, or a broken sink would be told of itself. A sink is told of every alert, those about its own module's other parts included. Cost: a dead sink is seen only in the log.
+23. **Routes live under `/extensions/<name>/`.** The handler gets the method, the path after the prefix, the query string, the headers and the raw body, and the service writes the status, the headers and the body it returns. The body is capped at 1 MiB, and a handler that throws is answered `500 internal_error` with no detail. Module routes do not share the webhooks' places (ruled after the review of this plan; as first written they did, and every `503` given to GitHub is a delivery lost for good while the service runs): each module has its own count of requests in flight, 10 as a starting value, and is answered `503 busy` beyond it. A request for a name that no module with a route has is answered `404 not_found` at once, with nothing counted and nothing read, as any unknown path is today. A handler has 10 seconds: its caller is answered at the limit, and its place stays taken until the handler's own promise settles, so no abandoned handler is ever uncounted. (planner) Its answer is checked before it is written; `cache-control: no-store` and `x-content-type-options: nosniff` are always set. Routes are served in dry run. Cost: a module whose handlers hang answers `503` to its own callers, and to nobody else, until they settle; ten requests of 1 MiB can be held for each module; a client that trickles its body holds a place for up to the server's request timeout (30 seconds), so ten such clients can keep one module busy, as they can the webhook route (found in Task 7's review); whether a request is genuine is the module's check alone.
 24. **(planner) How a notice went is not stored.** The run's row keeps the stamp. Each notifier's outcome is in the `notice` log line and feeds the alert. Cost: the UI can show that a notice was attempted, not whether it arrived, until a column is added.
 25. **Feedback goes through one function (O16).** A module reports the run, the person's git login, up or down and an optional reason. The service checks it, stores one answer for each run and person, the latest winning, and creates no memory record. (planner) The login is stored in lower case, so `Sam` and `sam` are one person; a reason is cut at 1,000 characters; the row also holds the module's name and the run's repository and number, as the other tables do. Only a published run can be answered, so never a dry run's. Cost: whoever passes the module's own check can answer for any login and any published run, and with made-up logins can store any number of rows for one run; the service cannot know better.
 
@@ -90,7 +90,7 @@ A call marked "(planner)" is the planner's. Every other is the session lead's, r
 30. **(planner) The second scorer is not shown extension text.** Its request is built as today. Cost: none known; a ticket cannot talk the scorer's score down.
 31. **(planner) What rows cost the findings is not measured.** A call that shows criteria asks the model for a longer answer. 15.1 runs the replay again when scoring joins the call or the scoring part of the contract changes; it does not speak of rows, but the worry is the same one. The replay runs without providers (call 6), so it cannot show this. Cost: the first evidence is a paid trial with a real provider, which is not in this plan.
 32. **(lead, ruled after the review of this plan) A pull request from a fork is given no extension context.** The engine is told whether the pull request's branch lies in another repository (`PullRequestInfo.fromFork`, read from what GitHub's answer already carries). For a fork no provider is asked: each has the status `skipped` with the code `from_fork`. A stranger could otherwise name a ticket in a branch or a title and have its criteria posted in a public review. (planner) Providers are asked only when the read says the pull request is not from a fork; a pull request whose origin is not known is treated as one from a fork, with the code `origin_unknown`. And whatever a provider returns for any other pull request can still be posted: criteria are written in the review, and the model may quote the text; the documents say so. Cost: a team that works through forks gets no ticket context until this rule is loosened.
-33. **(planner) A handler is handed the headers as first values under lower-case names.** 11.3 says the request is handed over untouched. The body is: it is the bytes received. A header given several times is its first value, as for the webhook route. Cost: a module that needs a repeated header cannot have it; Task 11 says so in the design.
+33. **(planner) A handler is handed the headers as Node's HTTP server reads them, under lower-case names.** 11.3 says the request is handed over untouched. The body is: it is the bytes received. A header given several times is what Node makes of it: most are joined with `, ` (`cookie` with `; `), for a few (such as `authorization`, `content-type`, `content-length`, `host`, `user-agent`) only the first value is kept, and `set-cookie`, which Node gives as a list, is handed over as its first value. (As first written this said every repeated header was its first value; Task 7's review found that only the few Node keeps apart are.) Cost: a module cannot tell a header given twice from one whose value holds a comma, and cannot read the later values of the few; Task 11 says so in the design.
 
 ## The predecessor's known gaps
 
@@ -119,7 +119,7 @@ Every constraint of the earlier plans still holds. The ones that bite most often
 - **Untrusted.** A provider's label, text and criteria, and a handler's answer, are checked field by field before they are used, inside a guard: an answer that throws when it is read is an answer of the wrong shape. A criterion's text is written on GitHub inside a code span, so nothing in it is live, and a row's note is made inert like every other text of the model's in the body.
 - **Posted is public.** Whatever a provider returns as criteria is written in the review, and the model may quote a provider's text there. It is then readable by whoever can read the pull request. No provider is asked for a pull request from a fork (call 32).
 - **Short codes only.** Wherever a failure is stored, logged or shown it is a short code, never an error's message. A code a module chose is used only when it is a short code; else the service's own.
-- **Boundaries, enforced by lint (`eslint.config.js`):** `src/engine/**` imports nothing from `db`, `shell`, `eval`, `forge/github`, no `node:fs`, `node:http` or `node:child_process`, and has no `import()`. So the loader lives in `src/extensions/`, and the engine is handed providers through `ReviewDeps`. `src/extensions/**` is under the general block: no GitHub adapter, no Postgres client. Only `src/db/**` imports a Postgres client, so a module reaches the database through the one function it is given. No new lint block is added.
+- **Boundaries, enforced by lint (`eslint.config.js`):** `src/engine/**` imports nothing from `db`, `shell`, `eval`, `forge/github`, no `node:fs`, `node:http` or `node:child_process`, and has no `import()`. So the loader lives in `src/extensions/`, and the engine is handed providers through `ReviewDeps`; the engine block also forbids `**/extensions/**` (added in Task 2's review). `src/extensions/**` is under the general block: no GitHub adapter, no Postgres client. Only `src/db/**` imports a Postgres client, so a module reaches the database through the one function it is given. No new lint block is added: the engine's block gains that one pattern.
 - **Logs** carry ids, names of modules, state names, codes and counts: never a login, a reason, a title, a text a provider returned, a request's path, headers or body, a module's path, or an error's message.
 - **A stored result may be old or damaged.** Every field read from `review_runs.result` is checked; what cannot be read is skipped, never thrown on.
 - **Migrations:** one file, `src/db/migrations/0009_feedback.sql`, plain SQL in the schema `visto_ai`, applied once in a transaction; `src/db/migrate.test.ts` pins its place. Outside text goes through `storable()`; a time is passed as an ISO string with `::timestamptz`.
@@ -130,7 +130,7 @@ Every constraint of the earlier plans still holds. The ones that bite most often
 
 Inputs and sequences no happy-path test would meet. Each has a test in the task named.
 
-1. **A provider that throws, throws at once, hangs, answers junk, answers something that throws when it is read, or changes what it was given.** The review runs as without it; the status says what happened; no message of the error is kept. Task 3.
+1. **A provider that throws, throws at once, hangs, answers junk (a list with a hole, an array-like that is no list), answers something that throws when it is read, or changes what it was given.** The review runs as without it; the status says what happened; no message of the error is kept. Task 3.
 2. **Text that tries to leave its block:** the review's own end marker, invisible characters, a line that looks like a criterion's id, a label of many lines, text far over the limits. Tasks 3 and 4.
 3. **Text that would cost a file its contents, and a file that is cut either way.** The first drops the text for the whole review, and keeps the criteria when they alone cost nothing; the second drops nothing. Tasks 3 and 4.
 4. **Rows the model should not have sent:** an entry that is no object, an `item` that is a number, a row with no status, an id that was not shown, a repeated id, a status of its own making, `met` with no note, a row in a call that showed no criteria, two batches that disagree. A bad row costs that row: the findings of its answer are kept. Task 4.
@@ -139,7 +139,7 @@ Inputs and sequences no happy-path test would meet. Each has a test in the task 
 7. **A notice sent twice, or at all when it must not be:** a later start, a run adopted late, dry run, a review that was not published, a stamp that cannot be written. And a notifier that throws or hangs after publication, at a limit of a few milliseconds, or changes the notice another notifier reads. Tasks 8 and 9.
 8. **An answer that must not be stored:** an unknown run, an unpublished one, a dry run's, a login of white space, a vote that is neither; and a second answer of the same person. Task 6.
 9. **A request that must not hurt the service:** one for a name no module has, with a large body, with and without modules; a body over the cap; a handler that never settles, many times over; a webhook while a module's places are all taken, and another module's request then; a handler that throws; an answer whose header holds a line break. Tasks 7 and 10.
-10. **A module that does not load:** no such file, an export that is no function, a set-up that throws or hangs, a part the contract does not know, nothing provided, a variable that is not set. Tasks 1, 2 and 10.
+10. **A module that does not load:** no such file, an import that never settles, an export that is no function, a set-up that throws or hangs, a part the contract does not know, nothing provided, a variable that is not set. Tasks 1, 2 and 10.
 11. **Dry run:** providers asked, no notifier, no sink, routes served. Task 10.
 12. **A result stored before this plan:** no `extensions`, no `acceptance`. It renders, publishes and logs as it did. Tasks 5 and 9.
 13. **A pull request from a fork, and one whose origin the read does not say.** No provider is called for either; a fork whose own repository was deleted is still a fork. Task 3.
@@ -172,12 +172,12 @@ export interface ExtensionConfig {
    | Key | Value | When not written |
    |---|---|---|
    | `name` | a short code: `/^[a-z][a-z0-9_]{0,39}$/` | required |
-   | `module` | 1 to 1,000 characters. A path, which starts with `./`, `../` or `/`; or the name of a package, which starts with none of them, does not start with `.`, holds no `:` and no `\`, does not end in `.ts`, `.mts`, `.js`, `.mjs` or `.cjs` (that is a path written without its `./`), and is not the name of one of Node's own modules (`isBuiltin` of `node:module`) | required |
+   | `module` | 1 to 1,000 characters, none of them a control character, a space or DEL (added in Task 1's review). A path, which starts with `./`, `../` or `/`; or the name of a package, which starts with none of them, does not start with `.`, holds no `:` and no `\`, does not end in `.ts`, `.mts`, `.js`, `.mjs` or `.cjs` (that is a path written without its `./`), and is not the name of one of Node's own modules (`isBuiltin` of `node:module`) | required |
    | `options` | a mapping | `{}` |
 
    The issues: `extensions.<i>.name: must be a short code (a lower-case letter, then lower-case letters, digits or underscores, at most 40)`; `extensions.<i>.module: must be a path that starts with ./, ../ or /, or the name of a package`.
 2. **A name is used once.** A second entry with a name already used: `extensions.<i>.name: is already used by another extension`.
-3. **Secrets by reference (call 2).** Inside `options`, at any depth, in mappings and in lists: a mapping whose only key is `env` is a reference. Its value must be a string that is not empty, else `extensions.<i>.options.<path>: env must name an environment variable`. The reference is replaced by the variable's value; a variable that is unset or empty is `extensions.<i>.options.<path>: environment variable <NAME> is not set`. `<path>` joins the keys with dots and writes a list's place as a number, as the other issues do (`options.chat.token`, `options.hooks.0`). A mapping with `env` and another key is left as written.
+3. **Secrets by reference (call 2).** Inside each value of `options`, at any depth, in mappings and in lists: a mapping whose only key is `env` is a reference. `options` itself is never one: `options: { env: X }` is a plain option named `env` (as first written the rule could read `options` itself as a reference, which left no mapping; ruled in Task 1's review). Its value must be a string that is not empty, else `extensions.<i>.options.<path>: env must name an environment variable`. The reference is replaced by the variable's value; a variable that is unset or empty is `extensions.<i>.options.<path>: environment variable <NAME> is not set`. `<path>` joins the keys with dots and writes a list's place as a number, as the other issues do (`options.chat.token`, `options.hooks.0`). A mapping with `env` and another key is left as written.
 4. **No issue quotes a value.** A variable's name is not a value and is quoted, as today.
 5. **Nothing is loaded here.** `module` is kept as written; whether the file exists is the loader's question.
 6. **The example file** gains a block, commented out, after the `alerts` block and before `repositories:`, with an empty line before its first comment line: the test's `uncomment` runs on through every line that begins with `#`, so without the empty line switching on `app` would switch this on too. The explanation stands above `# extensions:`; from that line on there are only keys and their comments.
@@ -227,6 +227,9 @@ test('the example with its extensions block switched on names the example module
   /* uncomment(example(), '# extensions:') with EXAMPLE_FEEDBACK_SECRET set: [{ name: 'example', module: './examples/extension-example.ts', options: { secret: <its value> } }];
      and uncomment(example(), '# app:') still has no extension */
 });
+// added in Task 1's review
+test('options stay a mapping: a mapping with the one key env at the top of options is an option named env', () => { /* options { env: SOME_VAR } is { env: 'SOME_VAR' }; options { token: { env: SOME_VAR } } is { token: <its value> } */ });
+test('a module name holds no control character, no space and no DEL', () => { /* a tab, a space, a NUL and DEL inside './a?b.ts': the one module issue */ });
 ```
 
 - [ ] **Step 2: Run them and see them fail.**
@@ -289,7 +292,7 @@ export interface RouteRequest {
   method: string;
   path: string;                // what follows /extensions/<name>, beginning with '/'; '/' when nothing follows. Not decoded
   query: string;               // what follows the first '?', without it; '' when there is none. Not decoded
-  headers: Record<string, string | undefined>;   // names in lower case; a header given several times is its first value (call 33)
+  headers: Record<string, string | undefined>;   // names in lower case; a header given several times as Node's HTTP server reads it (call 33)
   body: Buffer;                // the bytes received, at most 1 MiB
 }
 export interface RouteAnswer { status: number; headers?: Record<string, string>; body?: string }
@@ -315,14 +318,14 @@ export interface LoadedExtension { name: string; parts: Extension }
 export function withLimit<T>(ms: number, work: (signal: AbortSignal) => T | Promise<T>): Promise<T>;
 
 // src/extensions/load.ts
-export const SETUP_TIMEOUT_MS = 30_000;
+export const SETUP_TIMEOUT_MS = 30_000;               // the import's limit, and the set-up's
 /** Loads every module, in the order given, one after the other. Rejects at the first that fails, with Error(<code>), after one log line that names it. */
 export async function loadExtensions(configs: ExtensionConfig[], deps: {
   configDir: string;                                   // the folder of the config file: a relative path starts there
   log: (entry: Record<string, unknown>) => void;
   reportFeedback: (extension: string, answer: FeedbackAnswer) => Promise<FeedbackOutcome>;
   importModule?: (specifier: string) => Promise<unknown>;   // for tests; absent: (s) => import(s)
-  setupTimeoutMs?: number;                             // for tests; absent: SETUP_TIMEOUT_MS
+  setupTimeoutMs?: number;                             // for tests; absent: SETUP_TIMEOUT_MS; the import's limit too
 }): Promise<LoadedExtension[]>;
 /** The modules that have the part, in their order, each with its name. */
 export function contextProvidersOf(extensions: LoadedExtension[]): ContextProvider[];
@@ -333,10 +336,10 @@ export function alertSinksOf(extensions: LoadedExtension[]): Array<{ name: strin
 **Rules (11.3, calls 1, 3, 4, 5):**
 
 1. **What is imported.** A `module` that starts with `./`, `../` or `/` is resolved against `configDir` and imported by its file URL (`pathToFileURL`). Any other is imported as written.
-2. **The steps, for each module:** import it; its default export must be a function; call it once with the set-up object, under the set-up limit; check what it returns.
+2. **The steps, for each module:** import it, under the set-up limit; its default export must be a function; call it once with the set-up object, under the set-up limit again; check what it returns. (As first written only the set-up had the limit; Task 2's review found that a module whose top level never settles hung the start.)
 3. **The set-up object.** `name`; `options` as a deep copy (`structuredClone`), so no module changes another's or the config's; `log(entry)` writes `{ ...entry, event: 'extension_log', extension: <name> }` through `deps.log`, does nothing for an entry that is not an object, and never throws; `reportFeedback(answer)` calls `deps.reportFeedback(<name>, answer)`.
-4. **The shape.** What the function returns, once awaited, must be an object that is not null and not a list; each of its own keys must be one of `context`, `notify`, `alert`, `route`; each value must be a function, a value of `undefined` reading as absent; and at least one must be present.
-5. **A failure** writes one line, `{ event: 'extension_failed', extension: <name>, code, error: <the error's name or null>, cause: <the error's own string code or null> }`, and rejects with `Error(<code>)`. The line never holds the error's message or the module's path. The codes: `extension_import_failed` (the import rejected), `extension_bad_export` (the default export is no function), `extension_setup_failed` (the function threw or rejected), `extension_setup_timeout`, `extension_bad_shape`. Modules already set up are left as they are: the process is about to end.
+4. **The shape.** What the function returns, once awaited, must be a plain object that is not null and not a list; each of its own keys, symbols included, must be one of `context`, `notify`, `alert`, `route`; each value must be a function, a value of `undefined` reading as absent; and at least one must be present. Methods on a prototype are not own keys, so a class instance with no own part is `extension_bad_shape`. The parts are called as plain functions, detached from the object: a module must not rely on `this` (said in Task 2's review, for the documents).
+5. **A failure** writes one line, `{ event: 'extension_failed', extension: <name>, code, error: <the error's name when it is one of the built-in error names (`Error`, `TypeError`, `RangeError`, `ReferenceError`, `SyntaxError`, `EvalError`, `URIError`, `AggregateError`), else null>, cause: <the error's own `code` when it matches `/^[A-Z][A-Z0-9_]{0,79}$/`, else null> }`, and rejects with `Error(<code>)`. (As first written any name and any string code were logged, and a token-shaped one went into the log word for word.) The line never holds the error's message or the module's path. The codes: `extension_import_failed` (the import rejected), `extension_import_timeout` (the import did not settle within the limit), `extension_bad_export` (the default export is no function), `extension_setup_failed` (the function threw or rejected), `extension_setup_timeout`, `extension_bad_shape`. Modules already set up are left as they are: the process is about to end.
 6. **A success** writes `{ event: 'extension_loaded', extension: <name>, parts: [...] }`, the parts in the order `context`, `notify`, `alert`, `route`.
 7. **The three lists** keep the modules' order. `contextProvidersOf` gives `{ name, provide }`, where `provide` calls the module's `context` with the same two arguments.
 8. **The example module,** `examples/extension-example.ts`. It is the working sample `docs/extensions.md` points to (Task 11), so it is short, commented in plain words, and invented throughout. It imports its types with `import type` from `../src/extensions/types.ts`, and `timingSafeEqual` from `node:crypto`; nothing else. Its default export is an `ExtensionFactory` that returns three parts:
@@ -369,7 +372,7 @@ test('a module that does not load stops the loading and is named, without its pa
   /* Review Focus 10. Each rejects with Error(<code>) and logs one extension_failed line with the name and the code:
      the real import of './examples/no-such-file.ts': extension_import_failed, cause 'ERR_MODULE_NOT_FOUND';
      a module with no default, with default 5: extension_bad_export; a function that throws Error('boom at /srv/secret'): extension_setup_failed, and 'boom' and '/srv' are in no log line;
-     a function that never settles, with setupTimeoutMs 5: extension_setup_timeout;
+     an importModule that never settles, with setupTimeoutMs 5: extension_import_timeout; a function that never settles, with setupTimeoutMs 5: extension_setup_timeout;
      a function that returns null, [], {}, { notifier: fn }, { notify: 'x' }, { context: fn, extra: 1 }: extension_bad_shape. { notify: fn, alert: undefined } loads */
 });
 test('modules are set up in order, each once, and the second is not set up when the first fails', async () => { /* */ });
@@ -378,11 +381,15 @@ test('a module gets its name, a copy of its options, a tagged logger and its own
      reportFeedback(a) calls deps.reportFeedback('chat', a) and answers what it answers */
 });
 test('the three lists hold only the modules that have the part, in order', () => { /* */ });
+// added in Task 2's review
+test('the failure line keeps only a built-in error name and an error code of Node\'s style', async () => { /* TypeError and ERR_MODULE_NOT_FOUND are kept; a token-shaped name and code are null */ });
+test('review dependencies may carry context providers', () => { /* ReviewDeps['contextProviders'] takes contextProvidersOf's list */ });
 // test/boundaries.test.ts
 test('the extensions part may not import the GitHub adapter or a Postgres client', async () => { /* 'src/extensions/x.ts': both give no-restricted-imports */ });
+test('the engine may not import the extensions part', async () => { /* added in Task 2's review: a file under src/engine that imports from src/extensions gives no-restricted-imports */ });
 ```
 
-- [ ] **Step 2: Run them and see them fail.** The boundaries test holds before and after and is a pin.
+- [ ] **Step 2: Run them and see them fail.** The first boundaries test holds before and after and is a pin.
 - [ ] **Step 3: Implement.**
 - [ ] **Step 4: Run** `npm test && npm run typecheck && npm run lint` and the ASCII check.
 - [ ] **Step 5: Commit** `feat: the contract of an extension module, its loader and an example module`.
@@ -436,19 +443,21 @@ export function extensionPart(context: ExtensionContext, token: string): string;
    | threw or rejected | `error` | the error's message when it is a short code, else `provider_failed` |
    | did not settle within the limit | `error` | `timeout` |
    | answered something that is not an object, or whose `status` is none of the four; or, with `ok`, a `label` or a `text` that is present and no string, or `criteria` that is present and no list of strings | `error` | `bad_shape` |
+
+   `criteria` is read inside the guard without calling any method of the provider's object: it must be a list (`Array.isArray`) whose `length` is a whole number from 0 up, and its first 200 entries are read by index into a list of the service's own; an entry that is no string, a hole included, makes the answer `bad_shape`. (As first built the provider's own `slice` and iterator were called outside the guard: a list with its own `slice` rejected `gatherContext` and failed the review, and a sparse list put `undefined` into the criteria. Task 3's review.)
    | answered `ok`, and no text and no criterion is left once they are cleaned | `empty` | `empty` |
    | answered `ok` otherwise | `ok` | its `code` when that is a short code, else `ok` |
    | answered `empty`, `skipped` or `error` | as answered | its `code` when that is a short code, else the status's own name |
 
    The text and the criteria of an answer that is not `ok` are not used.
-4. **Cleaning the text.** A text longer than four times `EXTENSION_TEXT_CHARS` is first cut there, so that a huge string costs nothing; then `stripControl`, then trimmed, then cut at `EXTENSION_TEXT_CHARS` as `cutText` cuts, with its ` [cut]` mark; then, in the providers' order, cut in the same way at what is left of `EXTENSION_TOTAL_CHARS`, and dropped when nothing is left. A text counts towards the total by its length without the mark. The label: `inlineText`, every `<` and `>` removed (it is the one untrusted text that stands on a marker's own line), trimmed, cut at `EXTENSION_LABEL_CHARS`; the module's name when it is absent or empty. A block exists only for a text that is not empty.
-5. **Cleaning the criteria,** in the providers' order, reading at most the first 200 entries of each provider's list (what follows them is neither read nor checked): `stripControl`; every run of white space made one space; trimmed; cut at `CRITERION_CHARS` without splitting a surrogate pair; an empty one dropped; one whose text an earlier one already has dropped; all after the first `CRITERIA_MAX` dropped.
-6. **The audit,** all with `stage: 'context'`: `control_characters_stripped` with the subject `extension <name>` and the count as the reason, when any was removed from a text or a criterion; `extension_text_cut` with the subject `<name>` and the reason `per_provider` or `total`; `criterion_cut` and `criterion_repeated` with the subject `<name>`; `criteria_cut` with the subject `extensions` and the number dropped as the reason. No entry holds a text.
+4. **Cleaning the text.** A text longer than four times `EXTENSION_TEXT_CHARS` is first cut there, so that a huge string costs nothing; then `stripControl`, then made well formed (`toWellFormed`, so a lone surrogate never reaches the header message; added in Task 3's review), then trimmed, then cut at `EXTENSION_TEXT_CHARS` as `cutText` cuts, with its ` [cut]` mark; then, in the providers' order, cut in the same way at what is left of `EXTENSION_TOTAL_CHARS`, and dropped when nothing is left. A text counts towards the total by its length without the mark. A provider whose text is dropped or cut only because the total is used up keeps its status, `ok`. The label: `inlineText`, made well formed, every `<` and `>` removed (it is the one untrusted text that stands on a marker's own line), trimmed, cut at `EXTENSION_LABEL_CHARS`; the module's name when it is absent or empty. A block exists only for a text that is not empty.
+5. **Cleaning the criteria,** in the providers' order, reading at most the first 200 entries of each provider's list (what follows them is neither read nor checked): `stripControl`; made well formed; every run of white space made one space; trimmed; cut at `CRITERION_CHARS` without splitting a surrogate pair; an empty one dropped; one whose text an earlier one already has dropped; all after the first `CRITERIA_MAX` dropped.
+6. **The audit,** all with `stage: 'context'`: `control_characters_stripped` with the subject `extension <name>` and the count as the reason, when any was removed from a text or a criterion; `extension_text_cut` with the subject `<name>` and the reason `per_provider` or `total`; `criterion_cut` and `criterion_repeated` with the subject `<name>`, one entry of each for a provider, with the number of its criteria cut or repeated as the reason; `criteria_cut` with the subject `extensions` and the number dropped as the reason. No entry holds a text.
 7. **The part.** `''` when there is no block. Else `EXTENSION_LINE`, then for each block `wrapData('extension <name>: <label>', <text>, token)`, joined by line feeds. (Task 4 adds the criteria to the end of this part.)
 8. **The header message** is `pullRequestHeader(...)` as today and, when the part is not `''`, a line feed and the part. With no `extension`, or one that shows nothing, the three messages are what they are today, character for character. The second scorer's request is not touched (call 30).
 9. **`fixedTokens`** adds `estimateTokens` of a line feed and the part rendered with `MEASURE_TOKEN`, when the part is not `''`.
 10. **In `review`.** With `deps.contextProviders` absent or empty, nothing is asked, the result's `dependencies` has no `extensions` key, and every request is what it is today. Otherwise the providers are asked once, after the file list is read and found not empty, and before anything is packed. Every result returned from then on, a failed one included, carries `dependencies.extensions`; a result returned before has none (call 9). The gathering's audit entries join the review's.
-11. **Room (5.3, call 8).** The files are packed as today, with today's budget: call it the first packing. When it has at least one batch, the candidates are tried in this order, and one whose part is `''` is passed over: the whole context; then the context without its blocks, which is the criteria alone. For a candidate, a budget is computed with its part counted (`fixedTokens` with it as `extension`, the other arguments as for the first packing), and when that is above 0 the files are packed again with it. The candidate is shown when that packing exists and `JSON.stringify([notReviewed, audit])` is the same for it and for the first packing: packing with the part cut no test file, no full file and no thread, and left no file unreviewed, that packing without it kept. Its packing is then the one used, and no later candidate is tried. When the whole context is not the one shown, the audit gains `{ stage: 'context', action: 'extension_context_cut', subject, reason: 'over_call_budget' }`, with the subject `texts` when the criteria are still shown and `extensions` when nothing is; with nothing shown the first packing is used. A provider's status does not change with this. The choice is made right after the first packing, before anything else reads it, and holds for every call of the review. The extension never makes a review fail as `budget_too_small`. (Until Task 4 shows the criteria, the second candidate's part is always `''`.)
+11. **Room (5.3, call 8).** The files are packed as today, with today's budget: call it the first packing. When it has no batch, nothing is shown and the audit gains no `extension_context_cut` entry (settled in Task 3's review: there is no call to show it in). When it has at least one batch, the candidates are tried in this order, and one whose part is `''` is passed over: the whole context; then the context without its blocks, which is the criteria alone. For a candidate, a budget is computed with its part counted (`fixedTokens` with it as `extension`, the other arguments as for the first packing), and when that is above 0 the files are packed again with it. The candidate is shown when that packing exists and `JSON.stringify([notReviewed, audit])` is the same for it and for the first packing: packing with the part cut no test file, no full file and no thread, and left no file unreviewed, that packing without it kept. Its packing is then the one used, and no later candidate is tried. When the whole context is not the one shown, the audit gains `{ stage: 'context', action: 'extension_context_cut', subject, reason: 'over_call_budget' }`, with the subject `texts` when the criteria are still shown and `extensions` when nothing is; with nothing shown the first packing is used. A provider's status does not change with this. The choice is made right after the first packing, before anything else reads it, and holds for every call of the review. The extension never makes a review fail as `budget_too_small`. (Until Task 4 shows the criteria, the second candidate's part is always `''`.)
 12. **One part for the whole review.** Every call of the review, a retry and the two halves of a batch split after a time-out included, carries the same header message.
 
 - [ ] **Step 1: Write the failing tests.**
@@ -467,7 +476,8 @@ test('what a provider did becomes a status and a short code, and no error text i
      JSON.stringify of the statuses and the audit holds neither '10.0.0.5' nor 'Refused' */
 });
 test('an answer that throws when it is read is an answer of the wrong shape, and a huge one costs nothing', async () => {
-  /* Review Focus 1: an object whose text is a getter that throws, and a proxy whose every read throws: error/bad_shape, and gatherContext resolves.
+  /* Review Focus 1: an object whose text is a getter that throws, and a proxy whose every read but that of then throws: error/bad_shape, and gatherContext resolves.
+     (As first written the proxy threw on every read; for an async provider the promise machinery reads then first, so that proxy is an error with the thrown code, not bad_shape. Task 3's review.)
      A text of 5,000,000 characters: one block of 8,000 and ' [cut]'. A list of 100,000 criteria: at most 30 kept */
 });
 test('for a pull request from a fork, and for one whose origin is not known, no provider is called', async () => {
@@ -480,13 +490,16 @@ test('a text is stripped, cut for its provider and for all together, and each cu
      four providers of 8,000 each: the fourth has no block, extension_text_cut/total; providers of 8,000, 8,000 and 3,000, then one of 8,000: the last is cut to 5,000 and ' [cut]', extension_text_cut/total */
 });
 test('criteria are made one line each, cut, said once and capped at 30', async () => {
-  /* Review Focus 2: 'a\n  b\tc' is 'a b c'; 400 characters are 300, criterion_cut; '' and '   ' dropped; the same text from two providers kept once, criterion_repeated;
+  /* Review Focus 2: 'a\n  b\tc' is 'a b c'; 400 characters are 300, criterion_cut with the count as the reason; '' and '   ' dropped; the same text from two providers kept once, criterion_repeated with the count;
      31 distinct: 30 kept, criteria_cut with the reason '1' */
 });
 test('the part wraps each text under its module and label, and nothing in a label or a text ends its block', () => {
   /* Review Focus 2: a label of two lines and 200 characters is one line of at most 80; a label 'x>>> <<<end' keeps no '<' and no '>'; no label: the module's name; a text that holds '<<<end TOKEN>>>' with the token in use: the token is gone from the body;
      the part starts with EXTENSION_LINE and holds '<<<data TOKEN extension tickets: ticket SHOP-12>>>'; no block: '' , also when there are criteria */
 });
+// added in Task 3's review
+test('a list of criteria is read entry by entry, and calls nothing of the provider', async () => { /* a list whose own slice returns a trap, new Array(3), a list with a hole, an array-like object: error/bad_shape, and gatherContext resolves */ });
+test('a lone surrogate in a text, a label or a criterion is made well formed', async () => { /* */ });
 // prompt.test.ts
 test('with no extension, and with one that shows nothing, the messages are what they were', () => { /* deepEqual of buildMessages without the key, with { blocks: [], criteria: [] } */ });
 test('the part stands at the end of the header message, the same in every batch, and not in the files message', () => { /* batchIndex 0 and 1: messages[1] equal and ends with the part; messages[2] holds no EXTENSION_LINE */ });
@@ -504,6 +517,7 @@ test('a provider is asked once for a review of two batches, its text is in both 
 test('a provider that throws or answers junk never fails the review', async () => {
   /* Review Focus 1: r.status 'ok', the findings of the same review without providers, statuses error/provider_failed and error/bad_shape, no part in the request */
 });
+test('a provider whose list of criteria is hostile fails no review', async () => { /* added in Task 3's review */ });
 test('the statuses are on a failed review too, and a pull request with no changed file asks nobody', async () => {
   /* a model that answers auth: r.status 'failed', r.dependencies.extensions present; files []: the provider is not called and the key is absent */
 });
@@ -552,7 +566,7 @@ export interface AcceptanceRow {
 // ReviewInput gains    earlierAcceptance?: AcceptanceRow[]   -- the rows of the newest published review that has any; absent reads as none
 
 // src/engine/model/submit-review.ts
-// SubmitReviewArgs gains   acceptance?: unknown[]   -- the entries as the model sent them; each is judged in reconcileAcceptance
+// SubmitReviewArgs gains   acceptance?: unknown     -- as the model sent it, a list or not; it is judged, row by row, in reconcileAcceptance
 /** The tool of a call: with thread verdicts, with acceptance rows, with both or with neither. (false, false) and (true, false) are today's two tools, unchanged. */
 export function submitToolFor(withThreads: boolean, withAcceptance: boolean): ToolDefinition;
 export function parseSubmitReview(json: string, withThreads = false, withAcceptance = false): { ok: true; value: SubmitReviewArgs } | { ok: false; reason: string };
@@ -573,7 +587,7 @@ export function readAcceptance(value: unknown): AcceptanceRow[];
 
 **Rules (5.5, 5.7, calls 10 to 18):**
 
-1. **The tools.** Two more schemas beside today's two, each today's schema with `acceptance`. The tool the model is shown describes it as an optional list of `{ item: string, status: string, note?: string }`. The answer is parsed more loosely: `acceptance` is an optional list whose entries are taken as they come (a list of anything; null for the list reads as absent). Nothing of an entry is checked here: a badly shaped row costs that row in rule 4 and never the answer, the rule this file already keeps for a bad score (call 11). The JSON of `submitReviewTool` and of `submitReviewWithThreadsTool` does not change by one character. A call that was not sent a tool with `acceptance` and answers with that key is refused as today's unknown key is (`unexpected key acceptance`) and retried once.
+1. **The tools.** Two more schemas beside today's two, each today's schema with `acceptance`. The tool the model is shown describes it as an optional list of `{ item: string, status: one of met, not_met, not_verified, note?: string }`, the status as an enum (a ruling of Task 4's review). The answer is parsed more loosely: `acceptance` is taken as it comes, a list or not; null reads as absent. A value that is no list is no rows and one audit entry, `{ stage: 'reconcile', action: 'acceptance_dropped', subject: 'acceptance', reason: 'bad_shape' }`, and never fails the answer or costs a retry (as first written it failed the answer, against call 11; ruled in Task 4's review). Nothing of an entry is checked here: a badly shaped row costs that row in rule 4 and never the answer, the rule this file already keeps for a bad score (call 11). The JSON of `submitReviewTool` and of `submitReviewWithThreadsTool` does not change by one character. A call that was not sent a tool with `acceptance` and answers with that key is refused as today's unknown key is (`unexpected key acceptance`) and retried once.
 2. **Where the criteria stand.** `extensionPart` now ends with them, when there are any, after the blocks; with criteria and no block the part is `EXTENSION_LINE` and then the criteria. In this order, each on its own paragraph: `ACCEPTANCE_HEADING`; `ACCEPTANCE_RULES`; when `lastStatus` holds a status, one line of the service's own, `The last review left these as: A1 met; A3 not_met.`, naming only the criteria that have one; then `wrapData('acceptance criteria', <the list>, token)`, the list being one line for each criterion, `A<n>. <text>`, numbered from 1. `fixedTokens` follows, since it measures the part, and counts the JSON of `submitToolFor(withThreads, <criteria are shown>)` in place of today's tool. Task 3's test that a context of criteria alone shows nothing is changed to say this.
 3. **`ACCEPTANCE_RULES`,** exactly:
 
@@ -591,9 +605,9 @@ A note is one sentence on one line. A criterion that is not met is not a finding
 
 4. **A row is kept** when all of these hold; else it is dropped with `{ stage: 'reconcile', action: 'acceptance_dropped', subject: <the item as text, at most 40 characters; `row` when it has none that can be written>, reason }`:
    - it is well formed: an object that is not null and not a list, whose `item` is a string or a whole number (a number `n` reads as `A<n>`), whose `status` is a string, and whose `note` is absent, null or a string: else `bad_shape`. Reading it happens inside a guard, so an entry cannot throw;
+   - no earlier row of the same answer named the item: else `repeated`. A row whose `item` is a string or a whole number that names a criterion claims that item even when the rest of it is wrong: the first row for an item decides, damaged or not (as first written a damaged row did not claim it; ruled in Task 4's review);
    - its `item`, trimmed, is `A<n>` or `<n>` in any letter case, with `n` from 1 to the number of criteria: else `unknown_item`;
    - its `status` is one of the three: else `bad_status`;
-   - no earlier row of the same answer named the item: else `repeated`;
    - its note, after `stripControl`, with every run of white space made one space, trimmed and cut at 300 characters, is not empty, or its status is `not_verified`: else `no_note`.
 5. **One row for each criterion,** from the rows kept of every answer, in the answers' order:
    - some row says `not_met`: `not_met`, with the note of the first that does. When another says `met`, the audit gains `{ stage: 'reconcile', action: 'acceptance_disagreement', subject: 'A<n>', reason: 'not_met' }`;
@@ -608,7 +622,8 @@ A note is one sentence on one line. A criterion that is not met is not a finding
    - `lastStatus` is set only when the mode is not `full`, and before the part is measured for the budget: for each criterion, the status of the row of the same text in `input.earlierAcceptance`, when that row's `from` is not `none`; else null.
    - An ok result has `acceptance` whenever there is at least one criterion, also when no model was called and when the part was dropped for room: `reconcileAcceptance(<the answers>, <the criteria>, input.earlierAcceptance ?? [], mode !== 'full')`. Its audit joins the review's. With no criterion the key is absent. A failed result never has it.
    - Rows change nothing else: not the findings, the scores, the verdict, `nothingToDo` or the coverage (calls 13 and 29).
-7. **`readAcceptance`** reads what a stored result holds under `acceptance`, which may be old or damaged. A value that is no list gives `[]`. Rows are read one by one: a row whose `criterion` is no string or is empty, whose `status` is none of the three, or whose `note` is no string is skipped; a `from` that is none of the three reads as `review`. Task 5 uses it wherever stored rows are read.
+7. **`readAcceptance`** reads what a stored result holds under `acceptance`, which may be old or damaged. A value that is no list gives `[]`. Rows are read one by one, inside a guard, and at most 30 are read. A stored row gets the checks of a fresh one: its `criterion` is cleaned as a criterion is (rule 5 of Task 3: one line, cut at 300) and its `note` as a note is (rule 4); a row whose `criterion` is no string or is empty once cleaned, whose `status` is none of the three, whose `note` is no string, or that claims `met` or `not_met` with an empty note is skipped; a `from` that is none of the three reads as `review`. (As first written a stored row was checked less than a fresh one and any number was read; Tasks 4 and 5's reviews.) Task 5 uses it wherever stored rows are read.
+8. **`reconcileAcceptance`** skips a criterion that is not a string; the engine hands it strings only.
 
 - [ ] **Step 1: Write the failing tests.**
 
@@ -616,11 +631,11 @@ A note is one sentence on one line. A criterion that is not met is not a finding
 // submit-review.test.ts
 test('the two tools of today keep their arguments, and two more carry acceptance', () => {
   /* submitToolFor(false, false) deep-equals submitReviewTool and (true, false) submitReviewWithThreadsTool; their properties are overview, findings, files, and those with thread_verdicts;
-     (false, true) has acceptance and no thread_verdicts; (true, true) has both */
+     (false, true) has acceptance and no thread_verdicts; (true, true) has both; in both, acceptance's status is an enum of the three */
 });
 test('acceptance is read only in a call that asked for it, and no entry of it can fail the answer', () => {
   /* Review Focus 4: with the flag, the list [5, null, { item: 2, status: 'met', note: 'x' }, { item: 'Z9', status: 'maybe' }, { item: 'A1' }] parses, the entries as sent; acceptance: null reads as absent;
-     acceptance: 'x' (no list) fails. Without the flag the same answer is { ok: false } with a reason that names the unexpected key acceptance */
+     acceptance 'x', 5 and { item: 'A1' } (no list) parse too, as sent, with the findings kept (changed by the ruling on rule 1). Without the flag the same answer is { ok: false } with a reason that names the unexpected key acceptance */
 });
 // acceptance.test.ts
 test('a row that is not well formed is dropped by itself, and a number is read as an id', () => {
@@ -629,12 +644,17 @@ test('a row that is not well formed is dropped by itself, and a number is read a
 });
 test('stored rows are read one by one', () => {
   /* Review Focus 12: readAcceptance of undefined, 'x' and {}: []. Of [{ criterion: 5 }, { criterion: 'c', status: 'done', note: '' }, { criterion: 'c', status: 'met' }, a good row with from 'x', a good row]:
-     the two good rows, the first with from 'review' */
+     the two good rows, the first with from 'review'. As built (Tasks 4 and 5's reviews): a stored note of many lines is one line of at most 300; a stored met or not_met whose note is empty once cleaned is skipped;
+     of 5,000 good rows, 30 are read; a stored criterion is cleaned as a fresh one, and one with nothing left is no row; a row whose status throws when read is skipped */
 });
 test('a row counts only for a criterion that was shown, with a status of the three, once for each answer, and with a note when it claims', () => {
   /* Review Focus 4: three criteria. Dropped, each with its reason: 'A4', 'A0', 'x', '' (unknown_item); status 'done' (bad_status); a second A1 in one answer (repeated);
      met and not_met with a note of '' and of ' \u200b ' (no_note). Kept: 'a2', ' A2 ', '2'; not_verified with no note. A note of 400 characters over two lines is one line of 300 */
 });
+// added in Task 4's review
+test('the first row for an item decides, damaged or not', () => { /* */ });
+test('a list of rows that is no list costs the rows and nothing else', () => { /* one acceptance_dropped with the subject acceptance and the reason bad_shape */ });
+test('a criterion that is not a string has no row, and nothing is thrown', () => { /* */ });
 test('rows of several batches are merged by rule', () => {
   /* Review Focus 4: met alone: met. met and met: met with the first note. met then not_met, and not_met then met: not_met with the not_met note, and acceptance_disagreement in the audit.
      not_met and not_verified: not_met. met and not_verified: met. not_verified alone: not_verified. Every one from 'review' */
@@ -680,6 +700,7 @@ test('an incremental review keeps what the last review found for a criterion it 
      mode full: A is not_verified from none, and the header has no such line */
 });
 test('a failed review has no acceptance rows', async () => { /* */ });
+test('rows that are no list cost no answer and no retry', async () => { /* added in Task 4's review */ });
 ```
 
 - [ ] **Step 2: Run them and see them fail.**
@@ -720,7 +741,7 @@ export function acceptanceOf(runs: StoredRun[]): AcceptanceRow[];
 ```
 
    In this sample the escape `\u2014` stands for the dash the body's other sections put before a finding's text; the source writes it as that escape. The count line always names the three counts. A row's line is `- **\[<words>]**`, a space and the criterion in a code span, then, when the note is not empty, a space, `\u2014`, a space and the note, then its tag. The words are `met`, `not met`, `not verified`. The tag is ` _(kept from an earlier review)_` for a row from `earlier`, ` _(not judged in this review)_` for one from `none`, and nothing for one from `review`. Every row is listed: there are at most 30.
-2. **Nothing in a criterion is live.** The criterion comes from a module, which read it from a ticket anyone may have written. It is written with `firstLine` and then `codeSpan`, the function of `body.ts` that already shows a path: inside a code span no mention, no HTML, no link, no image and no reference to another repository's issue takes effect. The note is the model's: `firstLine` and `inertInline`, as a finding's first line.
+2. **Nothing in a criterion is live.** The criterion comes from a module, which read it from a ticket anyone may have written. A stored criterion or note of several lines is made one line by `readAcceptance` before it is rendered (Task 4, rule 7). It is written with `firstLine` and then `codeSpan`, the function of `body.ts` that already shows a path: inside a code span no mention, no HTML, no link, no image and no reference to another repository's issue takes effect. The note is the model's: `firstLine` and `inertInline`, as a finding's first line.
 3. **A stored result** may be old or damaged: its rows are read with `readAcceptance` (Task 4), here and in rule 5, and nowhere by other code. A result with no row that can be read has no section. The body written whole, when GitHub refused the inline comments, carries the section too.
 4. **Nothing else of the body changes:** not `Overall`, not a failed review's body.
 5. **`acceptanceOf`** looks at the published runs, newest first by id, and answers the rows of the first whose stored result has at least one row that `readAcceptance` reads. Runs of any mode count, a re-check included.
@@ -806,13 +827,13 @@ create table visto_ai.review_feedback (
 );
 ```
 
-2. **`claimNotice`** is one statement: it sets `notified_at` where the id is the run's, `published` is true and `notified_at` is null, and answers whether a row was changed.
-3. **`recordFeedback`** is one statement: an insert that selects the run's `service`, `owner`, `repo` and `number` from `review_runs` where the id is the run's and `published` is true, with `on conflict (run, login) do update` of `vote`, `reason`, `extension` and `at`. It answers whether a row came back. The login, the reason and the module's name go through `storable()`.
+2. **`claimNotice`** is one statement: it sets `notified_at` where the id is the run's, `published` is true, `dry_run` is false and `notified_at` is null, and answers whether a row was changed. (`dry_run = false` was added in Task 6's review, as `recordFeedback` has it.)
+3. **`recordFeedback`** is one statement: an insert that selects the run's `service`, `owner`, `repo` and `number` from `review_runs` where the id is the run's, `published` is true and `dry_run` is false, with `on conflict (run, login) do update` of `vote`, `reason`, `extension` and `at`. It answers whether a row came back. The login, the reason and the module's name go through `storable()`.
 4. **`createFeedback`.** The answer comes from a module and is checked field by field, typed or not:
    - `run`: a whole number from 1 to 2,147,483,647;
-   - `login`: a string; trimmed; one leading `@` removed; then 1 to `LOGIN_MAX_CHARS` characters, none of them white space or a control character; stored in lower case;
+   - `login`: a string; trimmed; one leading `@` removed; then well formed, with no white space, no control character and no format character (`\p{Cf}`), and, once lower-cased, 1 to `LOGIN_MAX_CHARS` characters counted by code point; stored in lower case (format characters, ill-formed text and the measure after lower-casing were added in Task 6's review);
    - `vote`: exactly `up` or `down`;
-   - `reason`: absent, null or a string. A string goes through `storable()`, is trimmed and is cut at `REASON_MAX_CHARS` without splitting a surrogate pair; an empty one is stored as null.
+   - `reason`: absent, null or a string. A string goes through `storable()`, is trimmed, is cut at `REASON_MAX_CHARS` without splitting a surrogate pair and is trimmed again after the cut (added in Task 6's review); an empty one is stored as null.
    Anything else, an answer that is no object included, is `{ ok: false, code: 'bad_answer' }`, and nothing is stored.
 5. `recordFeedback` answering false is `unknown_run`: no published run has that id, so a run that failed, one not yet published and a dry run's all answer it. A rejection of the database is `store_failed`. The time stored is the clock's.
 6. **The log:** one line for each call, `{ event: 'feedback', extension, run: <the number, or null when it is none>, vote: <the vote, or null>, outcome: 'stored' | <the code> }`. Never the login, never the reason. A logger that throws changes nothing.
@@ -826,6 +847,7 @@ create table visto_ai.review_feedback (
 test('the notice of a published run is claimed once, and never that of a run that is not published', async () => {
   /* a recorded run: false, and notified_at stays null; after markPublished: true, then false; an id no run has: false */
 });
+test('the notice of a dry run cannot be claimed, even when it was stamped as published', async () => { /* added in Task 6's review */ });
 // db/feedback.test.ts
 test('an answer is stored for a published run, with the repository and the number of that run', async () => { /* the row: run, github, acme, shop, 7, octo-dev, up, null, chat, the time */ });
 test('a second answer of the same person replaces the first, and another person stands beside it', async () => {
@@ -843,6 +865,9 @@ test('what is refused as bad_answer, with nothing stored', async () => {
 });
 test('a long reason is cut at 1,000 characters, an empty one is stored as none, and a NUL is removed', async () => { /* */ });
 test('an unknown run, an unpublished run and a dry run answer unknown_run', async () => { /* Review Focus 8 */ });
+// added in Task 6's review
+test('a login with a hidden character, a broken pair, or a length over the limit once lower-cased is refused', async () => { /* */ });
+test('a reason cut at the limit keeps no trailing space', async () => { /* */ });
 test('a database that fails answers store_failed, and nothing is thrown', async () => { /* a Db whose query rejects with an error whose message is no short code: the log line holds store_failed and not the message */ });
 ```
 
@@ -874,6 +899,7 @@ export interface CheckedAnswer { status: number; headers: Record<string, string>
  * `settled` resolves when the promise the handler returned has settled, which can be later, and never rejects.
  */
 export type ExtensionRoute = (request: RouteRequest) => { answer: Promise<CheckedAnswer>; settled: Promise<void> };
+// createListener reads both fields inside a guard: a route that returns no object, or whose fields throw, is answered 500 and gives its place back
 // createListener's routes gain   extensions?: ReadonlyMap<string, ExtensionRoute>   -- by module name; absent reads as none
 // its limits gain                maxExtensionBodyBytes?: number; maxExtensionInFlight?: number
 
@@ -892,14 +918,14 @@ export function createExtensionRoutes(extensions: LoadedExtension[], deps: {
 1. **The path.** With the query string cut off, a path that starts with `/extensions/` may be a module's: the name is what stands up to the next `/`, or to the end.
 2. **No module, no change.** When `routes.extensions` has no entry for that name, the answer is `404 not_found`, given at once on the path every unknown address takes today: no place is counted and nothing of the body is read. That holds with no module at all, for a name that is no short code, and for a module that has no `route`.
 3. **Every method** is handed over. The webhook route and `/healthz` are unchanged, and the webhook route keeps its own 20 places and its own cap: nothing a module route does is counted against them.
-4. **A module's places.** Each module has a count of its own, with `maxExtensionInFlight` places (absent: `EXTENSION_IN_FLIGHT`). A request for a module whose places are all taken is answered `503 busy`, before its body is read. Otherwise it takes a place, and gives it back at exactly one of these moments: when its body could not be read or was over the cap, so the handler was never called; or when the route's `settled` resolves. A place is never given back because the caller was answered.
+4. **A module's places.** Each module has a count of its own, with `maxExtensionInFlight` places (absent: `EXTENSION_IN_FLIGHT`). A request for a module whose places are all taken is answered `503 busy`, before its body is read. Otherwise it takes a place, and gives it back at exactly one of these moments: when its body could not be read or was over the cap, so the handler was never called; when the route returns no object or its `settled` or `answer` throws as it is read, which is answered `500 internal_error` (both are read inside the guard; as first built a route returning no object kept its place for good, Task 7's review); or when the route's `settled` resolves. A place is never given back because the caller was answered.
 5. **The body** is read as the webhook's is, with the cap `maxExtensionBodyBytes` (absent: `EXTENSION_BODY_BYTES`): over it, by its declared length or while it arrives, `413 payload_too_large` with `connection: close`.
-6. **The request** handed over: `method` as received (`''` when there is none); `path`, what follows the name, beginning with `/`, and `/` when nothing follows; `query`, what follows the first `?` of the URL, `''` when there is none; `headers` as the webhook route gets them, first values under lower-case names (call 33); `body`, the bytes received. Nothing is decoded.
+6. **The request** handed over: `method` as received (`''` when there is none); `path`, what follows the name, beginning with `/`, and `/` when nothing follows; `query`, what follows the first `?` of the URL, `''` when there is none; `headers` as Node's HTTP server reads them, under lower-case names, a value Node gives as a list (only `set-cookie`) handed over as its first (call 33); `body`, the bytes received. Nothing is decoded.
 7. **The answer** is written as soon as the route's `answer` resolves: with its status, with its headers over `content-type: text/plain; charset=utf-8`, and with `cache-control: no-store` and `x-content-type-options: nosniff` set last, so no handler changes them. `idle()` waits for answers, as today, and not for a handler that goes on after its limit.
 8. **`createExtensionRoutes`.** For each module with a `route`, a function that calls the handler once, with the request and a signal that aborts at the limit:
    - it throws, at once or later: the answer is `{ status: 500, headers: {}, body: 'internal_error' }`, logged as `{ event: 'extension_route_failed', extension, code: 'threw' }`;
    - it does not settle in time: the same answer, given at the limit, with the code `timeout`. The handler is not stopped; what it answers later is dropped; and `settled` stays unresolved until the handler's own promise settles, so the listener keeps its place taken;
-   - its answer is checked: an object; `status` a whole number from 200 to 599; `body` absent or a string; `headers` absent or an object of at most 20 entries, each name matching `/^[A-Za-z0-9-]{1,64}$/`, each value a string of at most 2,000 characters with no control character. Names are written in lower case, and `connection`, `content-length`, `transfer-encoding`, `cache-control` and `x-content-type-options` are left out. Anything else: the same `500`, with the code `bad_answer`.
+   - its answer is checked: an object; `status` a whole number from 200 to 599; `body` absent or a string; `headers` absent or an object of at most 20 entries, each name matching `/^[A-Za-z0-9-]{1,64}$/`, each value a string of at most 2,000 characters of printable ASCII (space to `~`). Names are written in lower case, and `connection`, `content-length`, `transfer-encoding`, `cache-control`, `x-content-type-options`, `keep-alive`, `upgrade`, `trailer`, `te` and `date` are left out. (As first written a value only had to hold no control character, which let through text the runtime refuses to write, and the last five names were not left out; Task 7's review.) Anything else: the same `500`, with the code `bad_answer`.
    `settled` resolves at once for a handler that threw before it returned a promise.
    Once for each request, when its answer is decided, `deps.noted` is told: `(name, true, 'ok')` for an answer that passed the check, whatever its status; `(name, false, <the code>)` for `threw`, `timeout` and `bad_answer`. A `noted` that throws changes nothing. The place rule of rule 4 makes a module whose handlers never settle refuse its own callers for good, so this is what lets an alert say so (call 26).
 9. **The log** of a module's route holds the module's name and a code: never the path, the query, a header or the body.
@@ -925,7 +951,8 @@ test('each request tells how its handler did, once', async () => {
 });
 test('an answer of the wrong shape is a 500, and the headers the service owns are left out', async () => {
   /* Review Focus 9: null; status 99, 600, 200.5, '200'; body 5; headers with a value holding a line feed, a name with a space, 21 entries: bad_answer.
-     { status: 200, headers: { 'Cache-Control': 'public', Connection: 'close', 'Content-Length': '5', 'X-Content-Type-Options': 'x' } }: headers {} */
+     a value with a tab or a character outside ASCII: bad_answer. { status: 200, headers: { 'Cache-Control': 'public', Connection: 'close', 'Content-Length': '5', 'X-Content-Type-Options': 'x' } }: headers {};
+     Keep-Alive, Upgrade, Trailer, TE and Date are left out too */
 });
 // http.test.ts -- a fake route is a function that records its request and returns two promises the test settles
 test('a request for a name no module has is answered 404 at once, as on main: nothing is read and no place is taken', async () => {
@@ -935,11 +962,13 @@ test('a request for a name no module has is answered 404 at once, as on main: no
 });
 test('a request under a module prefix is handed over with its method, the rest of its path, its query, its headers and its body', async () => {
   /* POST /extensions/chat/events/x?a=1&b=%20: { method: 'POST', path: '/events/x', query: 'a=1&b=%20', headers: { 'x-a': 'b' }, body 'abc' }.
-     GET /extensions/chat and /extensions/chat/: path '/'. /extensions/chat?x=1: path '/', query 'x=1'. A header given twice is its first value */
+     GET /extensions/chat and /extensions/chat/: path '/'. /extensions/chat?x=1: path '/', query 'x=1'. A header Node gives as a list is its first value */
 });
 test('what the module answers is written with its headers, and the two headers of the service are always set', async () => {
   /* { status: 200, headers: { 'content-type': 'application/json' }, body: '{}' }: written with application/json, cache-control no-store and x-content-type-options nosniff; no content-type: text/plain */
 });
+test('the two headers of the service are written over the module\'s own', async () => { /* a checked answer that carries cache-control and x-content-type-options: the service's two are written */ });
+test('a route that returns no object is answered 500, and its place is given back', async () => { /* maxExtensionInFlight 1: the next request for the module is handled */ });
 test('a body over 1 MiB is answered 413 on a module route, its place is given back, and the webhook route keeps its own cap', async () => {
   /* Review Focus 9: by content-length and while it arrives; the route is not called; with maxExtensionInFlight 1 the next request for the module is handled; a webhook of 2 MiB is handled */
 });
@@ -997,15 +1026,15 @@ export function githubPullRequestUrl(ref: PullRequestRef): string;
 
 **Rules (11.3, 14, calls 19, 22, 26):**
 
-1. **`sendNotice`.** Each notifier gets its own deep copy of the notice (`structuredClone`) and its own signal, so none changes what another reads. Its outcome: `{ ok: true, code: 'ok' }`; for a throw, at once or later, `{ ok: false, code }` with the error's message when it is a short code, else `notifier_failed`; for one that does not settle in time, `timeout`. With no notifier it resolves `[]`.
+1. **`sendNotice`.** Each notifier gets its own deep copy of the notice (`structuredClone`) and its own signal, so none changes what another reads. Its outcome: `{ ok: true, code: 'ok' }`; for a throw, at once or later, `{ ok: false, code }` with the error's message when it is a short code other than `ok`, else `notifier_failed`; for one that does not settle in time, `timeout`. The message is read inside a guard: whatever is thrown, a value whose `message` throws when read included, the outcome is `notifier_failed` and `sendNotice` never rejects. (As first built the message was read unguarded and `sendNotice` could reject, and `Error('ok')` was reported as `ok`; Task 8's review.) With no notifier it resolves `[]`.
 2. **`createExtensionHealth`** keeps one state for each module and part: not seen, working or failing.
    - `ok` false while not failing: the state is failing, and `alert('extension_error', { extension, part, reason: code })` is raised.
    - `ok` false while failing: nothing, also when the code is another.
    - `ok` true while failing: the state is working, and `alert('extension_ok', { extension, part })` is raised.
    - `ok` true otherwise: the state is working, and nothing is raised.
    An alert that throws changes nothing.
-3. **Sinks.** For each alert, after the log line and beside the webhook's post, every sink is called once with its own copy of `{ code, at: <the clock's time, as the webhook gets it>, details }`, under `sinkTimeoutMs` (absent: `ALERT_TIMEOUT_MS`). A sink that throws or does not settle in time is logged as `{ event: 'alert_failed', code, extension: <the sink's name>, reason: 'threw' | 'timeout' }` and raises no alert. `alert` still returns at once and never throws, and `settled` also waits for the sinks. With no `sinks`, `createAlerts` does what it does today.
-4. **The links:** `https://github.com/<owner>/<repo>/pull/<number>#pullrequestreview-<id>` and `https://github.com/<owner>/<repo>/pull/<number>`.
+3. **Sinks.** For each alert, after the log line and beside the webhook's post, every sink is called once with its own copy of `{ code, at: <the clock's time>, details }`, the time read from the clock once for each alert and given to the webhook and the sinks alike (as first built it was read twice and could differ; Task 8's review), and no sink called when the clock cannot be read, under `sinkTimeoutMs` (absent: `ALERT_TIMEOUT_MS`). A sink that throws or does not settle in time is logged as `{ event: 'alert_failed', code, extension: <the sink's name>, reason: 'threw' | 'timeout' }` and raises no alert. `alert` still returns at once and never throws, and `settled` also waits for the sinks. With no `sinks`, `createAlerts` does what it does today.
+4. **The links:** `https://github.com/<owner>/<repo>/pull/<number>#pullrequestreview-<id>` and `https://github.com/<owner>/<repo>/pull/<number>`. The owner and the repository are written unescaped, as the existing comment link writes them: the host is fixed and the names come from signed deliveries (raised and ruled not to change in Task 8's review).
 
 - [ ] **Step 1: Write the failing tests.**
 
@@ -1019,6 +1048,11 @@ test('a notifier that changes its notice changes nobody else\'s, nor the caller\
   /* Review Focus 7: the first sets notice.run = 0, notice.body = '' and notice.findings.major = 99: the second sees the values given, and the object the caller passed is unchanged */
 });
 test('with no notifier nothing is called and nothing is thrown', async () => { /* [] */ });
+// added in Task 8's review
+test('a thrown value whose message cannot be read is notifier_failed, and sendNotice still resolves', async () => { /* a message getter that throws; a proxy whose getPrototypeOf throws */ });
+test('a notifier that throws Error(\'ok\') is notifier_failed', async () => { /* */ });
+test('a notifier that settles after its limit has one outcome, timeout', async () => { /* */ });
+test('with no limit given each notifier has 10 seconds', async () => { /* NOTICE_TIMEOUT_MS is 10,000 */ });
 // extension-health.test.ts
 test('the first failure raises one alert, further failures none, and the first success after it one', () => {
   /* noted('tickets', 'context', false, 'timeout'): extension_error { extension: 'tickets', part: 'context', reason: 'timeout' }; again with 'bad_shape': nothing; true: extension_ok { extension, part }; true again: nothing */
@@ -1032,6 +1066,11 @@ test('a sink that throws or hangs is logged with its name, stops nothing and rai
      With sinkTimeoutMs 5 and a sink that never settles: reason 'timeout', its signal aborted, and settled() resolves */
 });
 test('with no sink an alert is what it was', async () => { /* the log and the post of today */ });
+// added in Task 8's review
+test('the time of an alert is read once, and the sinks get the time the webhook gets', async () => { /* a clock that moves at each read */ });
+test('a clock that throws is a failed post, as before, and no sink is told', async () => { /* */ });
+test('a sink that settles after its limit is logged once', async () => { /* */ });
+test('with no limit given each sink has 5 seconds', async () => { /* ALERT_TIMEOUT_MS is 5,000 */ });
 // links.test.ts
 test('a review link and a pull request link', () => {
   /* 'https://github.com/acme/shop/pull/7#pullrequestreview-501' and 'https://github.com/acme/shop/pull/7'; githubReviewUrl(ref, '501/x') throws github_bad_path */
@@ -1063,6 +1102,7 @@ notice?: {
   reviewUrl: (ref: PullRequestRef, reviewId: string) => string;
   pullRequestUrl: (ref: PullRequestRef) => string;
   timeoutMs?: number;          // for tests; passed on to sendNotice, whose own default is 10 seconds
+  send?: typeof sendNotice;    // for tests; absent: sendNotice
 };
 /** Told how each module did; absent when the deployment has none. */
 extensionHealth?: Pick<ExtensionHealth, 'noted'>;
@@ -1087,16 +1127,16 @@ extensionHealth?: Pick<ExtensionHealth, 'noted'>;
    | `body` | the body as it was published: the publication's own, or the adopted run's stored one |
 
    A notice that cannot be built (a link's function throws, as for a review id that is not digits) is logged as `{ event: 'notice_failed', job, run, reason: <codeOf the error> }`: no stamp is written, and nothing is called.
-6. **The call and after it:** `sendNotice(<the notifiers>, <the notice>, deps.notice.timeoutMs)`; then `{ event: 'notice', job, run, review: <the id>, sent: true, results: { <name>: <code>, ... } }`, and for each notifier `deps.extensionHealth?.noted(<name>, 'notify', <ok>, <code>)`.
+6. **The call and after it:** `(deps.notice.send ?? sendNotice)(<the notifiers>, <the notice>, deps.notice.timeoutMs)`; a send that rejects, which `sendNotice` never does, is logged as `{ event: 'notice_failed', job, run, reason: <codeOf the error> }` (as first built it was swallowed silently; Task 9's review); then `{ event: 'notice', job, run, review: <the id>, sent: true, results: { <name>: <code>, ... } }`, and for each notifier `deps.extensionHealth?.noted(<name>, 'notify', <ok>, <code>)`.
 7. **Nothing here changes the job.** It never rejects; a logger, a health or a notifier that throws changes nothing; and the job's outcome, its record and its `review` log line are what they are with no notifier.
-8. **The providers' health.** When this start called the engine, each entry of the result's `dependencies.extensions` that has a string `status` and a string `code` is told: `noted(<name>, 'context', status !== 'error', code)`. In dry run too. A result with no such map, and a review an earlier start recorded, tell nothing.
-9. **The `review` log line** gains `extensions`: the map of the result, or of the stored result of a review an earlier start recorded, each entry as `{ status, code }`; null when there is none or it cannot be read.
+8. **The providers' health.** When this start called the engine, each entry of the result's `dependencies.extensions` whose name, `status` and `code` are short codes is told: `noted(<name>, 'context', status !== 'error', code)`. In dry run too. A result with no such map, and a review an earlier start recorded, tell nothing.
+9. **The `review` log line** gains `extensions`: the map of the result, or of the stored result of a review an earlier start recorded, with the entries of rule 8 only, each as `{ status, code }`; null when there is no map or it is no object.
 
 - [ ] **Step 1: Write the failing tests.** The harness's options gain `notifiers` and a health that records.
 
 ```ts
 test('a published review is told to every notifier once, as the last thing the job does, with what a message needs', async () => {
-  /* Review Focus 7: live(), a result with one blocker and two minors, needsHuman true, highest 85. The notice deep-equals
+  /* Review Focus 7: live(), a result with one blocker and two minors (and one unplaced major, which is not counted: added in Task 9's review), needsHuman true, highest 85. The notice deep-equals
      { run: <the run's id>, repository: 'acme/shop', number: 7, title: <LIVE's>, author: 'octo-dev', headSha: 'h1', mode: 'full', trigger: 'automatic',
        reviewUrl: <reviewUrl(ref, '501')>, pullRequestUrl: <pullRequestUrl(ref)>, needsHuman: true, highestScore: 85, findings: { blocker: 1, major: 0, minor: 2 }, body: <the published body> };
      the writes show listReviewComments before the notifier was called; when the notifier is called the log already holds the job's review line; then the log holds { event: 'notice', sent: true, results: { chat: 'ok' } } */
@@ -1132,6 +1172,11 @@ test('the health is told how each provider did, in dry run too, and the review l
 test('a result with no statuses, or damaged ones, tells the health nothing and logs none', async () => {
   /* Review Focus 12: no key; extensions 'x'; { tickets: 5, wiki: { status: 'ok' } }: no call, and the line has extensions null, null and {} */
 });
+// added in Tasks 8 and 9's reviews
+test('a notifier that throws a value that cannot be read is one notice line with notifier_failed', async () => { /* */ });
+test('a notice whose sending rejects is one notice_failed line, and the job ends as it would have', async () => { /* deps.notice.send rejects */ });
+test('a publication that could not be recorded tells nobody and takes no stamp', async () => { /* markPublished fails */ });
+test('a notice carries the body that was published and stored, also when GitHub refused the inline comments', async () => { /* */ });
 ```
 
 - [ ] **Step 2: Run them and see them fail.**
@@ -1167,10 +1212,10 @@ export async function lockThenLoad(takeLock: () => Promise<InstanceLock | null>,
 
 **Rules (11.1, 11.3, calls 1, 6, 19, 22, 23):**
 
-1. **`main`.** Inside the start, after the model client is made and before `startService`: the database object is made first; `createFeedback({ db, clock, log })`; then `lockThenLoad`, with the lock taken as today (`takeInstanceLock` and its `instance_lock_lost` handler) and `load` being `loadExtensions(config.extensions, { configDir: <the folder of the --config file, made absolute>, log, reportFeedback })`. So no module is set up by an instance that is about to be refused (call 1). `startService` is then given `takeLock: () => Promise.resolve(<the lock>)`, the loaded modules, `githubReviewUrl` and `githubPullRequestUrl`; it is not changed for this and still releases the lock when it stops or fails. A rejection fails the start as any other does: `start_failed` is printed, and the log line has `another_instance_running` or the loader's code as its `reason`; for a module, after the loader's own line that names it. Nothing has listened by then. With no module named, the loader is given `[]` and loads nothing; the lock is still taken here, a moment earlier than on `main`.
+1. **`main`.** Inside the start, after the model client, the contract, the scorer and the GitHub adapters (the webhook reader, the access, the hook deliveries, the writer and the checks) are made, so that from the lock on nothing throws before the service holds it, and before `startService`: the database object is made first; `createFeedback({ db, clock, log })`; then `lockThenLoad`, with the lock taken as today (`takeInstanceLock` and its `instance_lock_lost` handler) and `load` being `loadExtensions(config.extensions, { configDir: <the folder of the --config file, made absolute>, log, reportFeedback })`. So no module is set up by an instance that is about to be refused (call 1). `startService` is then given `takeLock: () => Promise.resolve(<the lock>)`, the loaded modules, `githubReviewUrl` and `githubPullRequestUrl`; it is not changed for this and still releases the lock when it stops or fails. When the lock or the load fails, `main` closes the database object itself before the rejection goes on (a close that fails changes nothing). A rejection fails the start as any other does: `start_failed` is printed, and the log line has `another_instance_running` or the loader's code as its `reason`; for a module, after the loader's own line that names it. Nothing has listened by then. With no module named, the loader is given `[]` and loads nothing; the lock is still taken here, a moment earlier than on `main`.
 2. **The engine's dependencies** gain `contextProviders: contextProvidersOf(extensions)` only when that list is not empty. In dry run too.
 3. **`startService`:**
-   - `createAlerts` is given `sinks: alertSinksOf(deps.extensions)` out of dry run, and none in dry run;
+   - `createAlerts` is given `sinks: alertSinksOf(deps.extensions)` out of dry run, and none in dry run; a sink hears every alert, those about its own module's other parts included;
    - the review job is given `extensionHealth: createExtensionHealth(alert)` when `deps.extensions` is not empty;
    - the review job is given `notice: { notifiers, reviewUrl, pullRequestUrl }` only out of dry run and only when some module has a notifier;
    - the listener is given `extensions: createExtensionRoutes(deps.extensions, { log, noted })`, in dry run too, where `noted` tells the health of the part `route`. With no module that has a route the map is empty, and every address under `/extensions/` is answered as on `main`;
@@ -1232,7 +1277,7 @@ test('the eval commands load no module', () => { /* src/eval/cli.ts imports noth
 
 **Files:**
 - Create: `docs/extensions.md`
-- Modify: `README.md`, `config.example.yml` (the list of alerts at `alerts.webhook` gains `extension_error` and `extension_ok`; the comments of Task 1's block, if it left them short), `env.example` (the same list; a commented `EXAMPLE_FEEDBACK_SECRET`), `compose.yaml` (one commented line), `docs/superpowers/specs/2026-11-13-visto-ai-design.md` (the seven sentences of rule 4, and nothing else)
+- Modify: `README.md`, `config.example.yml` (the list of alerts at `alerts.webhook` gains `extension_error` and `extension_ok`; the comments of Task 1's block, if it left them short), `env.example` (the same list; a commented `EXAMPLE_FEEDBACK_SECRET`), `compose.yaml` (one commented line), `docs/superpowers/specs/2026-11-13-visto-ai-design.md` (the seven sentences of rule 4, and nothing else); this plan, brought to the rules as built
 
 **Rules:**
 
@@ -1243,7 +1288,7 @@ test('the eval commands load no module', () => { /* src/eval/cli.ts imports noth
    - **what is posted is public (call 32):** whatever a provider returns as criteria is written in the review, and the model may quote a provider's text in what it writes there, so both are readable by whoever can read the pull request, on a public repository by anyone. A provider must answer `skipped` for a pull request whose ticket must not be shown. No provider is asked for a pull request from a fork: the result says `skipped` with `from_fork`;
    - the notice, field by field, with the warning that the title and the body are untrusted text; that every publication is told, a re-check included, and that sending is the module's choice; at most once, and not again after a failure;
    - alerts: the codes that exist today, and that a sink's own failure raises none;
-   - routes: the prefix, what the handler gets (the body as the bytes received; the headers as first values under lower-case names, so a repeated header cannot be read, call 33) and may answer, the two headers the service always sets, the 1 MiB cap, the module's own 10 places, that a handler past its 10 seconds has its caller answered `500` and keeps its place until it settles, so a module whose handlers hang answers `503` to its own callers and to nobody else; that every route is public, that the module must check each request itself and answer a failed check with no detail, and the feedback function with each of its three refusals;
+   - routes: the prefix, what the handler gets (the body as the bytes received; the headers as Node's HTTP server reads them under lower-case names, so a repeated header is joined or, for a few, cut to its first value, call 33) and may answer, the two headers the service always sets, the 1 MiB cap, the module's own 10 places, that a handler past its 10 seconds has its caller answered `500` and keeps its place until it settles, so a module whose handlers hang answers `503` to its own callers and to nobody else; that every route is public, that the module must check each request itself and answer a failed check with no detail, and the feedback function with each of its three refusals;
    - **loading:** modules are set up after the instance lock is taken and before the migrations run and the service listens; the path rules; under Docker, the mount (`./extensions:/config/extensions:ro` beside the config, named as `./extensions/<file>`), that a mounted file reaches Node's own modules and `fetch` and no package of the image, the two ways to bring a package, and that a `.ts` file is run with its types stripped;
    - **trust:** a module runs inside the service with its secrets, its database connection and its network; the service does not sandbox it;
    - dry run, the eval commands, and that a changed module needs a restart;
@@ -1266,7 +1311,7 @@ test('the eval commands load no module', () => { /* src/eval/cli.ts imports noth
    | 5.1 | at the end of the Input item | The acceptance rows handed in are those of the newest published run that has any, a re-check included, and a criterion is told apart by its text. | 16 |
    | 5.3 | after "the previous review's overview and acceptance rows." | Of those rows the model is shown each criterion's status, in the service's own words, and not its note. | 17 |
    | 14 | the alert "a dependency's status changes" | It becomes: a dependency's status changes between working and failing; for an extension that is when it starts to answer with an error and when it stops, and an answer that there was nothing to look up, or nothing found, is no failure. | 26 |
-   | 11.3 | after "so the module can verify its chat tool's signature." | The body is the bytes received; the headers are handed over under lower-case names, a header given several times as its first value. | 33 |
+   | 11.3 | after "so the module can verify its chat tool's signature." | The body is the bytes received; the headers are handed over under lower-case names as the HTTP server reads them, so a header given several times is mostly joined with commas, and for a few, such as `authorization` and `content-type`, only its first value is kept. (As first written: "a header given several times as its first value", which is not what Node hands over; call 33.) | 33 |
    | 13 | the row of `review_runs` | Its list gains: when its notice was sent to the notifiers. | 19 |
    | 11.3 | after "Provider output is untrusted data with its own size limit." | No provider is asked for a pull request from a fork, because what a provider returns can be posted in the review and is then readable by whoever can read the pull request. | 32 |
 5. **A real run under Docker,** made by the controller after the last fix, on the final code, in a network with no way out, as in the earlier plans:
@@ -1282,7 +1327,7 @@ test('the eval commands load no module', () => { /* src/eval/cli.ts imports noth
 
 - [ ] **Step 1: Write the documents.** For each sentence written or kept in the sections touched, name the code that makes it true in the report.
 - [ ] **Step 2: Run** the suite, the type check, the lint and the ASCII check.
-- [ ] **Step 3: Commit** `docs: what an extension module is, what it can do and what it costs`.
+- [ ] **Step 3: Commit** `docs: extension modules: the module contract, the README, the example config, the design's amendments and the plan as built`.
 
 ---
 

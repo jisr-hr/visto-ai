@@ -22,6 +22,7 @@ services:
     env_file: .env
     volumes:
       - ./config.local.yml:/config/config.yml:ro
+      # - ./extensions:/config/extensions:ro   # extension modules, named in the config as ./extensions/<file>
     ports:
       - "8080:8080"
     stop_grace_period: 660s

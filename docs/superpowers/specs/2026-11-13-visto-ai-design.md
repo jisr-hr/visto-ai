@@ -149,7 +149,7 @@ The engine never writes to GitHub or the database. That is what lets the eval ca
 
 One entry point: `review(input, deps)`.
 
-- **Input**: the pull request reference, base and head commits, the trigger, the effective configuration for the repository, an "as of" time used by memory lookups, and the pull request's earlier state. The caller reads the earlier state and hands it in: the head of the last published review, that review's overview and acceptance rows, the scores stored by earlier runs, the scores stored in the last 30 days for the same blocks on other pull requests of the repository (section 6.2), and which files are covered so far. In a replay it is empty or built from the case.
+- **Input**: the pull request reference, base and head commits, the trigger, the effective configuration for the repository, an "as of" time used by memory lookups, and the pull request's earlier state. The caller reads the earlier state and hands it in: the head of the last published review, that review's overview and acceptance rows, the scores stored by earlier runs, the scores stored in the last 30 days for the same blocks on other pull requests of the repository (section 6.2), and which files are covered so far. In a replay it is empty or built from the case. The acceptance rows handed in are those of the newest published run that has any, a re-check included, and a criterion is told apart by its text.
 - **Dependencies**, all passed in: a read-only source (pull request data, file list with patches, file contents at a commit, review threads), a read-only memory, a model client, extension context providers, an MCP client factory, a clock and a logger.
 - **Result**: the mode used, findings (placed and unplaced), verdicts on earlier threads, scores per block and per file, the pull request verdict, an overview, acceptance rows if any, coverage (files reviewed and files not, with reasons), usage (calls, tokens, cached tokens, cost), a status per dependency, and an audit list.
 
@@ -207,7 +207,7 @@ For each file under review:
 For the pull request:
 
 - Title, description and branch names.
-- The bot's earlier threads with replies and state, and in incremental mode the previous review's overview and acceptance rows.
+- The bot's earlier threads with replies and state, and in incremental mode the previous review's overview and acceptance rows. Of those rows the model is shown each criterion's status, in the service's own words, and not its note.
 - Memory blocks (section 7.4).
 - Extension context, such as a ticket's acceptance criteria.
 
@@ -681,9 +681,9 @@ The deployment config may name extension modules. A module can provide:
 
 - **Context providers:** given the pull request's metadata, return a labelled block of text, optionally acceptance criteria, and a status. Ticket and wiki lookups are built this way.
 - **Notifiers:** called after a review is published, and for alerts. A chat message to the author is built this way.
-- **Feedback routes (O16):** a notifier may collect a thumbs up or down on the review it announced, with an optional reason. The module registers HTTP routes under a prefix reserved for it. The app hands it each request untouched, so the module can verify its chat tool's signature. The module reports an answer to the core through one function: the review run, the person's git login, up or down, and the reason.
+- **Feedback routes (O16):** a notifier may collect a thumbs up or down on the review it announced, with an optional reason. The module registers HTTP routes under a prefix reserved for it. The app hands it each request untouched, so the module can verify its chat tool's signature. The body is the bytes received; the headers are handed over under lower-case names as the HTTP server reads them, so a header given several times is mostly joined with commas, and for a few, such as `authorization` and `content-type`, only its first value is kept. The module reports an answer to the core through one function: the review run, the person's git login, up or down, and the reason.
 
-A module that fails to load stops start-up. Each provider's status is recorded on every review. Provider output is untrusted data with its own size limit.
+A module that fails to load stops start-up. Each provider's status is recorded on every review. A review that ends before the providers are asked, because the pull request has no changed file or its file list cannot be read, records none. Provider output is untrusted data with its own size limit. No provider is asked for a pull request from a fork, because what a provider returns can be posted in the review and is then readable by whoever can read the pull request.
 
 Feedback is stored per review run, one answer per person, the latest winning. It is a measure of the reviewer: the UI shows the share of thumbs up per repository and the reasons given. It creates no memory record, because a verdict on a whole review does not say which finding or score was wrong. Feedback routes are public like every other route: a request that fails the module's check is rejected with no detail, and request size is capped.
 
@@ -729,7 +729,7 @@ The schema is designed fresh. Identity everywhere is the git service, the reposi
 | `deliveries` | Webhook delivery ids, for duplicate rejection |
 | `jobs`, `heartbeat` | The queue and the liveness mark |
 | `pull_requests` | Author, state, merge and revert facts |
-| `review_runs` | One per run, append-only: mode, head, status, review id, whether approved and when dismissed, body, usage, dependency statuses, coverage, count of blocking findings on unchanged lines, count of blocking findings left without a thread |
+| `review_runs` | One per run, append-only: mode, head, status, review id, whether approved and when dismissed, body, usage, dependency statuses, coverage, count of blocking findings on unchanged lines, count of blocking findings left without a thread, when its notice was sent to the notifiers |
 | `review_comments` | The app's published inline comments: findings, with their severity and quoted code, and human-review notes, with their block's hash |
 | `file_scores` | Per run and file: hash of the file's diff, final score, floor source, whole-file score if any, change summary |
 | `block_scores` | Per run, file and block: hash of the block's changed lines, hash of its surroundings, line range, score, what it carried from earlier heads, category, reason, parts if split |
@@ -753,7 +753,7 @@ A deployment that ran the predecessor brings its history across with a one-off m
 - **Health.** The public health route returns liveness only. Queue state, recent reviews and configuration are served only behind the UI's sign-in. Assume every route is reachable from the internet.
 - **Alerts**, posted as JSON to one configured webhook and shown in the UI:
   - the publish rate falls;
-  - a dependency's status changes;
+  - a dependency's status changes between working and failing; for an extension that is when it starts to answer with an error and when it stops, and an answer that there was nothing to look up, or nothing found, is no failure;
   - cached tokens stay at zero across reviews that made more than one request in sequence. A single-request review at low volume misses the cache legitimately and is not counted;
   - the learning job is stale;
   - spend reaches 80% of the daily limit;
