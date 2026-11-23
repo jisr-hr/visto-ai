@@ -236,7 +236,10 @@ export function parseConfig(yamlText: string, env: Record<string, string | undef
   const extensions: ExtensionConfig[] = raw.extensions.map((e, i) => ({
     name: e.name,
     module: e.module,
-    options: resolveReferences(e.options, `extensions.${i}.options`, env, extensionIssues) as Record<string, unknown>,
+    // A reference is a value inside options, never options itself, which stays a mapping.
+    options: Object.fromEntries(
+      Object.entries(e.options).map(([k, v]) => [k, resolveReferences(v, `extensions.${i}.options.${k}`, env, extensionIssues)]),
+    ),
   }));
   if (extensionIssues.length > 0) throw new ConfigError(extensionIssues);
   const { defaults, overrides } = raw.repositories;

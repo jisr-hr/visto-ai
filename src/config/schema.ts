@@ -68,6 +68,7 @@ const MODULE_MESSAGE = 'must be a path that starts with ./, ../ or /, or the nam
 /** A path starts with ./, ../ or /; anything else must be the name of a package, so a path written without its ./ is refused. */
 function isModuleSpecifier(value: string): boolean {
   if (value.length < 1 || value.length > 1000) return false;
+  if (/[\x00-\x20\x7f]/.test(value)) return false;
   if (value.startsWith('./') || value.startsWith('../') || value.startsWith('/')) return true;
   if (value.startsWith('.') || value.includes(':') || value.includes('\\')) return false;
   if (/\.(ts|mts|js|mjs|cjs)$/.test(value)) return false;

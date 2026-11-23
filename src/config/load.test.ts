@@ -607,3 +607,20 @@ test('the example with its extensions block switched on names the example module
   const appEnv = { ...exampleEnv, APP_PRIVATE_KEY: PEM, ALERT_WEBHOOK_URL: 'https://alerts.example.test/in/abc', WEBHOOK_SECRET: 'w', DATABASE_URL: 'postgres://u:p@db:5432/visto' };
   assert.deepEqual(parseConfig(uncomment(example(), '# app:'), appEnv).extensions, []);
 });
+
+test('options stay a mapping: a mapping with the one key env at the top of options is an option named env', () => {
+  const c = parseConfig(ext('  - name: chat\n    module: ./c.ts\n    options: { env: SOME_VAR }\n'), KEY);
+  assert.deepEqual(c.extensions[0]!.options, { env: 'SOME_VAR' });
+  const down = parseConfig(ext('  - name: chat\n    module: ./c.ts\n    options: { token: { env: SOME_VAR } }\n'), { ...KEY, SOME_VAR: 'v' });
+  assert.deepEqual(down.extensions[0]!.options, { token: 'v' });
+});
+
+test('a module name holds no control character, no space and no DEL', () => {
+  for (const bad of ['./a\\tb.ts', './a b.ts', './a\\0b.ts', './a\\x7fb.ts']) {
+    assert.throws(
+      () => parseConfig(ext(`  - name: chat\n    module: "${bad}"\n`), KEY),
+      (e: ConfigError) => e.issues.length === 1 && e.issues[0] === 'extensions.0.module: must be a path that starts with ./, ../ or /, or the name of a package',
+      bad,
+    );
+  }
+});
