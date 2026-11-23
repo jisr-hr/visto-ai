@@ -1198,6 +1198,22 @@ test('a push after a review is reviewed incrementally, with the history of the e
   assert.deepEqual([h.inputs[0]!.mode, h.inputs[0]!.history?.lastReview?.head, h.inputs[0]!.history?.by], ['incremental', 'h0', 'model']);
   assert.deepEqual([(await listRuns(db, REF)).at(-1)!.mode, (await listRuns(db, REF)).at(-1)!.baseBranch], ['incremental', 'main']);
 });
+test('a later review is given the rows of the newest published review, and a dry run none', async () => {
+  const kept = { criterion: 'Orders above the limit are refused.', status: 'met', note: 'In src/orders/limit.ts:42.', from: 'review' };
+  await published({ head: 'h0', result: okResult({ findings: [MAJOR], acceptance: [kept as never] }) });
+  await published({ head: 'h0', mode: 'recheck', reviewId: '402', comments: [], result: okResult({ acceptance: [{ ...kept, status: 'not_met', note: 'Not refused.' } as never] }) });
+  await published({ head: 'h0', reviewId: '403', comments: [], result: okResult() });
+  await recorded({ headSha: 'h0', result: okResult({ acceptance: [{ ...kept, note: 'Never published.' } as never] }) });
+  const h = await live({ own: [[{ id: '403', commit: 'h0' }, { id: '402', commit: 'h0' }, { id: '401', commit: 'h0' }]] });
+  await runReviewJob(h.job, h.deps);
+  assert.deepEqual(h.inputs[0]!.earlierAcceptance, [{ ...kept, status: 'not_met', note: 'Not refused.' }]);
+  const first = await live({ pullRequest: 8 });
+  await runReviewJob(first.job, first.deps);
+  assert.deepEqual(first.inputs[0]!.earlierAcceptance, []);
+  const dry = await harness({ dryRun: true });
+  await runReviewJob(dry.job, dry.deps);
+  assert.equal('earlierAcceptance' in dry.inputs[0]!, false);
+});
 test('a repository set to full is reviewed in full at every head, with its history', async () => {
   await published({ head: 'h0' });
   const h = await live({ own: OWN_401, settings: { ...SETTINGS, newHead: 'full' } });

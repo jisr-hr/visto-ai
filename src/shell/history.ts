@@ -1,5 +1,7 @@
 import type { StoredRun } from '../db/review-runs.ts';
+import { readAcceptance } from '../engine/reconcile/acceptance.ts';
 import { shownOf } from '../engine/score/shown.ts';
+import type { AcceptanceRow } from '../engine/types.ts';
 import { CATEGORIES } from '../engine/score/types.ts';
 import type { Category, FileHistory, ScoredBy, ScoreEntry, ScoreHistory, StoredEntry, StoredSplit } from '../engine/score/types.ts';
 
@@ -181,6 +183,16 @@ export function lastReviewOf(runs: StoredRun[]): StoredRun | null {
   let newest: StoredRun | null = null;
   for (const r of runs) if (r.published && r.mode !== 'recheck' && (newest === null || r.id > newest.id)) newest = r;
   return newest;
+}
+
+/** The acceptance rows of the newest published run whose stored result has any; [] when none has. A row that is not of the expected shape is skipped. */
+export function acceptanceOf(runs: StoredRun[]): AcceptanceRow[] {
+  const newestFirst = runs.filter((r) => r.published && !r.dryRun).sort((a, b) => b.id - a.id);
+  for (const run of newestFirst) {
+    const rows = readAcceptance(isObject(run.result) ? run.result['acceptance'] : undefined);
+    if (rows.length > 0) return rows;
+  }
+  return [];
 }
 
 /** The scores a run gave, for other pull requests to reuse. */

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { fitBody, inert, MAX_BODY_CHARS, renderReview } from './body.ts';
-import type { Discussed, Finding, NotReviewed, RawFinding, ReviewResult, ThreadVerdict, UnplacedFinding } from '../types.ts';
+import type { AcceptanceRow, Discussed, Finding, NotReviewed, RawFinding, ReviewResult, ThreadVerdict, UnplacedFinding } from '../types.ts';
 import type { BlockScore, Category, FileLevelSource, FileScore, Span } from '../score/types.ts';
 
 const ZW = '\u200b';
@@ -842,4 +842,104 @@ test('the Human review section is written as before', () => {
   ].join('\n');
   assert.equal(section(renderReview(r, withUrl).body), text);
   assert.equal(section(renderReview(r, auto).body), text.replace(/\[([^\]]+)\]\([^)]+\)/g, '$1'));
+});
+
+// The acceptance section (Task 5).
+const row = (criterion: string, status: AcceptanceRow['status'], note: string, from: AcceptanceRow['from'] = 'review'): AcceptanceRow => ({ criterion, status, note, from });
+const THREE: AcceptanceRow[] = [
+  row('Orders above the limit are refused.', 'met', 'The check is in `src/orders/limit.ts:42`.'),
+  row('A refund writes an audit row.', 'not_met', 'No audit row is written.'),
+  row('The export is paged.', 'not_verified', '', 'none'),
+];
+const SECTION = [
+  '## Acceptance criteria',
+  '',
+  '1 met, 1 not met, 1 not verified.',
+  '',
+  '- **\\[met]** `Orders above the limit are refused.` \u2014 The check is in `src/orders/limit.ts:42`.',
+  '- **\\[not met]** `A refund writes an audit row.` \u2014 No audit row is written.',
+  '- **\\[not verified]** `The export is paged.` _(not judged in this review)_',
+].join('\n');
+const sectionOf = (body: string): string | null => {
+  const start = body.indexOf('## Acceptance criteria\n');
+  if (start < 0) return null;
+  const end = body.indexOf('\n\n## ', start + 1);
+  return end < 0 ? body.slice(start) : body.slice(start, end);
+};
+const PRE_PLAN = result({
+  findings: [finding({ severity: 'blocker', line: 3 })], unplaced: [unplaced({ side: 'LEFT' })],
+  coverage: { reviewed: ['src/a.ts'], notReviewed: notReviewed(1) },
+});
+const PRE_PLAN_BODY = [
+  '## Summary\n\nChanges a.ts.',
+  '## Human review\n\nNothing here is at or above 70%. The highest score is 0%.',
+  '## Findings\n\n- **\\[blocker]** `src/a.ts:3` \u2014 Breaks on empty input.',
+  "## Findings not placed on the diff\n\nGitHub cannot show these inline: the line is outside this pull request's diff, or the file has no diff GitHub can comment on. They do not block the merge.\n\n- `src/b.ts:4` (old file) \u2014 Name is unclear.",
+  '## Coverage\n\nThese files were not reviewed:\n\n- `f0.bin`: no_diff',
+  '## Overall\n\n1 blocker, 0 major, 0 minor. 1 could not be placed on the diff. 1 files were not reviewed. Human review: not needed (highest score 0%).',
+].join('\n\n');
+
+test('no rows, no section; a damaged row is skipped; a failed review has none', () => {
+  // A result stored before this plan, with no acceptance and no dependencies.extensions, renders the body it rendered, byte for byte.
+  assert.equal(renderReview(PRE_PLAN, auto).body, PRE_PLAN_BODY);
+  assert.equal(renderReview(PRE_PLAN, { ...auto, inline: false }).body.includes('Acceptance'), false);
+  for (const acceptance of [[], 'x', null, {}, [5, null, { criterion: '' }]]) {
+    assert.equal(renderReview({ ...PRE_PLAN, acceptance: acceptance as unknown as AcceptanceRow[] }, auto).body, PRE_PLAN_BODY);
+  }
+  const damaged = [{ criterion: 5 }, { criterion: 'c', status: 'done', note: '' }, { criterion: 'Totals are rounded.', status: 'met', note: 'In src/a.ts:3.', from: 'x' }];
+  const s = sectionOf(renderReview({ ...PRE_PLAN, acceptance: damaged as unknown as AcceptanceRow[] }, auto).body);
+  assert.equal(s, '## Acceptance criteria\n\n1 met, 0 not met, 0 not verified.\n\n- **\\[met]** `Totals are rounded.` \u2014 In src/a.ts:3.');
+  const failed = result({ status: 'failed', failure: { stage: 'model', code: 'timeout' } });
+  assert.equal(renderReview({ ...failed, acceptance: THREE }, auto).body, renderReview(failed, auto).body);
+  assert.equal(renderReview({ ...failed, acceptance: THREE }, auto).body.includes('Acceptance'), false);
+});
+test('the acceptance section stands between Human review and Findings, with its counts and one line for each row', () => {
+  const b = renderReview({ ...PRE_PLAN, acceptance: THREE }, auto).body;
+  assert.equal(sectionOf(b), SECTION);
+  assert.ok(b.includes(`## Human review\n\nNothing here is at or above 70%. The highest score is 0%.\n\n${SECTION}\n\n## Findings\n`));
+  // nothing else of the body changes
+  assert.equal(b.replace(`${SECTION}\n\n`, ''), PRE_PLAN_BODY);
+  // with no finding the section stands before what follows Human review
+  const bare = renderReview(result({ acceptance: THREE }), auto).body;
+  assert.ok(bare.includes(`is 0%.\n\n${SECTION}\n\n## Overall\n`));
+});
+test('a kept row and a row nobody judged say so, and a row of this review says nothing more', () => {
+  const s = sectionOf(renderReview(result({ acceptance: [
+    row('Kept one.', 'met', 'In src/a.ts:2.', 'earlier'),
+    row('Kept unsure.', 'not_verified', '', 'earlier'),
+    row('Nobody.', 'not_verified', '', 'none'),
+    row('Judged.', 'not_verified', 'The caller is not shown.'),
+    row('Judged bare.', 'not_verified', ''),
+  ] }), auto).body)!;
+  assert.deepEqual(s.split('\n').slice(4), [
+    '- **\\[met]** `Kept one.` \u2014 In src/a.ts:2. _(kept from an earlier review)_',
+    '- **\\[not verified]** `Kept unsure.` _(kept from an earlier review)_',
+    '- **\\[not verified]** `Nobody.` _(not judged in this review)_',
+    '- **\\[not verified]** `Judged.` \u2014 The caller is not shown.',
+    '- **\\[not verified]** `Judged bare.`',
+  ]);
+  assert.equal(s.split('\n')[2], '1 met, 0 not met, 4 not verified.');
+});
+test('nothing in a criterion is live, and a note cannot become a mention, HTML or a heading', () => {
+  const hostile = '@octo-lead <img src=x> [x](https://example.test/a) ![y](https://example.test/b) acme/other#12 `tick` &amp;';
+  const s = sectionOf(renderReview(result({ acceptance: [
+    row(hostile, 'met', '# Done\n```\n@acme/owners'),
+    row('Second line\n## Heading', 'not_met', '@acme/owners <b>x</b> &amp; done'),
+    row('```fence', 'not_verified', '', 'none'),
+  ] }), auto).body)!;
+  const lines = s.split('\n');
+  assert.equal(lines.length, 7);
+  // the whole criterion stands inside one code span whose fence is longer than any run of backticks in it
+  assert.equal(lines[4], `- **\\[met]** \`\` ${hostile} \`\` \u2014 # Done`);
+  assert.equal(s.includes('@acme'), false);
+  assert.equal(lines[5], `- **\\[not met]** \`Second line\` \u2014 @${ZW}acme/owners <${ZW}b>x<${ZW}/b> &${ZW}amp; done`);
+  assert.equal(lines[6], '- **\\[not verified]** ```` ```fence ```` _(not judged in this review)_');
+  const b = renderReview(result({ acceptance: [row(hostile, 'met', '# Done\n```\n@acme/owners')] }), auto).body;
+  assert.equal(b.split('\n').some((l) => l.startsWith('# Done') || l.startsWith('```') || l.startsWith('## Heading')), false);
+});
+test('the body written whole carries the section', () => {
+  const b = renderReview({ ...PRE_PLAN, acceptance: THREE }, { ...auto, inline: false }).body;
+  assert.equal(sectionOf(b), SECTION);
+  assert.ok(b.indexOf('## Human review\n') < b.indexOf('## Acceptance criteria\n'));
+  assert.ok(b.indexOf('## Acceptance criteria\n') < b.indexOf('## Findings\n'));
 });

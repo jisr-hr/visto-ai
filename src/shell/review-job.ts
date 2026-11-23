@@ -22,7 +22,7 @@ import { earlierOf, missedComments } from './earlier.ts';
 import { matchPosted, notedOf } from './posted.ts';
 import { publishRun } from './publish.ts';
 import type { PublishOutcome } from './publish.ts';
-import { CATEGORY_NAMES, historyOf, lastReviewOf, scoresToStore } from './history.ts';
+import { acceptanceOf, CATEGORY_NAMES, historyOf, lastReviewOf, scoresToStore } from './history.ts';
 import { followUp, planFollowUp } from './thread-followup.ts';
 import { QUIET_SECONDS, skipReason } from './triggers.ts';
 import { gatingOf, reviewedOnRequest } from '../gate/gating.ts';
@@ -463,7 +463,7 @@ export async function runReviewJob(job: Job, deps: ReviewJobDeps): Promise<void>
             by = engine.scorer !== undefined ? 'scorer' : 'model';
             const scoredBy = by;
             const since = new Date(now.getTime() - REUSE_DAYS * 86_400_000).toISOString();
-            result = await deps.review({ ...input, mode, history: historyOf({ runs, last, by: scoredBy }) }, {
+            result = await deps.review({ ...input, mode, history: historyOf({ runs, last, by: scoredBy }), earlierAcceptance: acceptanceOf(runs) }, {
               ...engine,
               reusableScores: async (blocks) => (await reusableScores(db, job.ref, scoredBy, blocks, since)).map((row) => ({
                 path: row.path, hash: row.hash, around: row.around,

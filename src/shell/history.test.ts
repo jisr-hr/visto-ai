@@ -6,7 +6,7 @@ import { shownOf } from '../engine/score/shown.ts';
 import { review } from '../engine/review.ts';
 import { SUBMIT_REVIEW } from '../engine/model/submit-review.ts';
 import type { ChangedFile, ModelRequest, ReviewDeps, ReviewInput, ReviewResult } from '../engine/types.ts';
-import { historyOf, lastReviewOf, scoresToStore } from './history.ts';
+import { acceptanceOf, historyOf, lastReviewOf, scoresToStore } from './history.ts';
 
 const REF = { service: 'github', owner: 'acme', repo: 'shop', number: 7 } as const;
 const USAGE = { calls: 1, inputTokens: 1, outputTokens: 1, cachedTokens: 0, cost: 0 };
@@ -343,4 +343,33 @@ test('a split and the blocks a whole-file score stood for carry their surroundin
 test('the scores to store carry their surroundings', () => {
   const result = { scores: [{ ...file('src/a.ts', []), blocks: [blk('h1', 40, { around: X }), { ...blk('h2', 50), around: '' }, { ...blk('h3', 60), around: 7 }] }] };
   assert.deepEqual(scoresToStore(result).map((one) => [one.hash, one.around]), [['h1', X], ['h2', null], ['h3', null]]);
+});
+
+const aRow = (criterion: string, status = 'met', from = 'review') => ({ criterion, status, note: status === 'not_verified' ? '' : `Note on ${criterion}`, from });
+test('the earlier rows are those of the newest published run that has any', () => {
+  const fullRun = run(1, { acceptance: [aRow('Orders are refused.')] }, { ...published, mode: 'full' });
+  const recheck = run(2, { acceptance: [aRow('Orders are refused.', 'not_met'), aRow('Refunds are logged.', 'not_verified', 'none')] }, { ...published, mode: 'recheck' });
+  assert.deepEqual(acceptanceOf([fullRun, recheck]), [
+    { criterion: 'Orders are refused.', status: 'not_met', note: 'Note on Orders are refused.', from: 'review' },
+    { criterion: 'Refunds are logged.', status: 'not_verified', note: '', from: 'none' },
+  ]);
+  // the order the runs are listed in does not matter: the newest by id
+  assert.deepEqual(acceptanceOf([recheck, fullRun]).map((r) => r.status), ['not_met', 'not_verified']);
+  // a published run with no rows (its provider failed) is passed over, and so are rows that cannot be read
+  const outage = run(3, {}, { ...published, mode: 'incremental' });
+  const damaged = run(4, { acceptance: [{ criterion: 5 }, { criterion: 'x', status: 'done', note: '' }] }, published);
+  const notAList = run(5, { acceptance: 'x' }, published);
+  assert.deepEqual(acceptanceOf([fullRun, recheck, outage, damaged, notAList]).map((r) => r.status), ['not_met', 'not_verified']);
+  // a run that is not published, and a dry run, are never looked at
+  const unpublished = run(6, { acceptance: [aRow('Unpublished.')] });
+  const dry = run(7, { acceptance: [aRow('Dry.')] }, { ...published, dryRun: true });
+  assert.deepEqual(acceptanceOf([fullRun, recheck, unpublished, dry]).map((r) => r.criterion), ['Orders are refused.', 'Refunds are logged.']);
+  // no run with rows
+  assert.deepEqual(acceptanceOf([]), []);
+  assert.deepEqual(acceptanceOf([outage, unpublished, dry]), []);
+  // damaged rows of the chosen run are skipped one by one; a from that is none of the three reads as review
+  const mixed = run(8, { acceptance: [{ criterion: '' }, aRow('Kept.', 'met', 'x'), null] }, published);
+  assert.deepEqual(acceptanceOf([fullRun, mixed]), [{ criterion: 'Kept.', status: 'met', note: 'Note on Kept.', from: 'review' }]);
+  // a result that is no object
+  assert.deepEqual(acceptanceOf([run(9, {}, { ...published, result: null }), run(10, {}, { ...published, result: 'x' })]), []);
 });
