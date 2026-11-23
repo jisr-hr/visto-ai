@@ -170,3 +170,59 @@ test('the owner and the name of a repository are compared in lower case', async 
   assert.equal(await laterVerdict(db, upper, 'c-1', T2), 'fixed');
   await db.close();
 });
+
+test('of two later published runs that kept the same thread, the newer one gives the verdict, and a run started at the reply is not later', async () => {
+  const db = await testDb();
+  const kept = (v: string): unknown => ({ findings: [], threadVerdicts: [{ commentId: 'c-1', verdict: v }] });
+  await publishedRun(db, T2, kept('answered'));
+  assert.equal(await laterVerdict(db, REF, 'c-1', T2), null);
+  await publishedRun(db, ms(T2, 1000), kept('open'));
+  await publishedRun(db, ms(T2, 2000), kept('fixed'));
+  assert.equal(await laterVerdict(db, REF, 'c-1', T2), 'fixed');
+  await db.close();
+});
+
+test('a run of another owner\'s repository of the same name and number is never the later verdict', async () => {
+  const db = await testDb();
+  const other = async (): Promise<void> => {
+    const id = await recordRun(db, run({ ref: { ...REF, owner: 'octo' }, startedAt: ms(T2, 5000), result: { threadVerdicts: [{ commentId: 'c-1', verdict: 'fixed' }] } }));
+    await markPublished(db, id, { reviewId: `rv-${id}`, publishedAt: ms(T2, 6000), body: 'text', inlineDropped: false });
+  };
+  await other();
+  assert.equal(await laterVerdict(db, REF, 'c-1', T2), null);
+  await publishedRun(db, ms(T2, 1000), { threadVerdicts: [{ commentId: 'c-1', verdict: 'answered' }] });
+  await other();
+  assert.equal(await laterVerdict(db, REF, 'c-1', T2), 'answered');
+  await db.close();
+});
+
+test('a reply on another pull request or another repository that names a posted comment of this one is not queued', async () => {
+  const db = await testDb();
+  await withFinding(db);
+  await recordActivity(db, reply());
+  await recordActivity(db, reply({ sourceId: 'r-pr8', ref: { ...REF, number: 8 } }));
+  await recordActivity(db, reply({ sourceId: 'r-web', ref: { ...REF, repo: 'web' } }));
+  await recordActivity(db, reply({ sourceId: 'r-octo', ref: { ...REF, owner: 'octo' } }));
+  assert.deepEqual(await replies(db), ['r-1']);
+  await db.close();
+});
+
+test('a collaborator\'s reply sorts with those of people with access', async () => {
+  const db = await testDb();
+  await withFinding(db);
+  await recordActivity(db, reply({ sourceId: 'r-stranger', author: 'octo-guest', association: 'none', at: '2026-03-02T09:00:00.000Z' }));
+  await recordActivity(db, reply({ sourceId: 'r-collab', author: 'octo-dev', association: 'collaborator', at: '2026-03-02T10:00:00.000Z' }));
+  assert.deepEqual(await replies(db), ['r-collab', 'r-stranger']);
+  await db.close();
+});
+
+test('the queue is in the order the replies were written, and two written at the same instant in the order they were stored', async () => {
+  const db = await testDb();
+  await withFinding(db);
+  await recordActivity(db, reply({ sourceId: 'r-late', at: '2026-03-02T11:00:00.000Z' }));
+  await recordActivity(db, reply({ sourceId: 'r-early', at: '2026-03-02T09:00:00.000Z' }));
+  await recordActivity(db, reply({ sourceId: 'r-tie-1', at: '2026-03-02T10:00:00.000Z' }));
+  await recordActivity(db, reply({ sourceId: 'r-tie-2', at: '2026-03-02T10:00:00.000Z' }));
+  assert.deepEqual(await replies(db), ['r-early', 'r-tie-1', 'r-tie-2', 'r-late']);
+  await db.close();
+});

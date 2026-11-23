@@ -140,3 +140,17 @@ test('0011_lessons comes right after 0010_memory, and applies over the rows of t
   assert.deepEqual(await db.query('select count(*)::int as n from visto_ai.judge_calls'), [{ n: 0 }]);
   await db.close();
 });
+test('a verdict\'s classification is one of five, in lower case, a reply has one row, and its attempts start at 0', async () => {
+  const db = await testDb();
+  const insert = (reply: string, classification: string | null, owner = 'acme'): Promise<unknown> => db.query(
+    `insert into visto_ai.reply_verdicts (service, owner, repo, number, reply, finding, classification, outcome, judged_at)
+     values ('github', $1, 'shop', 7, $2, 'c-1', $3, 'none', '2026-03-02T10:00:00Z')`, [owner, reply, classification]);
+  await assert.rejects(insert('r-1', 'praise'));
+  await assert.rejects(insert('r-1', 'Noise'));
+  for (const c of ['confirmed_fix', 'valid_pushback', 'invalid_pushback', 'question', 'noise']) await insert(`r-${c}`, c);
+  await insert('r-null', null);
+  await assert.rejects(insert('r-null', 'noise', 'octo'));
+  assert.deepEqual(await db.query("select attempts from visto_ai.reply_verdicts where reply = 'r-null'"), [{ attempts: 0 }]);
+  assert.deepEqual(await db.query('select count(*)::int as n from visto_ai.reply_verdicts'), [{ n: 6 }]);
+  await db.close();
+});

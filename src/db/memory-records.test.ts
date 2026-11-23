@@ -326,3 +326,27 @@ test('a read of lessons within a limit sets it inside its transaction, and refus
   }
   await db.close();
 });
+
+test('the standing lessons are read for a repository named in any case, end at their expiry, need a text, and two made at once come newest id first', async () => {
+  const db = await testDb();
+  await addRecords(db, REPO, [
+    lesson({ sourceRef: '7:r-1', lesson: 'the first rule stored, made at the same time' }),
+    lesson({ sourceRef: '7:r-2', lesson: 'the second rule stored, made at the same time' }),
+    lesson({ sourceRef: '7:r-3', createdAt: ms(T, 1000), expiresAt: ms(T, 2 * DAY), lesson: 'the rule whose expiry is the time asked' }),
+    lesson({ sourceRef: '7:r-4', createdAt: ms(T, 2000), lesson: null }),
+  ]);
+  const upper: RepoKey = { service: 'github', owner: 'Acme', repo: 'Shop' };
+  assert.deepEqual(await standingLessons(db, upper, ms(T, 2 * DAY), 10),
+    ['the second rule stored, made at the same time', 'the first rule stored, made at the same time']);
+  assert.deepEqual(await standingLessons(db, REPO, ms(T, 2 * DAY - 1), 10), [
+    'the rule whose expiry is the time asked', 'the second rule stored, made at the same time', 'the first rule stored, made at the same time',
+  ]);
+  await db.close();
+});
+
+test('two live lessons made at the same time come newest id first', async () => {
+  const db = await testDb();
+  await addRecords(db, REPO, [lesson({ sourceRef: '7:r-1' }), lesson({ sourceRef: '7:r-2' })]);
+  assert.deepEqual((await liveLessons(db, REPO, ms(T, DAY), 10)).map((r) => r.sourceRef), ['7:r-2', '7:r-1']);
+  await db.close();
+});

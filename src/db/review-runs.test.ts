@@ -292,3 +292,11 @@ test('a judge call is stored with its pull request and its reply, its counts rou
   ]);
   await db.close();
 });
+test('a judge call with ordinary counts is stored as given', async () => {
+  const db = await testDb();
+  await recordJudgeCall(db, REF, 'r-1', at(0), { calls: 2, inputTokens: 2400, outputTokens: 80, cachedTokens: 30, cost: 0.25 });
+  assert.deepEqual(await db.query('select calls, input_tokens, output_tokens, cached_tokens, cost from visto_ai.judge_calls'), [
+    { calls: 2, input_tokens: 2400, output_tokens: 80, cached_tokens: 30, cost: 0.25 },
+  ]);
+  await db.close();
+});
