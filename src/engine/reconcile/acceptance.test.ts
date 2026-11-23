@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readAcceptance, reconcileAcceptance } from './acceptance.ts';
+import { CRITERIA_MAX, CRITERION_CHARS } from '../context/extensions.ts';
 import type { SubmitReviewArgs } from '../model/submit-review.ts';
 import type { AcceptanceRow } from '../types.ts';
 
@@ -49,6 +50,16 @@ test('stored rows are read one by one', () => {
     { criterion: 'c', status: 'met', note: '' }, { criterion: 'c', status: 'not_met', note: ' \u200b\n ' }, { criterion: 'c', status: 'not_verified', note: '' },
     { criterion: 'd', status: 'met', note: ' In\u200b src/a.ts:3. ' },
   ]), [row('c', 'not_verified', '', 'review'), row('d', 'met', 'In src/a.ts:3.', 'review')]);
+  // At most as many rows as there can be criteria.
+  const many = readAcceptance(Array.from({ length: 5000 }, (_, i) => row(`Criterion ${i}.`, 'met', 'In src/a.ts:3.', 'review')));
+  assert.equal(many.length, CRITERIA_MAX);
+  assert.deepEqual(many.at(-1)!.criterion, `Criterion ${CRITERIA_MAX - 1}.`);
+  // A stored criterion is cleaned as a fresh one is; one with nothing left is no row.
+  assert.deepEqual(readAcceptance([
+    { criterion: 'Ord\u202eers \u200bare\n  refused\u0007.\ud800', status: 'met', note: 'In src/a.ts:3.', from: 'review' },
+    { criterion: 'q'.repeat(400), status: 'not_verified', note: '', from: 'none' },
+    { criterion: ' \u200b\u202e\u0007\n ', status: 'met', note: 'x', from: 'review' },
+  ]), [row('Orders are refused.\ufffd', 'met', 'In src/a.ts:3.', 'review'), row('q'.repeat(CRITERION_CHARS), 'not_verified', '', 'none')]);
   const throwing = { criterion: 'c', note: '', get status(): string { throw new Error('trap'); } };
   assert.deepEqual(readAcceptance([throwing, good]), [good]);
 });

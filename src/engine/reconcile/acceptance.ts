@@ -1,5 +1,6 @@
 // Acceptance rows: what the model said of each criterion it was shown, checked and merged by rule (5.5, 5.7).
 // No model call merges anything, and the service never writes a not_met that no answer gave.
+import { CRITERIA_MAX, CRITERION_CHARS } from '../context/extensions.ts';
 import { stripControl } from '../context/untrusted.ts';
 import type { SubmitReviewArgs } from '../model/submit-review.ts';
 import type { AcceptanceRow, AcceptanceStatus, AuditEntry } from '../types.ts';
@@ -19,7 +20,8 @@ function cutAt(text: string, limit: number): string {
   return text.slice(0, end);
 }
 
-const oneLine = (text: string, limit: number): string => cutAt(stripControl(text).text.replace(/\s+/g, ' ').trim(), limit).trim();
+// Stripped, made well formed, one line, trimmed and cut: what a fresh criterion and a fresh note are made.
+const oneLine = (text: string, limit: number): string => cutAt(stripControl(text).text.toWellFormed().replace(/\s+/g, ' ').trim(), limit).trim();
 
 interface Kept { index: number; status: AcceptanceStatus; note: string }
 
@@ -133,14 +135,17 @@ export function readAcceptance(value: unknown): AcceptanceRow[] {
   if (!Array.isArray(value)) return [];
   const rows: AcceptanceRow[] = [];
   for (const one of value as unknown[]) {
+    // No more rows than there can be criteria: a damaged result cannot fill a body.
+    if (rows.length >= CRITERIA_MAX) break;
     try {
       if (typeof one !== 'object' || one === null) continue;
       const { criterion, status, note, from } = one as Record<string, unknown>;
-      if (typeof criterion !== 'string' || criterion === '' || typeof status !== 'string' || !STATUSES.has(status) || typeof note !== 'string') continue;
-      // The checks of a fresh row: the note cleaned and cut alike, and a claim with no note is no row.
+      if (typeof criterion !== 'string' || typeof status !== 'string' || !STATUSES.has(status) || typeof note !== 'string') continue;
+      // The checks of a fresh row: the criterion and the note cleaned and cut alike, and a claim with no note is no row.
+      const text = oneLine(criterion, CRITERION_CHARS);
       const line = oneLine(note, NOTE_CHARS);
-      if (line === '' && status !== 'not_verified') continue;
-      rows.push({ criterion, status: status as AcceptanceStatus, note: line, from: typeof from === 'string' && FROM.has(from) ? (from as AcceptanceRow['from']) : 'review' });
+      if (text === '' || (line === '' && status !== 'not_verified')) continue;
+      rows.push({ criterion: text, status: status as AcceptanceStatus, note: line, from: typeof from === 'string' && FROM.has(from) ? (from as AcceptanceRow['from']) : 'review' });
     } catch {
       // a row that throws when it is read is skipped
     }
