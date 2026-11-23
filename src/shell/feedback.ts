@@ -7,7 +7,7 @@ export const LOGIN_MAX_CHARS = 100;
 export const REASON_MAX_CHARS = 1_000;
 
 const MAX_RUN = 2_147_483_647;
-const LOGIN_SHAPE = /^[^\s\p{Cc}]+$/u;
+const LOGIN_SHAPE = /^[^\s\p{Cc}\p{Cf}]+$/u;
 
 interface Checked { run: number | null; vote: 'up' | 'down' | null; login: string | null; reason: string | null; good: boolean }
 
@@ -25,7 +25,10 @@ function check(answer: unknown): Checked {
     if (typeof login === 'string') {
       let l = login.trim();
       if (l.startsWith('@')) l = l.slice(1);
-      if (l.length >= 1 && [...l].length <= LOGIN_MAX_CHARS && LOGIN_SHAPE.test(l)) out.login = storable(l).toLowerCase();
+      if (l.length >= 1 && l.isWellFormed() && LOGIN_SHAPE.test(l)) {
+        const lower = l.toLowerCase();   // measured as stored
+        if ([...lower].length <= LOGIN_MAX_CHARS) out.login = lower;
+      }
     }
     const reason = a['reason'];
     let reasonOk = true;
@@ -36,6 +39,7 @@ function check(answer: unknown): Checked {
         r = r.slice(0, REASON_MAX_CHARS);
         const last = r.charCodeAt(r.length - 1);
         if (last >= 0xd800 && last <= 0xdbff) r = r.slice(0, -1);   // do not split a pair
+        r = r.trimEnd();
       }
       out.reason = r === '' ? null : r;
     } else reasonOk = false;

@@ -106,7 +106,7 @@ export async function markPublished(db: Db, runId: number, p: { reviewId: string
 /** Takes the one notice a published run may send: true for the call that wrote the stamp; false for every later call, and for a run that is not published or does not exist. */
 export async function claimNotice(db: Db, runId: number, at: string): Promise<boolean> {
   const rows = await db.query(
-    'update visto_ai.review_runs set notified_at = $2::timestamptz where id = $1 and published = true and notified_at is null returning id',
+    'update visto_ai.review_runs set notified_at = $2::timestamptz where id = $1 and published = true and dry_run = false and notified_at is null returning id',
     [runId, at]);
   return rows.length === 1;
 }

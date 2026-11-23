@@ -200,3 +200,10 @@ test('of two claims made at the same time only one wins', async () => {
   assert.equal(results.filter((x) => x).length, 1);
   await db.close();
 });
+test('the notice of a dry run cannot be claimed, even when it was stamped as published', async () => {
+  const db = await testDb();
+  const id = await recordRun(db, run({ dryRun: true }));
+  await markPublished(db, id, { reviewId: 'r1', publishedAt: at(1), body: 'text', inlineDropped: false });
+  assert.equal(await claimNotice(db, id, at(2)), false);
+  await db.close();
+});

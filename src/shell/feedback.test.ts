@@ -117,3 +117,20 @@ test('a logger that throws changes nothing, and a bad answer logs no run and no 
   assert.deepEqual(h.logged, [{ event: 'feedback', extension: 'chat', run: null, vote: null, outcome: 'bad_answer' }]);
   await h.db.close();
 });
+test('a login with a hidden character, a broken pair, or a length over the limit once lower-cased is refused', async () => {
+  const h = await setup();
+  const bad = ['\u200b', 'ab\u202e', 'a\ud800', 'a\ud801', '\u0130'.repeat(LOGIN_MAX_CHARS)];
+  for (const login of bad) {
+    assert.deepEqual(await h.report('chat', { run: h.id, login, vote: 'up' }), { ok: false, code: 'bad_answer' }, JSON.stringify(login));
+  }
+  assert.equal((await h.rows()).length, 0);
+  assert.deepEqual(await h.report('chat', { run: h.id, login: '\u0130'.repeat(50), vote: 'up' }), { ok: true });
+  await h.db.close();
+});
+test('a reason cut at the limit keeps no trailing space', async () => {
+  const h = await setup();
+  await h.report('chat', { run: h.id, login: 'a', vote: 'up', reason: 'x'.repeat(REASON_MAX_CHARS - 1) + ' y' });
+  const [row] = await h.rows();
+  assert.equal(row!['reason'], 'x'.repeat(REASON_MAX_CHARS - 1));
+  await h.db.close();
+});
