@@ -26,7 +26,7 @@ export interface RouteRequest {
   method: string;
   path: string;                // what follows /extensions/<name>, beginning with '/'; '/' when nothing follows. Not decoded
   query: string;               // what follows the first '?', without it; '' when there is none. Not decoded
-  headers: Record<string, string | undefined>;   // names in lower case; a header given several times is its first value
+  headers: Record<string, string | undefined>;   // names in lower case; a header given several times arrives as Node hands it over (most are joined with a comma)
   body: Buffer;                // the bytes received, at most 1 MiB
 }
 export interface RouteAnswer { status: number; headers?: Record<string, string>; body?: string }
