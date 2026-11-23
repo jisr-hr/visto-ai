@@ -817,6 +817,16 @@ function held(): { promise: Promise<void>; release: () => void } {
   return { promise, release };
 }
 const turns = async (n = 5): Promise<void> => { for (let i = 0; i < n; i += 1) await new Promise((resolve) => setImmediate(resolve)); };
+/** Only turns a hang into a failure: a test that is slow under load still passes. */
+const GUARD_MS = 30_000;
+/** Waits turn by turn until `done` holds, and fails after `max` turns rather than hang the file. */
+async function until(done: () => boolean, max = 10_000): Promise<void> {
+  for (let i = 0; i < max; i += 1) {
+    if (done()) return;
+    await turns(1);
+  }
+  throw new Error('until');
+}
 
 /** A Db that counts its statements and the reads of the queue (one for each run started); `fail` may replace a statement. */
 function counted(db: Db, fail: (text: string) => Promise<never> | null = () => null): { db: Db; stats: { statements: number; queues: number } } {
@@ -844,8 +854,8 @@ const nightly = (d: NightDeps): Nightly => createNightly({
   paused: d.paused ?? (async () => null), ...(d.rowWaitMs === undefined ? {} : { rowWaitMs: d.rowWaitMs }),
 });
 const tickAndWait = async (n: Nightly): Promise<void> => {
-  await bounded(n.tick(), 5_000);
-  await bounded(n.idle(), 5_000);
+  await bounded(n.tick(), GUARD_MS);
+  await bounded(n.idle(), GUARD_MS);
 };
 
 test('start makes the row once and logs what it holds', async () => {
@@ -922,9 +932,9 @@ test('a tick while a run is under way starts no second run', async () => {
   const requests: ModelRequest[] = [];
   const model: ModelClient = { complete: async (request) => { requests.push(request); await gate.promise; return noise(); } };
   const n = nightly({ db, clock: at(NOW), model });
-  await bounded(n.tick(), 5_000);
-  while (requests.length === 0) await turns(1);
-  await bounded(n.tick(), 5_000);
+  await bounded(n.tick(), GUARD_MS);
+  await until(() => requests.length > 0);
+  await bounded(n.tick(), GUARD_MS);
   await turns();
   assert.equal(stats.queues, 1);
   assert.equal(requests.length, 1);
@@ -933,7 +943,7 @@ test('a tick while a run is under way starts no second run', async () => {
   await turns();
   assert.equal(idle, false);
   gate.release();
-  await bounded(waiting, 5_000);
+  await bounded(waiting, GUARD_MS);
   assert.equal(requests.length, 1);
   assert.equal((await verdicts(plain)).length, 1);
   n.stop();
@@ -1073,7 +1083,11 @@ test('a read of the row that never settles: the tick returns at its limit, start
   const alerts: Array<[string, unknown]> = [];
   const logged: Array<Record<string, unknown>> = [];
   const n = nightly({ db, clock: () => new Date(now), rowWaitMs: 5, log: (e) => { logged.push(e); }, alert: (code, details) => { alerts.push([code, details]); } });
-  await tickAndWait(n);
+  const began = Date.now();
+  await bounded(n.tick(), GUARD_MS);
+  const took = Date.now() - began;
+  assert.ok(took < 1_000, `the tick took ${took} ms`);
+  await bounded(n.idle(), GUARD_MS);
   assert.deepEqual(logged, [{ event: 'lessons_failed', reason: 'timeout' }]);
   assert.equal(stats.queues, 0);
   now = plus(NOW, 37 * HOUR_MS);
@@ -1093,24 +1107,24 @@ test('after stop no run starts, and the run under way ends without another call 
   const model: ModelClient = { complete: async (request) => { requests.push(request); await gate.promise; return noise(); } };
   const logged: Array<Record<string, unknown>> = [];
   const n = nightly({ db, clock: at(NOW), model, log: (e) => { logged.push(e); } });
-  await bounded(n.tick(), 5_000);
-  while (requests.length === 0) await turns(1);
+  await bounded(n.tick(), GUARD_MS);
+  await until(() => requests.length > 0);
   n.stop();
   const before = stats.statements;
   gate.release();
-  await bounded(n.idle(), 5_000);
+  await bounded(n.idle(), GUARD_MS);
   assert.equal(requests.length, 1);
   assert.equal(stats.statements, before);
   assert.deepEqual(logged.filter((e) => e.event === 'lessons').map((e) => e.end), ['stopped']);
-  await bounded(n.tick(), 5_000);
-  await bounded(n.idle(), 5_000);
+  await bounded(n.tick(), GUARD_MS);
+  await bounded(n.idle(), GUARD_MS);
   assert.equal(stats.statements, before);
   assert.equal(requests.length, 1);
   assert.deepEqual(await verdicts(plain), []);
   await plain.close();
 });
 
-test('an alert that returns a rejected promise leaves no unhandled rejection, and the tick goes on', async () => {
+test('an alert that returns a rejected promise leaves no rejection unhandled, and the tick goes on', async () => {
   const plain = await setup();
   await startLearning(plain, WORK_LESSONS, NOW);
   const { db, stats } = counted(plain);
@@ -1172,4 +1186,131 @@ test('with a row that cannot be read, the 36 hours count from the last run this 
   assert.deepEqual(alerts, [['lessons_stale', { hours: 37 }]]);
   n.stop();
   await plain.close();
+});
+
+/** A Db whose reads of the row run at once and answer only when released, in the order they were made. */
+function heldReads(db: Db): { db: Db; stats: { statements: number; queues: number }; reads: Array<() => void> } {
+  const reads: Array<() => void> = [];
+  const inner = counted(db);
+  return {
+    stats: inner.stats, reads,
+    db: wrap(inner.db, {
+      query: async <R,>(text: string, params?: unknown[]) => {
+        const rows = await inner.db.query<R>(text, params);
+        if (READ_ROW(text)) {
+          const gate = held();
+          reads.push(gate.release);
+          await gate.promise;
+        }
+        return rows;
+      },
+    }),
+  };
+}
+
+test('two ticks that overlap start one run in a day, whatever the slower read saw', async () => {
+  const plain = await setup();
+  await recordActivity(plain, reply());
+  const { db, stats, reads } = heldReads(plain);
+  const n = nightly({ db, clock: at(NOW) });
+  const a = n.tick();
+  const b = n.tick();
+  await until(() => reads.length === 2);
+  reads[0]!();
+  await bounded(a, GUARD_MS);
+  await bounded(n.idle(), GUARD_MS);
+  assert.equal(stats.queues, 1);
+  assert.equal((await readLearning(plain, WORK_LESSONS))!.ranAt, NOW);
+  // B read the row before A's run wrote it: it saw no run of today.
+  reads[1]!();
+  await bounded(b, GUARD_MS);
+  await bounded(n.idle(), GUARD_MS);
+  assert.equal(stats.queues, 1);
+  n.stop();
+  await plain.close();
+});
+
+test('a tick that began before the stop raises no alert and starts no run after it', async () => {
+  const plain = await setup();
+  await recordActivity(plain, reply());
+  await startLearning(plain, WORK_LESSONS, NOW);
+  const { db, stats, reads } = heldReads(plain);
+  const alerts: Array<[string, unknown]> = [];
+  const n = nightly({ db, clock: at(plus(NOW, 37 * HOUR_MS)), alert: (code, details) => { alerts.push([code, details]); } });
+  const ticking = n.tick();
+  await until(() => reads.length === 1);
+  n.stop();
+  reads[0]!();
+  await bounded(ticking, GUARD_MS);
+  await bounded(n.idle(), GUARD_MS);
+  assert.deepEqual(alerts, []);
+  assert.equal(stats.queues, 0);
+  await plain.close();
+});
+
+test('the next try counts from the end of the run cut short, to the millisecond', async () => {
+  const plain = await setup();
+  await recordActivity(plain, reply());
+  const { db, stats } = counted(plain);
+  let now = NOW;
+  const ended = plus(NOW, 10 * 60_000);
+  const n = nightly({ db, clock: () => new Date(now), paused: async () => { now = ended; return 'spend_limit'; } });
+  await tickAndWait(n);
+  assert.equal(stats.queues, 1);
+  now = plus(ended, NIGHT_RETRY_MS - 1);
+  await tickAndWait(n);
+  assert.equal(stats.queues, 1);
+  now = plus(ended, NIGHT_RETRY_MS);
+  await tickAndWait(n);
+  assert.equal(stats.queues, 2);
+  n.stop();
+  await plain.close();
+});
+
+test('stale is more than 36 hours, the hours are rounded down, and the row of 00:00 is a run of that day', async () => {
+  // Rule 5: "When the clock is more than STALE_AFTER_MS past last": exactly 36 hours is not yet stale.
+  const plain = await setup();
+  await recordActivity(plain, reply());
+  await startLearning(plain, WORK_LESSONS, NOW);
+  let now = plus(NOW, 36 * HOUR_MS);
+  const alerts: Array<[string, unknown]> = [];
+  const alert = (code: string, details?: unknown) => { alerts.push([code, details]); };
+  const n = nightly({ db: plain, clock: () => new Date(now), alert, paused: async () => 'model_error' });
+  await tickAndWait(n);
+  assert.deepEqual(alerts, []);
+  now = plus(NOW, 36 * HOUR_MS + 1);
+  await tickAndWait(n);
+  assert.deepEqual(alerts, [['lessons_stale', { hours: 36 }]]);
+  n.stop();
+  alerts.length = 0;
+  now = plus(NOW, 36 * HOUR_MS + 40 * 60_000);
+  const later = nightly({ db: plain, clock: () => new Date(now), alert, paused: async () => 'model_error' });
+  await tickAndWait(later);
+  assert.deepEqual(alerts, [['lessons_stale', { hours: 36 }]]);
+  later.stop();
+  await plain.close();
+
+  for (const [ranAt, runs] of [['2026-03-11T00:00:00.000Z', 0], ['2026-03-10T23:59:59.999Z', 1]] as const) {
+    const fresh = await setup();
+    await noteLearning(fresh, WORK_LESSONS, ranAt, ZEROS);
+    const { db, stats } = counted(fresh);
+    const m = nightly({ db, clock: at(NOW) });
+    await tickAndWait(m);
+    assert.equal(stats.queues, runs, ranAt);
+    m.stop();
+    await fresh.close();
+  }
+});
+
+test('a failed read of the row logs the error\'s own short code', async () => {
+  for (const [message, reason] of [['row_gone', 'row_gone'], ['Connection refused at 10.0.0.1', 'internal_error']] as const) {
+    const plain = await testDb();
+    const { db } = counted(plain, (text) => (READ_ROW(text) ? Promise.reject(new Error(message)) : null));
+    const logged: Array<Record<string, unknown>> = [];
+    const n = nightly({ db, clock: at(NOW), log: (e) => { logged.push(e); } });
+    await tickAndWait(n);
+    assert.deepEqual(logged, [{ event: 'lessons_failed', reason }]);
+    n.stop();
+    await plain.close();
+  }
 });

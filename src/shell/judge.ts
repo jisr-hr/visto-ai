@@ -352,9 +352,12 @@ export function createNightly(deps: {
   function due(read: RowRead & { ok: true }, at: number): boolean {
     if (current !== null) return false;
     if (notBefore !== null && at < notBefore) return false;
+    const today = dayStart(new Date(at)).getTime();
+    // A run of this process that completed today is one, whatever an older read of the row says.
+    if (lastCompleted !== null && lastCompleted >= today) return false;
     const ranAt = read.row?.ranAt ?? null;
     if (ranAt === null) return true;
-    return Date.parse(ranAt) < dayStart(new Date(at)).getTime();
+    return Date.parse(ranAt) < today;
   }
 
   return {
@@ -369,12 +372,13 @@ export function createNightly(deps: {
         const at = now();
         if (at === null) return;   // a tick whose clock cannot be read does nothing
         const read = await readRow(deps.db, rowWait);
+        if (stopped) return;   // a tick that began before the stop does nothing after it
         checkStale(read, at);
         if (!read.ok) {
           log({ event: 'lessons_failed', reason: read.reason });
           return;
         }
-        if (stopped || !due(read, at)) return;
+        if (!due(read, at)) return;
         current = startRun(at);
       } catch {
         // a tick never rejects
