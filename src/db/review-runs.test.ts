@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { testDb } from './testing.ts';
-import { adoptableRun, hasOkRun, hasRun, lastPublishedRun, listRuns, markPublished, markPublishTried, recordRun, spentSince, unpublishedRun } from './review-runs.ts';
+import { adoptableRun, hasOkRun, hasRun, lastPublishedRun, listRuns, claimNotice, markPublished, markPublishTried, recordRun, spentSince, unpublishedRun } from './review-runs.ts';
 import type { RunRecord } from './review-runs.ts';
 import { enqueueJob, finishJob } from './jobs.ts';
 
@@ -177,5 +177,26 @@ test('a run keeps its base branch and its mode, and a row stored before has no b
   assert.equal(stored[0]!.baseBranch, 'main');
   assert.equal(stored[0]!.mode, 'incremental');
   assert.equal(stored[1]!.baseBranch, null);
+  await db.close();
+});
+test('the notice of a published run is claimed once, and never that of a run that is not published', async () => {
+  const db = await testDb();
+  const id = await recordRun(db, run({ dryRun: false }));
+  const stamp = async (): Promise<unknown> => (await db.query('select notified_at from visto_ai.review_runs where id = $1', [id]))[0]!['notified_at'];
+  assert.equal(await claimNotice(db, id, at(5)), false);
+  assert.equal(await stamp(), null);
+  assert.equal(await markPublished(db, id, { reviewId: 'r1', publishedAt: at(1), body: 'text', inlineDropped: false }), true);
+  assert.equal(await claimNotice(db, id, at(6)), true);
+  assert.equal(await claimNotice(db, id, at(7)), false);
+  assert.equal(new Date(String(await stamp())).toISOString(), at(6));
+  assert.equal(await claimNotice(db, id + 1000, at(8)), false);
+  await db.close();
+});
+test('of two claims made at the same time only one wins', async () => {
+  const db = await testDb();
+  const id = await recordRun(db, run({ dryRun: false }));
+  await markPublished(db, id, { reviewId: 'r1', publishedAt: at(1), body: 'text', inlineDropped: false });
+  const results = await Promise.all([claimNotice(db, id, at(2)), claimNotice(db, id, at(3)), claimNotice(db, id, at(4))]);
+  assert.equal(results.filter((x) => x).length, 1);
   await db.close();
 });
