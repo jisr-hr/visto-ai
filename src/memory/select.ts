@@ -20,13 +20,19 @@ import { readTime } from './time.ts';
 export { readTime };
 
 export const RECORDS_READ = 5_000;            // live records of one repository that are read
+export const REVERTS_READ = 1_000;            // live records of reverts of one repository that are read
 
-export interface LiveRecord { ref: string; number: number; path: string; directory: string; category: string | null; missed: boolean; createdAt: string }
+export interface LiveRecord {
+  ref: string; number: number; path: string; directory: string; category: string | null; missed: boolean; createdAt: string;
+  reverted?: number;   // on a record of a revert: the pull request that was reverted; absent on a signal
+}
 export interface RecordSource {
   /** The repository's signals live at `at`, in any order; RECORDS_READ + 1 at most, the newest when there are more. May reject. */
   live(at: Date): Promise<LiveRecord[]>;
   /** The repository's lessons live at `at`, in any order; LESSONS_READ + 1 at most, the newest when there are more. May reject. Absent: the repository has no lessons. */
   lessons?(at: Date): Promise<LiveLesson[]>;
+  /** The repository's records of reverts live at `at`, each with `reverted`, in any order; REVERTS_READ + 1 at most, the newest when there are more. May reject. Absent: the repository has none. */
+  reverts?(at: Date): Promise<LiveRecord[]>;
 }
 type File = { path: string; previousPath: string | null };
 
@@ -128,6 +134,26 @@ export function linesFor(files: File[], records: LiveRecord[]): { lines: MemoryL
   return { lines: all.slice(0, MEMORY_LINES), cut: Math.max(0, all.length - MEMORY_LINES), names };
 }
 
+/** The reverted lines for these files from these records of reverts: for each file, in the order given, the newest record on its path or its old path that no file before it took. `names`: the records passed over because their path is not printable. Pure. */
+export function revertedLinesFor(files: File[], reverts: LiveRecord[]): { lines: MemoryLine[]; names: number } {
+  let names = 0;
+  const usable: Array<{ record: LiveRecord; ms: number }> = [];
+  for (const entry of dated(reverts)) {
+    if (printable(entry.record.path)) usable.push(entry);
+    else names += 1;
+  }
+  const taken = new Set<{ record: LiveRecord; ms: number }>();
+  const lines: MemoryLine[] = [];
+  for (const file of files) {
+    // One line for a file at most, and a record is one line at most; a reverted line is never near (call 12).
+    const entry = usable.find((e) => !taken.has(e) && (e.record.path === file.path || (file.previousPath !== null && e.record.path === file.previousPath)));
+    if (entry === undefined) continue;
+    taken.add(entry);
+    lines.push({ ref: entry.record.ref, near: false, path: entry.record.path, day: new Date(entry.ms).toISOString().slice(0, 10), category: null, missed: false, reverted: true });
+  }
+  return { lines, names };
+}
+
 // Count desc, then name by code unit; the entries under the minimum are not listed.
 function listed(counts: Map<string, Set<number>>, size: number): { list: MemoryCount[]; cut: number } {
   const eligible: MemoryCount[] = [];
@@ -175,6 +201,10 @@ function kept<T extends { number: number; createdAt: string }>(entries: T[], own
   return { records: [...withTime, ...without].slice(0, limit), cut: true };
 }
 const keptRecords = (records: LiveRecord[], own: number) => kept(records, own, RECORDS_READ, (list) => dated(list).map((entry) => entry.record));
+// A record of a revert counts only with a reverted pull request; one made by, or of, the pull request under review is dropped before the limit.
+const keptReverts = (reverts: LiveRecord[], own: number) =>
+  kept((Array.isArray(reverts) ? reverts : []).filter((r) => typeof r === 'object' && r !== null && Number.isInteger(r.reverted) && r.reverted! >= 1 && r.reverted !== own),
+    own, REVERTS_READ, (list) => dated(list).map((entry) => entry.record));
 // An entry that is no object is passed over before anything of it is read.
 const keptLessons = (lessons: LiveLesson[], own: number) =>
   kept(lessons.filter((lesson) => typeof lesson === 'object' && lesson !== null), own, LESSONS_READ, (list) => newestLessons(list).map((entry) => entry.lesson));
@@ -184,10 +214,22 @@ export function createMemory(source: RecordSource, own: number): Memory {
   const memory: Memory = {
     async blocks(files, asOf, signal): Promise<MemoryBlocks> {
       const now = keptRecords(await source.live(asOf), own);
+      // The reverts are read once, as of the review, never for the day; a review that stopped waiting costs no read of them.
+      let reverts: { records: LiveRecord[]; cut: boolean } = { records: [], cut: false };
+      if (typeof source.reverts === 'function') {
+        signal.throwIfAborted();
+        reverts = keptReverts(await source.reverts(asOf), own);
+      }
+      // The signals' lines are chosen as if no revert existed; the reverted lines stand after them, and the limit cuts them first (call 12).
       const lines = linesFor(files, now.records);
-      // Nothing is shown, and the answer still says what was passed over: the unprintable records, and the read's limit.
-      if (lines.lines.length === 0) {
-        return { repository: { directories: [], categories: [] }, pullRequest: [], cut: { directories: 0, categories: 0, lines: 0, names: lines.names, records: now.cut } };
+      const reverted = revertedLinesFor(files, reverts.records);
+      const all = [...lines.lines, ...reverted.lines];
+      const shown = all.slice(0, MEMORY_LINES);
+      const names = lines.names + reverted.names;
+      const records = now.cut || reverts.cut;
+      // Nothing is shown, and the answer still says what was passed over: the unprintable records, and the reads' limits.
+      if (shown.length === 0) {
+        return { repository: { directories: [], categories: [] }, pullRequest: [], cut: { directories: 0, categories: 0, lines: 0, names, records } };
       }
       // A review that stopped waiting costs no second read.
       signal.throwIfAborted();
@@ -195,13 +237,13 @@ export function createMemory(source: RecordSource, own: number): Memory {
       const counts = countsOf(day.records);
       return {
         repository: { directories: counts.directories, categories: counts.categories },
-        pullRequest: lines.lines,
+        pullRequest: shown,
         cut: {
           directories: counts.cut.directories,
           categories: counts.cut.categories,
-          lines: lines.cut,
-          names: lines.names + counts.names,
-          records: now.cut || day.cut,
+          lines: lines.cut + (all.length - shown.length),
+          names: names + counts.names,
+          records: records || day.cut,
         },
       };
     },
