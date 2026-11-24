@@ -183,3 +183,46 @@ test('0012_reverts comes right after 0011_lessons, and applies over the rows of 
     [{ data_type: 'integer', is_nullable: 'YES' }]);
   await db.close();
 });
+test('0013_approval comes right after 0012_reverts, and applies over the rows of the release before it', async () => {
+  const ledger = await testDb();
+  const names = (await ledger.query<{ name: string }>('select name from visto_ai.schema_migrations order by name')).map((r) => r.name);
+  assert.equal(names.indexOf('0013_approval'), names.indexOf('0012_reverts') + 1);
+  await ledger.close();
+  const db = await pgliteDb();
+  const all = loadMigrations(MIGRATIONS_DIR);
+  await migrate(db, all.filter((m) => m.name <= '0012_reverts'));
+  const id = await recordRun(db, {
+    ref: { service: 'github', owner: 'acme', repo: 'shop', number: 7 }, job: null, trigger: 'automatic', mode: 'full', dryRun: false,
+    headSha: 'h1', baseSha: 'merge000', baseBranch: 'main', outcome: 'ok', failureStage: null, failureCode: null, needsHuman: false, highestScore: 35,
+    body: 'text', comments: [], result: { findings: [] },
+    usage: { calls: 1, inputTokens: 1000, outputTokens: 200, cachedTokens: 0, cost: 0.5 },
+    startedAt: '2026-03-01T10:00:00.000Z', finishedAt: '2026-03-01T10:01:00.000Z',
+  });
+  await db.query(
+    `update visto_ai.review_runs set published = true, review_id = '501', published_at = '2026-03-01T10:01:30Z', inline_dropped = false
+     where id = $1`, [id]);
+  const before = await db.query('select * from visto_ai.review_runs');
+  assert.deepEqual(await migrate(db, all.filter((m) => m.name <= '0013_approval')), ['0013_approval']);
+  const added = ['approved', 'approval_code', 'dismissed_at', 'dismissed_by', 'dismiss_failure', 'stood_at_merge'];
+  const after = await db.query('select * from visto_ai.review_runs');
+  assert.deepEqual(after.map((r) => Object.fromEntries(Object.entries(r).filter(([k]) => !added.includes(k)))), before);
+  assert.deepEqual(
+    await db.query(`select ${added.join(', ')} from visto_ai.review_runs`),
+    [{ approved: false, approval_code: null, dismissed_at: null, dismissed_by: null, dismiss_failure: null, stood_at_merge: null }]);
+  assert.deepEqual(
+    await db.query(
+      `select column_name, data_type, is_nullable from information_schema.columns
+       where table_schema = 'visto_ai' and table_name = 'review_runs' and column_name = any($1::text[]) order by column_name`, [added]),
+    [
+      { column_name: 'approval_code', data_type: 'text', is_nullable: 'YES' },
+      { column_name: 'approved', data_type: 'boolean', is_nullable: 'NO' },
+      { column_name: 'dismiss_failure', data_type: 'text', is_nullable: 'YES' },
+      { column_name: 'dismissed_at', data_type: 'timestamp with time zone', is_nullable: 'YES' },
+      { column_name: 'dismissed_by', data_type: 'text', is_nullable: 'YES' },
+      { column_name: 'stood_at_merge', data_type: 'timestamp with time zone', is_nullable: 'YES' },
+    ]);
+  assert.deepEqual(
+    await db.query("select indexname from pg_indexes where schemaname = 'visto_ai' and indexname = 'review_runs_standing'"),
+    [{ indexname: 'review_runs_standing' }]);
+  await db.close();
+});

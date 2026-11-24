@@ -3,13 +3,13 @@ import { storable, storableOrNull } from './text.ts';
 import type { Db } from './types.ts';
 
 export type JobStatus = 'pending' | 'running' | 'done' | 'dropped';
-/** The lane of the queue: a review, or the gate's check and commands. */
-export type JobKind = 'review' | 'gate';
+/** The lane of the queue: a review, the gate's check and commands, or the withdrawal of the app's approvals. */
+export type JobKind = 'review' | 'gate' | 'withdraw';
 export interface Job {
   id: number; ref: PullRequestRef;      // owner and repo in lower case
   kind: JobKind;
   // review lane: opened, reopened, ready_for_review, synchronize, retargeted, command, done, rerun, or command_retry,
-  // done_retry, rerun_retry; gate lane: sync, done, skip, rerun
+  // done_retry, rerun_retry; gate lane: sync, done, skip, rerun; withdraw lane: withdraw
   reason: string;
   headSha: string;                      // the head the event named; '' for a manual job, which reviews the live head
   trigger: 'automatic' | 'manual';
@@ -124,6 +124,22 @@ export async function askGate(
   return rows[0]?.id ?? null;
 }
 
+/**
+ * Stores a withdraw job for the pull request, due at `now`; a pending one takes this time, and the installation when
+ * one is given (an ask that brings none leaves what is there). Its starts are kept.
+ */
+export async function askWithdraw(db: Db, ref: PullRequestRef, now: string, installation?: string | null): Promise<number | null> {
+  const rows = await db.query<{ id: number }>(
+    `insert into visto_ai.jobs (service, owner, repo, number, kind, reason, head_sha, status, run_at, starts, created_at, delivery,
+                                trigger, requested_by, comment_id, association, installation)
+     values ($1, $2, $3, $4, 'withdraw', 'withdraw', '', 'pending', $5::timestamptz, 0, $5::timestamptz, null, 'automatic', null, null, null, $6)
+     on conflict (service, owner, repo, number, kind) where status = 'pending'
+     do update set run_at = excluded.run_at, installation = coalesce(excluded.installation, visto_ai.jobs.installation)
+     returning id`,
+    [ref.service, storable(ref.owner).toLowerCase(), storable(ref.repo).toLowerCase(), ref.number, now, storableOrNull(installation ?? null)]);
+  return rows[0]?.id ?? null;
+}
+
 /** pending and due -> running, counting a start. null when the job is not pending any more or its time is after `now`. */
 export async function claimJob(db: Db, id: number, now: string): Promise<Job | null> {
   const rows = await db.query<Row>(
@@ -159,7 +175,8 @@ export async function dropJobIfUnchanged(db: Db, job: Pick<Job, 'id' | 'starts' 
  * already has a pending job of the same kind, this one is dropped with outcome `superseded` instead, finished at `now`,
  * with two exceptions for the gate's lane: a command (a manual gate job) takes the place of a waiting sync, which is
  * dropped as `superseded`; and a sync that is superseded by a waiting sync hands it its count of starts when that is
- * higher. A job of the other kind never supersedes.
+ * higher. A withdraw job superseded by a waiting withdraw job hands it its starts the same way. A job of another kind
+ * never supersedes.
  * It runs its statements outside any transaction, so it is the one place that may catch a statement's error.
  */
 export async function requeueJob(db: Db, id: number, runAt: string, now: string, giveBackStart: boolean): Promise<'requeued' | 'superseded'> {
@@ -201,8 +218,8 @@ export async function requeueJob(db: Db, id: number, runAt: string, now: string,
      )
      update visto_ai.jobs p set starts = greatest(p.starts, this.starts)
      from this
-     where this.kind = 'gate' and this.trigger = 'automatic'
-       and p.status = 'pending' and p.kind = 'gate' and p.trigger = 'automatic'
+     where this.kind in ('gate', 'withdraw') and this.trigger = 'automatic'
+       and p.status = 'pending' and p.kind = this.kind and p.trigger = 'automatic'
        and p.service = this.service and p.owner = this.owner and p.repo = this.repo and p.number = this.number`,
     [id, now, back]);
   return 'superseded';
