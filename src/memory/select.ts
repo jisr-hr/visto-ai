@@ -134,7 +134,7 @@ export function linesFor(files: File[], records: LiveRecord[]): { lines: MemoryL
   return { lines: all.slice(0, MEMORY_LINES), cut: Math.max(0, all.length - MEMORY_LINES), names };
 }
 
-/** The reverted lines for these files from these records of reverts: for each file, in the order given, the newest record on its path or its old path that no file before it took. `names`: the records passed over because their path is not printable. Pure. */
+/** The reverted lines for these files from these records of reverts: for each file, in the order given, the newest record on its path or its old path, on a path that no file before it took. `names`: the records passed over because their path is not printable. Pure. */
 export function revertedLinesFor(files: File[], reverts: LiveRecord[]): { lines: MemoryLine[]; names: number } {
   let names = 0;
   const usable: Array<{ record: LiveRecord; ms: number }> = [];
@@ -142,13 +142,14 @@ export function revertedLinesFor(files: File[], reverts: LiveRecord[]): { lines:
     if (printable(entry.record.path)) usable.push(entry);
     else names += 1;
   }
-  const taken = new Set<{ record: LiveRecord; ms: number }>();
+  // A path that already has its reverted line is taken: the engine keeps one for a path, so a file goes on to a path that has none.
+  const taken = new Set<string>();
   const lines: MemoryLine[] = [];
   for (const file of files) {
-    // One line for a file at most, and a record is one line at most; a reverted line is never near (call 12).
-    const entry = usable.find((e) => !taken.has(e) && (e.record.path === file.path || (file.previousPath !== null && e.record.path === file.previousPath)));
+    // One line for a file at most, and so a record is one line at most; a reverted line is never near (call 12).
+    const entry = usable.find((e) => !taken.has(e.record.path) && (e.record.path === file.path || (file.previousPath !== null && e.record.path === file.previousPath)));
     if (entry === undefined) continue;
-    taken.add(entry);
+    taken.add(entry.record.path);
     lines.push({ ref: entry.record.ref, near: false, path: entry.record.path, day: new Date(entry.ms).toISOString().slice(0, 10), category: null, missed: false, reverted: true });
   }
   return { lines, names };
@@ -216,7 +217,8 @@ export function createMemory(source: RecordSource, own: number): Memory {
       const now = keptRecords(await source.live(asOf), own);
       // The reverts are read once, as of the review, never for the day; a review that stopped waiting costs no read of them.
       let reverts: { records: LiveRecord[]; cut: boolean } = { records: [], cut: false };
-      if (typeof source.reverts === 'function') {
+      // With no files no reverted line can be shown, so nothing is asked of the reverts.
+      if (typeof source.reverts === 'function' && files.length > 0) {
         signal.throwIfAborted();
         reverts = keptReverts(await source.reverts(asOf), own);
       }

@@ -1,8 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import type { MemoryBlocks } from '../engine/types.ts';
-import { MEMORY_NAME } from '../engine/context/memory.ts';
-import { countsOf, createMemory, dayStart, linesFor, readTime, RECORDS_READ, REVERTS_READ, type LiveRecord, type RecordSource } from './select.ts';
+import { askMemory, MEMORY_NAME } from '../engine/context/memory.ts';
+import { countsOf, createMemory, dayStart, linesFor, readTime, RECORDS_READ, revertedLinesFor, REVERTS_READ, type LiveRecord, type RecordSource } from './select.ts';
 import { LESSONS_READ, type LiveLesson } from './lessons.ts';
 
 let serial = 0;
@@ -676,4 +676,50 @@ test('the order of what the source returns changes nothing', async () => {
   assert.deepEqual(rotated, first);
   assert.equal(JSON.stringify(reversed), JSON.stringify(first));
   assert.deepEqual(first.pullRequest.filter((l) => l.reverted === true).map((l) => l.ref), [`47:reverts:3:${TAX}`, revert(45, 4, 'src/cart/new.ts', day(8)).ref]);
+});
+
+test('a path that already has its reverted line is taken, so the memory hands over one line for a path', async () => {
+  const a = file('src/cart/add.ts', 'src/cart/old.ts');
+  const b = file('src/cart/new.ts', 'src/cart/old.ts');
+  const old10 = revert(9, 3, 'src/cart/old.ts', day(10));
+  const old8 = revert(11, 4, 'src/cart/old.ts', day(8));
+  const new7 = revert(12, 5, 'src/cart/new.ts', day(7));
+  const src = withReverts([], [old10, old8, new7]);
+  const got = await createMemory(src, 8).blocks([a, b], AS_OF, signal);
+  assert.deepEqual(got.pullRequest, [revertedLine(old10), revertedLine(new7)]);
+  assert.equal(got.cut.lines, 0);
+  // the engine keeps every reverted line the memory handed over
+  const asked = await askMemory(createMemory(withReverts([], [old10, old8, new7]), 8), [a, b], AS_OF);
+  assert.deepEqual(asked.context?.lines, got.pullRequest);
+  assert.deepEqual(asked.status, { status: 'ok', code: 'ok', lines: 2 });
+  // B's path is A's old path
+  const c = file('src/cart/old.ts');
+  const own = revert(13, 6, 'src/cart/old.ts', day(6));
+  const variant = await revertBlocks([], [old10, old8, own, revert(14, 6, 'src/cart/add.ts', day(5))], [a, c]);
+  assert.deepEqual(variant.pullRequest, [revertedLine(old10)]);
+  // a file whose every candidate path is taken gets none, and nothing throws
+  const taken = await revertBlocks([], [old10, old8], [a, b]);
+  assert.deepEqual(taken.pullRequest, [revertedLine(old10)]);
+  assert.deepEqual(revertedLinesFor([a, b, c], [old10, old8]).lines, [revertedLine(old10)]);
+});
+
+test('the rules of the read of reverts: its number, the day as a time, an answer that is no list, no files, and names counted beside a line', async () => {
+  assert.equal(REVERTS_READ, 1000);
+  // the day is the UTC day of the record's time, not the text of it
+  const offset = revert(9, 3, TAX, '2026-03-10T01:00:00+02:00');
+  assert.deepEqual((await revertBlocks([], [offset], [file(TAX)])).pullRequest.map((l) => l.day), ['2026-03-09']);
+  // an answer that is no list is a memory with no reverted line
+  for (const answer of [null, undefined, 'x', 5, {}]) {
+    const got = await createMemory({ live: async () => [], reverts: async () => answer as unknown as LiveRecord[] }, 8).blocks([file(TAX)], AS_OF, signal);
+    assert.deepEqual(got.pullRequest, [], String(answer));
+  }
+  // with no files nothing is asked of the reverts
+  const src = withReverts([], [revert(9, 3, TAX, day(10))]);
+  const none = await createMemory(src, 8).blocks([], AS_OF, signal);
+  assert.deepEqual(none.pullRequest, []);
+  assert.deepEqual(src.asked, []);
+  // an unprintable path among the reverts is counted when the answer is not empty
+  const shown = await revertBlocks([], [revert(9, 3, TAX, day(10)), revert(11, 4, 'src/my file.ts', day(11))], [file(TAX), file('src/my file.ts')]);
+  assert.equal(shown.pullRequest.length, 1);
+  assert.equal(shown.cut.names, 1);
 });
