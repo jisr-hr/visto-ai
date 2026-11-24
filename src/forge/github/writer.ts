@@ -1,13 +1,11 @@
 import type { AppInfo, ForgeWriter, OwnReviewState, PostedComment, PullRequestRef, ReviewDraft } from '../types.ts';
 import type { AppAuth } from './app-auth.ts';
 import { createGithubHttp, isObject, jsonOf } from './http.ts';
+import { ownReviewStateOf } from './objects.ts';
 import { createGithubThreads } from './threads.ts';
 
 export const MAX_REVIEW_PAGES = 10;
 export const MAX_COMMENT_PAGES = 20;
-
-// A review's state as the list answer writes it; any other is 'other'.
-const OWN_STATE = new Map<string, OwnReviewState>([['APPROVED', 'approved'], ['DISMISSED', 'dismissed'], ['COMMENTED', 'commented']]);
 
 const bad = (): Error => new Error('github_bad_response');
 const wholeNumber = (v: unknown): v is number => typeof v === 'number' && Number.isInteger(v);
@@ -84,7 +82,7 @@ export function createGithubWriter(opts: { auth: AppAuth; info: { read(): Promis
         if (item.commit_id === null) continue;
         if (typeof item.commit_id !== 'string') throw bad();
         const review: (typeof own)[number] = { id: String(item.id), commit: item.commit_id, at: timeOf(item.submitted_at) };
-        if (typeof item.state === 'string') review.state = OWN_STATE.get(item.state) ?? 'other';
+        if (typeof item.state === 'string') review.state = ownReviewStateOf(item.state);
         own.push(review);
       }
       own.sort((a, b) => (a.at === b.at ? 0 : a.at > b.at ? -1 : 1));

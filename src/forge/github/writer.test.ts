@@ -90,6 +90,18 @@ test("the app's own reviews carry their state when GitHub gives one", async () =
   ]);
   assert.deepEqual(own.map((r) => 'state' in r), [false, false, true, true, true, true]);
 });
+test("the app's own reviews read their state whatever its case", async () => {
+  const review = (id: number, state: string) => ({
+    id, user: { login: 'visto-test[bot]', type: 'Bot' }, commit_id: `c${id}`, body: 'text', submitted_at: `2026-03-01T10:0${id}:00Z`, state,
+  });
+  const { writer } = github({ 'GET /repos/acme/shop/pulls/7/reviews?per_page=100&page=1': () => json([
+    review(1, 'approved'), review(2, 'Dismissed'), review(3, 'commented'), review(4, 'changes_requested'),
+  ]) });
+  assert.deepEqual(await writer.listOwnReviews(REF, '99'), [
+    { id: '4', commit: 'c4', state: 'other' }, { id: '3', commit: 'c3', state: 'commented' },
+    { id: '2', commit: 'c2', state: 'dismissed' }, { id: '1', commit: 'c1', state: 'approved' },
+  ]);
+});
 test("an own review whose commit is null is not listed, and one whose commit is no string still rejects", async () => {
   const review = (id: number, commit: unknown, at: string) =>
     ({ id, user: { login: 'visto-test[bot]', type: 'Bot' }, commit_id: commit, body: 'text', submitted_at: at, state: 'COMMENTED' });

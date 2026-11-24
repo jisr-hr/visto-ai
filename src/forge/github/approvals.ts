@@ -1,12 +1,11 @@
-import type { ForgeApprovals, OwnReviewState, PullRequestRef } from '../types.ts';
+import type { ForgeApprovals, PullRequestRef } from '../types.ts';
 import type { AppAuth } from './app-auth.ts';
 import { createGithubHttp, isObject, jsonOf } from './http.ts';
+import { ownReviewStateOf } from './objects.ts';
 
 export const MAX_RULE_PAGES = 10;
 
 const JSON_ACCEPT = 'application/vnd.github+json';
-// A review's state as listOwnReviews maps it; any other is 'other'.
-const OWN_STATE = new Map<string, OwnReviewState>([['APPROVED', 'approved'], ['DISMISSED', 'dismissed'], ['COMMENTED', 'commented']]);
 
 const bad = (): Error => new Error('github_bad_response');
 const badPath = (): Error => new Error('github_bad_path');
@@ -107,7 +106,7 @@ export function createGithubApprovals(opts: { auth: AppAuth; fetch: typeof fetch
       if (!res.ok) throw new Error(`github_${res.status}`);
       const body = await jsonOf(res);
       if (!isObject(body) || typeof body.state !== 'string') throw bad();
-      return { state: OWN_STATE.get(body.state) ?? 'other', commit: typeof body.commit_id === 'string' ? body.commit_id : null };
+      return { state: ownReviewStateOf(body.state), commit: typeof body.commit_id === 'string' ? body.commit_id : null };
     },
 
     async dismissReview(ref: PullRequestRef, installation: string, reviewId: string, message: string): Promise<void> {

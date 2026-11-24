@@ -155,6 +155,13 @@ test('a review whose commit is null is read with its state', async () => {
   }
 });
 
+test('a review state is read whatever its case', async () => {
+  for (const [state, expected] of [['approved', 'approved'], ['Dismissed', 'dismissed'], ['commented', 'commented'], ['changes_requested', 'other']] as const) {
+    const { approvals } = github({ [REVIEW]: () => json({ id: 501, state, commit_id: 'h1' }) });
+    assert.deepEqual(await approvals.readReview(REF, '99', '501'), { state: expected, commit: 'h1' }, state);
+  }
+});
+
 const DISMISSAL = 'PUT /repos/acme/shop/pulls/7/reviews/501/dismissals';
 const MESSAGE = 'New commits were pushed after this approval.';
 test('a dismissal is sent once as a PUT with its message, and an answer that is not dismissed rejects', async () => {

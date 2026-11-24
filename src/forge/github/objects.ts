@@ -1,4 +1,4 @@
-import type { Association, GeneralComment, HumanInlineComment, HumanReview } from '../types.ts';
+import type { Association, GeneralComment, HumanInlineComment, HumanReview, OwnReviewState } from '../types.ts';
 import { isObject } from './http.ts';
 
 const bad = (): Error => new Error('github_bad_response');
@@ -31,6 +31,13 @@ export const associationOf = (v: unknown): Association => ASSOCIATION.get(typeof
 const REVIEW_STATE = new Map<string, HumanReview['state']>([
   ['APPROVED', 'approved'], ['CHANGES_REQUESTED', 'changes_requested'], ['COMMENTED', 'commented'], ['DISMISSED', 'dismissed'],
 ]);
+
+/** The state of a review of the app's own, by its name in capitals: what `listOwnReviews` and `readReview` read. */
+export const OWN_REVIEW_STATE: ReadonlyMap<string, OwnReviewState> = new Map<string, OwnReviewState>([
+  ['APPROVED', 'approved'], ['DISMISSED', 'dismissed'], ['COMMENTED', 'commented'],
+]);
+/** A review's state read whatever its case, as `reviewOf` reads one; any other is 'other'. */
+export const ownReviewStateOf = (state: string): OwnReviewState => OWN_REVIEW_STATE.get(state.toUpperCase()) ?? 'other';
 
 function objectItem(v: unknown): Record<string, unknown> {
   if (!isObject(v)) throw bad();
