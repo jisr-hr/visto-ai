@@ -67,12 +67,13 @@ interface RunSetup {
   inputPath: string; outDir: string; label: string; maxCases: number; maxCost: number; concurrency: number;
   config: DeploymentConfig; deps: ReviewDeps;
   options: Record<string, string>; // the values given of the command's own options
+  flags: Set<string>;              // the command's own flags that were given
 }
 
 // What `replay` and `backtest` share: the same options, the same checks, and the same real clients.
-// `own`: the options with a value that the command takes beside the shared ones.
-export function prepareRun(command: string, inputName: string, argv: string[], env: Record<string, string | undefined>, own: string[] = []): RunSetup {
-  const parsed = parse(argv, [inputName, 'out', 'label', 'config', 'max-cases', 'max-cost', 'concurrency', ...own], ['force']);
+// `own`: the options with a value that the command takes beside the shared ones; `ownFlags`: its flags.
+export function prepareRun(command: string, inputName: string, argv: string[], env: Record<string, string | undefined>, own: string[] = [], ownFlags: string[] = []): RunSetup {
+  const parsed = parse(argv, [inputName, 'out', 'label', 'config', 'max-cases', 'max-cost', 'concurrency', ...own], ['force', ...ownFlags]);
   if (parsed.positional.length > 0) throw new UsageError(`usage: ${command} takes no positional arguments`);
   const get = (name: string): string => {
     const v = parsed.options.get(name);
@@ -113,16 +114,16 @@ export function prepareRun(command: string, inputName: string, argv: string[], e
     const value = parsed.options.get(name);
     if (value !== undefined) options[name] = value;
   }
-  return { inputPath, outDir, label, maxCases, maxCost, concurrency, config, deps, options };
+  return { inputPath, outDir, label, maxCases, maxCost, concurrency, config, deps, options, flags: parsed.flags };
 }
 
 const projectFolder = (): string => resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 
 async function replay(argv: string[], env: Record<string, string | undefined>, out: (line: string) => void): Promise<void> {
-  const setup = prepareRun('replay', 'cases', argv, env);
+  const setup = prepareRun('replay', 'cases', argv, env, [], ['plain']);
   const { cases, sha256 } = readable('cases', () => loadCases(setup.inputPath));
   const { inputPath, outDir, label, maxCases, maxCost, concurrency, config, deps } = setup;
-  const file = await runReplay({ outDir, label, maxCases, maxCost, concurrency, config, deps, cases, casesFile: inputPath, casesSha256: sha256 });
+  const file = await runReplay({ outDir, label, maxCases, maxCost, concurrency, config, deps, cases, casesFile: inputPath, casesSha256: sha256, plain: setup.flags.has('plain') });
   out(`cases ${file.summary.cases}, failed ${file.summary.failed_cases}, not started ${file.cases_not_started}, total_cost ${file.summary.total_cost}`);
   if (file.stopped_reason !== null) out(`stopped: ${file.stopped_reason}`);
 }

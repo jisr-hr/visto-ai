@@ -638,3 +638,14 @@ test('import-aacr reports an input that cannot be read', async () => {
   assert.equal(code, 2);
   assert.deepEqual(lines, ['usage: cannot read --input']);
 });
+
+test('replay accepts --plain, and backtest does not', () => {
+  const folder = mkdtempSync(tmpdir() + '/');
+  const config = join(folder, 'config.yml');
+  writeFileSync(config, 'model:\n  apiKey: { env: MODEL_KEY }\n  model: vendor/model-a\n');
+  const env = { GITHUB_TOKEN: 't', MODEL_KEY: 'k' };
+  const argv = ['--cases', join(folder, 'cases.yml'), '--out', join(folder, 'out'), '--label', 'one', '--config', config];
+  assert.equal(prepareRun('replay', 'cases', argv, env, [], ['plain']).flags.has('plain'), false);
+  assert.equal(prepareRun('replay', 'cases', [...argv, '--plain'], env, [], ['plain']).flags.has('plain'), true);
+  assert.throws(() => prepareRun('replay', 'cases', [...argv, '--plain'], env), /unknown option --plain/);
+});

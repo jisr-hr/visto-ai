@@ -283,3 +283,31 @@ test('a config that names an MCP server changes nothing of a replay', async () =
   assert.deepEqual(named, none);
   assert.equal(none.requests.length, 1);
 });
+
+test('replayCase records unplaced and beyond-the-diff findings as extra_findings, unplaced first', async () => {
+  const beyond = { ...finding(5), body: 'Beyond.', beyond_diff: true };
+  const unplaced = { ...finding(900), body: 'Off the diff.' };
+  const r = await replayCase(caseA, config, stubDeps([finding(2), unplaced, beyond]));
+  assert.equal(r.findings.length, 1);
+  assert.deepEqual(r.extra_findings?.map((f) => f.body), ['Off the diff.', 'Beyond.']);
+  assert.deepEqual(r.extra_findings?.[1], { path: 'src/a.ts', line: 5, side: 'RIGHT', severity: 'major', body: 'Beyond.' });
+});
+
+test('runReplay with plain records plain: true in summary.json, and runs the control', async () => {
+  const plainAnswer = JSON.stringify({ findings: [{ path: 'src/a.ts', line: 2, severity: 'major', body: 'Wrong value.' }] });
+  const requests: string[] = [];
+  const deps = stubDeps();
+  deps.model = {
+    complete: (r) => {
+      requests.push(r.forcedTool ?? 'none');
+      return Promise.resolve({ toolName: 'submit_findings', toolArguments: plainAnswer, text: null, model: 'm', provider: null, usage: { calls: 1, inputTokens: 5, outputTokens: 5, cachedTokens: 0, cost: 0.001 } });
+    },
+  };
+  const args = baseArgs({ deps, plain: true });
+  const s = await runReplay(args);
+  assert.equal(s.plain, true);
+  assert.deepEqual(requests, ['submit_findings', 'submit_findings', 'submit_findings']);
+  const written = JSON.parse(readFileSync(join(args.outDir, 'summary.json'), 'utf8')) as { plain: boolean };
+  assert.equal(written.plain, true);
+  assert.equal((await runReplay(baseArgs())).plain, false);
+});
