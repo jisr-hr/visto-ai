@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { GATE_OFF } from '../config/load.ts';
 import type { RepoSettings } from '../config/load.ts';
 import { markDismissed, markDismissFailed } from '../db/approvals.ts';
-import { askWithdraw, claimJob, getJob } from '../db/jobs.ts';
+import { askWithdraw, claimJob, finishJob, getJob } from '../db/jobs.ts';
 import type { Job } from '../db/jobs.ts';
 import { savePullRequest } from '../db/pull-requests.ts';
 import { markPublished, recordRun } from '../db/review-runs.ts';
@@ -32,6 +32,10 @@ interface Options {
   stored?: string | null | false;
   /** The logger and the alert throw. */
   throwing?: boolean;
+  /** Every statement of the job whose text holds this rejects. */
+  failQuery?: string;
+  /** The job's clock throws. */
+  clockThrows?: boolean;
 }
 
 interface Harness {
@@ -76,7 +80,11 @@ async function harness(options: Options = {}): Promise<Harness> {
   let now = new Date(at(0));
 
   const jobDb: Db = {
-    query: <Row>(text: string, params?: unknown[]) => { queries.push(text); return db.query<Row>(text, params); },
+    query: <Row>(text: string, params?: unknown[]) => {
+      queries.push(text);
+      if (options.failQuery !== undefined && text.includes(options.failQuery)) return Promise.reject(new Error('db_down'));
+      return db.query<Row>(text, params);
+    },
     script: (sql) => db.script(sql),
     transaction: (work) => db.transaction(work),
     close: () => db.close(),
@@ -111,7 +119,7 @@ async function harness(options: Options = {}): Promise<Harness> {
         if (answer !== null) throw answer;
       },
     },
-    clock: () => now,
+    clock: () => { if (options.clockThrows === true) throw new Error('clock_down'); return now; },
     log: (entry) => { logs.push(entry); if (options.throwing === true) throw new Error('log_down'); },
     alert: (code, details) => { alerts.push([code, details]); if (options.throwing === true) throw new Error('alert_down'); },
     settingsFor: () => options.settings ?? SETTINGS,
@@ -548,4 +556,164 @@ test('the log line holds ids, counts and codes only', async () => {
   assert.deepEqual(await statusOf(loud, last), ['done', 'failed', at(5)]);
   assert.deepEqual(await runRows(loud.db), [row(id, { dismiss_failure: 'github_403' })]);
   assert.deepEqual([loud.alerts.length, loud.logs.length, loud.queued()], [1, 1, 1]);
+});
+
+test('a live state of no known kind is a failure, never read as a merge', async () => {
+  const odd = { ...liveOf({ head: 'h2' }), state: 'locked' } as unknown as LivePullRequest;
+  const h = await harness({ live: [odd] });
+  const id = await posted(h.db, '501');
+  const job = await h.job(5, { starts: 3 });
+  await h.run(job);
+  assert.deepEqual(h.calls, [['readPullRequest', REF, '99']]);
+  assert.deepEqual(await runRows(h.db), [row(id, { dismiss_failure: 'internal_error' })]);
+  assert.deepEqual(h.alerts, [['dismissal_failed', { reason: 'internal_error', repo: 'acme/shop', number: 7 }]]);
+  assert.deepEqual(await statusOf(h, job), ['done', 'failed', at(5)]);
+  assert.equal(lines(h)[0]!['state'], null);
+});
+
+test('a give-up records its failures before the job is finished: a refused record still alerts once and asks the gate', async () => {
+  const h = await harness({ failQuery: 'set dismiss_failure = $2', dismissals: { '501': [new Error('github_403')] } });
+  const id = await posted(h.db, '501');
+  const job = await h.job(5, { starts: 3 });
+  await h.run(job);
+  assert.deepEqual(await statusOf(h, job), ['done', 'failed', at(5)]);
+  assert.deepEqual(await runRows(h.db), [row(id)]);
+  assert.deepEqual(h.alerts, [['dismissal_failed', { reason: 'github_403', repo: 'acme/shop', number: 7 }]]);
+  assert.deepEqual(await gateJobs(h.db), [{ reason: 'sync', status: 'pending', installation: '99' }]);
+  assert.equal(h.queued(), 1);
+  // The records came first: the finish was the job's last statement.
+  const marks = h.queries.findIndex((q) => q.includes('set dismiss_failure = $2'));
+  const finish = h.queries.findIndex((q) => q.includes("status in ('pending', 'running')") && q.includes('outcome = $3'));
+  assert.ok(marks >= 0 && finish > marks);
+});
+
+test('a give-up whose records are written is recorded though the job was finished meanwhile', async () => {
+  const h = await harness({ dismissals: { '501': [new Error('github_403')] } });
+  const id = await posted(h.db, '501');
+  const job = await h.job(5, { starts: 3 });
+  assert.equal(await finishJob(h.db, job.id, 'dropped', 'superseded', at(5)), true);
+  await h.run(job);
+  assert.deepEqual(await statusOf(h, job), ['dropped', 'superseded', at(5)]);
+  assert.deepEqual(await runRows(h.db), [row(id, { dismiss_failure: 'github_403' })]);
+  assert.deepEqual(h.alerts, [['dismissal_failed', { reason: 'github_403', repo: 'acme/shop', number: 7 }]]);
+  assert.deepEqual([lines(h)[0]!['outcome'], lines(h)[0]!['requeued'], h.queued()], [null, false, 1]);
+});
+
+test('a failure recorded on an approval at the live head ends when a later job finds it dismissed by hand', async () => {
+  // The withdraw job asked after the approving publication cannot read the pull request at its third start.
+  const h = await harness({ live: [new Error('github_502'), liveOf()], reviews: { '501': [DISMISSED] } });
+  const id = await posted(h.db, '501');
+  await h.run(await h.job(5, { starts: 3 }));
+  assert.deepEqual(await runRows(h.db), [row(id, { dismiss_failure: 'github_502' })]);
+  assert.deepEqual([h.alerts.length, h.queued()], [1, 1]);
+
+  // A person dismisses it by hand; the next job reads it, though it is at the live head and the newest review.
+  const next = await h.job(200);
+  await h.run(next);
+  assert.deepEqual(named(h, 'readReview'), [['readReview', '501']]);
+  assert.equal(named(h, 'dismissReview').length, 0);
+  assert.deepEqual(await runRows(h.db), [row(id, { dismissed_at: new Date(at(200)), dismissed_by: 'git_service' })]);
+  assert.deepEqual(await statusOf(h, next), ['done', 'done', at(200)]);
+  assert.deepEqual([lines(h)[1]!['targets'], lines(h)[1]!['by_git_service'], h.alerts.length, h.queued()], [0, 1, 1, 2]);
+});
+
+test('a failure recorded on an approval that is no longer a target is cleared when GitHub still holds it approved', async () => {
+  const h = await harness({ live: [liveOf()], dismissals: { '501': [new Error('github_403')] } });
+  const approval = await posted(h.db, '501');
+  // A later comment of the same head makes it a target (call 11), and its dismissal fails three times.
+  const comment = await posted(h.db, '502', { approved: false });
+  await h.run(await h.job(5, { starts: 3 }));
+  assert.equal((await runRows(h.db))[0]!.dismiss_failure, 'github_403');
+  assert.deepEqual([h.alerts.length, h.queued()], [1, 1]);
+
+  // /review approves the same head again: the first approval is no target, holds on GitHub, and its failure ends.
+  const again = await posted(h.db, '503');
+  const next = await h.job(200);
+  await h.run(next);
+  assert.deepEqual(named(h, 'readReview').slice(-1), [['readReview', '501']]);
+  assert.equal(named(h, 'dismissReview').length, 1);
+  assert.deepEqual(await runRows(h.db), [row(approval), row(comment), row(again)]);
+  assert.deepEqual(await statusOf(h, next), ['done', 'done', at(200)]);
+  assert.deepEqual([lines(h)[1]!['targets'], lines(h)[1]!['failed'], h.alerts.length, h.queued()], [0, 0, 1, 2]);
+});
+
+test('an approval no longer targeted whose failure cannot be read again stays recorded, with no new alert', async () => {
+  const answers: Array<[ReviewAnswer, string]> = [
+    [new Error('github_500'), 'github_500'], [null, 'review_not_found'], [{ state: 'other', commit: 'h1' }, 'review_state_other'],
+  ];
+  for (const [answer, code] of answers) {
+    const h = await harness({ live: [liveOf()], reviews: { '501': [answer] } });
+    const id = await posted(h.db, '501');
+    assert.equal(await markDismissFailed(h.db, id, 'github_502'), true);
+    const first = await h.job(5);
+    await h.run(first);
+    assert.deepEqual(await statusOf(h, first), ['pending', null, at(15)], code);
+    assert.deepEqual([lines(h)[0]!['targets'], lines(h)[0]!['failed'], lines(h)[0]!['code']], [0, 1, code]);
+    await h.db.query('update visto_ai.jobs set starts = 2 where id = $1', [first.id]);
+    const last = await h.claim(15);
+    await h.run(last!);
+    assert.deepEqual(await statusOf(h, last!), ['done', 'failed', at(15)], code);
+    // Still recorded, now with the code of the last failed withdrawal; the failure is not new, so nothing is alerted or asked.
+    assert.deepEqual(await runRows(h.db), [row(id, { dismiss_failure: code })], code);
+    assert.deepEqual([h.alerts, h.queued(), named(h, 'dismissReview').length], [[], 0, 0], code);
+  }
+});
+
+test('the gate is not asked for a pull request whose base branch is not gated', async () => {
+  const h = await harness({ live: [liveOf({ head: 'h2', baseBranch: 'release/1.0' })] });
+  const id = await posted(h.db, '501', { baseBranch: 'release/1.0' });
+  await h.run(await h.job(5));
+  assert.deepEqual(await runRows(h.db), [row(id, { dismissed_at: new Date(at(5)), dismissed_by: 'app' })]);
+  assert.deepEqual([await gateJobs(h.db), h.queued()], [[], 0]);
+});
+
+test('at a merge, an approval at the merged head on another base branch is left', async () => {
+  const h = await harness({ live: [liveOf({ head: 'h2', state: 'merged' })] });
+  const id = await posted(h.db, '501', { headSha: 'h2', baseBranch: 'release/1.0' });
+  const job = await h.job(5);
+  await h.run(job);
+  assert.deepEqual(h.calls, [['readPullRequest', REF, '99']]);
+  assert.deepEqual([await runRows(h.db), h.alerts], [[row(id)], []]);
+  assert.deepEqual(await statusOf(h, job), ['done', 'kept', at(5)]);
+});
+
+test('at the give-up each failed target records its own code', async () => {
+  const h = await harness({ reviews: { '501': [null] }, dismissals: { '502': [new Error('github_403')] } });
+  const first = await posted(h.db, '501');
+  const second = await posted(h.db, '502');
+  await h.run(await h.job(5, { starts: 3 }));
+  assert.deepEqual(await runRows(h.db), [row(first, { dismiss_failure: 'review_not_found' }), row(second, { dismiss_failure: 'github_403' })]);
+  assert.deepEqual(h.alerts, [['dismissal_failed', { reason: 'review_not_found', repo: 'acme/shop', number: 7 }]]);
+});
+
+test('a record that changes nothing is not counted', async () => {
+  const h = await harness({ reviews: { '501': [DISMISSED] } });
+  const gone = await posted(h.db, '501');
+  const taken = await posted(h.db, '502');
+  // Another job records each one first, as GitHub answers this one.
+  const { readReview, dismissReview } = h.deps.approvals;
+  h.deps.approvals.readReview = async (ref, installation, reviewId) => {
+    if (reviewId === '501') await markDismissed(h.db, gone, at(4), 'git_service');
+    return readReview(ref, installation, reviewId);
+  };
+  h.deps.approvals.dismissReview = async (ref, installation, reviewId, message) => {
+    await markDismissed(h.db, taken, at(4), 'app');
+    return dismissReview(ref, installation, reviewId, message);
+  };
+  const job = await h.job(5);
+  await h.run(job);
+  assert.deepEqual(await runRows(h.db), [
+    row(gone, { dismissed_at: new Date(at(4)), dismissed_by: 'git_service' }), row(taken, { dismissed_at: new Date(at(4)), dismissed_by: 'app' }),
+  ]);
+  assert.deepEqual(await statusOf(h, job), ['done', 'done', at(5)]);
+  assert.deepEqual([lines(h)[0]!['targets'], lines(h)[0]!['dismissed'], lines(h)[0]!['by_git_service'], lines(h)[0]!['failed']], [2, 0, 0, 0]);
+});
+
+test('a clock that throws when the job is put back changes nothing', async () => {
+  const h = await harness({ clockThrows: true, dismissals: { '501': [new Error('github_403')] } });
+  await posted(h.db, '501');
+  const job = await h.job(5);
+  await h.run(job);
+  assert.equal((await getJob(h.db, job.id))!.status, 'pending');
+  assert.deepEqual([lines(h)[0]!['outcome'], lines(h)[0]!['requeued'], lines(h)[0]!['code']], ['put_back', true, 'github_403']);
 });

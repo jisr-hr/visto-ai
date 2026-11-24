@@ -1,6 +1,6 @@
 import type { RepoSettings } from '../config/load.ts';
 import {
-  failedDismissals, markDismissed, markDismissFailed, markStoodAtMerge, newestApprovalStands, standingApprovals,
+  clearDismissFailure, failedDismissals, markDismissed, markDismissFailed, markStoodAtMerge, newestApprovalStands, standingApprovals,
 } from '../db/approvals.ts';
 import type { Standing } from '../db/approvals.ts';
 import { askGate, askWithdraw, finishJob, requeueJob } from '../db/jobs.ts';
@@ -30,9 +30,9 @@ type Entry = {
   state: LivePullRequest['state'] | null;
   standing: number;              // the standing approvals read
   targets: number;               // those the job read again on GitHub
-  dismissed: number;             // dismissed by this job and recorded so
-  by_git_service: number;        // found dismissed, or no longer an approval, and recorded so
-  failed: number;                // targets left standing for a failure
+  dismissed: number;             // dismissed by this job, and recorded so by this record
+  by_git_service: number;        // found dismissed, or no longer an approval, and recorded so by this record
+  failed: number;                // approvals left standing for a failure: targets, and those read for a recorded failure
   code: string | null;           // the first failure's code
   outcome: string | null; requeued: boolean | null;
 };
@@ -47,7 +47,7 @@ interface Found {
   installation?: string;
   live?: LivePullRequest | null;
   targets?: Standing[];
-  /** The targets left standing for a failure, in order, each with its code. */
+  /** The approvals left standing for a failure, in order, each with its code. */
   failures: Array<{ run: number; code: string }>;
   /** A dismissal was recorded, or a failure recorded for the first time: the gate is asked. */
   changed: boolean;
@@ -76,8 +76,11 @@ export async function runWithdrawJob(job: Job, deps: WithdrawJobDeps): Promise<v
   const alert: Alert = (code, details) => {
     try { deps.alert(code, details); } catch { /* an alert that throws changes nothing */ }
   };
+  const clock = (): Date => {
+    try { return deps.clock(); } catch { return new Date(); }
+  };
   const now = (): string => {
-    try { return deps.clock().toISOString(); } catch { return new Date().toISOString(); }
+    try { return clock().toISOString(); } catch { return new Date().toISOString(); }
   };
   const entry: Entry = {
     event: 'withdraw', job: job.id, repo: `${job.ref.owner}/${job.ref.repo}`, number: job.ref.number,
@@ -101,12 +104,11 @@ export async function runWithdrawJob(job: Job, deps: WithdrawJobDeps): Promise<v
       if (await finishJob(deps.db, job.id, end.status, end.outcome, now())) entry.outcome = end.outcome;
     } else if (job.starts >= MAX_STARTS) {
       entry.requeued = false;
-      if (await finishJob(deps.db, job.id, 'done', 'failed', now())) {
-        entry.outcome = 'failed';
-        await giveUp(steps, end.code);
-      }
+      // The records before the finish: a stop between the two leaves the job to run again, never a failure unrecorded.
+      await giveUp(steps, end.code);
+      if (await finishJob(deps.db, job.id, 'done', 'failed', now())) entry.outcome = 'failed';
     } else {
-      const at = deps.clock();
+      const at = clock();
       const wait = WITHDRAW_RETRY_WAITS_MS[job.starts <= 1 ? 0 : 1]!;
       const answer = await requeueJob(deps.db, job.id, new Date(at.getTime() + wait).toISOString(), at.toISOString(), false);
       entry.requeued = answer === 'requeued';
@@ -156,14 +158,20 @@ async function work(s: Steps): Promise<End> {
     found.targets = found.standing.filter((a) => a.headSha !== head);
   }
   entry.targets = found.targets.length;
-  if (found.targets.length === 0) return { kind: 'finish', status: 'done', outcome: 'kept' };
+  const targets = new Set(found.targets);
+  // On an open pull request an approval kept with a recorded failure is read as well: the failure ends once a job
+  // finds it dismissed or holding.
+  const failed = live.state === 'open' ? found.standing.filter((a) => !targets.has(a) && a.failure !== null) : [];
+  if (targets.size === 0 && failed.length === 0) return { kind: 'finish', status: 'done', outcome: 'kept' };
 
-  for (const target of found.targets) {
+  for (const approval of found.standing) {
+    if (!targets.has(approval) && !failed.includes(approval)) continue;
     try {
-      if (live.state === 'open') await withdraw(s, installation, target);
-      else await atMerge(s, installation, target);
+      if (!targets.has(approval)) await recheck(s, installation, approval);
+      else if (live.state === 'open') await withdraw(s, installation, approval);
+      else await atMerge(s, installation, approval);
     } catch (error) {
-      found.failures.push({ run: target.run, code: codeOf(error) });
+      found.failures.push({ run: approval.run, code: codeOf(error) });
     }
   }
   const first = found.failures[0];
@@ -171,10 +179,11 @@ async function work(s: Steps): Promise<End> {
   return { kind: 'finish', status: 'done', outcome: 'done' };
 }
 
-/** Records a target as dismissed. Rejects when the database does. */
-async function recordDismissed(s: Steps, target: Standing, by: 'app' | 'git_service'): Promise<void> {
-  await markDismissed(s.deps.db, target.run, s.now(), by);
+/** Records an approval as dismissed; it is counted only when this record changed it. Rejects when the database does. */
+async function recordDismissed(s: Steps, approval: Standing, by: 'app' | 'git_service'): Promise<void> {
+  const marked = await markDismissed(s.deps.db, approval.run, s.now(), by);
   s.found.changed = true;
+  if (!marked) return;
   if (by === 'app') s.entry.dismissed += 1;
   else s.entry.by_git_service += 1;
 }
@@ -210,6 +219,23 @@ async function withdraw(s: Steps, installation: string, target: Standing): Promi
   await recordDismissed(s, target, 'app');
 }
 
+/**
+ * On an open pull request, an approval that is no target but carries a recorded failure: one GitHub no longer holds as
+ * an approval is recorded dismissed; one it holds as approved holds, and its failure is cleared. It is never dismissed
+ * here. Rejects with the failure's code.
+ */
+async function recheck(s: Steps, installation: string, approval: Standing): Promise<void> {
+  const answer = await s.deps.approvals.readReview(s.job.ref, installation, approval.reviewId);
+  if (answer === null) throw new Error('review_not_found');
+  const state = stateOf(answer);
+  if (state === 'dismissed' || state === 'commented') {
+    await recordDismissed(s, approval, 'git_service');
+    return;
+  }
+  if (state !== 'approved') throw new Error('review_state_other');
+  if (await clearDismissFailure(s.deps.db, approval.run)) s.found.changed = true;
+}
+
 /** At a merge: records an approval of another head that GitHub still holds, and one it no longer holds as dismissed. Rejects with the failure's code. */
 async function atMerge(s: Steps, installation: string, target: Standing): Promise<void> {
   const answer = await s.deps.approvals.readReview(s.job.ref, installation, target.reviewId);
@@ -229,36 +255,38 @@ async function atMerge(s: Steps, installation: string, target: Standing): Promis
 }
 
 /**
- * The third start failed: on an open pull request each target left standing records its code; when the live pull
- * request was not read at this start, or its targets were not known, every standing approval records the first code
- * (call 19); on a merged one nothing is recorded. One alert when any of these was recorded for the first time.
+ * The third start failed, before the job is finished: on an open pull request each approval left standing for a failure
+ * records its own code; when the live pull request was not read at this start, or its targets were not known, every
+ * standing approval records the first code (call 19); on a merged one nothing is recorded. One alert, and the gate
+ * asked, when any of these was recorded for the first time, or could not be recorded: a failure unrecorded is never
+ * read as an old one. Never rejects.
  */
 async function giveUp(s: Steps, code: string): Promise<void> {
   const { db } = s.deps;
   const { found } = s;
   const live = found.live;
+  if (live !== undefined && live !== null && live.state === 'merged') return;
+  let fresh = false;
   let records: Array<{ run: number; code: string }> = [];
-  try {
-    if (live !== undefined && live !== null && live.state === 'merged') return;
-    if (live !== undefined && live !== null && found.targets !== undefined) {
-      records = found.failures;
-    } else {
+  if (live !== undefined && live !== null && found.targets !== undefined) {
+    records = found.failures;
+  } else {
+    try {
       const standing = found.standing ?? await standingApprovals(db, s.job.ref);
       records = standing.map((a) => ({ run: a.run, code }));
+    } catch {
+      // The approvals could not be read, so none could be recorded.
+      fresh = true;
     }
-  } catch {
-    // The approvals could not be read: nothing is recorded, and the next push, publication or start asks again.
-    return;
   }
-  let first = false;
   for (const r of records) {
     try {
-      if (await markDismissFailed(db, r.run, r.code)) first = true;
+      if (await markDismissFailed(db, r.run, r.code)) fresh = true;
     } catch {
-      // left as it was: the next withdraw job of the pull request records it
+      fresh = true;
     }
   }
-  if (!first) return;
+  if (!fresh) return;
   found.changed = true;
   s.alert('dismissal_failed', { reason: code, repo: s.entry.repo, number: s.entry.number });
 }

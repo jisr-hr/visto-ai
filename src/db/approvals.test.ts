@@ -5,7 +5,7 @@ import type { Db } from './types.ts';
 import { markPublished, recordRun } from './review-runs.ts';
 import type { RunRecord } from './review-runs.ts';
 import {
-  failedDismissal, failedDismissals, hasStandingApproval, markDismissed, markDismissFailed, markStoodAtMerge,
+  clearDismissFailure, failedDismissal, failedDismissals, hasStandingApproval, markDismissed, markDismissFailed, markStoodAtMerge,
   newestApprovalStands, newestWasApproval, standingApprovals,
 } from './approvals.ts';
 
@@ -126,6 +126,29 @@ test('the newest published run says whether its approval stands, and whether it 
     [await newestApprovalStands(db, { ...UPPER, number }), await newestWasApproval(db, { ...UPPER, number })];
   assert.deepEqual(await Promise.all([7, 8, 9, 10, 11, 12].map(read)), [
     [false, false], [false, false], [true, true], [false, true], [false, false], [true, true],
+  ]);
+  await db.close();
+});
+
+test('a recorded failure is cleared once, and never on a dismissed run', async () => {
+  const db = await testDb();
+  const id = await posted(db, '501', true);
+  assert.equal(await clearDismissFailure(db, id), false);
+  assert.equal(await markDismissFailed(db, id, 'github_403'), true);
+  assert.equal(await clearDismissFailure(db, id), true);
+  assert.equal(await clearDismissFailure(db, id), false);
+  // The approval still stands, with no failure.
+  assert.deepEqual(await standingApprovals(db, UPPER), [{ run: id, reviewId: '501', headSha: 'h1', baseBranch: 'main', failure: null }]);
+  assert.deepEqual(await failedDismissals(db), []);
+
+  // A dismissed run, and a comment, each carrying a failure written by statement: left as they are.
+  const dismissed = await posted(db, '502', true, { headSha: 'h2' });
+  const comment = await posted(db, '503', false, { headSha: 'h3' });
+  await db.query("update visto_ai.review_runs set dismissed_at = $2::timestamptz, dismissed_by = 'app' where id = $1", [dismissed, at(100)]);
+  await db.query("update visto_ai.review_runs set dismiss_failure = 'github_502' where id = any($1::integer[])", [[dismissed, comment]]);
+  assert.deepEqual([await clearDismissFailure(db, dismissed), await clearDismissFailure(db, comment)], [false, false]);
+  assert.deepEqual(await db.query('select id, dismiss_failure from visto_ai.review_runs order by id'), [
+    { id, dismiss_failure: null }, { id: dismissed, dismiss_failure: 'github_502' }, { id: comment, dismiss_failure: 'github_502' },
   ]);
   await db.close();
 });

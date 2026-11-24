@@ -74,6 +74,16 @@ export async function markDismissFailed(db: Db, run: number, code: string): Prom
   return rows[0]?.first === true;
 }
 
+/** Clears the recorded failure of an approval not dismissed, which a later withdraw job found holding. true when a failure was cleared. */
+export async function clearDismissFailure(db: Db, run: number): Promise<boolean> {
+  const rows = await db.query(
+    `update visto_ai.review_runs set dismiss_failure = null
+     where id = $1 and approved and dismissed_at is null and dismiss_failure is not null
+     returning id`,
+    [run]);
+  return rows.length === 1;
+}
+
 /** Records that an approval not dismissed still stood at a merge. true the first time; never on a dismissed run or one that is no approval. */
 export async function markStoodAtMerge(db: Db, run: number, at: string): Promise<boolean> {
   const rows = await db.query(
