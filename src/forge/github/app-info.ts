@@ -6,7 +6,7 @@ const READ = new Set(['read', 'write', 'admin']);
 const WRITE = new Set(['write', 'admin']);
 
 /** What the app lacks, one entry for each permission or event a feature needs and the app has not got. */
-export function missingFor(info: AppInfo, dryRun: boolean, gate?: GateNeeds): FeatureOff[] {
+export function missingFor(info: AppInfo, dryRun: boolean, gate?: GateNeeds, approval?: boolean): FeatureOff[] {
   const missing: FeatureOff[] = [];
   const need = (feature: FeatureOff['feature'], permission: string, level: 'read' | 'write'): void => {
     if (!(level === 'read' ? READ : WRITE).has(info.permissions[permission] ?? '')) missing.push({ feature, missing: `${permission}:${level}` });
@@ -29,6 +29,12 @@ export function missingFor(info: AppInfo, dryRun: boolean, gate?: GateNeeds): Fe
     }
     if (gate.statuses) need('gate', 'statuses', 'read');
     if (gate.members) need('gate', 'members', 'read');
+  }
+  // The branch protection is read with administration; an approval is posted, read and dismissed with pull requests.
+  if (!dryRun && approval === true) {
+    need('approval', 'administration', 'read');
+    need('approval', 'pull_requests', 'write');
+    subscribe('approval', 'pull_request_review');
   }
   return missing;
 }
@@ -75,7 +81,7 @@ export function createAppInfo(opts: { auth: AppAuth; fetch: typeof fetch; apiBas
 
   return {
     read,
-    lacks: async (dryRun, gate) => missingFor(await read(), dryRun, gate),
+    lacks: async (dryRun, gate, approval) => missingFor(await read(), dryRun, gate, approval),
     canResolve: async () => WRITE.has((await read()).permissions.contents ?? ''),
   };
 }

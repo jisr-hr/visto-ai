@@ -8,16 +8,16 @@ const infoWith = (permissions: Record<string, string>, events: string[]) => ({ b
 
 test('an app made from the manifest lacks nothing the service needs', () => {
   const info = infoWith(manifest.default_permissions, manifest.default_events);
-  assert.deepEqual([missingFor(info, true, ALL), missingFor(info, false, ALL)], [[], []]);
+  assert.deepEqual([missingFor(info, true, ALL, true), missingFor(info, false, ALL, true)], [[], []]);
 });
 
 test('the manifest asks for no permission the service does not use', () => {
   const names = Object.keys(manifest.default_permissions).filter((name) => name !== 'metadata');
-  assert.deepEqual(names.sort(), ['checks', 'contents', 'issues', 'members', 'pull_requests', 'statuses']);
+  assert.deepEqual(names.sort(), ['administration', 'checks', 'contents', 'issues', 'members', 'pull_requests', 'statuses']);
   for (const name of names) {
     const permissions: Record<string, string> = { ...manifest.default_permissions };
     delete permissions[name];
-    const missing = missingFor(infoWith(permissions, manifest.default_events), false, ALL).map((m) => m.missing);
+    const missing = missingFor(infoWith(permissions, manifest.default_events), false, ALL, true).map((m) => m.missing);
     assert.ok(missing.some((m) => m.startsWith(`${name}:`)), name);
   }
 });
@@ -43,6 +43,6 @@ test('the manifest is private, has an active hook and no address to come back to
   assert.equal(manifest.public, false);
   assert.deepEqual(manifest.hook_attributes, { url: 'https://example.invalid/webhooks/github', active: true });
   assert.equal('redirect_url' in manifest, false);
-  assert.deepEqual(manifest.default_permissions, { pull_requests: 'write', contents: 'write', issues: 'write', checks: 'write', statuses: 'read', members: 'read', metadata: 'read' });
+  assert.deepEqual(manifest.default_permissions, { pull_requests: 'write', contents: 'write', issues: 'write', checks: 'write', statuses: 'read', members: 'read', administration: 'read', metadata: 'read' });
   assert.deepEqual(manifest.default_events, ['pull_request', 'issue_comment', 'pull_request_review', 'pull_request_review_comment', 'pull_request_review_thread', 'check_run']);
 });
