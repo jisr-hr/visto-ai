@@ -38,6 +38,7 @@ export interface EarlierThread {
   settled: boolean;                   // resolved in a way that needs no further verdict
   lastVerdict: 'fixed' | 'answered' | 'open' | null;     // the newest verdict an earlier published run kept
   replies: EarlierReply[];            // oldest first
+  closedForApproval?: boolean;        // closed under the thread rule before this run; absent with approval off
 }
 export interface EarlierState { head: string; threads: EarlierThread[] }   // head: of the last published review
 export interface ThreadVerdict {
@@ -51,6 +52,7 @@ export interface Discussed {
   path: string; side: Side; line: number; severity: 'blocker' | 'major'; body: string;
   commentId: string;                    // the first comment of the thread that already raised it
   resolved: boolean; settled: boolean;  // that thread, at the moment the finding was dropped
+  closedForApproval?: boolean;          // that thread's, when the finding was dropped
 }
 
 export type AcceptanceStatus = 'met' | 'not_met' | 'not_verified';

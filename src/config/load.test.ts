@@ -2,7 +2,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
 import { generateKeyPairSync } from 'node:crypto';
-import { ConfigError, GATE_OFF, contractFile, gateUseOf, parseConfig, repoConfigFor, repoSettingsFor, serviceConfig } from './load.ts';
+import {
+  APPROVAL_OFF, ConfigError, GATE_OFF, approvalOf, approvalUseOf, contractFile, gateUseOf, parseConfig, repoConfigFor, repoSettingsFor, serviceConfig,
+} from './load.ts';
 
 const minimal = 'model:\n  apiKey: { env: MODEL_KEY }\n  model: vendor/model-a\n';
 
@@ -806,4 +808,119 @@ test('learning is not a key of a repository', () => {
   const override = mcpIssues(minimal + 'repositories:\n  overrides:\n    acme/shop:\n      learning: true\n');
   assert.equal(override.length, 1, override.join());
   assert.ok(override[0]!.startsWith('repositories.overrides.acme/shop'), override.join());
+});
+
+const AUDIT_ISSUE = 'must be written as 0 while autoApprove is true: this release does not draw the audit sample yet';
+const DEFAULTS_AUDIT = `repositories.defaults.score.auditShare: ${AUDIT_ISSUE}`;
+const SHOP_AUDIT = `repositories.overrides.acme/shop.score.auditShare: ${AUDIT_ISSUE}`;
+const repos = (body: string): string => `${SERVICE_YAML}repositories:\n${body}`;
+
+test('approval is off unless the config writes it, and a config that writes none gives the settings it gave', () => {
+  assert.deepEqual(APPROVAL_OFF, { enabled: false, threads: 'strict', auditShare: 5 });
+  const others = repos('  overrides:\n    acme/shop: { score: { threshold: 40, inlineNotes: true }, gate: { mode: shadow } }\n');
+  const configs = [parseConfig(minimal, KEY), parseConfig(SERVICE_YAML, ENV), parseConfig(example(), exampleEnv), parseConfig(others, ENV)];
+  for (const c of configs) {
+    assert.equal('approval' in c.repositories.defaults, false);
+    for (const o of Object.values(c.repositories.overrides)) assert.equal('approval' in o, false);
+    for (const name of ['acme/shop', 'acme/other']) {
+      const settings = repoSettingsFor(c, name);
+      assert.equal('approval' in settings, false, name);
+      assert.deepEqual(approvalOf(settings), APPROVAL_OFF, name);
+    }
+    assert.equal(approvalUseOf(c), false);
+  }
+  assert.deepEqual(repoSettingsFor(parseConfig(others, ENV), 'acme/shop'), {
+    primaryBranches: ['main', 'master'], scoreThreshold: 40, ignoredAuthors: ['dependabot[bot]'], baseBranches: [], newHead: null, inlineNotes: true,
+    gate: { ...GATE_OFF, mode: 'shadow' },
+  });
+});
+
+test('the three keys are read for all repositories and for one, and an override replaces only the keys it writes', () => {
+  const c = parseConfig(
+    repos('  defaults: { score: { autoApprove: true, auditShare: 0 } }\n  overrides:\n    acme/shop: { score: { approvalThreads: gate } }\n    acme/off: { score: { autoApprove: false } }\n'),
+    ENV,
+  );
+  assert.deepEqual(c.repositories.defaults.approval, { enabled: true, threads: 'strict', auditShare: 0 });
+  assert.deepEqual(c.repositories.overrides['acme/shop']!.approval, { threads: 'gate' });
+  assert.deepEqual(c.repositories.overrides['acme/off']!.approval, { enabled: false });
+  assert.deepEqual(repoSettingsFor(c, 'Acme/Shop').approval, { enabled: true, threads: 'gate', auditShare: 0 });
+  assert.deepEqual(approvalOf(repoSettingsFor(c, 'acme/shop')), { enabled: true, threads: 'gate', auditShare: 0 });
+  assert.deepEqual(approvalOf(repoSettingsFor(c, 'acme/other')), { enabled: true, threads: 'strict', auditShare: 0 });
+  assert.deepEqual(approvalOf(repoSettingsFor(c, 'acme/off')), { enabled: false, threads: 'strict', auditShare: 0 });
+  assert.deepEqual([repoSettingsFor(c, 'acme/shop').scoreThreshold, repoSettingsFor(c, 'acme/shop').inlineNotes], [70, false]);
+  assert.equal(approvalUseOf(c), true);
+  const one = parseConfig(repos('  overrides:\n    acme/shop: { score: { autoApprove: true, auditShare: 0 } }\n'), ENV);
+  assert.deepEqual(approvalOf(repoSettingsFor(one, 'acme/shop')), { enabled: true, threads: 'strict', auditShare: 0 });
+  assert.equal('approval' in one.repositories.defaults, false);
+  assert.equal('approval' in repoSettingsFor(one, 'acme/other'), false);
+  assert.equal(approvalUseOf(one), true);
+  const idle = parseConfig(repos('  defaults: { score: { approvalThreads: gate, auditShare: 0 } }\n  overrides:\n    acme/shop: { score: { autoApprove: false } }\n'), ENV);
+  assert.deepEqual(approvalOf(repoSettingsFor(idle, 'acme/other')), { enabled: false, threads: 'gate', auditShare: 0 });
+  assert.equal(approvalUseOf(idle), false);
+});
+
+test('automatic approval is refused while the audit share is not written as 0, for the defaults and for one repository', () => {
+  for (const score of ['{ autoApprove: true }', '{ autoApprove: true, auditShare: 5 }', '{ autoApprove: true, auditShare: 37.5, approvalThreads: gate }']) {
+    assert.deepEqual(issuesOf(repos(`  defaults: { score: ${score} }\n`)), [DEFAULTS_AUDIT], score);
+  }
+  assert.deepEqual(issuesOf(repos('  overrides:\n    acme/shop: { score: { autoApprove: true } }\n')), [SHOP_AUDIT]);
+  assert.deepEqual(issuesOf(repos('  defaults: { score: { autoApprove: true, auditShare: 0 } }\n  overrides:\n    acme/shop: { score: { auditShare: 5 } }\n')), [SHOP_AUDIT]);
+  // Bad defaults are reported once for an override that writes neither autoApprove nor auditShare.
+  for (const override of ['{ score: { inlineNotes: true } }', '{ score: { approvalThreads: gate } }', '{ newHead: full }']) {
+    assert.deepEqual(issuesOf(repos(`  defaults: { score: { autoApprove: true } }\n  overrides:\n    acme/shop: ${override}\n`)), [DEFAULTS_AUDIT], override);
+  }
+  // One that writes either key is judged on its own.
+  for (const fixed of ['{ autoApprove: false }', '{ auditShare: 0 }']) {
+    assert.deepEqual(issuesOf(repos(`  defaults: { score: { autoApprove: true } }\n  overrides:\n    acme/shop: { score: ${fixed} }\n`)), [DEFAULTS_AUDIT], fixed);
+  }
+  for (const own of ['{ autoApprove: true }', '{ auditShare: 5 }']) {
+    assert.deepEqual(issuesOf(repos(`  defaults: { score: { autoApprove: true } }\n  overrides:\n    acme/shop: { score: ${own} }\n`)), [DEFAULTS_AUDIT, SHOP_AUDIT], own);
+  }
+  assert.deepEqual(
+    issuesOf(repos('  defaults: { gate: { enabled: true }, score: { autoApprove: true } }\n')),
+    [`repositories.defaults.gate.branches: ${GATE_ISSUE}`, DEFAULTS_AUDIT],
+  );
+  for (const dryRun of ['true', 'false']) {
+    const at = (body: string): string => repos(body).replace('dryRun: true', `dryRun: ${dryRun}`);
+    for (const score of ['{ autoApprove: false, auditShare: 5 }', '{ auditShare: 0 }', '{ approvalThreads: gate }', '{ autoApprove: true, auditShare: 0 }']) {
+      assert.deepEqual(issuesOf(at(`  defaults: { score: ${score} }\n`)), [], `${dryRun} ${score}`);
+      assert.deepEqual(issuesOf(at(`  overrides:\n    acme/shop: { score: ${score} }\n`)), [], `${dryRun} ${score}`);
+    }
+    assert.deepEqual(issuesOf(at('  defaults: { score: { autoApprove: true } }\n')), [DEFAULTS_AUDIT], dryRun);
+    assert.deepEqual(issuesOf(at('  overrides:\n    acme/shop: { score: { autoApprove: true, auditShare: 5 } }\n')), [SHOP_AUDIT], dryRun);
+  }
+});
+
+test('an approval key of the wrong kind is refused by name, and the issue quotes no value', () => {
+  const bad: [string, string][] = [
+    ['approvalThreads', 'relaxed'], ['autoApprove', 'yes'], ['auditShare', '-1'], ['auditShare', '101'], ['auditShare', 'five'], ['auditShare', 'null'],
+  ];
+  for (const [key, value] of bad) {
+    const at: [string, string][] = [
+      [`  defaults: { score: { ${key}: ${value} } }\n`, `repositories.defaults.score.${key}`],
+      [`  overrides:\n    acme/shop: { score: { ${key}: ${value} } }\n`, `repositories.overrides.acme/shop.score.${key}`],
+    ];
+    for (const [body, where] of at) {
+      const issues = issuesOf(repos(body));
+      assert.ok(issues.length > 0, `${key}: ${value}`);
+      for (const issue of issues) {
+        assert.ok(issue.startsWith(where), issue);
+        for (const quoted of ['relaxed', 'yes', 'five', '-1', '101']) assert.ok(!issue.includes(quoted), issue);
+      }
+    }
+  }
+  const unknown = issuesOf(repos('  defaults: { score: { autoApproval: true } }\n'));
+  assert.ok(unknown.length === 1 && unknown[0]!.startsWith('repositories.defaults.score') && unknown[0]!.includes('autoApproval'), unknown.join());
+});
+
+test('the example with its score block switched on reads approval as written: off, strict, share 0', () => {
+  const c = parseConfig(uncomment(example(), '    # score:'), exampleEnv);
+  assert.deepEqual(c.repositories.defaults.approval, { enabled: false, threads: 'strict', auditShare: 0 });
+  for (const name of ['acme/shop', 'acme/other']) {
+    assert.deepEqual(approvalOf(repoSettingsFor(c, name)), { enabled: false, threads: 'strict', auditShare: 0 }, name);
+  }
+  assert.equal(approvalUseOf(c), false);
+  for (const line of ['autoApprove: false', 'approvalThreads: strict', 'auditShare: 0']) {
+    assert.match(example(), new RegExp(`^ {4}# {3}${line}$`, 'm'), line);
+  }
 });

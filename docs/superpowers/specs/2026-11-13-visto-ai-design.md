@@ -169,7 +169,7 @@ Rules carried over from the predecessor:
 - An automatic trigger on an already reviewed head is skipped as an empty diff. The one exception is a pull request retargeted to another base branch: its diff is different, so it gets a `full` review.
 - A draft is skipped unless a person asked for the review.
 
-**Threads a run judges.** Every major or blocker thread of the bot's that is not settled, whether it is resolved or not. A thread is **settled** when it is resolved in a way the rule in force accepts without a further verdict. For the gate that is the second half of its rule: the app resolved it, or a person replied in it (section 9). Where automatic approval is on under the strict rule, it is the second half of that rule (section 6.4). Judging resolved threads is a change from the predecessor, which judged only unresolved ones. Without it, an author who fixed the code and resolved the thread themselves could never have the fix verified, and on a later head the gate would have nothing left to clear that thread with.
+**Threads a run judges.** Every major or blocker thread of the bot's that is not settled, whether it is resolved or not. A thread is **settled** when it is resolved in a way the rule in force accepts without a further verdict. For the gate that is the second half of its rule: the app resolved it, or a person replied in it (section 9). Where automatic approval is on, a thread is settled only when the second half of its thread rule (section 6.4) accepts it too. Judging resolved threads is a change from the predecessor, which judged only unresolved ones. Without it, an author who fixed the code and resolved the thread themselves could never have the fix verified, and on a later head the gate would have nothing left to clear that thread with.
 
 **What a run reads.** In this order of priority, all within the batch limit (section 12):
 
@@ -393,22 +393,22 @@ The app submits its review as an approval only when all of these hold:
 5. The pull request is open, is not a draft, and its head is still the head that was reviewed.
 6. The pull request was not drawn for the audit sample (section 6.5).
 7. The pull request's branch is in the repository itself (D24). A pull request from a fork is never approved automatically, because pushing to a fork takes no access to the repository.
-8. The base branch dismisses stale approvals, and the app can read that it does (D12). This is the git service's own rule that removes an approval when new commits are pushed. It is checked when a review is about to approve. Where the rule is off, or the app cannot read the branch's rules, the bot reviews as usual, does not approve, and says why in the review.
+8. The base branch dismisses stale approvals, and the app can read that it does (D12). This is the git service's own rule that removes an approval when new commits are pushed. It is checked when a review is about to approve. Where the rule is off, or the app cannot read the branch's rules, the bot reviews as usual, does not approve, and says why in the review. The rule is read when the review is about to be posted, from the active rulesets that apply to the base branch (readable with Metadata read) and from its branch protection (Administration read): either one that dismisses stale approvals is enough.
 
-Otherwise the review is a comment, as in the predecessor.
+Otherwise the review is a comment, as in the predecessor. Where automatic approval is on, the review ends with one paragraph that says it approved, or which condition first did not hold. A review GitHub refuses as an approval is posted as a comment and says so.
 
 **Blocking threads and approval (D18).** The gate (section 9) lets a thread clear when the bot accepts the author's reply, or when a person replies and the thread is resolved, and that person may be the author. That is right for a gate, which exists to make sure findings are answered. Whether it is enough for an approval that replaces a human reviewer is a setting, per repository, in the deployment config:
 
-- **Strict, the default.** A major or blocker thread counts as closed in two cases only. First, the newest published review on the current head verified the fix in changed code: it kept a `fixed` verdict, and the thread's file changed since the thread was opened (section 5.6). Second, the thread is resolved, and either the app resolved it after such a verdict or a person **other than the author**, with access to the repository, replied in it. Access means owner, member or collaborator, the same check as for commands (D15, D23). On a public repository anyone can reply in a thread, and a stranger's reply closes nothing.
+- **Strict, the default.** A major or blocker thread counts as closed in two cases only. First, the newest published review on the current head verified the fix in changed code: it kept a `fixed` verdict, and the thread's file changed since the thread was opened (section 5.6). Second, the thread is resolved, and either the app resolved it after such a verdict or a person **other than the author**, with access to the repository, replied in it. Access means owner, member or collaborator, the same check as for commands (D15, D23). On a public repository anyone can reply in a thread, and a stranger's reply closes nothing. A thread the newest review kept open, and a finding whose comment is gone from its thread, are open under either rule.
 - **Same as the gate.** A thread counts as closed exactly when the gate's rule, as set for the repository, would clear it (section 9). The bot accepting a reply is enough. So is any person's reply once the thread is resolved, the author's included, unless clearing by reply is switched off.
 
 The setting exists for wrong findings. Under the strict rule a wrong finding never blocks the merge. It costs one person's look: the bot does not approve, and a person reviews the pull request as they would one above the threshold. The relaxed rule saves that look. Its price is that the author, who may be an AI agent, can argue the bot out of a correct finding with no person involved.
 
 Approval is decided only when a review runs. An author who has answered a thread comments `/review` to have it judged again. The rule is evaluated whether or not the gate check is on.
 
-**Withdrawal (D12).** An approval belongs to one head. When a new commit arrives, or the pull request is retargeted to another base branch, the app dismisses its own approval at once, before the new review is queued. The review of the new head decides afresh, and approves again when every condition above holds. If the dismissal fails the app raises an alert, and where the gate is on it fails the check.
+**Withdrawal (D12).** An approval belongs to one head. When a new commit arrives, or the pull request is retargeted to another base branch, the app stores a withdrawal job for the pull request in the transaction that stores its facts and queues the new review, and runs it at once; a dismissal that fails is tried again after 10 and 60 seconds. The review of the new head decides afresh, and approves again when every condition above holds. A reopening asks for a withdrawal as a new commit does: it withdraws an approval of another head or base branch, and an approval of the reopened head and base stands. A later review of the same head that does not approve withdraws the bot's earlier approval of it too. A conversion to draft withdraws nothing. If the dismissal still fails after about 70 seconds the app raises an alert and, where the gate is on, fails the check of the pull request's head for as long as that approval stands; a skip does not pass it.
 
-The app's own withdrawal is not a guarantee. It depends on the push webhook reaching a running app. While the app is down or restarting, or a delivery is late, the approval stands on the new head, and the pull request can be merged in that window. Redelivery at start-up (section 8.2) shortens the window and does not close it. Only the git service's own rule that dismisses stale approvals closes it. That is why the bot approves only where the rule is on (condition 8). The setup guide says how to enable it. When a pull request is merged at a head the bot did not approve while its approval still stood, the app records it and raises an alert.
+The app's own withdrawal is not a guarantee. It depends on the push webhook reaching a running app. While the app is down or restarting, or a delivery is late, the approval stands on the new head, and the pull request can be merged in that window. Redelivery at start-up (section 8.2) shortens the window and does not close it. Only the git service's own rule that dismisses stale approvals closes it. That is why the bot approves only where the rule is on (condition 8). The setup guide says how to enable it. When a pull request is merged while an approval of the bot's that no longer holds still stood (one of another head or base branch, or any when the newest review is not an approval that stands), the app records it and raises an alert.
 
 Where a repository requires code-owner review, GitHub still waits for a person on owned paths, because an app cannot be a code owner.
 
@@ -416,7 +416,7 @@ Where a repository requires code-owner review, GitHub still waits for a person o
 
 Once the bot approves a kind of change, no person looks at it, so nothing would ever record that it needed one. Two outside signals break that loop:
 
-- **Audit sample (D9).** A share of approvable pull requests is sent to a human anyway and labelled as an audit. The share is set in the deployment config, as a default and per repository, and is 5% unless changed. At 0% the audit is off, and reverts are the only outside signal left. Selection is a hash of the pull request's identity, keyed with the deployment's audit key (section 11.1). Pushing again does not re-roll it, and an author cannot work out beforehand whether a pull request will be drawn. Opening a new pull request for the same change does give a new draw. That gap is accepted.
+- **Audit sample (D9).** A share of approvable pull requests is sent to a human anyway and labelled as an audit. The share is set in the deployment config, as a default and per repository, and is 5% unless changed. At 0% the audit is off, and reverts are the only outside signal left. Selection is a hash of the pull request's identity, keyed with the deployment's audit key (section 11.1). Pushing again does not re-roll it, and an author cannot work out beforehand whether a pull request will be drawn. Opening a new pull request for the same change does give a new draw. That gap is accepted. It is built in the plan after automatic approval; until then automatic approval is refused unless the share is 0.
 - **Reverts.** When a pull request is reverted, its files are recorded as having needed more attention. A revert is recognised when the merge of the reverting pull request is stored: the first line of its description that is not blank, as the delivery of its merge carried it, is exactly the reference the git service's revert button writes to an earlier pull request of the same repository, with nothing else on the line. The line is read as it is written: no character is stripped first, and every line end a renderer honours ends it. No other line and no commit message is read, so a reference below the first line, one with a reason or an invisible character on its line, and a revert made on the command line, are not recorded. The files are those of the reverted pull request's last completed review; with none, nothing is recorded. Reverts enter none of the three numbers in section 6.6. The UI shows them as their own count, with how many of the reverted pull requests the bot had approved.
 
 ### 6.6 Measuring the score
@@ -546,10 +546,11 @@ Order on every webhook: verify the signature, parse, reject a delivery id alread
 
 | Event | Action |
 |---|---|
-| Pull request opened, reopened, ready for review | Queue a review |
-| Pull request new commits | Withdraw any approval, then queue a review after a 180-second quiet period. A newer push replaces a pending one |
-| Pull request retargeted to another base branch | Withdraw any approval, queue a `full` review |
-| Pull request closed | Derive learning records |
+| Pull request opened, reopened, ready for review | Queue a review. On a reopening, store a withdrawal of any approval as for new commits |
+| Pull request new commits | Store a withdrawal of any approval, run at once (section 6.4), then queue a review after a 180-second quiet period. A newer push replaces a pending one |
+| Pull request retargeted to another base branch | Store a withdrawal of any approval, run at once (section 6.4), queue a `full` review |
+| Review dismissed | When it is an approval of the app's own, record it |
+| Pull request closed | Derive learning records. When it is merged, check that no approval of the bot's that no longer held (of another head or base branch, or any when the newest published review is not an approval that stands) still stood |
 | Comment `/review` | Queue a manual review |
 | Comment `/done` | Gate command (section 9) |
 | Comment `/ai-review-skip <reason>` | Gate command (section 9) |
@@ -645,7 +646,7 @@ GitHub access is direct HTTP with installation tokens. The `gh` command-line too
 | Commit statuses | Read | Reading required CI checks for `/done` |
 | Issues | Write | Reactions and replies to commands |
 | Organization members | Read | The skip-team check |
-| Branch rules (the exact permission is to be verified, section 20) | Read (optional) | Reading whether the base branch dismisses stale approvals. Needed only for automatic approval |
+| Administration | Read (optional) | Reading the branch protection, whether the base branch dismisses stale approvals; rulesets are read with Metadata. Needed only for automatic approval |
 | Metadata | Read | Required by GitHub |
 
 Events: pull request, issue comment, pull request review, pull request review comment, pull request review thread, check run.
@@ -734,7 +735,7 @@ The schema is designed fresh. Identity everywhere is the git service, the reposi
 | `deliveries` | Webhook delivery ids, for duplicate rejection |
 | `jobs`, `heartbeat` | The queue and the liveness mark |
 | `pull_requests` | Author, state, merge and revert facts |
-| `review_runs` | One per run, append-only: mode, head, status, review id, whether approved and when dismissed, body, usage, dependency statuses, coverage, count of blocking findings on unchanged lines, count of blocking findings left without a thread, when its notice was sent to the notifiers |
+| `review_runs` | One per run, append-only: mode, head, status, review id, whether approved and when dismissed, by whom, why a withdrawal failed, whether it still stood at a merge though it no longer held, and why the review did or did not approve, body, usage, dependency statuses, coverage, count of blocking findings on unchanged lines, count of blocking findings left without a thread, when its notice was sent to the notifiers |
 | `review_comments` | The app's published inline comments: findings, with their severity and quoted code, and human-review notes, with their block's hash |
 | `file_scores` | Per run and file: hash of the file's diff, final score, floor source, whole-file score if any, change summary |
 | `block_scores` | Per run, file and block: hash of the block's changed lines, hash of its surroundings, line range, score, what it carried from earlier heads, category, reason, parts if split |
@@ -764,8 +765,8 @@ A deployment that ran the predecessor brings its history across with a one-off m
   - cached tokens stay at zero across reviews that made more than one request in sequence. A single-request review at low volume misses the cache legitimately and is not counted;
   - the learning job is stale (`learning_stale` for the signals pass, `lessons_stale` for the nightly work);
   - spend reaches 80% of the daily limit;
-  - a dismissal fails;
-  - a pull request is merged while a stale approval of the bot's still stood (section 6.4);
+  - a dismissal fails (`dismissal_failed`);
+  - a pull request is merged while a stale approval of the bot's still stood (`stale_approval_merged`, section 6.4);
   - a permission or an event that a configured feature needs is missing (section 8.4).
 - Health and alerts read live data, never a file written earlier.
 
@@ -828,8 +829,8 @@ Each stage ends with something that can be measured or shown.
 5. **Gate.**
 6. **Extensions and MCP tools,** including feedback routes.
 7. **Shadow at the first deployment, then cut-over.** Tracked in that deployment's private repository. From here the first deployment runs on this project: findings, the gate, and the score shown in every review, with automatic approval off and no learned records yet. Capture is already storing the human activity that memory and the live numbers need.
-8. **Memory.** Records, learning, retrieval, and the importer's database output. Both evals are re-run with memory "as of" each case. Until the UI exists, a record can be disabled only in the database. A deployment may leave learning off in configuration until stage 10. Cut in four plans: memory for the score, lessons from replies and reverts, which are built, and the evals with lessons as of each case, which is next.
-9. **Automatic approval and withdrawal.**
+8. **Memory.** Records, learning, retrieval, and the importer's database output. Both evals are re-run with memory "as of" each case. Until the UI exists, a record can be disabled only in the database. A deployment may leave learning off in configuration until stage 10. Cut in four plans: memory for the score, lessons from replies and reverts, which are built, and the evals with lessons as of each case, which wait for a deployment: a history file holds no finding of this reviewer, so the lessons an eval needs can only be made from a deployment's own database.
+9. **Automatic approval and withdrawal.** Cut in two plans: approval, its record and its withdrawal, which is built, and the audit sample, which is next.
 10. **UI.** Three screens: score numbers per repository, learned records with their kill switch, recent reviews with failures, feedback and dependency health. Sign-in is through the same app, and access is limited to the accounts or the one team named in the deployment config. With neither named, the UI is off.
 
 Stages 2 and 3 need a case file, read access to the repositories it came from and an OpenRouter key. The owner supplies those. The replay in stage 2 is the first real use of the OpenRouter connection, so it is also where that connection is proven (section 20, item 4).
@@ -853,7 +854,7 @@ Each of these comes from documentation or third-party reports, not from a test.
 5. The in-process Postgres used for tests behaves like the real one for the queries the queue uses.
 6. A `/review` comment posted by a tool's own account carries a repository association that the command check (D15) accepts. A comment posted by another app probably does not.
 7. The association the git service reports for a commenter (owner, member, collaborator) is right for a member of an organisation whose membership is private. If it is not, D15 and D23 need a lookup of the commenter's permission on the repository instead.
-8. Which permission lets an app read a branch's protection rules, in both of GitHub's forms (rulesets and classic branch protection), and whether the answer says that stale approvals are dismissed (section 6.4).
+8. Settled by GitHub's permissions page: the rules of a branch are read with Metadata read, its protection with Administration read, and the fields of call 9 say whether stale approvals are dismissed. On a private repository whose plan holds no rules both reads answer 403 for any branch, so the reviewer cannot approve there. Not settled: the answers on a branch whose rules dismiss, a protection rule written as a pattern, and the other items of the plan's "To verify".
 9. One review can carry 50 inline notes on top of its findings.
 10. The decisions endpoint the second scorer uses (section 6.7) is marked alpha by its provider: its path, request and response may change.
 11. That a decision model's answer to one question does not depend on which other questions travel in the same request. The question set was reduced after it was first tried.

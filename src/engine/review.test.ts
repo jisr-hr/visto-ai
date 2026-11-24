@@ -771,6 +771,28 @@ test('a later review keeps a verdict, drops a finding its thread already raised,
   assert.ok(r.audit.some((e) => e.action === 'thread_not_shown' && e.subject === 'T2' && e.reason === 'file_not_in_diff'));
   assert.ok(r.audit.some((e) => e.stage === 'reconcile' && e.action === 'duplicate' && e.subject === 'src/a.ts:2' && e.reason === 'near_thread'));
 });
+test('a finding dropped as a duplicate keeps whether its thread was closed for approval', async () => {
+  const answer = {
+    ...answerOnA,
+    findings: [{ ...answerOnA.findings[0]!, quote: 'const a = 1;' }],
+    thread_verdicts: [{ thread_id: 'T1', verdict: 'open' }],
+  };
+  const droppedWith = async (over: Partial<EarlierThread>) => {
+    const r = await review({ ...input, earlier: { head: 'abcdef0', threads: [earlierThread(over)] } }, deps({ files: [fileA], answers: [answer] }));
+    assert.deepEqual(r.findings, []);
+    assert.equal(r.alreadyDiscussed?.length, 1);
+    return r.alreadyDiscussed![0]!;
+  };
+  const entry = { path: 'src/a.ts', side: 'RIGHT', line: 2, severity: 'major', body: 'Wrong value.', commentId: 'C1', resolved: true, settled: false };
+  assert.deepEqual(await droppedWith({ closedForApproval: true }), { ...entry, closedForApproval: true });
+  assert.deepEqual(await droppedWith({ closedForApproval: false }), { ...entry, closedForApproval: false });
+  const absent = await droppedWith({});
+  assert.deepEqual(absent, entry);
+  assert.equal('closedForApproval' in absent, false);
+  // A value that is not a boolean is not copied.
+  const damaged = await droppedWith({ closedForApproval: 'yes' as unknown as boolean });
+  assert.equal('closedForApproval' in damaged, false);
+});
 test('a review that fails, and one with nothing to read, still say how many threads were due', async () => {
   const earlier = { head: 'abcdef0', threads: [earlierThread(), earlierThread({ id: 'PRRT_2', severity: 'minor' })] };
   const failed = await review({ ...input, earlier }, deps({ files: [fileA], answers: [new ProviderError('auth', 'a', null, null)] }));

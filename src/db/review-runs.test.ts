@@ -116,6 +116,28 @@ test('a run is recorded unpublished and marked published once', async () => {
   assert.deepEqual([stored!.published, stored!.reviewId, stored!.publishedAt, stored!.body, stored!.inlineDropped], [true, '501', at(95), 'posted text', true]);
   await db.close();
 });
+test('an approval is recorded with its publication, and a run published without one reads as no approval', async () => {
+  const db = await testDb();
+  const approval = await recordRun(db, run({ dryRun: false }));
+  const comment = await recordRun(db, run({ dryRun: false, headSha: 'h2' }));
+  const refused = await recordRun(db, run({ dryRun: false, headSha: 'h3' }));
+  assert.equal(await markPublished(db, approval, { reviewId: '501', publishedAt: at(95), body: 'approved text', inlineDropped: false, approved: true, approvalCode: 'approved' }), true);
+  assert.equal(await markPublished(db, comment, { reviewId: '502', publishedAt: at(96), body: 'posted text', inlineDropped: true }), true);
+  assert.equal(await markPublished(db, refused, { reviewId: '503', publishedAt: at(97), body: 'other text', inlineDropped: false, approvalCode: 'rule_off' }), true);
+  assert.deepEqual(await db.query('select id, approved, approval_code from visto_ai.review_runs order by id'), [
+    { id: approval, approved: true, approval_code: 'approved' },
+    { id: comment, approved: false, approval_code: null },
+    { id: refused, approved: false, approval_code: 'rule_off' },
+  ]);
+  const posted = (headSha: string, reviewId: string, publishedAt: string, body: string, inlineDropped: boolean) =>
+    ({ ...run({ dryRun: false, headSha }), published: true, reviewId, publishedAt, body, inlineDropped, publishTriedAt: null });
+  assert.deepEqual(await listRuns(db, REF), [
+    { id: approval, ...posted('h1', '501', at(95), 'approved text', false) },
+    { id: comment, ...posted('h2', '502', at(96), 'posted text', true) },
+    { id: refused, ...posted('h3', '503', at(97), 'other text', false) },
+  ]);
+  await db.close();
+});
 test('unpublishedRun finds the newest finished live review of that head and base that is not published yet', async () => {
   const db = await testDb();
   assert.equal(await unpublishedRun(db, REF, 'h1', 'b1', at(-100)), null);

@@ -1,3 +1,5 @@
+import { closedBefore } from '../approval/threads.ts';
+import type { ApprovalThreads } from '../config/load.ts';
 import type { StoredComment } from '../db/review-comments.ts';
 import type { StoredRun } from '../db/review-runs.ts';
 import type { EarlierReply, EarlierState, EarlierThread, Severity } from '../engine/types.ts';
@@ -50,9 +52,15 @@ export function missedComments(args: { runs: StoredRun[]; stored: Stored[]; thre
 /**
  * What the engine is told about the pull request's earlier review and its threads. Only the three finding severities count: a note is no earlier thread, so it is not shown, owes no verdict, gets no reply and is no source of a duplicate.
  * `replySettles` (absent reads as true): whether a person's reply settles a resolved thread; false under the gate with clearing by reply off.
+ * `approval` (given only with approval on): each thread then carries whether it was closed under the thread rule before this run,
+ * and is settled only when today's rule and that rule both accept it (call 7). Absent, the state is what it was, with no such key.
  */
-export function earlierOf(args: { last: StoredRun; runs: StoredRun[]; stored: Stored[]; threads: ReviewThread[]; replySettles?: boolean }): EarlierState {
+export function earlierOf(args: {
+  last: StoredRun; runs: StoredRun[]; stored: Stored[]; threads: ReviewThread[]; replySettles?: boolean;
+  approval?: { rule: ApprovalThreads; author: string; clearByReply: boolean };
+}): EarlierState {
   const replySettles = args.replySettles ?? true;
+  const approval = args.approval;
   const byComment = new Map(args.stored.filter((s) => SEVERITIES.includes(s.severity)).map((s) => [s.commentId, s]));
   const newestFirst = args.runs.filter((r) => r.published).sort((a, b) => b.id - a.id);
   const threads: EarlierThread[] = [];
@@ -72,14 +80,18 @@ export function earlierOf(args: { last: StoredRun; runs: StoredRun[]; stored: St
       lastVerdict = verdictOf(r, t.id);
       if (lastVerdict !== null) break;
     }
+    // The app resolved it only when the app's own reply with a marker stands in the thread too: a login alone proves nothing.
+    const settled = t.resolved && ((t.resolvedByApp && t.comments.some((c) => c.byApp && hasMarker(c.body))) || (replySettles && replies.some((r) => r.kind === 'person')));
+    const closedForApproval = approval === undefined ? undefined : closedBefore(t, { ...approval, published: newestFirst });
     threads.push({
       id: t.id, commentId: first.id, path: t.path, side: t.side, line: t.line,
       severity: row.severity as Severity, quote: row.quote, body: first.body,
       openedAt: { head: opened === undefined ? '' : opened.headSha, diffHash: opened === undefined ? null : diffHashOf(opened, row.path) },
       resolved: t.resolved,
-      // The app resolved it only when the app's own reply with a marker stands in the thread too: a login alone proves nothing.
-      settled: t.resolved && ((t.resolvedByApp && t.comments.some((c) => c.byApp && hasMarker(c.body))) || (replySettles && replies.some((r) => r.kind === 'person'))),
+      // With approval on, a thread is settled only when both rules accept it; one settled by one side alone is judged again.
+      settled: closedForApproval === undefined ? settled : settled && closedForApproval,
       lastVerdict, replies,
+      ...(closedForApproval === undefined ? {} : { closedForApproval }),
     });
   }
   threads.sort((a, b) => Number(a.commentId) - Number(b.commentId));

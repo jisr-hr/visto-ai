@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { dryChecks, dryWriter } from './dry-writer.ts';
+import { dryApprovals, dryChecks, dryWriter } from './dry-writer.ts';
 
 test('in dry run every write is refused', async () => {
   const w = dryWriter();
@@ -22,4 +22,11 @@ test('in dry run every call of the checks is refused', async () => {
   await assert.rejects(c.writeCheck(ref, '99', { id: null, commit: 'h1', name: 'AI Review', status: 'queued', conclusion: null, title: 'x', summary: 'y' }), /^Error: dry_run$/);
   await assert.rejects(c.greenChecks(ref, '99', 'h1', ['ci']), /^Error: dry_run$/);
   await assert.rejects(c.isTeamMember('99', 'acme/release-managers', 'octo-lead'), /^Error: dry_run$/);
+});
+test('in dry run every call of the approvals is refused', async () => {
+  const a = dryApprovals();
+  const ref = { service: 'github', owner: 'acme', repo: 'shop', number: 7 } as const;
+  await assert.rejects(a.staleApprovals(ref, '99', 'main'), /^Error: dry_run$/);
+  await assert.rejects(a.readReview(ref, '99', '501'), /^Error: dry_run$/);
+  await assert.rejects(a.dismissReview(ref, '99', '501', 'x'), /^Error: dry_run$/);
 });

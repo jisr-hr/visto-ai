@@ -1,6 +1,6 @@
 import type { ForgeEvent, PullRequestAction, PullRequestFacts, PullRequestRef } from '../types.ts';
 import { isObject } from './http.ts';
-import { authorOf, generalCommentOf, inlineCommentOf, reviewOf } from './objects.ts';
+import { authorOf, generalCommentOf, idOf, inlineCommentOf, reviewOf } from './objects.ts';
 import { revertedNumber } from '../../memory/reverts.ts';
 
 export const MAX_ID_CHARS = 200;
@@ -132,6 +132,13 @@ function build(name: string, p: Record<string, unknown>): ForgeEvent {
     case 'pull_request':
       return pullRequestEvent(p);
     case 'pull_request_review': {
+      if (p.action === 'dismissed') {
+        // Whoever dismissed it, and whoever wrote it: only the review's id leaves here.
+        const ref = refOf(p, prNumber(p));
+        const review = idOf(obj(p.review).id);
+        short(review);
+        return { kind: 'review_dismissed', ref, installation: installationOf(p), review };
+      }
       if (p.action !== 'submitted') return unknownAction;
       const ref = refOf(p, prNumber(p));
       const review = reviewOf(p.review);

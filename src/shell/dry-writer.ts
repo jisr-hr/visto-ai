@@ -1,4 +1,4 @@
-import type { ForgeChecks, ForgeWriter } from '../forge/types.ts';
+import type { ForgeApprovals, ForgeChecks, ForgeWriter } from '../forge/types.ts';
 
 const refused = (): Promise<never> => Promise.reject(new Error('dry_run'));
 
@@ -11,4 +11,9 @@ export function dryWriter(): ForgeWriter {
 /** Checks for dry run: every method rejects with Error('dry_run'). */
 export function dryChecks(): ForgeChecks {
   return { findCheck: refused, writeCheck: refused, greenChecks: refused, isTeamMember: refused };
+}
+
+/** Approvals for dry run: every method rejects with Error('dry_run'). */
+export function dryApprovals(): ForgeApprovals {
+  return { staleApprovals: refused, readReview: refused, dismissReview: refused };
 }

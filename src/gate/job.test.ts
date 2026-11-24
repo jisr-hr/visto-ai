@@ -1,9 +1,11 @@
 import test, { afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { GATE_OFF } from '../config/load.ts';
+import { markDismissed, markDismissFailed } from '../db/approvals.ts';
 import { recordEvaluation, recordSkip, NO_COUNTS } from '../db/gate.ts';
 import type { GateState } from '../db/gate.ts';
 import { askGate, claimJob, enqueueJob, finishJob, getJob } from '../db/jobs.ts';
+import { markPublished } from '../db/review-runs.ts';
 import type { Db } from '../db/types.ts';
 import type { CheckWrite, OwnCheck } from '../forge/types.ts';
 import { checkText } from './check.ts';
@@ -604,4 +606,138 @@ test('the sweep\'s sync for a stored pull request carries no installation, and t
   await h.run(job);
   assert.deepEqual(h.calls.filter((c) => c[0] === 'readPullRequest').map((c) => c[2]), ['42']);
   assert.deepEqual(await statusOf(h, job.id), ['done', 'synced']);
+});
+
+/** Stores a run of the pull request `number` at `head` with no finding, published as review `reviewId`, as an approval or as a comment. */
+async function postedRun(db: Db, reviewId: string, approved: boolean, head = 'h1', number: number = REF.number): Promise<number> {
+  const id = await storeRun(db, { ref: { ...REF, number }, headSha: head, findings: [], publish: false });
+  await markPublished(db, id, { reviewId, publishedAt: at(2), body: 'A review.', inlineDropped: false, approved, approvalCode: approved ? 'approved' : null });
+  return id;
+}
+
+/** Runs the job with a database that keeps the text of each statement it is given. */
+async function runSeen(h: Harness, job = h.job): Promise<string[]> {
+  const seen: string[] = [];
+  const db: Db = {
+    query: (text, params) => { seen.push(text); return h.deps.db.query(text, params); },
+    script: (sql) => h.deps.db.script(sql),
+    transaction: (work) => h.deps.db.transaction(work),
+    close: () => h.deps.db.close(),
+  };
+  await runGateJob(job, { ...h.deps, db });
+  return seen;
+}
+
+const UNWITHDRAWN_SUMMARY = [
+  'This reviewer approved an earlier commit of this pull request, or gave an approval it no longer stands behind, and could not dismiss it (`github_403`). While it stands it may count toward the approvals this branch requires, so this check fails.',
+  "Dismiss that approval on the pull request's page. The service also tries again at the next commit, the next review of this pull request and its next start, and this check is decided again once the approval is gone.",
+].join('\n\n');
+
+test('a gate job on a pull request whose approval could not be dismissed writes the failing check and records it', async () => {
+  // The approval of h1 stands after a push to h2: its withdrawal failed. A skip of h2 and a review under way do not pass it.
+  const h = await harness({ live: liveOf({ head: 'h2' }), threads: [[thread()]], check: WAITING_CHECK, starts: 3 });
+  const approval = await postedRun(h.db, '501', true);
+  assert.equal(await markDismissFailed(h.db, approval, 'github_403'), true);
+  await recordSkip(h.db, { ref: REF, headSha: 'h2', actor: 'octo-lead', reason: 'hotfix', commentId: '41', at: at(0) });
+  await reviewJob(h.db, 'manual');
+  const statements = await runSeen(h);
+  assert.deepEqual(writes(h), [{
+    id: '71', commit: 'h2', name: 'AI Review', status: 'completed', conclusion: 'failure', title: 'Earlier approval not withdrawn (github_403)', summary: UNWITHDRAWN_SUMMARY,
+  }]);
+  assert.deepEqual((await rows(h.db)).map((r) => [r.head_sha, r.mode, r.state, r.code, r.run, r.blocking, r.findings, r.refused_inline]),
+    [['h2', 'enforce', 'unwithdrawn', 'github_403', null, 0, 0, 0]]);
+  // Ended, not tried again, even on its last start: no alert, no sync left waiting, no thread read.
+  assert.deepEqual(await statusOf(h), ['done', 'synced']);
+  assert.deepEqual(await h.db.query("select id from visto_ai.jobs where kind = 'gate' and status = 'pending'"), []);
+  assert.deepEqual(h.alerts, []);
+  assert.equal(threadReads(h), 0);
+  assert.deepEqual(gateLogs(h), [{
+    event: 'gate', job: h.job.id, repo: 'acme/shop', number: 7, reason: 'sync', head: 'h2', mode: 'enforce', state: 'unwithdrawn', code: 'github_403',
+    blocking: 0, cleared_by_review: 0, cleared_by_reply: 0, unknown: 0, refused_inline: 0, wrote: true, outcome: 'synced', requeued: null,
+  }]);
+  // Read beside the skip, before the jobs.
+  const skipAt = statements.findIndex((s) => s.includes('from visto_ai.gate_overrides'));
+  const failureAt = statements.findIndex((s) => s.includes('dismiss_failure is not null'));
+  const jobsAt = statements.findIndex((s) => s.includes("kind = 'review' and status in ('pending', 'running')"));
+  assert.ok(skipAt >= 0 && failureAt === skipAt + 1 && jobsAt === failureAt + 1, JSON.stringify([skipAt, failureAt, jobsAt]));
+
+  // A second look writes nothing and records nothing.
+  await again(h, 5);
+  assert.equal(writes(h).length, 1);
+  assert.equal((await rows(h.db)).length, 1);
+  // Once the approval is dismissed, by anyone, the check is decided again: here the skip of h2 lets it through.
+  assert.equal(await markDismissed(h.db, approval, at(6), 'git_service'), true);
+  await again(h, 7);
+  assert.deepEqual(writes(h).map((w) => [w.commit, w.conclusion, w.title]).at(-1), ['h2', 'success', 'Skipped by @octo-lead']);
+  assert.deepEqual((await rows(h.db)).map((r) => r.state), ['unwithdrawn', 'skipped']);
+
+  // Bypass outranks it.
+  const bypass = await harness({ settings: withGate({ mode: 'bypass' }), live: liveOf({ head: 'h2' }) });
+  await markDismissFailed(bypass.db, await postedRun(bypass.db, '501', true), 'github_403');
+  await bypass.run();
+  assert.deepEqual(writes(bypass).map((w) => [w.conclusion, w.title]), [['success', 'Gate bypassed']]);
+  assert.deepEqual((await rows(bypass.db)).map((r) => r.state), ['bypassed']);
+
+  // An approval of the head that could not be dismissed fails the head's check as well, whatever its review says.
+  const same = await harness({ threads: [[]] });
+  await markDismissFailed(same.db, await postedRun(same.db, '501', true), 'review_state_other');
+  await same.run();
+  assert.deepEqual(writes(same).map((w) => [w.commit, w.conclusion, w.title]), [['h1', 'failure', 'Earlier approval not withdrawn (review_state_other)']]);
+  assert.deepEqual(await statusOf(same), ['done', 'synced']);
+});
+
+test('with no failed withdrawal the evaluation is what it was', async () => {
+  // Each case is run twice, on the same runs: posted as comments, and posted as approvals none of which carries a
+  // failure that stands (one with none, one whose failure ended with its dismissal, one of another pull request).
+  const cases: Array<[string, Parameters<typeof harness>[0], (db: Db) => Promise<void>]> = [
+    ['waiting', { live: liveOf({ head: 'h2' }) }, async () => {}],
+    ['blocked', { threads: [[thread()]] }, async (db) => { await storeComment(db, await storeRun(db), 'major'); }],
+    ['passed', { threads: [[thread({ resolved: true, comments: [appComment('8001'), reply('octo-dev')] })]] }, async (db) => { await storeComment(db, await storeRun(db), 'major'); }],
+    ['skipped', {}, async (db) => { await recordSkip(db, { ref: REF, headSha: 'h1', actor: 'octo-lead', reason: 'hotfix', commentId: '41', at: at(0) }); }],
+    ['reviewing', {}, async (db) => { await reviewJob(db, 'manual'); }],
+    ['bypassed', { settings: withGate({ mode: 'bypass' }) }, async () => {}],
+    ['failed', { threads: [new Error('github_502')] }, async (db) => { await storeComment(db, await storeRun(db), 'major'); }],
+  ];
+  type Seen = { writes: CheckWrite[]; rows: Row[]; logs: unknown[]; calls: unknown[][]; status: [string, string | null]; statements: string[] };
+  for (const [name, options, setup] of cases) {
+    const seen: Seen[] = [];
+    for (const approvals of [false, true]) {
+      const h = await harness(options);
+      await setup(h.db);
+      await postedRun(h.db, '601', approvals, 'h0');
+      const ended = await postedRun(h.db, '602', approvals, 'h0');
+      const other = await postedRun(h.db, '603', approvals, 'h1', 8);
+      if (approvals) {
+        assert.equal(await markDismissFailed(h.db, ended, 'github_403'), true);
+        assert.equal(await markDismissed(h.db, ended, at(3), 'app'), true);
+        assert.equal(await markDismissFailed(h.db, other, 'github_403'), true);
+      }
+      const statements = await runSeen(h);
+      seen.push({ writes: writes(h), rows: await rows(h.db), logs: gateLogs(h), calls: h.calls, status: await statusOf(h), statements });
+    }
+    const [plain, quiet] = seen as [Seen, Seen];
+    assert.equal(plain.rows[0]!.state, name, name);
+    assert.deepEqual(quiet, plain, name);
+    // The failures are read once in each evaluation, and nothing else is.
+    assert.equal(quiet.statements.filter((s) => s.includes('dismiss_failure')).length, 1, name);
+  }
+});
+
+test('a read of the failed withdrawals that rejects writes nothing, and the job is tried again, as when the skip cannot be read', async () => {
+  const ends: unknown[] = [];
+  for (const failQuery of ['dismiss_failure is not null', 'from visto_ai.gate_overrides']) {
+    const h = await harness({ failQuery, check: WAITING_CHECK, threads: [[thread()]] });
+    await storeComment(h.db, await storeRun(h.db), 'major');
+    await h.run();
+    const first = { writes: writes(h), rows: await rows(h.db), job: await statusOf(h), runAt: (await getJob(h.db, h.job.id))!.runAt, log: gateLogs(h)[0] };
+    assert.deepEqual([first.writes, first.rows, first.job, first.runAt], [[], [], ['pending', null], at(10)], failQuery);
+    assert.equal(threadReads(h), 0, failQuery);
+    // On the third start it gives up as any sync does: an alert, and the give-up recorded.
+    await h.run((await h.claimNext(at(10)))!);
+    await h.run((await h.claimNext(at(70)))!);
+    const last = { writes: writes(h), states: (await rows(h.db)).map((r) => [r.head_sha, r.state, r.code]), job: await statusOf(h), alerts: h.alerts };
+    assert.deepEqual(last, { writes: [], states: [['h1', 'failed', 'db_down']], job: ['done', 'failed'], alerts: [['gate_check_failed', { reason: 'db_down' }]] }, failQuery);
+    ends.push([first, last, gateLogs(h)]);
+  }
+  assert.deepEqual(ends[0], ends[1]);
 });

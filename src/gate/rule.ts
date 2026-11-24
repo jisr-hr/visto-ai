@@ -57,6 +57,17 @@ function severityOf(word: string): Severity {
   return word === NOTE ? 'note' : 'unknown';
 }
 
+/** Each stored comment's severity, by its id; a word that is no severity is `unknown`. */
+export function storedSeverities(stored: Array<StoredComment & { run: number }>): Map<string, 'blocker' | 'major' | 'minor' | 'unknown' | 'note'> {
+  const severities = new Map<string, Severity>();
+  for (const s of stored) {
+    const severity = severityOf(s.severity);
+    const known = severities.get(s.commentId);
+    if (known === undefined || RANK[severity] > RANK[known]) severities.set(s.commentId, severity);
+  }
+  return severities;
+}
+
 /** Orders comment ids as numbers when both are digits, else as text. */
 function byId(a: string, b: string): number {
   if (/^\d+$/.test(a) && /^\d+$/.test(b) && a.length !== b.length) return a.length - b.length;
@@ -93,12 +104,7 @@ export function evaluateGate(args: {
   reviewed: StoredRun;         // the head's review
   clearByReply: boolean;
 }): GateVerdict {
-  const severities = new Map<string, Severity>();
-  for (const s of args.stored) {
-    const severity = severityOf(s.severity);
-    const known = severities.get(s.commentId);
-    if (known === undefined || RANK[severity] > RANK[known]) severities.set(s.commentId, severity);
-  }
+  const severities = storedSeverities(args.stored);
   const published = args.runs.filter((r) => r.published).sort((a, b) => b.id - a.id);
   const read = readPaths(args.reviewed);
   const verdict: GateVerdict = { blocking: [], clearedByReview: 0, clearedByReply: 0, silentResolves: 0, unknownThreads: 0, findings: 0 };

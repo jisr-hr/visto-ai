@@ -8,6 +8,8 @@ import { getPullRequest } from '../db/pull-requests.ts';
 import type { Db } from '../db/types.ts';
 import { GATE_OFF, type RepoSettings } from '../config/load.ts';
 import { commentBody, listActivity } from '../db/human-activity.ts';
+import { markDismissed } from '../db/approvals.ts';
+import { markPublished, recordRun } from '../db/review-runs.ts';
 import type { ForgeEvent, PullRequestAction, PullRequestFacts } from '../forge/types.ts';
 
 const REF = { service: 'github', owner: 'acme', repo: 'shop', number: 7 } as const;
@@ -45,7 +47,8 @@ const said = (body: string, over = {}): ForgeEvent => ({
 const GATED: RepoSettings = { ...SETTINGS, gate: { ...GATE_OFF, enabled: true, branches: ['main'] } };
 const NAMES: Record<ForgeEvent['kind'], string> = {
   pull_request: 'pull_request', general_comment: 'issue_comment', inline_comment: 'pull_request_review_comment',
-  thread: 'pull_request_review_thread', check_rerun: 'check_run', review: 'pull_request_review', ping: 'ping', ignored: 'other',
+  thread: 'pull_request_review_thread', check_rerun: 'check_run', review: 'pull_request_review', review_dismissed: 'pull_request_review',
+  ping: 'ping', ignored: 'other',
 };
 
 function deliver(
@@ -53,7 +56,8 @@ function deliver(
   { database = db, settings = SETTINGS, dryRun = false }: { database?: Db; settings?: RepoSettings; dryRun?: boolean } = {},
 ): Promise<HttpAnswer> {
   const name = NAMES[event.kind];
-  const action = event.kind === 'pull_request' || event.kind === 'thread' ? event.action : event.kind === 'check_rerun' ? 'rerequested' : 'created';
+  const action = event.kind === 'pull_request' || event.kind === 'thread' ? event.action
+    : event.kind === 'check_rerun' ? 'rerequested' : event.kind === 'review_dismissed' ? 'dismissed' : 'created';
   const reader = { read: () => ({ ok: true as const, delivery, name, action, event }) };
   return receive({
     db: database, reader, clock: () => new Date(now), log: (entry) => { logged.push(entry); },
@@ -389,4 +393,121 @@ test('a sync carries the installation the event came through, and a later event 
     await deliver(said('/review'), 'c1', { database: other, settings: GATED });
     assert.deepEqual((await gateJobs(other)).map((j) => j.installation), ['99']);
   } finally { await other.close(); }
+});
+
+// Withdrawals: a push, a retarget, a reopening, a merge and a dismissed review of a pull request with a standing approval.
+
+const withdrawJobs = async (database: Db = db) => (await unfinishedJobs(database)).filter((j) => j.kind === 'withdraw');
+/** The pending withdraw jobs end, as their runner would end them: the next delivery then stores a job of its own. */
+const withdrawRan = (database: Db = db) => database.query("update visto_ai.jobs set status = 'done', outcome = 'kept' where kind = 'withdraw' and status = 'pending'");
+/** A run at h1 against main, published as review `reviewId`: an approval unless `approved` is false. Its id is returned. */
+async function postedRun(database: Db, reviewId: string, approved = true): Promise<number> {
+  const id = await recordRun(database, {
+    ref: REF, job: null, trigger: 'automatic', mode: 'full', dryRun: false, headSha: 'h1', baseSha: 'merge000', baseBranch: 'main',
+    outcome: 'ok', failureStage: null, failureCode: null, needsHuman: false, highestScore: 10,
+    body: 'A review.', comments: [], result: { findings: [] },
+    usage: { calls: 1, inputTokens: 1, outputTokens: 1, cachedTokens: 0, cost: 0 }, startedAt: at(-60), finishedAt: at(-50),
+  });
+  await markPublished(database, id, { reviewId, publishedAt: at(-50), body: 'A review.', inlineDropped: false, approved, approvalCode: approved ? 'approved' : 'rule_off' });
+  return id;
+}
+const MERGED: Partial<PullRequestFacts> = { state: 'merged', mergedAt: at(39), closedAt: at(39) };
+
+test("a push, a retarget, a reopening and a merge of a pull request with a standing approval store a withdraw job in the delivery's transaction, whatever the filters say", async () => {
+  const FILTERED: RepoSettings = { ...SETTINGS, baseBranches: ['release/1.0'] };
+  const filters: Array<[string, Partial<PullRequestFacts>, RepoSettings]> = [
+    ['draft', { draft: true }, SETTINGS], ['ignored_author', { author: 'dependabot[bot]' }, SETTINGS],
+    ['gated', {}, GATED], ['base_filtered', {}, FILTERED],
+  ];
+  const actions: Array<[PullRequestAction, Partial<PullRequestFacts>, number]> = [
+    ['synchronize', { headSha: 'h2' }, 10], ['retargeted', { headSha: 'h2' }, 20], ['reopened', { headSha: 'h2' }, 30], ['closed', { headSha: 'h2', ...MERGED }, 40],
+  ];
+  for (const [skip, over, settings] of filters) {
+    const other = await testDb();
+    try {
+      await postedRun(other, '501');
+      for (const [action, more, seconds] of actions) {
+        const label = `${skip} ${action}`;
+        now = at(seconds);
+        queued = 0;
+        assert.deepEqual(await deliver(pr(action, { ...over, ...more, updatedAt: at(seconds) }), `d-${seconds}`, { database: other, settings }), { status: 202, body: 'accepted' }, label);
+        // Due at once, with the event's installation; the filters still decided the review as before.
+        assert.deepEqual((await withdrawJobs(other)).map((j) => [j.reason, j.status, j.runAt, j.installation, j.trigger]), [['withdraw', 'pending', at(seconds), '99', 'automatic']], label);
+        const line = logged.at(-1)!;
+        assert.deepEqual([line.outcome, line.job, line.skip, line.withdraw, queued], ['accepted', null, action === 'closed' ? null : skip, true, 1], label);
+        await withdrawRan(other);
+      }
+    } finally { await other.close(); }
+  }
+  // An opening, a ready for review, a plain close and a label store none, and their lines say nothing of it.
+  const quiet = await testDb();
+  try {
+    await postedRun(quiet, '501');
+    for (const [i, event] of [pr('opened'), pr('ready_for_review'), pr('closed', { state: 'closed', closedAt: at(1) }), pr('other')].entries()) {
+      await deliver(event, `q${i}`, { database: quiet });
+      assert.deepEqual([await withdrawJobs(quiet), 'withdraw' in logged.at(-1)!], [[], false], event.action);
+    }
+  } finally { await quiet.close(); }
+  // In the delivery's transaction: when the withdraw job cannot be stored, nothing of the delivery is.
+  const failing = await testDb();
+  try {
+    await postedRun(failing, '501');
+    queued = 0;
+    const refusing: Db = { ...failing, transaction: (work) => failing.transaction((tx) => work({
+      ...tx, query: (text, params) => (text.includes("'withdraw', 'withdraw'") ? Promise.reject(new Error('refused')) : tx.query(text, params)),
+    })) };
+    assert.deepEqual(await deliver(pr('synchronize', { headSha: 'h2' }), 'f1', { database: refusing }), { status: 503, body: 'storage_unavailable' });
+    assert.deepEqual([await failing.query('select id from visto_ai.deliveries'), await getPullRequest(failing, REF), await unfinishedJobs(failing), queued], [[], null, [], 0]);
+  } finally { await failing.close(); }
+});
+
+test('with no standing approval, or in dry run, a push stores nothing more and its line is what it was', async () => {
+  const lineOf = (delivery: string, action: string, job: string | null, skip: string | null = null) => ({
+    event: 'webhook', delivery, name: 'pull_request', action, outcome: 'accepted', reason: null, job, skip,
+  });
+  // No run at all; then a review posted as a comment, and an approval dismissed since.
+  await deliver(pr('synchronize'), 'd1');
+  assert.deepEqual([(await unfinishedJobs(db)).map((j) => [j.kind, j.reason]), logged.at(-1), queued], [[['review', 'synchronize']], lineOf('d1', 'synchronize', 'delayed'), 1]);
+  await postedRun(db, '501', false);
+  await markDismissed(db, await postedRun(db, '502'), at(-10), 'git_service');
+  now = at(10);
+  await deliver(pr('synchronize', { headSha: 'h2', updatedAt: at(10) }), 'd2');
+  assert.deepEqual([(await unfinishedJobs(db)).map((j) => [j.kind, j.reason, j.headSha]), logged.at(-1), queued], [[['review', 'synchronize', 'h2']], lineOf('d2', 'synchronize', 'delayed'), 2]);
+  await deliver(pr('closed', { headSha: 'h2', ...MERGED, updatedAt: at(40) }), 'd3');
+  assert.deepEqual([await withdrawJobs(), logged.at(-1), queued], [[], lineOf('d3', 'closed', null), 2]);
+  // In dry run a standing approval asks for nothing either.
+  const dry = await testDb();
+  try {
+    await postedRun(dry, '501');
+    now = at(0);
+    await deliver(pr('synchronize'), 'd4', { database: dry, dryRun: true });
+    assert.deepEqual([(await unfinishedJobs(dry)).map((j) => [j.kind, j.reason]), logged.at(-1)], [[['review', 'synchronize']], lineOf('d4', 'synchronize', 'delayed')]);
+    await deliver(pr('closed', { ...MERGED, updatedAt: at(40) }), 'd5', { database: dry, dryRun: true });
+    assert.deepEqual([await withdrawJobs(dry), logged.at(-1)], [[], lineOf('d5', 'closed', null)]);
+  } finally { await dry.close(); }
+});
+
+test("a dismissed review of the app's own standing approval stores a withdraw job; another review's stores nothing", async () => {
+  const dismissed = (review: string): ForgeEvent => ({ kind: 'review_dismissed', ref: REF, installation: '99', review });
+  const lineOf = (delivery: string, more = {}) => ({
+    event: 'webhook', delivery, name: 'pull_request_review', action: 'dismissed', outcome: 'accepted', reason: null, ...more,
+  });
+  await postedRun(db, '501');
+  await postedRun(db, '502', false);
+  await markDismissed(db, await postedRun(db, '503'), at(-10), 'app');
+  // A review posted as a comment, an approval already dismissed, and a review the service never posted.
+  for (const review of ['502', '503', '777']) {
+    assert.deepEqual(await deliver(dismissed(review), `x${review}`), { status: 202, body: 'accepted' }, review);
+    assert.deepEqual([await unfinishedJobs(db), logged.at(-1), queued], [[], lineOf(`x${review}`), 0], review);
+  }
+  assert.deepEqual(await db.query("select id, outcome from visto_ai.deliveries where id = 'x777'"), [{ id: 'x777', outcome: 'handled' }]);
+  // The app's own approval that stands.
+  now = at(5);
+  await deliver(dismissed('501'), 'x501');
+  assert.deepEqual((await withdrawJobs()).map((j) => [j.reason, j.status, j.runAt, j.installation]), [['withdraw', 'pending', at(5), '99']]);
+  assert.deepEqual([logged.at(-1), queued], [lineOf('x501', { withdraw: true }), 1]);
+  // In dry run it asks for nothing.
+  await withdrawRan();
+  await deliver(dismissed('501'), 'x501-dry', { dryRun: true });
+  assert.deepEqual([await withdrawJobs(), logged.at(-1), queued], [[], lineOf('x501-dry'), 1]);
 });

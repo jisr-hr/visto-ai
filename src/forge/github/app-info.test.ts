@@ -4,6 +4,7 @@ import test from 'node:test';
 import type { AppInfo } from '../types.ts';
 import type { AppAuth } from './app-auth.ts';
 import { createAppInfo, missingFor } from './app-info.ts';
+import manifest from './app-manifest.json' with { type: 'json' };
 
 const auth: AppAuth = { appToken: () => 'jwt', installationToken: async () => 'unused' };
 
@@ -110,4 +111,28 @@ test('in dry run the gate needs nothing', () => {
 test('lacks passes what the gate needs on', async () => {
   const { info } = setup([new Response(JSON.stringify({ ...APP, events: FULL.events, permissions: TODAYS.permissions }))]);
   assert.deepEqual((await info.lacks(false, { ...NOTHING, check: true })).map((m) => m.missing), ['checks:write', 'event:check_run']);
+});
+
+test('with approval on and out of dry run the app needs administration read, pull requests write and the review event', () => {
+  const permissions: Record<string, string> = { ...manifest.default_permissions };
+  delete permissions.administration;
+  const withoutAdministration: AppInfo = { botLogin: 'visto-test[bot]', permissions, events: manifest.default_events };
+  assert.deepEqual(missingFor(withoutAdministration, false, undefined, true), [{ feature: 'approval', missing: 'administration:read' }]);
+  assert.deepEqual(missingFor(withoutAdministration, true, undefined, true), []);
+  assert.deepEqual(missingFor(withoutAdministration, false), []);
+  assert.deepEqual(missingFor(withoutAdministration, false, undefined, false), []);
+  const readOnly: AppInfo = { ...withoutAdministration, permissions: { ...permissions, administration: 'read', pull_requests: 'read' } };
+  assert.deepEqual(missingFor(readOnly, false, undefined, true).filter((m) => m.feature === 'approval'), [{ feature: 'approval', missing: 'pull_requests:write' }]);
+  const unsubscribed: AppInfo = { ...withoutAdministration, permissions: { ...permissions, administration: 'write' }, events: manifest.default_events.filter((e) => e !== 'pull_request_review') };
+  assert.deepEqual(missingFor(unsubscribed, false, undefined, true).filter((m) => m.feature === 'approval'), [{ feature: 'approval', missing: 'event:pull_request_review' }]);
+  const bare: AppInfo = { botLogin: 'visto-test[bot]', permissions: {}, events: [] };
+  assert.deepEqual(missingFor(bare, false, undefined, true).filter((m) => m.feature === 'approval'), [
+    { feature: 'approval', missing: 'administration:read' }, { feature: 'approval', missing: 'pull_requests:write' }, { feature: 'approval', missing: 'event:pull_request_review' },
+  ]);
+  assert.deepEqual(missingFor(bare, true, undefined, true), missingFor(bare, true));
+});
+test('lacks passes approval on', async () => {
+  const { info } = setup([new Response(JSON.stringify({ ...APP, events: FULL.events, permissions: TODAYS.permissions }))]);
+  assert.deepEqual((await info.lacks(false, NOTHING, true)).map((m) => [m.feature, m.missing]), [['approval', 'administration:read']]);
+  assert.deepEqual((await info.lacks(false, NOTHING)).map((m) => m.missing), []);
 });

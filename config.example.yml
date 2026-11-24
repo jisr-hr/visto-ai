@@ -97,7 +97,7 @@ learning: false
 #   # The port the service listens on (1 to 65535). It is 8080 when not written.
 #   port: 8080
 # alerts:
-#   # The environment variable that holds the URL (http or https) that gets the alerts: model_error, model_ok, spend_80, spend_limit, cost_unknown, redelivery_failed, feature_off, gate_check_failed, gate_bypass, extension_error, extension_ok, mcp_error, mcp_ok, memory_error, memory_ok, learning_stale and lessons_stale.
+#   # The environment variable that holds the URL (http or https) that gets the alerts: model_error, model_ok, spend_80, spend_limit, cost_unknown, redelivery_failed, feature_off, gate_check_failed, gate_bypass, extension_error, extension_ok, mcp_error, mcp_ok, memory_error, memory_ok, learning_stale, lessons_stale, dismissal_failed and stale_approval_merged.
 #   webhook: { env: ALERT_WEBHOOK_URL }
 
 # Optional extension modules: code of your own that the service loads once, at start. A module can give the reviewer
@@ -159,9 +159,18 @@ repositories:
     # the highest scores first, none twice. A note is an ordinary review thread, so where a repository requires resolved
     # conversations someone must resolve each one; the app never does. It can be set for all repositories and for one.
     # It is false when not written.
+    # autoApprove posts a review as an approval when every file is reviewed, nothing is at or above the threshold, no major or blocker
+    # finding is open, the pull request is no draft and not from a fork, and the base branch dismisses stale approvals (a ruleset's
+    # pull request rule, or branch protection). The app then needs Administration read. It is false when not written.
+    # approvalThreads: strict, a thread closes for approval when a review verified a fix in changed code, or when someone other than the
+    # author, with access, replied and it is resolved; gate, as the merge gate's rule clears it. It is strict when not written.
+    # auditShare must be written as 0 while autoApprove is true: this release does not draw the audit sample yet.
     # score:
     #   threshold: 70
     #   inlineNotes: false
+    #   autoApprove: false
+    #   approvalThreads: strict
+    #   auditShare: 0
 
     # The merge gate. A pull request is gated when its repository has the gate enabled and its base branch is listed in branches
     # (compared exactly, case and all). A gated pull request is not reviewed when someone pushes; it is reviewed when someone

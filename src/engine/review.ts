@@ -96,11 +96,13 @@ function okResult(overview: string, threshold: number, due: number, said: Said, 
 const distinct = (values: string[]): string[] => [...new Set(values)];
 
 // A major or blocker finding dropped as a duplicate, with the thread that already raised it; a minor one is not kept.
+// Whether the thread was closed for approval is kept only when it is a boolean: with approval off there is no key.
 function discussed(f: { path: string; side: Side; line: number; severity: Severity; body: string }, thread: EarlierThread): Discussed[] {
   if (f.severity === 'minor') return [];
   return [{
     path: f.path, side: f.side, line: f.line, severity: f.severity, body: f.body,
     commentId: thread.commentId, resolved: thread.resolved, settled: thread.settled,
+    ...(typeof thread.closedForApproval === 'boolean' ? { closedForApproval: thread.closedForApproval } : {}),
   }];
 }
 

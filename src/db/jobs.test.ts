@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { testDb } from './testing.ts';
 import type { Db } from './types.ts';
-import { askGate, claimJob, deleteFinishedJobs, dropJobIfUnchanged, dueJobs, enqueueJob, finishJob, getJob, requeueJob, reviewJobsOf, unfinishedJobs } from './jobs.ts';
+import { askGate, askWithdraw, claimJob, deleteFinishedJobs, dropJobIfUnchanged, dueJobs, enqueueJob, finishJob, getJob, requeueJob, reviewJobsOf, unfinishedJobs } from './jobs.ts';
 
 const REF = { service: 'github', owner: 'acme', repo: 'shop', number: 7 } as const;
 const at = (seconds: number): string => new Date(Date.parse('2026-03-01T10:00:00.000Z') + seconds * 1000).toISOString();
@@ -363,6 +363,55 @@ test('a sync carries the installation it was asked with, the newest onto a waiti
   await db.close();
 });
 
+test('a withdraw job has its own pending slot beside a review job and a gate job, and a second ask moves its time and keeps its starts', async () => {
+  const db = await testDb();
+  const review = (await enqueueJob(db, job()))!;
+  const check = await sync(db);
+  const withdraw = (await askWithdraw(db, { ...REF, owner: 'Acme' }, at(0)))!;
+  assert.deepEqual((await unfinishedJobs(db)).map((j) => [j.id, j.kind, j.status]),
+    [[review, 'review', 'pending'], [check, 'gate', 'pending'], [withdraw, 'withdraw', 'pending']]);
+  await claimJob(db, withdraw, at(1));
+  assert.equal(await requeueJob(db, withdraw, at(11), at(1), false), 'requeued');
+  const others = [await getJob(db, review), await getJob(db, check)];
+  assert.equal(await askWithdraw(db, REF, at(5), '98'), withdraw);
+  assert.deepEqual(await getJob(db, withdraw), {
+    id: withdraw, ref: REF, kind: 'withdraw', reason: 'withdraw', headSha: '', trigger: 'automatic',
+    requestedBy: null, commentId: null, association: null, installation: '98', status: 'pending', outcome: null,
+    runAt: at(5), starts: 1, createdAt: at(0),
+  });
+  assert.equal(await askWithdraw(db, REF, at(6)), withdraw);
+  assert.deepEqual([(await getJob(db, withdraw))?.installation, (await getJob(db, withdraw))?.runAt, (await getJob(db, withdraw))?.starts], ['98', at(6), 1]);
+  assert.deepEqual([await getJob(db, review), await getJob(db, check)], others);
+  assert.equal((await unfinishedJobs(db)).filter((j) => j.kind === 'withdraw').length, 1);
+  assert.deepEqual((await dueJobs(db, at(10), 5, 'withdraw')).map((j) => [j.id, j.kind]), [[withdraw, 'withdraw']]);
+  await db.close();
+});
+test('a withdraw job put back while another waits hands it its starts, as a sync does', async () => {
+  const db = await testDb();
+  const running = (await askWithdraw(db, REF, at(0)))!;
+  await claimJob(db, running, at(0));
+  assert.equal(await requeueJob(db, running, at(10), at(1), false), 'requeued');
+  await claimJob(db, running, at(10));
+  assert.equal((await getJob(db, running))?.starts, 2);
+  const waiting = (await askWithdraw(db, REF, at(11)))!;
+  assert.notEqual(waiting, running);
+  const check = await sync(db, at(11));
+  assert.equal(await requeueJob(db, running, at(70), at(12), false), 'superseded');
+  assert.deepEqual([(await getJob(db, running))?.status, (await getJob(db, running))?.outcome], ['dropped', 'superseded']);
+  assert.deepEqual([(await getJob(db, waiting))?.status, (await getJob(db, waiting))?.starts], ['pending', 2]);
+  assert.equal((await getJob(db, check))?.starts, 0);
+
+  // A gate sync behaves as before: it hands its starts to a waiting sync, never to a waiting withdraw job.
+  const other = { ...REF, number: 8 };
+  const syncing = (await askGate(db, other, at(0)))!;
+  await claimJob(db, syncing, at(1));
+  await db.query('update visto_ai.jobs set starts = 2 where id = $1', [syncing]);
+  const nextSync = (await askGate(db, other, at(2)))!;
+  const nextWithdraw = (await askWithdraw(db, other, at(2)))!;
+  assert.equal(await requeueJob(db, syncing, at(60), at(9), false), 'superseded');
+  assert.deepEqual([(await getJob(db, nextSync))?.starts, (await getJob(db, nextWithdraw))?.starts], [2, 0]);
+  await db.close();
+});
 test('the unfinished review jobs of a pull request are listed, never a gate job, a finished one or another pull request\'s', async () => {
   const db = await testDb();
   const done = (await enqueueJob(db, job()))!;

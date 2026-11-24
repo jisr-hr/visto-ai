@@ -11,9 +11,12 @@ import type { RunRecord } from '../db/review-runs.ts';
 import { listComments, recordComments } from '../db/review-comments.ts';
 import type { StoredComment } from '../db/review-comments.ts';
 import { GATE_OFF, type RepoSettings } from '../config/load.ts';
-import type { ForgeWriter, LivePullRequest, PostedComment, PullRequestRef, ReviewDraft, ReviewThread, Source } from '../forge/types.ts';
+import type { ForgeApprovals, ForgeWriter, LivePullRequest, OwnReviewState, PostedComment, PullRequestRef, ReviewDraft, ReviewThread, Source } from '../forge/types.ts';
+import { markDismissed } from '../db/approvals.ts';
+import type { ApprovalCode } from '../approval/rule.ts';
+import { approvalParagraph } from '../approval/text.ts';
 import { review } from '../engine/review.ts';
-import { renderReview } from '../engine/render/body.ts';
+import { fitBody, renderReview } from '../engine/render/body.ts';
 import { renderNotes } from '../engine/render/notes.ts';
 import { shownOf } from '../engine/score/shown.ts';
 import type { BlockScore } from '../engine/score/types.ts';
@@ -1846,6 +1849,24 @@ test('with clearing by reply off a resolved thread with a person\'s reply is jud
   assert.deepEqual(await settledUnder(REPLY_OFF(SETTINGS), 11), [['PRRT_1', true, true]]);
   assert.deepEqual(await settledUnder(REPLY_OFF({ ...GATED, gate: { ...GATED.gate, branches: ['release'] } }), 12), [['PRRT_1', true, true]]);
 });
+test('with approval on the earlier state is judged under the thread rule in force, the live author and clearing by reply', async () => {
+  // The reply is by octo-dev, the live author, as a member: under the strict rule only being the author keeps it from closing the thread.
+  const RESOLVED: ReviewThread = { ...THREAD, resolved: true, comments: [THREAD.comments[0]!, { ...THREAD.comments[1]!, association: 'member' }] };
+  const under = async (settings: RepoSettings, number: number): Promise<unknown> => {
+    await published({ pullRequest: number });
+    const h = await manualJob({ reason: 'done', settings, pullRequest: number, own: OWN_401, threads: [[RESOLVED]] });
+    await runReviewJob(h.job, h.deps);
+    return h.inputs[0]!.earlier?.threads.map((t) => [t.id, t.settled, 'closedForApproval' in t ? t.closedForApproval : 'absent']);
+  };
+  const approving = (threads: 'strict' | 'gate', enabled = true): RepoSettings => ({ ...SETTINGS, approval: { enabled, threads, auditShare: 0 } });
+  // The reply is the live author's own: it closes nothing under the strict rule.
+  assert.deepEqual(await under(approving('strict'), 7), [['PRRT_1', false, false]]);
+  assert.deepEqual(await under(approving('gate'), 8), [['PRRT_1', true, true]]);
+  assert.deepEqual(await under(REPLY_OFF(approving('gate')), 9), [['PRRT_1', false, false]]);
+  // Approval written but off, and not written: what it was.
+  assert.deepEqual(await under(approving('strict', false), 10), [['PRRT_1', true, 'absent']]);
+  assert.deepEqual(await under(SETTINGS, 11), [['PRRT_1', true, 'absent']]);
+});
 test('a /done review and a re-run start over once when the head moved, with the fields of who asked', async () => {
   const done = await manualJob({ reason: 'done', settings: GATED, liveAfter: MOVED });
   await runReviewJob(done.job, done.deps);
@@ -2586,4 +2607,365 @@ test('the health is told once for a review: an error of either part is a failure
   const resumed = await live({ pullRequest: 170 });
   await runReviewJob(resumed.job, { ...resumed.deps, memoryHealth: memoryHealthInto(told) });
   assert.deepEqual([resumed.inputs.length, told], [0, []]);
+});
+
+// Automatic approval.
+const APPROVING: RepoSettings = { ...SETTINGS, approval: { enabled: true, threads: 'strict', auditShare: 0 } };
+/** The pull request, from the repository itself: with an approvable result, every live condition of approval holds. */
+const LIVE_OK: LivePullRequest = { ...LIVE, info: { ...LIVE.info, fromFork: false } };
+const liveAt = (head: string): LivePullRequest => ({ ...LIVE_OK, info: { ...LIVE_OK.info, headSha: head } });
+/** A result every stored condition of approval holds for: its one file covered at 35 with one block at 35, one minor finding, threshold 70. */
+const approvable = (over: Partial<ReviewResult> = {}): ReviewResult => {
+  const file = flaggedResult().scores[0]!;
+  return okResult({ scores: [{ ...file, finalScore: 35, blocks: file.blocks.map((b) => ({ ...b, entry: { score: 35, category: 'calculation', reason: '' } })) }], ...over });
+};
+/** The app's own reviews as the git service lists them, each with its state, for the harness's `own`. */
+const ownReviews = (...reviews: Array<{ id: string; commit: string; state?: OwnReviewState }>): Array<Array<{ id: string; commit: string; state?: OwnReviewState }>> => [reviews];
+/** The paragraph a review of `head` ends with, under the strict rule and the threshold 70. */
+const paragraphOf = (code: ApprovalCode, head = 'h1'): string => approvalParagraph(code, { head, threshold: 70, rule: 'strict' });
+const LINKS = { lineUrl: () => 'https://git.example.test/x', commentUrl: (id: string) => `https://git.example.test/c/${id}` };
+
+/** Gives the harness's deps an approvals fake whose branch rule answers `rule`, and an onWithdraw that counts its calls. */
+function approving(h: Harness, rule: 'dismissed' | 'kept' = 'dismissed'): { calls: unknown[][]; woken: () => number } {
+  const calls: unknown[][] = [];
+  let woken = 0;
+  const approvals: ForgeApprovals = {
+    staleApprovals: async (_ref, _installation, branch) => { calls.push(['staleApprovals', branch]); return rule; },
+    readReview: async () => { calls.push(['readReview']); throw new Error('not_expected'); },
+    dismissReview: async () => { calls.push(['dismissReview']); throw new Error('not_expected'); },
+  };
+  h.deps.approvals = approvals;
+  h.deps.onWithdraw = () => { woken += 1; };
+  return { calls, woken: () => woken };
+}
+/** The approval columns of a pull request's runs, lowest id first. */
+const approvalRows = (number = 7) => db.query<{ id: number; head_sha: string; approved: boolean; approval_code: string | null; dismissed_at: Date | null; dismissed_by: string | null }>(
+  'select id, head_sha, approved, approval_code, dismissed_at, dismissed_by from visto_ai.review_runs where number = $1 order by id', [number]);
+/** The withdraw jobs of a pull request, lowest id first. */
+const withdrawJobs = (number = 7) => db.query<{ status: string; run_at: Date; installation: string | null }>(
+  "select status, run_at, installation from visto_ai.jobs where kind = 'withdraw' and number = $1 order by id", [number]);
+/** The pending withdraw jobs end, as their runner would end them: the next harness of the pull request then claims its own job. */
+const withdrawRan = () => db.query("update visto_ai.jobs set status = 'done', outcome = 'kept' where kind = 'withdraw' and status = 'pending'");
+/** An approval of review `reviewId` at `head`, posted by an earlier job and standing. */
+async function standing(head = 'h0', reviewId = '401', number = 7): Promise<number> {
+  const id = await recorded({ ref: { ...REF, number }, headSha: head, baseBranch: 'main' });
+  await markPublished(db, id, { reviewId, publishedAt: at(-3400), body: 'Approved earlier.', inlineDropped: false, approved: true, approvalCode: 'approved' });
+  return id;
+}
+/** Every statement the job runs from now on, those of its transactions included, in the order it runs them. */
+function statementsOf(h: Harness): string[] {
+  const seen: string[] = [];
+  const spy = (inner: Db): Db => ({
+    query: (text, params) => { seen.push(text); return inner.query(text, params); },
+    script: (sql) => inner.script(sql),
+    close: () => inner.close(),
+    transaction: (work) => inner.transaction((tx) => work(spy(tx))),
+  });
+  h.deps.db = spy(h.deps.db);
+  return seen;
+}
+/** The statement of listRuns. */
+const isListRuns = (text: string): boolean => text.includes('from visto_ai.review_runs') && /number = \$4\s+order by id$/.test(text);
+/** The statements that serve approval alone: the runs and comments read for the decision, the newest review's reading, a standing approval, a withdraw job. */
+const approvalStatements = (statements: string[]): string[] => statements.filter((s) => isListRuns(s) || s.includes('select run, comment_id')
+  || s.includes('select approved from') || s.includes('approved and dismissed_at is null') || s.includes("'withdraw'"));
+
+test('with approval off the job records, posts and logs what it did', async () => {
+  /** One review of an approvable result under `settings`, with the approvals fake and onWithdraw given or not. */
+  const runOf = async (number: number, settings: RepoSettings, fakes: boolean): Promise<unknown> => {
+    const h = await live({ pullRequest: number, settings, live: LIVE_OK, result: approvable() });
+    const seen = fakes ? approving(h) : { calls: [], woken: () => 0 };
+    await runReviewJob(h.job, h.deps);
+    const line = reviewLine(h);
+    assert.deepEqual(['approved' in line, 'approval' in line, seen.calls, seen.woken(), await withdrawJobs(number)], [false, false, [], 0, []], String(number));
+    return {
+      drafts: h.drafts, writes: h.writes, outcome: (await getJob(db, h.job.id))?.outcome,
+      rows: (await approvalRows(number)).map((r) => [r.approved, r.approval_code, r.dismissed_at, r.dismissed_by]),
+      logged: h.logged.map((e) => ({ ...e, job: null, run: null, number: null })),
+    };
+  };
+  const bare = await runOf(8, SETTINGS, false) as { drafts: ReviewDraft[]; rows: unknown[]; outcome: string };
+  assert.deepEqual([bare.outcome, 'event' in bare.drafts[0]!, bare.rows], ['published', false, [[false, null, null, null]]]);
+  // The review as it was rendered and recorded: no paragraph, so nothing was decided.
+  const rendered = renderReview(approvable(), { trigger: 'automatic', requestedBy: null, inline: true, ...LINKS });
+  assert.deepEqual(bare.drafts, [{ commit: 'h1', body: rendered.body, comments: rendered.comments }]);
+  assert.equal(rendered.body.includes('automatically'), false);
+  // With the approvals at hand, and with approval written but off: the same drafts, rows and lines.
+  assert.deepEqual(await runOf(9, SETTINGS, true), bare);
+  assert.deepEqual(await runOf(10, { ...SETTINGS, approval: { enabled: false, threads: 'strict', auditShare: 0 } }, true), bare);
+});
+
+test('an approval is recorded with its code, and a withdraw job is stored with it', async () => {
+  const h = await live({ settings: APPROVING, live: LIVE_OK, result: approvable() });
+  const seen = approving(h);
+  await runReviewJob(h.job, h.deps);
+  assert.deepEqual([h.drafts.length, h.drafts[0]!.event, seen.calls], [1, 'approve', [['staleApprovals', 'main']]]);
+  assert.ok(h.drafts[0]!.body.endsWith(`\n\n${paragraphOf('approved')}`));
+  const [run] = await listRuns(db, REF);
+  assert.deepEqual([run!.published, run!.reviewId, run!.body], [true, '501', h.drafts[0]!.body]);
+  assert.deepEqual((await approvalRows()).map((r) => [r.approved, r.approval_code, r.dismissed_at, r.dismissed_by]), [[true, 'approved', null, null]]);
+  // A push may have landed since the decision: the withdraw job, which reads the live head, is stored with the approval, due at once.
+  assert.deepEqual((await withdrawJobs()).map((j) => [j.status, j.run_at.toISOString(), j.installation]), [['pending', at(0), '99']]);
+  assert.equal(seen.woken(), 1);
+  const line = reviewLine(h);
+  assert.deepEqual([(await getJob(db, h.job.id))?.outcome, line.published, line.approved, line.approval], ['published', true, true, 'approved']);
+  // An onWithdraw that throws changes nothing.
+  const loud = await live({ pullRequest: 8, settings: APPROVING, live: LIVE_OK, result: approvable() });
+  approving(loud);
+  loud.deps.onWithdraw = () => { throw new Error('Something private broke'); };
+  await runReviewJob(loud.job, loud.deps);
+  assert.deepEqual([(await getJob(db, loud.job.id))?.outcome, (await withdrawJobs(8)).length, reviewLine(loud).approval], ['published', 1, 'approved']);
+});
+
+test('a review that does not approve, on a pull request with a standing approval, stores a withdraw job; one with none stores nothing', async () => {
+  // The branch keeps stale approvals: this review is a comment, and the approval of h0 still stands.
+  await standing();
+  const h = await live({ settings: APPROVING, live: LIVE_OK, result: approvable(), own: ownReviews({ id: '401', commit: 'h0', state: 'approved' }) });
+  const seen = approving(h, 'kept');
+  await runReviewJob(h.job, h.deps);
+  assert.equal('event' in h.drafts[0]!, false);
+  assert.ok(h.drafts[0]!.body.endsWith(`\n\n${paragraphOf('rule_off')}`));
+  assert.deepEqual((await approvalRows()).map((r) => [r.head_sha, r.approved, r.approval_code]), [['h0', true, 'approved'], ['h1', false, 'rule_off']]);
+  assert.deepEqual([(await withdrawJobs()).map((j) => [j.status, j.installation]), seen.woken()], [[['pending', '99']], 1]);
+  assert.deepEqual([reviewLine(h).approved, reviewLine(h).approval], [false, 'rule_off']);
+  // Approval switched off since: the approval that stands is looked at again all the same; nothing is decided.
+  await standing('h0', '401', 8);
+  const off = await live({ pullRequest: 8, own: ownReviews({ id: '401', commit: 'h0', state: 'approved' }) });
+  const offSeen = approving(off);
+  await runReviewJob(off.job, off.deps);
+  assert.deepEqual([(await withdrawJobs(8)).length, offSeen.woken(), offSeen.calls, 'event' in off.drafts[0]!, 'approved' in reviewLine(off)], [1, 1, [], false, false]);
+  // No standing approval: an earlier comment, and an approval dismissed since.
+  await published({ pullRequest: 9, comments: [] });
+  const after = await standing('h0', '402', 10);
+  await markDismissed(db, after, at(-100), 'git_service');
+  for (const [number, own] of [[9, '401'], [10, '402']] as const) {
+    const none = await live({ pullRequest: number, settings: APPROVING, live: LIVE_OK, result: approvable(), own: [[{ id: own, commit: 'h0' }]] });
+    const noneSeen = approving(none, 'kept');
+    await runReviewJob(none.job, none.deps);
+    assert.deepEqual([(await getJob(db, none.job.id))?.outcome, reviewLine(none).approval, await withdrawJobs(number), noneSeen.woken()], ['published', 'rule_off', [], 0], String(number));
+  }
+});
+
+test('an adopted approval is recorded as one, and a dismissed one as dismissed by the git service', async () => {
+  // An approval posted whose record failed: the job is left running, and no withdraw job is stored without the record.
+  const lost = await live({ settings: APPROVING, live: LIVE_OK, result: approvable(), markFailures: 3 });
+  const lostSeen = approving(lost);
+  await runReviewJob(lost.job, lost.deps);
+  assert.deepEqual([lost.drafts[0]!.event, (await listRuns(db, REF))[0]!.published, await withdrawJobs(), lostSeen.woken()], ['approve', false, [], 0]);
+  await requeueJob(db, lost.job.id, at(0), at(0), false);        // what start-up recovery does
+  // The next start finds it on GitHub as an approval: adopted as one, with no decision of its own, and its withdrawal asked for.
+  const again = await live({ reuseJob: lost.job.id, settings: APPROVING, live: LIVE_OK, own: ownReviews({ id: '501', commit: 'h1', state: 'approved' }) });
+  const seen = approving(again);
+  await runReviewJob(again.job, again.deps);
+  assert.deepEqual([again.drafts.length, again.inputs.length, seen.calls], [0, 0, []]);
+  assert.deepEqual((await approvalRows()).map((r) => [r.approved, r.approval_code, r.dismissed_at, r.dismissed_by]), [[true, null, null, null]]);
+  assert.deepEqual([(await withdrawJobs()).length, seen.woken()], [1, 1]);
+  const line = reviewLine(again);
+  assert.deepEqual([(await getJob(db, again.job.id))?.outcome, line.adopted, line.approved, line.approval], ['published', true, true, null]);
+  // One GitHub holds as dismissed, with approval off: an approval the git service dismissed; nothing stands, nothing is asked.
+  const before = await live({ pullRequest: 8, posts: [new Error('github_502')] });
+  await runReviewJob(before.job, before.deps);
+  const dismissed = await live({ pullRequest: 8, reuseJob: before.job.id, own: ownReviews({ id: '502', commit: 'h1', state: 'dismissed' }) });
+  const dismissedSeen = approving(dismissed);
+  await runReviewJob(dismissed.job, dismissed.deps);
+  assert.deepEqual((await approvalRows(8)).map((r) => [r.approved, r.approval_code, r.dismissed_at?.toISOString(), r.dismissed_by]), [[true, null, at(0), 'git_service']]);
+  assert.deepEqual([await withdrawJobs(8), dismissedSeen.woken(), reviewLine(dismissed).approved, reviewLine(dismissed).approval], [[], 0, true, null]);
+  // One GitHub holds as a comment: no approval, and the line has neither key.
+  const first = await live({ pullRequest: 9, posts: [new Error('github_502')] });
+  await runReviewJob(first.job, first.deps);
+  const commented = await live({ pullRequest: 9, reuseJob: first.job.id, own: ownReviews({ id: '503', commit: 'h1', state: 'commented' }) });
+  approving(commented);
+  await runReviewJob(commented.job, commented.deps);
+  assert.deepEqual((await approvalRows(9)).map((r) => [r.approved, r.approval_code, r.dismissed_by]), [[false, null, null]]);
+  assert.deepEqual([await withdrawJobs(9), 'approved' in reviewLine(commented), 'approval' in reviewLine(commented), reviewLine(commented).adopted], [[], false, false, true]);
+});
+
+test('a later start that adopts an approval at another commit records it and asks for its withdrawal', async () => {
+  // A review of h0 the database lost track of, which GitHub holds as an approval; the push to h1 is then reviewed against it.
+  await recorded({ headSha: 'h0', result: EARLIER_RESULT, baseBranch: 'main' });
+  const h = await live({ own: ownReviews({ id: '401', commit: 'h0', state: 'approved' }), threads: [[THREAD]] });
+  const seen = approving(h);
+  await runReviewJob(h.job, h.deps);
+  assert.deepEqual(h.logged.filter((e) => e.event === 'adopted_late').length, 1);
+  assert.deepEqual((await approvalRows()).map((r) => [r.head_sha, r.approved, r.approval_code, r.dismissed_by]), [['h0', true, null, null], ['h1', false, null, null]]);
+  // Asked at the adoption, and again after the publication of h1, while the approval of h0 still stands: one job, woken twice.
+  assert.deepEqual([(await withdrawJobs()).map((j) => [j.status, j.installation]), seen.woken(), seen.calls], [[['pending', '99']], 2, []]);
+  assert.deepEqual([(await getJob(db, h.job.id))?.outcome, 'approved' in reviewLine(h)], ['published', false]);
+  // Dismissed on GitHub: recorded so, and nothing stands; a comment: no approval.
+  for (const [number, state, row] of [[8, 'dismissed', [true, 'git_service']], [9, 'commented', [false, null]]] as const) {
+    await recorded({ ref: { ...REF, number }, headSha: 'h0', result: EARLIER_RESULT, baseBranch: 'main' });
+    const later = await live({ pullRequest: number, own: ownReviews({ id: '401', commit: 'h0', state }), threads: [[THREAD]] });
+    const laterSeen = approving(later);
+    await runReviewJob(later.job, later.deps);
+    assert.deepEqual((await approvalRows(number)).map((r) => [r.head_sha, r.approved, r.dismissed_by]), [['h0', ...row], ['h1', false, null]], state);
+    assert.deepEqual([await withdrawJobs(number), laterSeen.woken(), (await getJob(db, later.job.id))?.outcome], [[], 0, 'published'], state);
+  }
+});
+
+test('with approval on, a push that tells nothing new after an approval is published and decided; after a comment it ends nothing_new as before', async () => {
+  const first = await live({ settings: APPROVING, live: LIVE_OK, result: approvable() });
+  approving(first);
+  await runReviewJob(first.job, first.deps);
+  const [approval] = await listRuns(db, REF);
+  assert.deepEqual([approval!.published, (await approvalRows())[0]!.approved], [true, true]);
+  // The push's withdraw job dismissed the approval of h1 before the push's review was computed.
+  await markDismissed(db, approval!.id, at(10), 'app');
+  await withdrawRan();
+  const nothing = approvable({ nothingToDo: true, mode: 'incremental' });
+  const push = await live({ head: 'h2', live: liveAt('h2'), settings: APPROVING, own: ownReviews({ id: '501', commit: 'h1', state: 'dismissed' }), posts: [{ id: '502' }], result: nothing });
+  const seen = approving(push);
+  await runReviewJob(push.job, push.deps);
+  assert.deepEqual([(await getJob(db, push.job.id))?.outcome, push.drafts.length, push.drafts[0]!.event, seen.calls], ['published', 1, 'approve', [['staleApprovals', 'main']]]);
+  assert.ok(push.drafts[0]!.body.endsWith(`\n\n${paragraphOf('approved', 'h2')}`));
+  const newest = (await listRuns(db, REF)).at(-1)!;
+  assert.deepEqual([newest.headSha, newest.published, newest.reviewId, newest.body], ['h2', true, '502', push.drafts[0]!.body]);
+  assert.deepEqual((await approvalRows()).map((r) => [r.head_sha, r.approved, r.approval_code, r.dismissed_by]), [['h1', true, 'approved', 'app'], ['h2', true, 'approved', null]]);
+  // Its scores are kept as any recorded run's are.
+  assert.deepEqual((await blockRows()).map((r) => r.run), [approval!.id, newest.id]);
+  assert.deepEqual([reviewLine(push).nothing_new, reviewLine(push).approved, reviewLine(push).approval], [false, true, 'approved']);
+  // A push's job on the head of the newest review is still dropped.
+  await withdrawRan();
+  const same = await live({ head: 'h2', live: liveAt('h2'), settings: APPROVING, result: nothing });
+  approving(same);
+  await runReviewJob(same.job, same.deps);
+  assert.deepEqual([(await getJob(db, same.job.id))?.outcome, same.inputs.length], ['already_reviewed', 0]);
+
+  // The newest published review is a comment: the push ends nothing_new, as with approval off; nothing is decided.
+  await published({ pullRequest: 8, head: 'h1', comments: [] });
+  const quiet = await live({ pullRequest: 8, head: 'h2', live: liveAt('h2'), settings: APPROVING, own: [[{ id: '401', commit: 'h1' }]], result: nothing });
+  const quietSeen = approving(quiet);
+  await runReviewJob(quiet.job, quiet.deps);
+  const ended = (await listRuns(db, { ...REF, number: 8 })).at(-1)!;
+  assert.deepEqual([(await getJob(db, quiet.job.id))?.outcome, quiet.drafts.length, ended.body, ended.published, quietSeen.calls], ['nothing_new', 0, '', false, []]);
+  assert.deepEqual([reviewLine(quiet).nothing_new, 'approval' in reviewLine(quiet), await withdrawJobs(8)], [true, false, []]);
+  // With approval off after an approval: nothing_new as before.
+  await standing('h1', '401', 9);
+  const off = await live({ pullRequest: 9, head: 'h2', live: liveAt('h2'), own: [[{ id: '401', commit: 'h1' }]], result: nothing });
+  approving(off);
+  const statements = statementsOf(off);
+  await runReviewJob(off.job, off.deps);
+  assert.deepEqual([(await getJob(db, off.job.id))?.outcome, off.drafts.length, await withdrawJobs(9)], ['nothing_new', 0, []]);
+  // The newest review is not even read with approval off.
+  assert.deepEqual(statements.filter((s) => s.includes('select approved from')), []);
+});
+
+test('a read of the newest approval that fails before a nothing-new push posts the review as a comment with record_unreadable', async () => {
+  // The newest review is a comment: read, the push would end nothing_new. Not read, it is posted, and never as an approval.
+  await published({ head: 'h1', comments: [] });
+  const h = await live({
+    head: 'h2', live: liveAt('h2'), settings: APPROVING, own: [[{ id: '401', commit: 'h1' }]], result: approvable({ nothingToDo: true, mode: 'incremental' }),
+    failQuery: 'select approved from',
+  });
+  const seen = approving(h);
+  await runReviewJob(h.job, h.deps);
+  assert.deepEqual([(await getJob(db, h.job.id))?.outcome, h.drafts.length, 'event' in h.drafts[0]!, seen.calls], ['published', 1, false, []]);
+  assert.ok(h.drafts[0]!.body.endsWith(`\n\n${paragraphOf('record_unreadable', 'h2')}`));
+  // Decided before the threads were read for it: the only read of the threads is the earlier state's.
+  assert.deepEqual(h.writes.map((w) => w[0]), ['listOwnReviews', 'listThreads', 'listOwnReviews', 'publishReview', 'listReviewComments']);
+  assert.deepEqual((await approvalRows()).map((r) => [r.head_sha, r.approved, r.approval_code]), [['h1', false, null], ['h2', false, 'record_unreadable']]);
+  assert.deepEqual([reviewLine(h).nothing_new, reviewLine(h).approved, reviewLine(h).approval, await withdrawJobs()], [false, false, 'record_unreadable', []]);
+  assert.equal(JSON.stringify(h.logged).includes('private'), false);
+});
+
+test('runs that cannot be read before the post give record_unreadable, and the review is still posted', async () => {
+  // The statement of listRuns: the first read is the record's, the second the one made just before the post.
+  const h = await live({ settings: APPROVING, live: LIVE_OK, result: approvable() });
+  const seen = approving(h);
+  const query = h.deps.db.query;
+  let reads = 0;
+  h.deps.db = { ...h.deps.db, query: (text, params) => (isListRuns(text) && ++reads === 2 ? Promise.reject(new Error('Something private broke')) : query(text, params)) };
+  await runReviewJob(h.job, h.deps);
+  assert.equal(reads, 2);
+  assert.deepEqual([(await getJob(db, h.job.id))?.outcome, h.drafts.length, 'event' in h.drafts[0]!, seen.calls], ['published', 1, false, []]);
+  assert.ok(h.drafts[0]!.body.endsWith(`\n\n${paragraphOf('record_unreadable')}`));
+  assert.deepEqual(h.writes.map((w) => w[0]), ['listOwnReviews', 'listOwnReviews', 'publishReview', 'listReviewComments']);
+  assert.deepEqual((await approvalRows()).map((r) => [r.approved, r.approval_code]), [[false, 'record_unreadable']]);
+  assert.deepEqual([reviewLine(h).approval, JSON.stringify(h.logged).includes('private')], ['record_unreadable', false]);
+  // The stored comments, which a first review reads only then: the same.
+  const comments = await live({ pullRequest: 8, settings: APPROVING, live: LIVE_OK, result: approvable(), failQuery: 'select run, comment_id' });
+  const commentsSeen = approving(comments);
+  await runReviewJob(comments.job, comments.deps);
+  assert.deepEqual([(await getJob(db, comments.job.id))?.outcome, 'event' in comments.drafts[0]!, commentsSeen.calls], ['published', false, []]);
+  assert.deepEqual((await approvalRows(8)).map((r) => [r.approved, r.approval_code]), [[false, 'record_unreadable']]);
+});
+
+test('a resumed review is decided at its post like a first one, and one another job recorded is posted with its own text', async () => {
+  // This job's own run: its first post failed; the later start decides again, and posts the same approval.
+  const before = await live({ settings: APPROVING, live: LIVE_OK, result: approvable(), posts: [new Error('github_502')] });
+  approving(before);
+  await runReviewJob(before.job, before.deps);
+  assert.deepEqual([before.drafts[0]!.event, (await getJob(db, before.job.id))?.status, (await approvalRows())[0]!.approved], ['approve', 'pending', false]);
+  const again = await live({ reuseJob: before.job.id, now: at(900), settings: APPROVING, live: LIVE_OK });
+  const seen = approving(again);
+  await runReviewJob(again.job, again.deps);
+  assert.deepEqual([again.inputs.length, again.drafts, seen.calls], [0, before.drafts, [['staleApprovals', 'main']]]);
+  assert.deepEqual((await approvalRows()).map((r) => [r.approved, r.approval_code]), [[true, 'approved']]);
+  assert.deepEqual([(await getJob(db, again.job.id))?.outcome, reviewLine(again).resumed, reviewLine(again).approval], ['published', true, 'approved']);
+
+  // A run octo-lead's /review recorded, posted by octo-dev's: its recorded text, with the paragraph decided now; never octo-dev's name.
+  const result = approvable();
+  const asked = renderReview(result, { trigger: 'manual', requestedBy: 'octo-lead', inline: true, ...LINKS });
+  assert.ok(asked.body.includes('@octo-lead'));
+  await recorded({ ref: { ...REF, number: 8 }, job: 4242, trigger: 'manual', result, body: asked.body, comments: asked.comments });
+  const other = await manualJob({ pullRequest: 8, requestedBy: 'octo-dev', settings: APPROVING, live: LIVE_OK });
+  approving(other);
+  await runReviewJob(other.job, other.deps);
+  assert.deepEqual([other.inputs.length, other.drafts.length, other.drafts[0]!.event], [0, 1, 'approve']);
+  assert.equal(other.drafts[0]!.body, fitBody(asked.body, paragraphOf('approved')));
+  assert.equal(other.drafts[0]!.body.includes('@octo-dev'), false);
+  // With approval off, refused inline: the body written whole names no one, and nothing is decided.
+  await recorded({ ref: { ...REF, number: 9 }, job: 4243, trigger: 'manual', result, body: asked.body, comments: asked.comments });
+  const refused = await manualJob({ pullRequest: 9, requestedBy: 'octo-dev', posts: [new Error('review_rejected'), { id: '502' }] });
+  await runReviewJob(refused.job, refused.deps);
+  const whole = refused.drafts.at(-1)!;
+  assert.deepEqual([refused.drafts.length, refused.drafts[0]!.body, whole.comments.length, 'event' in whole], [2, asked.body, 0, false]);
+  assert.deepEqual([whole.body.includes('@octo-dev'), whole.body.includes('@octo-lead'), whole.body.startsWith('**Full review** requested.')], [false, false, true]);
+  // A run recorded with no job, by an older release, is read as this job's: written again with this job's trigger and requester.
+  await recorded({ ref: { ...REF, number: 10 }, result });
+  const older = await manualJob({ pullRequest: 10, requestedBy: 'octo-dev', settings: APPROVING, live: LIVE_OK });
+  approving(older);
+  await runReviewJob(older.job, older.deps);
+  assert.equal(older.drafts[0]!.body, renderReview(result, { trigger: 'manual', requestedBy: 'octo-dev', inline: true, ...LINKS, approval: paragraphOf('approved') }).body);
+});
+
+test('the decision at the post is made under the thread rule in force and the repository\'s clearing by reply', async () => {
+  // The major 8001 of h0, whose thread octo-dev, the author, replied to and resolved: open under the strict rule; closed under the gate's
+  // rule with clearing by reply on; open again with it off.
+  const RESOLVED: ReviewThread = { ...THREAD, resolved: true };
+  const GATE_RULE: RepoSettings = { ...SETTINGS, approval: { enabled: true, threads: 'gate', auditShare: 0 } };
+  const cases: Array<[number, RepoSettings, 'strict' | 'gate', ApprovalCode]> = [
+    [7, APPROVING, 'strict', 'open_thread'],
+    [8, GATE_RULE, 'gate', 'approved'],
+    [9, REPLY_OFF(GATE_RULE), 'gate', 'open_thread'],
+  ];
+  for (const [number, settings, rule, code] of cases) {
+    await published({ pullRequest: number });
+    const h = await live({ pullRequest: number, settings, live: LIVE_OK, result: approvable(), own: OWN_401, threads: [[RESOLVED]] });
+    const seen = approving(h);
+    await runReviewJob(h.job, h.deps);
+    assert.deepEqual([h.drafts.length, h.drafts[0]!.event, reviewLine(h).approval], [1, code === 'approved' ? 'approve' : undefined, code], String(number));
+    // The paragraph names the rule in force; the branch's rule is read only once the threads let it be.
+    assert.ok(h.drafts[0]!.body.endsWith(`\n\n${approvalParagraph(code, { head: 'h1', threshold: 70, rule })}`), String(number));
+    assert.deepEqual(seen.calls, code === 'approved' ? [['staleApprovals', 'main']] : [], String(number));
+    assert.deepEqual((await approvalRows(number)).map((r) => [r.head_sha, r.approved, r.approval_code]), [['h0', false, null], ['h1', code === 'approved', code]], String(number));
+  }
+});
+
+test('in dry run nothing of approval runs: no read for it, no withdraw job, nothing posted', async () => {
+  // A standing approval of h0 on each: out of dry run a review of h1 would be decided and a withdraw job stored after it,
+  // and a push that tells nothing new would read the newest review.
+  for (const [number, result] of [[7, approvable()], [8, approvable({ nothingToDo: true, mode: 'incremental' })]] as const) {
+    await standing('h0', '401', number);
+    const h = await harness({ pullRequest: number, settings: APPROVING, live: LIVE_OK, result, own: OWN_401 });
+    const seen = approving(h);
+    const statements = statementsOf(h);
+    await runReviewJob(h.job, h.deps);
+    assert.deepEqual([(await getJob(db, h.job.id))?.outcome, h.writes, seen.calls, seen.woken(), await withdrawJobs(number)], ['reviewed', [], [], 0, []], String(number));
+    assert.deepEqual(approvalStatements(statements), [], String(number));
+    // The spy sees the statements of a transaction: the run is recorded in the one that finishes the job.
+    assert.equal(statements.some((s) => s.includes('insert into visto_ai.review_runs')), true, String(number));
+    const line = reviewLine(h);
+    assert.deepEqual([line.dry_run, line.published, 'approved' in line, 'approval' in line], [true, false, false, false], String(number));
+    assert.deepEqual((await approvalRows(number)).map((r) => [r.head_sha, r.approved, r.approval_code]), [['h0', true, 'approved'], ['h1', false, null]], String(number));
+  }
 });

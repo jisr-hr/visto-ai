@@ -1,12 +1,12 @@
 import type { AppInfo, PullRequestRef, ReviewThread, ThreadComment } from '../types.ts';
 import type { AppAuth } from './app-auth.ts';
 import { isObject, jsonOf } from './http.ts';
-import { authorOf } from './objects.ts';
+import { associationOf, authorOf } from './objects.ts';
 
 export const MAX_THREAD_PAGES = 20;
 export const MAX_REPLY_PAGES = 20;
 
-const COMMENT_FIELDS = 'id fullDatabaseId body createdAt author{login __typename} pullRequestReview{fullDatabaseId}';
+const COMMENT_FIELDS = 'id fullDatabaseId body createdAt author{login __typename} authorAssociation pullRequestReview{fullDatabaseId}';
 
 const LIST_THREADS = `query($owner: String!, $name: String!, $number: Int!, $after: String) {
   repository(owner: $owner, name: $name) {
@@ -113,11 +113,14 @@ export function createGithubThreads(opts: { auth: AppAuth; info: { read(): Promi
     const type = user === null ? undefined : user.__typename;
     const { author, authorIsBot } = authorOf(user === null ? null : { login: user.login, type });
     const review = isObject(raw.pullRequestReview) ? idText(raw.pullRequestReview.fullDatabaseId) : null;
-    return {
+    const comment: ThreadComment = {
       id, node: raw.id, author, authorIsBot: user === null ? true : authorIsBot,
       byApp: user !== null && type === 'Bot' && typeof user.login === 'string' && accountName(user.login) === botName,
       reviewId: review, body: typeof raw.body === 'string' ? raw.body : '', at: typeof raw.createdAt === 'string' ? raw.createdAt : '',
     };
+    // The author's access, only as GitHub reports it: an unknown word is none, and no word is no key.
+    if (typeof raw.authorAssociation === 'string') comment.association = associationOf(raw.authorAssociation);
+    return comment;
   };
 
   async function restOfComments(token: string, thread: string, first: Connection): Promise<unknown[]> {

@@ -16,6 +16,7 @@ import type { LoadedExtension } from './extensions/types.ts';
 import { createGithubAccess } from './forge/github/access.ts';
 import { createAppAuth } from './forge/github/app-auth.ts';
 import { createAppInfo } from './forge/github/app-info.ts';
+import { createGithubApprovals } from './forge/github/approvals.ts';
 import { createGithubChecks } from './forge/github/checks.ts';
 import { createGithubHookDeliveries } from './forge/github/hook-deliveries.ts';
 import { githubCommentUrl, githubLineUrl, githubPullRequestUrl, githubReviewUrl } from './forge/github/links.ts';
@@ -243,6 +244,7 @@ export async function main(argv: string[], env: Record<string, string | undefine
       const hooks = createGithubHookDeliveries({ auth, fetch: github });
       const writer = createGithubWriter({ auth, info, fetch: github });
       const checks = createGithubChecks({ auth, appId: config.app.id, fetch: github });
+      const approvals = createGithubApprovals({ auth, fetch: github });
       // The database object is made before the modules, so the function a module reports feedback through exists when
       // it is set up; it connects when first used, and the service migrates it once it has started.
       const db = postgresDb(config.database.url, log);
@@ -281,6 +283,7 @@ export async function main(argv: string[], env: Record<string, string | undefine
         appInfo: info,
         writer,
         checks,
+        approvals,
         fetch,
         sleep,
         every: (ms, work) => {

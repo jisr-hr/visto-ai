@@ -14,6 +14,7 @@
     "checks": "write",
     "statuses": "read",
     "members": "read",
+    "administration": "read",
     "metadata": "read"
   },
   "default_events": [

@@ -14,7 +14,8 @@ export type CheckPlan =
   | { state: 'passed' | 'blocked'; verdict: GateVerdict; notReviewed: number; withoutThread: number; refused: number }
   | { state: 'failed'; code: string; evaluated: boolean }   // evaluated: the head has its review and the check could not be decided
   | { state: 'skipped'; actor: string; reason: string }
-  | { state: 'bypassed' };
+  | { state: 'bypassed' }
+  | { state: 'unwithdrawn'; code: string };      // an approval of the app's that could not be dismissed stands
 
 export interface CheckFacts {
   gating: 'enforce' | 'shadow' | 'bypass';
@@ -23,6 +24,7 @@ export interface CheckFacts {
   job: 'running' | 'pending' | null;             // whether a review of the pull request is under way
   paused: string | null;                         // why reviews are paused, when a job is pending
   runs: StoredRun[];
+  unwithdrawn?: string | null;                   // the code of a standing approval's recorded withdrawal failure; absent or null: none
 }
 
 const isObject = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -30,6 +32,10 @@ const isObject = (value: unknown): value is Record<string, unknown> => typeof va
 /** What the check says before any thread is read; null when the head has its review and the threads decide. */
 export function planBefore(facts: CheckFacts): CheckPlan | null {
   if (facts.gating === 'bypass') return { state: 'bypassed' };
+  // A recorded failure to withdraw outranks a skip and a review (call 19); a code that is not a short code is still one.
+  if (facts.unwithdrawn !== undefined && facts.unwithdrawn !== null) {
+    return { state: 'unwithdrawn', code: isShortCode(facts.unwithdrawn) ? facts.unwithdrawn : 'internal_error' };
+  }
   if (facts.skip !== null) return { state: 'skipped', actor: facts.skip.actor, reason: facts.skip.reason };
   if (facts.job === 'running') return { state: 'reviewing' };
   if (facts.job === 'pending') return facts.paused !== null ? { state: 'paused', code: facts.paused } : { state: 'reviewing' };
@@ -189,6 +195,14 @@ export function checkText(plan: CheckPlan, meta: CheckMeta): CheckText {
     }
     case 'bypassed':
       return make('completed', 'success', 'Gate bypassed', ["The merge gate is in bypass mode for this repository, so this check passes without a review. When bypass is switched off, the check goes back to what the gate's rule says."]);
+    case 'unwithdrawn': {
+      // No skip line: a skip does not pass it.
+      const code = shownCode(plan.code);
+      return make('completed', 'failure', `Earlier approval not withdrawn (${code})`, [
+        `This reviewer approved an earlier commit of this pull request, or gave an approval it no longer stands behind, and could not dismiss it (\`${code}\`). While it stands it may count toward the approvals this branch requires, so this check fails.`,
+        "Dismiss that approval on the pull request's page. The service also tries again at the next commit, the next review of this pull request and its next start, and this check is decided again once the approval is gone.",
+      ]);
+    }
   }
 }
 

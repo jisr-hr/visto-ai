@@ -1,5 +1,7 @@
+import { approvalOf } from '../config/load.ts';
 import type { RepoSettings } from '../config/load.ts';
-import { enqueueJob, finishJob, requeueJob } from '../db/jobs.ts';
+import { hasStandingApproval, markDismissed, newestWasApproval } from '../db/approvals.ts';
+import { askWithdraw, enqueueJob, finishJob, requeueJob } from '../db/jobs.ts';
 import type { Job } from '../db/jobs.ts';
 import { recordBlockScores, reusableScores } from '../db/block-scores.ts';
 import { getPullRequest } from '../db/pull-requests.ts';
@@ -14,7 +16,9 @@ import type { InlineComment } from '../engine/render/body.ts';
 import { renderNotes } from '../engine/render/notes.ts';
 import type { Category, ScoredBy, Span } from '../engine/score/types.ts';
 import type { EarlierState, LessonsStatus, Limits, Memory, MemoryState, ReviewDeps, ReviewInput, ReviewResult, ThreadVerdict, Usage } from '../engine/types.ts';
-import type { ForgeAccess, ForgeWriter, LivePullRequest, PullRequestInfo, PullRequestRef, ReviewThread, Source } from '../forge/types.ts';
+import type {
+  ForgeAccess, ForgeApprovals, ForgeWriter, LivePullRequest, OwnReviewState, PullRequestInfo, PullRequestRef, ReviewThread, Source,
+} from '../forge/types.ts';
 import type { ReviewNotice } from '../extensions/types.ts';
 import { PAUSE_MS } from './model-health.ts';
 import type { ModelHealth } from './model-health.ts';
@@ -28,7 +32,7 @@ import { failureText, mayCommand, refusalText } from './commands.ts';
 import { earlierOf, missedComments } from './earlier.ts';
 import { matchPosted, notedOf } from './posted.ts';
 import { publishRun } from './publish.ts';
-import type { PublishOutcome } from './publish.ts';
+import type { ApprovalContext, PublishOutcome } from './publish.ts';
 import { acceptanceOf, CATEGORY_NAMES, historyOf, lastReviewOf, scoresToStore } from './history.ts';
 import { followUp, planFollowUp } from './thread-followup.ts';
 import { QUIET_SECONDS, skipReason } from './triggers.ts';
@@ -83,6 +87,10 @@ export interface ReviewJobDeps {
   memoryFor?: (ref: PullRequestRef) => Memory;
   /** Told how memory did in each review; absent when learning is off. */
   memoryHealth?: Pick<MemoryHealth, 'noted'>;
+  /** The base branch's rule on stale approvals, for the decision at publish; absent: it cannot be read, and nothing is approved. */
+  approvals?: ForgeApprovals;
+  /** Called after a withdraw job was stored, so that its runner starts it at once. */
+  onWithdraw?: () => void;
 }
 
 /** The newest published run of these, or null. */
@@ -239,6 +247,14 @@ export async function runReviewJob(job: Job, deps: ReviewJobDeps): Promise<void>
       deps.log(entry);
     } catch {
       // a logger that fails changes nothing
+    }
+  };
+  /** Told after a withdraw job was stored; one that throws changes nothing, and the runner's timer starts the job. */
+  const wake = (): void => {
+    try {
+      deps.onWithdraw?.();
+    } catch {
+      // a wake that fails changes nothing
     }
   };
   const now = deps.clock();
@@ -521,7 +537,7 @@ export async function runReviewJob(job: Job, deps: ReviewJobDeps): Promise<void>
         if (reviewed !== null && resumed !== null && resumed.id <= reviewed.id) resumed = null;
         // What the database may not know: a review of the app's own on the pull request that no published run has. Asked before anything is paid.
         if (resumed === null) {
-          let own: Array<{ id: string; commit: string }> | null = null;
+          let own: Array<{ id: string; commit: string; state?: OwnReviewState }> | null = null;
           try {
             own = await deps.writer.listOwnReviews(job.ref, installation);
           } catch (error) {
@@ -546,8 +562,13 @@ export async function runReviewJob(job: Job, deps: ReviewJobDeps): Promise<void>
                 log({ event: 'unknown_review', job: job.id, review: review.id });
                 continue;
               }
-              // Recorded as posted with its inline comments: the read-back stores what it finds.
-              await markPublished(db, found.id, { reviewId: review.id, publishedAt: nowIso, body: found.body, inlineDropped: false });
+              // Recorded as posted with its inline comments: the read-back stores what it finds. GitHub holds it as an approval, or one
+              // dismissed since (only an approval can be dismissed here): an approval, with no decision of this job's.
+              const approved = review.state === 'approved' || review.state === 'dismissed';
+              await markPublished(db, found.id, { reviewId: review.id, publishedAt: nowIso, body: found.body, inlineDropped: false, approved });
+              // Dismissed: by the git service. Still held: it is at another commit than the live head, and its withdrawal is asked for.
+              if (review.state === 'dismissed') await markDismissed(db, found.id, nowIso, 'git_service');
+              else if (approved && (await askWithdraw(db, job.ref, nowIso, installation)) !== null) wake();
               adopted = true;
               log({ event: 'adopted_late', job: job.id, run: found.id, review: review.id });
               // Nothing is known of the notes it was posted with: none is counted as missing.
@@ -587,7 +608,11 @@ export async function runReviewJob(job: Job, deps: ReviewJobDeps): Promise<void>
               // Under the gate with clearing by reply off, a person's reply settles nothing (5.2): the thread is judged again.
               const settings = deps.settingsFor(repo);
               const replySettles = !(reviewedOnRequest(gatingOf(settings, live.info.baseBranch)) && !settings.gate.clearByReply);
-              earlier = earlierOf({ last, runs, stored, threads, replySettles });
+              // With approval on, a thread is settled only when the thread rule in force closes it too (call 7).
+              const approval = approvalOf(settings);
+              earlier = approval.enabled
+                ? earlierOf({ last, runs, stored, threads, replySettles, approval: { rule: approval.threads, author: live.info.author, clearByReply: settings.gate.clearByReply } })
+                : earlierOf({ last, runs, stored, threads, replySettles });
             }
           }
         }
@@ -738,6 +763,21 @@ export async function runReviewJob(job: Job, deps: ReviewJobDeps): Promise<void>
     let requeued = false;
     /** The job was ended as nothing new by this start. */
     let endedNothingNew = false;
+    /** The read of the newest published review failed: the review is posted, and decided as a record that could not be read. */
+    let newestUnread = false;
+    /**
+     * With approval on, whether a push that tells nothing new is posted all the same: the newest published review was an approval,
+     * dismissed since or not, and the new head needs its own (call 12). A read that fails posts it too, never as an approval.
+     */
+    const afterApproval = async (): Promise<boolean> => {
+      if (!approvalOf(deps.settingsFor(repo)).enabled) return false;
+      try {
+        return await newestWasApproval(db, job.ref);
+      } catch {
+        newestUnread = true;
+        return true;
+      }
+    };
     /** The recorded run to publish; only ever set when not in dry run. */
     let toPublish: StoredRun | null = resumed;
     if (resumed !== null) {
@@ -761,7 +801,7 @@ export async function runReviewJob(job: Job, deps: ReviewJobDeps): Promise<void>
         }
       }));
       if (written && ended === 'failed' && !startedOver) await fail(installation, 'review_failed');
-    } else if (!manual && nothingNewOf(result)) {
+    } else if (!manual && nothingNewOf(result) && !(await afterApproval())) {
       // Nothing new: no review is posted. The run is kept with no body, so that no later start takes it for a review waiting to be published.
       let runId: number | null = null;
       written = await tried(() => db.transaction(async (tx) => {
@@ -810,16 +850,58 @@ export async function runReviewJob(job: Job, deps: ReviewJobDeps): Promise<void>
       const hold = age < PUBLISH_WAIT_MS;
       // A later start that may post writes the time first, so that the start after it is held from then on. Without that, nothing is posted.
       const timed = resumed === null || hold || await tried(async () => { await markPublishTried(db, target.id, nowIso); });
-      const out: PublishOutcome = !timed ? { kind: 'failed', code: 'record_failed' }
-        : await publishRun({ forge: deps.forge, writer: deps.writer, lineUrl: deps.lineUrl, commentUrl: deps.commentUrl },
-          { ref: job.ref, installation, run: target, trigger: job.trigger, requestedBy, known: knownOf(runs), resumed: resumed !== null, hold });
+      /** A read just before the post; null when it rejects. */
+      const orNull = async <T>(read: () => Promise<T>): Promise<T | null> => {
+        try {
+          return await read();
+        } catch {
+          return null;
+        }
+      };
+      /** With approval on (the settings as they read now), what the decision is made from besides the live reads; with it off, nothing. */
+      const approvalContext = async (): Promise<ApprovalContext | undefined> => {
+        const settings = deps.settingsFor(repo);
+        const approval = approvalOf(settings);
+        if (!approval.enabled) return undefined;
+        return {
+          rule: approval.threads, clearByReply: settings.gate.clearByReply, threshold: settings.scoreThreshold,
+          // The newest review that could not be read stands for a record that cannot be: never approved.
+          runs: newestUnread ? null : await orNull(() => listRuns(db, job.ref)),
+          stored: await orNull(() => listComments(db, job.ref)),
+        };
+      };
+      let out: PublishOutcome;
+      if (!timed) {
+        out = { kind: 'failed', code: 'record_failed' };
+      } else {
+        const approval = await approvalContext();
+        // A run another job recorded keeps that job's trigger and requester; one recorded with no job, by an older release, is this job's.
+        const ownRun = resumed === null || resumed.job === null || resumed.job === job.id;
+        out = await publishRun({ forge: deps.forge, writer: deps.writer, lineUrl: deps.lineUrl, commentUrl: deps.commentUrl, approvals: deps.approvals }, {
+          ref: job.ref, installation, run: target, trigger: job.trigger, requestedBy, known: knownOf(runs), resumed: resumed !== null, hold, ownRun,
+          ...(approval === undefined ? {} : { approval }),
+        });
+      }
       publish = out;
       const finish = (outcome: string): Promise<boolean> => tried(async () => { await finishJob(db, job.id, 'done', outcome, nowIso); });
       if (out.kind === 'published') {
+        /** A withdraw job was stored by the try that committed. */
+        let asked = false;
         written = await tried(() => db.transaction(async (tx) => {
-          await markPublished(tx, target.id, { reviewId: out.reviewId, publishedAt: later(0), body: out.body, inlineDropped: out.inlineDropped });
+          // Each try starts afresh: a job stored by a try that was rolled back is no job.
+          asked = false;
+          await markPublished(tx, target.id, {
+            reviewId: out.reviewId, publishedAt: later(0), body: out.body, inlineDropped: out.inlineDropped,
+            approved: out.approval?.approved === true, approvalCode: out.approval?.code ?? null,
+          });
+          // An adopted review GitHub holds as a dismissed approval.
+          if (out.approval?.dismissed === true) await markDismissed(tx, target.id, later(0), 'git_service');
           await finishJob(tx, job.id, 'done', 'published', nowIso);
+          // Any approval of the app's that stands, this one included, is looked at again: a push may have landed since it was decided,
+          // and a later review that does not approve withdraws it (calls 10, 11).
+          if (await hasStandingApproval(tx, job.ref)) asked = (await askWithdraw(tx, job.ref, later(0), installation)) !== null;
         }));
+        if (written && asked) wake();
         if (written) {
           await readBack(target, installation, out.reviewId, out.notesDropped);
           await threadFollowUp(target, installation, out.reviewId);
@@ -878,6 +960,8 @@ export async function runReviewJob(job: Job, deps: ReviewJobDeps): Promise<void>
       published: publish?.kind === 'published', review: publish?.kind === 'published' ? publish.reviewId : null,
       publish: publish?.kind ?? null, publish_code: publish?.kind === 'failed' ? publish.code : null,
       resumed: resumed !== null, adopted: publish?.kind === 'published' && publish.adopted,
+      // Only when the publication carried a decision (its code) or an adopted approval (null): with approval off the line is what it was.
+      ...(publish?.kind === 'published' && publish.approval !== undefined ? { approved: publish.approval.approved, approval: publish.approval.code } : {}),
       threads_due: threadsDueOf(result ?? resumed?.result), verdicts: verdictsOf(result ?? resumed?.result).length, duplicates: duplicatesOf(result ?? resumed?.result),
       blocking_on_unchanged: blockingOnUnchangedOf(result ?? resumed?.result), nothing_new: endedNothingNew,
       notes: endedNothingNew ? 0 : notesOf(run.comments), notes_dropped: publish?.kind === 'published' ? publish.notesDropped : null,

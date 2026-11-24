@@ -162,3 +162,10 @@ test('a re-run is handled and stores nothing', () => {
   const event: ForgeEvent = { kind: 'check_rerun', ref, installation: '555', app: '12345', check: 'AI Review', headSha: 'aaa111', actor: 'octo-lead' };
   assert.deepEqual(captureOf(event, delivery, receivedAt), { outcome: 'handled', pullRequest: null, activity: null });
 });
+
+test('a dismissed review is handled and stores nothing', () => {
+  for (const installation of ['99', null]) {
+    const event: ForgeEvent = { kind: 'review_dismissed', ref, installation, review: '501' };
+    assert.deepEqual(captureOf(event, delivery, receivedAt), { outcome: 'handled', pullRequest: null, activity: null });
+  }
+});

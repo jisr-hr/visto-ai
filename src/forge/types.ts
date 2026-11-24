@@ -96,6 +96,7 @@ export type ForgeEvent =
   | { kind: 'general_comment'; ref: PullRequestRef; installation: string | null; comment: GeneralComment }
   | { kind: 'thread'; ref: PullRequestRef; installation?: string | null; action: 'resolved' | 'unresolved'; thread: string; rootComment: string | null; actor: string; actorIsBot: boolean }
   | { kind: 'check_rerun'; ref: PullRequestRef; installation: string | null; app: string; check: string; headSha: string; actor: string }
+  | { kind: 'review_dismissed'; ref: PullRequestRef; installation: string | null; review: string }
   | { kind: 'ignored'; reason: 'unknown_event' | 'unknown_action' | 'not_a_pull_request' | 'malformed' };
 export type WebhookReading =
   | { ok: false; reason: 'bad_signature' | 'not_json' | 'no_delivery_id' | 'no_event_name' }
@@ -112,11 +113,11 @@ export interface AppInfo {
 }
 /** What the configured gate uses of the app; all false when no gate is configured. */
 export interface GateNeeds { check: boolean; statuses: boolean; members: boolean }
-export interface FeatureOff { feature: 'reviews' | 'publishing' | 'resolving' | 'commands' | 'capture' | 'gate'; missing: string }
+export interface FeatureOff { feature: 'reviews' | 'publishing' | 'resolving' | 'commands' | 'capture' | 'gate' | 'approval'; missing: string }
 export interface AppIdentity {
   read(): Promise<AppInfo>;
-  /** What the app lacks: one entry for each permission or event a feature needs and the app has not got. */
-  lacks(dryRun: boolean, gate?: GateNeeds): Promise<FeatureOff[]>;
+  /** What the app lacks: one entry for each permission or event a feature needs and the app has not got. `approval`: whether any repository has approval on. */
+  lacks(dryRun: boolean, gate?: GateNeeds, approval?: boolean): Promise<FeatureOff[]>;
   /** True when the app may resolve a review thread: its `contents` permission is write or admin. */
   canResolve(): Promise<boolean>;
 }
@@ -124,7 +125,9 @@ export interface ReviewDraft {
   commit: string;                            // the commit the review was computed for
   body: string;
   comments: Array<{ path: string; side: Side; line: number; body: string }>;
+  event?: 'approve';                         // absent: a comment
 }
+export type OwnReviewState = 'approved' | 'dismissed' | 'commented' | 'other';
 export interface PostedComment { id: string; path: string; side: Side; line: number | null; body: string }
 export interface ThreadComment {
   id: string;                 // the comment's number, as text
@@ -133,6 +136,7 @@ export interface ThreadComment {
   byApp: boolean;             // written by this app's own account
   reviewId: string | null;    // the review the comment belongs to
   body: string; at: string;
+  association?: Association;  // as the git service reports it for the comment; absent: not reported
 }
 export interface ReviewThread {
   id: string;                 // the git service's id of the thread
@@ -142,10 +146,10 @@ export interface ReviewThread {
   comments: ThreadComment[];  // oldest first, never empty; the first one opened the thread
 }
 export interface ForgeWriter {
-  /** Posts one review as a comment, pinned to `draft.commit`. Rejects `review_rejected` when the git service refuses what it holds; any other failure rejects with a short code and says nothing about whether the review was created. */
+  /** Posts one review, as a comment, or as an approval when the draft says so, pinned to `draft.commit`. Rejects `review_rejected` when the git service refuses what it holds; any other failure rejects with a short code and says nothing about whether the review was created. */
   publishReview(ref: PullRequestRef, installation: string, draft: ReviewDraft): Promise<{ id: string }>;
-  /** The app's own reviews of the pull request that have a body, newest first, each with the commit it is pinned to. */
-  listOwnReviews(ref: PullRequestRef, installation: string): Promise<Array<{ id: string; commit: string }>>;
+  /** The app's own reviews of the pull request that have a body, newest first, each with the commit it is pinned to and, when the git service gives one, its state. One whose commit is null is not listed. */
+  listOwnReviews(ref: PullRequestRef, installation: string): Promise<Array<{ id: string; commit: string; state?: OwnReviewState }>>;
   /** The inline comments of one review, read from the pull request's own comment list. null when that list was cut short. */
   listReviewComments(ref: PullRequestRef, installation: string, reviewId: string): Promise<PostedComment[] | null>;
   /** Puts a reaction on a general comment of a pull request. */
@@ -184,4 +188,14 @@ export interface ForgeChecks {
   greenChecks(ref: PullRequestRef, installation: string, commit: string, names: string[]): Promise<string[]>;
   /** Whether `login` is an active member of the team `<org>/<slug>`. Rejects with a short code when the git service did not say. */
   isTeamMember(installation: string, team: string, login: string): Promise<boolean>;
+}
+
+export interface ForgeApprovals {
+  /** 'dismissed' when an active ruleset's pull request rule, or the branch protection, dismisses an approval when new commits are pushed;
+   *  'kept' when both were read and neither does. Rejects with a short code when neither said so and one could not be read. */
+  staleApprovals(ref: PullRequestRef, installation: string, branch: string): Promise<'dismissed' | 'kept'>;
+  /** One review as the git service holds it now; its commit is null when the service gives none. null when it answers that there is none. Rejects with a short code. */
+  readReview(ref: PullRequestRef, installation: string, reviewId: string): Promise<{ state: OwnReviewState; commit: string | null } | null>;
+  /** Dismisses one review. Sent once. Rejects with a short code and says nothing about whether it took effect. */
+  dismissReview(ref: PullRequestRef, installation: string, reviewId: string, message: string): Promise<void>;
 }

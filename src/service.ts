@@ -1,15 +1,18 @@
 import { loadMigrations, MIGRATIONS_DIR, migrate } from './db/migrate.ts';
 import { beat, readHeartbeat } from './db/heartbeat.ts';
-import { askGate, deleteFinishedJobs } from './db/jobs.ts';
+import { markDismissFailed, standingApprovals } from './db/approvals.ts';
+import { askGate, askWithdraw, deleteFinishedJobs } from './db/jobs.ts';
 import type { Job } from './db/jobs.ts';
 import { getPullRequest } from './db/pull-requests.ts';
 import type { Db, InstanceLock } from './db/types.ts';
-import { gateUseOf, repoSettingsFor } from './config/load.ts';
+import { approvalUseOf, gateUseOf, repoSettingsFor } from './config/load.ts';
 import type { ServiceConfig } from './config/load.ts';
 import type { ModelClient, ReviewDeps, ReviewInput, ReviewResult } from './engine/types.ts';
 import { alertSinksOf, notifiersOf } from './extensions/load.ts';
 import type { LoadedExtension } from './extensions/types.ts';
-import type { AppIdentity, ForgeAccess, ForgeChecks, ForgeWriter, HookDeliveries, PullRequestRef, Source, WebhookReader } from './forge/types.ts';
+import type { AppIdentity, ForgeAccess, ForgeApprovals, ForgeChecks, ForgeWriter, HookDeliveries, PullRequestRef, Source, WebhookReader } from './forge/types.ts';
+import { runWithdrawJob, sweepWithdraw } from './approval/withdraw.ts';
+import type { WithdrawJobDeps } from './approval/withdraw.ts';
 import { gatingOf } from './gate/gating.ts';
 import { runGateJob } from './gate/job.ts';
 import type { GateJobDeps } from './gate/job.ts';
@@ -18,7 +21,7 @@ import { askWaiting, sweepGate } from './gate/sweep.ts';
 import { ALERT_TIMEOUT_MS, createAlerts } from './shell/alerts.ts';
 import type { Alert } from './shell/alerts.ts';
 import { codeOf, isShortCode } from './shell/codes.ts';
-import { dryChecks, dryWriter } from './shell/dry-writer.ts';
+import { dryApprovals, dryChecks, dryWriter } from './shell/dry-writer.ts';
 import { createExtensionHealth } from './shell/extension-health.ts';
 import { createExtensionRoutes } from './shell/extension-routes.ts';
 import { createListener } from './shell/http.ts';
@@ -49,6 +52,8 @@ export interface ServiceDeps {
   writer: ForgeWriter;
   /** The check runs, statuses and team membership the gate reads and writes. In dry run the gate is given checks that refuse every call instead. */
   checks: ForgeChecks;
+  /** The branch's rule on stale approvals, a review's state and its dismissal. In dry run, and when absent, approvals that refuse every call are given instead. */
+  approvals?: ForgeApprovals;
   /** What the app is allowed to do; asked once at start. */
   appInfo: AppIdentity;
   fetch: typeof fetch;
@@ -79,6 +84,8 @@ export const LOOKBACK_MARGIN_MS = 120_000;
 export const JOB_KEEP_MS = 14 * 86_400_000;
 /** The places of the gate's runner. */
 export const GATE_CONCURRENCY = 4;
+/** The places of the withdraw runner. */
+export const WITHDRAW_CONCURRENCY = 2;
 
 /** The error's name and, when it is a string, its code. Never its message. */
 function why(error: unknown): { error: string; code: string | null } {
@@ -108,10 +115,15 @@ export function gateForge(dryRun: boolean, checks: ForgeChecks, writer: ForgeWri
   return dryRun ? { checks: dryChecks(), writer: dryWriter() } : { checks, writer };
 }
 
+/** What the review job and the withdraw job are given to reach GitHub's approvals: in dry run, and when none was given, approvals whose every call rejects; else the ones given. */
+export function approvalsFor(dryRun: boolean, approvals: ForgeApprovals | undefined): ForgeApprovals {
+  return dryRun ? dryApprovals() : approvals ?? dryApprovals();
+}
+
 /**
  * Takes the lock, migrates, recovers, then listens; the work that follows listening is not waited for.
  * `settled` resolves when the work that follows listening has had its first try: the key check, the app check, with learning on the learning work's start and the judge's row (the first pass is not waited for, and no run of the judge starts), the redelivery attempt and, when that worked, the first beat.
- * `stop` drains both runners (at most DRAIN_WAIT_MS between them), closes the listener and waits for requests in flight (at most STOP_WAIT_MS),
+ * `stop` drains the three runners (at most DRAIN_WAIT_MS between them), closes the listener and waits for requests in flight (at most STOP_WAIT_MS),
  * beats once more, waits for alerts, closes the database and releases the lock. It never rejects.
  */
 export async function startService(config: ServiceConfig, deps: ServiceDeps): Promise<{ stop(): Promise<void>; settled: Promise<void> }> {
@@ -139,6 +151,8 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps): Pr
   // With learning off none of it is made: no pass, no memory, no health (call 17). In dry run it runs (11.1).
   const learning = config.learning ? createLearning({ db, clock, log: say, alert }) : null;
   const memory = config.learning ? { memoryFor: (ref: PullRequestRef) => recordsMemory(db, ref), memoryHealth: createMemoryHealth(alert) } : null;
+  // Nothing reaches GitHub's approvals in dry run, nor when the service was given none: each call rejects, and nothing is approved or dismissed.
+  const approvals = approvalsFor(config.dryRun, deps.approvals);
   const reviewDeps: ReviewJobDeps = {
     db, forge: deps.forge, clock, log: say, sleep: deps.sleep, settingsFor,
     limits: {
@@ -147,6 +161,7 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps): Pr
     },
     dryRun: config.dryRun, writer: config.dryRun ? dryWriter() : deps.writer, engineDeps: deps.engineDeps, review: deps.review, lineUrl: deps.lineUrl, health, spend,
     commentUrl: deps.commentUrl, canResolve: () => deps.appInfo.canResolve(),
+    approvals, onWithdraw: () => { void withdrawRunner.tick(); },
     ...(config.dryRun || notifiers.length === 0 ? {} : { notice: { notifiers, reviewUrl: deps.reviewUrl, pullRequestUrl: deps.pullRequestUrl } }),
     ...(extensionHealth === null ? {} : { extensionHealth }),
     ...(mcpHealth === null ? {} : { mcpHealth }),
@@ -213,9 +228,72 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps): Pr
       if (how !== 'ended') gateAlert('gate_check_failed', { reason: how });
     },
   });
+  const withdrawDeps: WithdrawJobDeps = {
+    db, forge: deps.forge, approvals, clock, log: say, alert, settingsFor, dryRun: config.dryRun,
+    onQueued: () => { tickBoth(); },
+  };
+  // Never paused with the reviews (call 17).
+  const withdrawRunner = createRunner({
+    db, kind: 'withdraw', concurrency: WITHDRAW_CONCURRENCY, clock, log: say,
+    mayStart: async () => true,
+    run: (job) => runWithdrawJob(job, withdrawDeps),
+    onLeft: withdrawLeft,
+  });
+  /**
+   * A withdraw job the runner dropped, as too old or out of starts, withdrew nothing: the reason is recorded as the failure
+   * of each standing approval of its pull request, and raised once when one of these was recorded for the first time or
+   * could not be recorded. Out of dry run, a job too old is asked for afresh, and the check of a repository whose gate is
+   * enabled is asked for. Each step is caught: one that fails changes nothing else.
+   */
+  async function withdrawLeft(job: Job, how: 'ended' | 'too_old' | 'attempts_exhausted'): Promise<void> {
+    if (how === 'ended') return;
+    const repo = `${job.ref.owner}/${job.ref.repo}`;
+    // A failure unrecorded is never read as an old one.
+    let fresh = false;
+    try {
+      for (const standing of await standingApprovals(db, job.ref)) {
+        try {
+          if (await markDismissFailed(db, standing.run, how)) fresh = true;
+        } catch {
+          // left as it was: the next withdraw job of the pull request records it
+          fresh = true;
+        }
+      }
+    } catch {
+      // the approvals could not be read, so none could be recorded: the next push, publication or start asks again
+      fresh = true;
+    }
+    if (fresh) {
+      try {
+        alert('dismissal_failed', { reason: how, repo, number: job.ref.number });
+      } catch {
+        // an alert that throws changes nothing
+      }
+    }
+    if (config.dryRun) return;
+    // The dropped row is finished, so this stores a fresh job: its re-check clears the approvals that hold and withdraws
+    // the others. Not for a job out of starts: a crash that repeats would loop.
+    if (how === 'too_old') {
+      try {
+        await askWithdraw(db, job.ref, clock().toISOString(), job.installation);
+        void withdrawRunner.tick();
+      } catch {
+        // the request is lost: the next push, publication or start asks again
+      }
+    }
+    try {
+      if (!settingsFor(repo).gate.enabled) return;
+      await askGate(db, job.ref, clock().toISOString(), undefined, { installation: job.installation });
+      void gateRunner.tick();
+    } catch {
+      // the request for the check is lost: the next event or start asks again
+    }
+  }
+  /** Every runner looks at its due jobs. */
   function tickBoth(): void {
     void runner.tick();
     void gateRunner.tick();
+    void withdrawRunner.tick();
   }
   /** A review job has left its runner, however it left: the check of a gated pull request is asked for. With the gate off nothing is read. */
   async function reviewLeft(job: Job): Promise<void> {
@@ -258,6 +336,11 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps): Pr
     await recoverJobs(db, clock(), say);
     // The checks the record and the config disagree on, or that a review left under way, are asked for.
     if (gateLive) say({ event: 'gate_sweep', asked: await sweepGate(db, settingsFor, clock().toISOString()) });
+    // A withdrawal that failed is asked for again on each pull request stored as open (call 22).
+    if (!config.dryRun) {
+      const asked = await sweepWithdraw(db, clock().toISOString());
+      if (asked > 0) say({ event: 'withdraw_sweep', asked });
+    }
     listening = await deps.listen(listener, config.server.port);
   } catch (error) {
     try {
@@ -313,7 +396,7 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps): Pr
 
   async function appCheck(): Promise<void> {
     if (ending) return;
-    const lacking = await deps.appInfo.lacks(config.dryRun, gateUseOf(config));
+    const lacking = await deps.appInfo.lacks(config.dryRun, gateUseOf(config), approvalUseOf(config));
     if (ending) return;
     if (lacking.length === 0) say({ event: 'app_check', missing: 0 });
     for (const { feature, missing } of lacking) {
@@ -383,7 +466,7 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps): Pr
     await redeliveryThenBeat('upkeep_failed');
   }
 
-  every(TICK_MS, async () => { await Promise.all([runner.tick(), gateRunner.tick()]); });
+  every(TICK_MS, async () => { await Promise.all([runner.tick(), gateRunner.tick(), withdrawRunner.tick()]); });
   every(UPKEEP_MS, upkeep);
   tickBoth();
   const settled = (async () => {
@@ -405,8 +488,8 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps): Pr
       }
     }
     try {
-      if (await within(DRAIN_WAIT_MS, Promise.all([runner.drain(), gateRunner.drain()])) === 'timeout') {
-        say({ event: 'drain_timeout', running: runner.running() + gateRunner.running() });
+      if (await within(DRAIN_WAIT_MS, Promise.all([runner.drain(), gateRunner.drain(), withdrawRunner.drain()])) === 'timeout') {
+        say({ event: 'drain_timeout', running: runner.running() + gateRunner.running() + withdrawRunner.running() });
       }
     } catch (error) {
       say({ event: 'drain_failed', ...why(error) });

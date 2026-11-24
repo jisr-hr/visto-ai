@@ -22,6 +22,8 @@ type Meta = {
   inline: boolean;
   // Builds a link to a comment by its id; absent or null when the service has no such link.
   commentUrl?: ((commentId: string) => string) | null;
+  // A paragraph the service wrote, set after the Overall line; absent: nothing.
+  approval?: string;
 };
 
 const WHOLE_FILE_TEXT: Record<Exclude<FileLevelSource, 'whole_file' | 'team_file_invalid'>, string> = {
@@ -381,7 +383,9 @@ function rendered(result: ReviewResult, meta: Meta): { body: string; comments: I
   if (result.coverage.notReviewed.length > 0) {
     rest.push(['## Coverage', '', 'These files were not reviewed:', '', ...bullets(result.coverage.notReviewed.map(notReviewedLine))].join('\n'));
   }
-  tail.push(`${OVERALL_HEADING}\n\n${overallLine(result)}`);
+  // The service's own paragraph, not escaped, inside the tail a cut keeps; an empty one is none.
+  const approval = typeof meta.approval === 'string' && meta.approval !== '' ? `\n\n${meta.approval}` : '';
+  tail.push(`${OVERALL_HEADING}\n\n${overallLine(result)}${approval}`);
   const comments = !meta.inline ? [] : result.findings.map((f) => ({ path: f.path, side: f.side, line: f.line, body: commentBody(f) }));
   return { body: fitBody(head.join('\n\n'), tail.join('\n\n')), comments };
 }

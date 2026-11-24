@@ -178,6 +178,23 @@ test('an id is read as a number or as digits, and a comment without one is a bad
   await assert.rejects(read({ id: null }), { message: 'github_bad_response' });
   assert.equal((await read({ pullRequestReview: null }))[0]!.comments[0]!.reviewId, null);
 });
+test("a comment carries its author's access when GitHub reports it, and none when it does not", async () => {
+  const reported: unknown[] = ['OWNER', 'MEMBER', 'COLLABORATOR', 'CONTRIBUTOR', 'FIRST_TIMER', 'NONE', 5, undefined];
+  const comments = reported.map((v, i) => COMMENT(i + 1, v === undefined ? {} : { authorAssociation: v }));
+  const queries: string[] = [];
+  const answers = [page([threadWith(connection(comments, 'c-1'))]), commentsPage([COMMENT(9, { authorAssociation: 'MEMBER' })])];
+  const stub = async (_url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+    queries.push((JSON.parse(String(init?.body)) as { query: string }).query);
+    return answers.shift() ?? json({ message: 'Not Found' }, 404);
+  };
+  const writer = createGithubWriter({ auth, info, fetch: stub as typeof fetch });
+  const [thread] = await writer.listThreads(REF, '99');
+  assert.deepEqual(thread!.comments.map((c) => c.association),
+    ['owner', 'member', 'collaborator', 'none', 'none', 'none', undefined, undefined, 'member']);
+  assert.deepEqual(thread!.comments.map((c) => 'association' in c), [true, true, true, true, true, true, false, false, true]);
+  assert.equal(queries.length, 2);
+  for (const query of queries) assert.match(query, /authorAssociation/);
+});
 test('a reply, an edit and a resolve are each one mutation with their ids, sent once', async () => {
   const reply = github({ addPullRequestReviewThreadReply: [json({ data: { addPullRequestReviewThreadReply: { comment: { id: 'PRRC_9' } } } })] });
   await reply.writer.replyToThread('99', 'PRRT_1', 'Fixed.');

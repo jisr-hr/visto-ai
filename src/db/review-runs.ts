@@ -93,13 +93,19 @@ export async function listRuns(db: Db, ref: PullRequestRef): Promise<StoredRun[]
   return rows.map((row) => toRun(row, r));
 }
 
-/** Fills in a run's publication, once. false when the run was already marked. */
-export async function markPublished(db: Db, runId: number, p: { reviewId: string; publishedAt: string; body: string; inlineDropped: boolean }): Promise<boolean> {
+/**
+ * Fills in a run's publication, once. false when the run was already marked. `approved` is stored true only when it is
+ * true (the review was posted as an approval); `approvalCode` is the decision it was posted with, null when none was made.
+ */
+export async function markPublished(db: Db, runId: number, p: {
+  reviewId: string; publishedAt: string; body: string; inlineDropped: boolean; approved?: boolean; approvalCode?: string | null;
+}): Promise<boolean> {
   const rows = await db.query(
-    `update visto_ai.review_runs set published = true, review_id = $2, published_at = $3::timestamptz, body = $4, inline_dropped = $5
+    `update visto_ai.review_runs set published = true, review_id = $2, published_at = $3::timestamptz, body = $4, inline_dropped = $5,
+            approved = $6, approval_code = $7
      where id = $1 and published = false
      returning id`,
-    [runId, storable(p.reviewId), p.publishedAt, storable(p.body), p.inlineDropped]);
+    [runId, storable(p.reviewId), p.publishedAt, storable(p.body), p.inlineDropped, p.approved === true, storableOrNull(p.approvalCode ?? null)]);
   return rows.length === 1;
 }
 
