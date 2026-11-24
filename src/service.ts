@@ -1,7 +1,7 @@
 import { loadMigrations, MIGRATIONS_DIR, migrate } from './db/migrate.ts';
 import { beat, readHeartbeat } from './db/heartbeat.ts';
 import { markDismissFailed, standingApprovals } from './db/approvals.ts';
-import { askGate, deleteFinishedJobs } from './db/jobs.ts';
+import { askGate, askWithdraw, deleteFinishedJobs } from './db/jobs.ts';
 import type { Job } from './db/jobs.ts';
 import { getPullRequest } from './db/pull-requests.ts';
 import type { Db, InstanceLock } from './db/types.ts';
@@ -241,29 +241,46 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps): Pr
   });
   /**
    * A withdraw job the runner dropped, as too old or out of starts, withdrew nothing: the reason is recorded as the failure
-   * of each standing approval of its pull request, raised once, and, out of dry run, the check of a repository whose gate
-   * is enabled is asked for. Each step is caught: one that fails changes nothing else.
+   * of each standing approval of its pull request, and raised once when one of these was recorded for the first time or
+   * could not be recorded. Out of dry run, a job too old is asked for afresh, and the check of a repository whose gate is
+   * enabled is asked for. Each step is caught: one that fails changes nothing else.
    */
   async function withdrawLeft(job: Job, how: 'ended' | 'too_old' | 'attempts_exhausted'): Promise<void> {
     if (how === 'ended') return;
     const repo = `${job.ref.owner}/${job.ref.repo}`;
+    // A failure unrecorded is never read as an old one.
+    let fresh = false;
     try {
       for (const standing of await standingApprovals(db, job.ref)) {
         try {
-          await markDismissFailed(db, standing.run, how);
+          if (await markDismissFailed(db, standing.run, how)) fresh = true;
         } catch {
           // left as it was: the next withdraw job of the pull request records it
+          fresh = true;
         }
       }
     } catch {
-      // the approvals could not be read: the next push, publication or start asks again
+      // the approvals could not be read, so none could be recorded: the next push, publication or start asks again
+      fresh = true;
     }
-    try {
-      alert('dismissal_failed', { reason: how, repo, number: job.ref.number });
-    } catch {
-      // an alert that throws changes nothing
+    if (fresh) {
+      try {
+        alert('dismissal_failed', { reason: how, repo, number: job.ref.number });
+      } catch {
+        // an alert that throws changes nothing
+      }
     }
     if (config.dryRun) return;
+    // The dropped row is finished, so this stores a fresh job: its re-check clears the approvals that hold and withdraws
+    // the others. Not for a job out of starts: a crash that repeats would loop.
+    if (how === 'too_old') {
+      try {
+        await askWithdraw(db, job.ref, clock().toISOString(), job.installation);
+        void withdrawRunner.tick();
+      } catch {
+        // the request is lost: the next push, publication or start asks again
+      }
+    }
     try {
       if (!settingsFor(repo).gate.enabled) return;
       await askGate(db, job.ref, clock().toISOString(), undefined, { installation: job.installation });

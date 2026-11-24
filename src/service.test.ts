@@ -2150,6 +2150,71 @@ test('a withdraw job the runner drops, as too old or out of starts, records why 
   assert.deepEqual([(await approvalRows(h.db)).map((r) => r.dismiss_failure), h.logged.some((e) => e.event === 'runner_failed')], [[null], false]);
 });
 
+test('a withdraw job the runner drops raises no alert when no approval stands, nor when each one already carried a recorded failure', async () => {
+  for (const how of ['too_old', 'attempts_exhausted'] as const) {
+    for (const failed of [false, true]) {
+      const label = `${how} ${failed ? 'failed before' : 'none standing'}`;
+      const h = await harness({ dryRun: false });
+      await migrate(h.db, loadMigrations(MIGRATIONS_DIR));
+      if (failed) await markDismissFailed(h.db, await approvalOf(h.db, '501', 'h0'), 'github_403');
+      const id = (await askWithdraw(h.db, REF, how === 'too_old' ? at(-90_000) : at(0), '99'))!;
+      if (how === 'attempts_exhausted') await h.db.query('update visto_ai.jobs set starts = 3 where id = $1', [id]);
+      await (await h.start()).settled;
+      await h.until(async () => (await jobOf(h.db, id)).status === 'dropped');
+      await h.flush();
+      assert.deepEqual(alertsOf(h, 'dismissal_failed'), [], label);
+      // The reason is recorded all the same on an approval that carried a failure.
+      assert.deepEqual((await approvalRows(h.db)).map((r) => r.dismiss_failure), failed ? [how] : [], label);
+    }
+  }
+  // A mark the database refuses counts as new: raised, though the approval carried a failure.
+  const refused = await harness({ dryRun: false, failQuery: 'set dismiss_failure = $2' });
+  await migrate(refused.db, loadMigrations(MIGRATIONS_DIR));
+  const standing = await approvalOf(refused.db, '501', 'h0');
+  await refused.db.query("update visto_ai.review_runs set dismiss_failure = 'github_403' where id = $1", [standing]);
+  const id = (await askWithdraw(refused.db, REF, at(0), '99'))!;
+  await refused.db.query('update visto_ai.jobs set starts = 3 where id = $1', [id]);
+  await (await refused.start()).settled;
+  await refused.until(() => alertsOf(refused, 'dismissal_failed').length > 0);
+  assert.deepEqual(alertsOf(refused, 'dismissal_failed'), [{ event: 'alert', code: 'dismissal_failed', reason: 'attempts_exhausted', repo: 'acme/shop', number: 7 }]);
+  assert.deepEqual((await approvalRows(refused.db)).map((r) => r.dismiss_failure), ['github_403']);
+});
+
+test('a withdraw job dropped as too old is asked for again at once, and its re-check withdraws what no longer holds and clears what holds; one out of starts, or in dry run, is not', async () => {
+  const seen = approvalsFake();
+  const h = await harness({ dryRun: false, approvals: seen.approvals });
+  await migrate(h.db, loadMigrations(MIGRATIONS_DIR));
+  const old = await approvalOf(h.db, '501', 'h0');
+  const held = await approvalOf(h.db, '502', 'h1');
+  h.live = liveAt('h1');
+  await askWithdraw(h.db, REF, at(-90_000), '99');
+  await (await h.start()).settled;
+  await h.until(async () => (await withdrawRows(h.db)).some((j) => j.status === 'done'));
+  // The dropped job, then the one stored in its place with its installation, run at once by the lane.
+  assert.deepEqual(await withdrawRows(h.db), [
+    { number: 7, status: 'dropped', outcome: 'too_old', installation: '99' },
+    { number: 7, status: 'done', outcome: 'done', installation: '99' },
+  ]);
+  // The approval of another head is dismissed; the one at the live head, the newest review, holds and its failure is cleared.
+  assert.deepEqual((await approvalRows(h.db)).map((r) => [r.id, r.dismissed_by, r.dismiss_failure]), [[old, 'app', null], [held, null, null]]);
+  assert.deepEqual(seen.calls, [['readReview', '99', '501'], ['dismissReview', '99', '501', dismissMessage('h0')], ['readReview', '99', '502']]);
+  assert.deepEqual(alertsOf(h, 'dismissal_failed'), [{ event: 'alert', code: 'dismissal_failed', reason: 'too_old', repo: 'acme/shop', number: 7 }]);
+
+  // Out of starts, or in dry run: no job is stored in its place.
+  for (const [how, dryRun] of [['attempts_exhausted', false], ['too_old', true]] as const) {
+    const label = `${how}${dryRun ? ' in dry run' : ''}`;
+    const other = await harness({ dryRun, approvals: approvalsFake().approvals });
+    await migrate(other.db, loadMigrations(MIGRATIONS_DIR));
+    await approvalOf(other.db, '501', 'h0');
+    const dropped = (await askWithdraw(other.db, REF, how === 'too_old' ? at(-90_000) : at(0), '99'))!;
+    if (how === 'attempts_exhausted') await other.db.query('update visto_ai.jobs set starts = 3 where id = $1', [dropped]);
+    await (await other.start()).settled;
+    await other.until(() => alertsOf(other, 'dismissal_failed').length > 0);
+    await other.flush();
+    assert.deepEqual(await withdrawRows(other.db), [{ number: 7, status: 'dropped', outcome: how, installation: '99' }], label);
+  }
+});
+
 test('a withdraw sweep that cannot read the database fails the start', async () => {
   const h = await harness({ dryRun: false, failQuery: 'dismiss_failure is not null' });
   await assert.rejects(h.start(), /db_down/);
