@@ -3,7 +3,7 @@ import test from 'node:test';
 import { estimateTokens } from './batches.ts';
 import {
   askMemory, CATEGORIES_LINE, DIRECTORIES_LINE, MEMORY_CATEGORIES, MEMORY_DIRECTORIES, MEMORY_LINES, MEMORY_TIMEOUT_MS, memoryParts,
-  PULL_REQUEST_MEMORY_RULES, REPOSITORY_MEMORY_RULES,
+  PULL_REQUEST_MEMORY_RULES, REPOSITORY_MEMORY_RULES, REVERTED_LINE_RULES, withoutReverted,
 } from './memory.ts';
 import type { MemoryContext } from './memory.ts';
 import { CATEGORIES } from '../score/types.ts';
@@ -418,4 +418,133 @@ test('an answer in time leaves its signal alone, and the default limit is five s
   assert.equal((settled as { status: { code: string } } | undefined)?.status.code, 'timeout');
   assert.equal(signal?.aborted, true);
   await pending;
+});
+
+// Reverted lines (plan of reverts, Task 4).
+const reverted = (over: Partial<MemoryLine> = {}): MemoryLine =>
+  ({ ref: '9:reverts:7:src/billing/tax.ts', near: false, path: 'src/billing/tax.ts', day: '2026-03-10', category: null, missed: false, reverted: true, ...over });
+
+test('with no reverted line the two parts are what they were', async () => {
+  const parts = memoryParts(context);
+  assert.equal(parts.pullRequest, `${PULL_REQUEST_MEMORY_RULES}\n\nchanged | \`src/billing/tax.ts\` | 2026-03-10 | business_rule | missed\nnear | \`src/billing/rates.ts\` | 2026-03-02 | - | -`);
+  assert.equal(parts.pullRequest.includes(REVERTED_LINE_RULES), false);
+  assert.equal(parts.repository,
+    `${REPOSITORY_MEMORY_RULES}\n\n${DIRECTORIES_LINE}\n- \`src/billing\`: 4\n- \`src/cart\`: 2\n\n${CATEGORIES_LINE}\n- business_rule: 3`);
+  const answer = blocks({
+    repository: { directories: context.directories, categories: context.categories },
+    pullRequest: context.lines,
+    cut: { ...noCut, lines: 2 },
+  });
+  assert.deepEqual(await askMemory(answering(answer), files, asOf), {
+    context,
+    status: { status: 'ok', code: 'ok', lines: 2 },
+    audit: [{ stage: 'context', action: 'memory_cut', subject: 'lines', reason: '2' }],
+  });
+});
+
+test('a reverted line is kept with reverted true, no category and no miss, whatever the memory handed over', async () => {
+  const handed = { ref: '9:reverts:7:src/billing/tax.ts', near: false, path: 'src/billing/tax.ts', day: '2026-03-10', category: 'billing', missed: true, reverted: true, excerpt: 'words' };
+  const got = await askMemory(answering(blocks({ pullRequest: [handed as never] })), files, asOf);
+  assert.deepEqual(got.context!.lines, [{ ref: '9:reverts:7:src/billing/tax.ts', near: false, path: 'src/billing/tax.ts', day: '2026-03-10', category: null, missed: false, reverted: true }]);
+  assert.deepEqual(got.status, { status: 'ok', code: 'ok', lines: 1 });
+  for (const bad of [{ ...handed, missed: 'yes' }, { ...handed, day: 'soon' }, { ...handed, path: 'src/billing/my tax.ts' }]) {
+    const none = await askMemory(answering(blocks({ pullRequest: [bad as never] })), files, asOf);
+    assert.equal(none.context, undefined);
+    assert.deepEqual(none.status, { status: 'empty', code: 'no_records', lines: 0 });
+  }
+});
+
+test('a reverted flag that is not true is no flag, and the line is what it was', async () => {
+  for (const flag of [false, 'yes', 1, {}, null]) {
+    const got = await askMemory(answering(blocks({ pullRequest: [{ ...line({ category: 'billing', missed: true }), reverted: flag } as never] })), files, asOf);
+    const kept = got.context!.lines[0]!;
+    assert.deepEqual(Object.keys(kept).sort(), ['category', 'day', 'missed', 'near', 'path', 'ref'], String(flag));
+    assert.deepEqual([kept.category, kept.missed], ['billing', true]);
+    assert.equal(memoryParts(got.context!).pullRequest.includes(REVERTED_LINE_RULES), false);
+  }
+});
+
+test('the signals\' lines come first and the reverted lines after them, one for a path and none near, whatever order the memory handed them in', async () => {
+  const signalTax = line({ ref: '8:h1:src/billing/tax.ts' });
+  const signalAdd = line({ ref: '6:h2:src/cart/add.ts', path: 'src/cart/add.ts' });
+  const revertTax = reverted();
+  const revertAdd = reverted({ ref: '11:reverts:5:src/cart/add.ts', path: 'src/cart/add.ts', day: '2026-03-04' });
+  const got = await askMemory(answering(blocks({
+    pullRequest: [
+      revertTax,
+      signalTax,
+      reverted({ ref: '10:reverts:4:src/billing/tax.ts', day: '2026-03-02' }),
+      reverted({ ref: '12:reverts:3:src/billing/rates.ts', path: 'src/billing/rates.ts', near: true }),
+      signalAdd,
+      revertAdd,
+    ],
+  })), files, asOf);
+  assert.deepEqual(got.context!.lines, [signalTax, signalAdd, revertTax, revertAdd]);
+  assert.deepEqual(got.status, { status: 'ok', code: 'ok', lines: 4 });
+});
+
+test('with thirty signals\' lines no reverted line is kept, and the audit counts what was cut', async () => {
+  const signals = (n: number): MemoryLine[] => Array.from({ length: n }, (_, i) => line({ ref: `${20 + i}:file:src/billing/f${i}.ts`, path: `src/billing/f${i}.ts` }));
+  const reverts = [reverted(), reverted({ ref: '9:reverts:7:src/cart/add.ts', path: 'src/cart/add.ts' })];
+  const thirty = await askMemory(answering(blocks({ pullRequest: [...reverts, ...signals(30)] })), files, asOf);
+  assert.deepEqual(thirty.context!.lines, signals(30));
+  assert.deepEqual(cutsOf(thirty.audit), { lines: '2' });
+  assert.deepEqual(thirty.audit, [{ stage: 'context', action: 'memory_cut', subject: 'lines', reason: '2' }]);
+  const less = await askMemory(answering(blocks({ pullRequest: [...reverts, ...signals(29)] })), files, asOf);
+  assert.deepEqual(less.context!.lines, [...signals(29), reverts[0]]);
+  assert.deepEqual(cutsOf(less.audit), { lines: '1' });
+});
+
+const withReverted: MemoryContext = {
+  directories: context.directories,
+  categories: context.categories,
+  lines: [
+    line({ ref: '8:h1:src/billing/tax.ts', day: '2026-03-10', category: 'business_rule', missed: true }),
+    reverted({ day: '2026-03-08' }),
+    reverted({ ref: '11:reverts:5:src/cart/add.ts', path: 'src/cart/add.ts', day: '2026-03-02' }),
+  ],
+};
+
+test('a reverted line ends in reverted, and the rule for reverted lines stands between the rules and the lines, once', () => {
+  const part = memoryParts(withReverted).pullRequest;
+  assert.equal(part, `${PULL_REQUEST_MEMORY_RULES}\n\n${REVERTED_LINE_RULES}\n\nchanged | \`src/billing/tax.ts\` | 2026-03-10 | business_rule | missed\nchanged | \`src/billing/tax.ts\` | 2026-03-08 | - | reverted\nchanged | \`src/cart/add.ts\` | 2026-03-02 | - | reverted`);
+  assert.equal(part.split(REVERTED_LINE_RULES).length, 2);
+  assert.equal(part.includes('<<<'), false);
+  assert.equal(memoryParts(withReverted).repository, memoryParts(context).repository);
+  const refused = memoryParts({ ...withReverted, lines: [withReverted.lines[0]!, reverted({ ref: '9:reverts:7:src/my file.ts', path: 'src/my file.ts' })] }).pullRequest;
+  assert.equal(refused, `${PULL_REQUEST_MEMORY_RULES}\n\nchanged | \`src/billing/tax.ts\` | 2026-03-10 | business_rule | missed`);
+  assert.equal(refused.includes(REVERTED_LINE_RULES), false);
+  assert.equal(refused.includes('my file'), false);
+});
+
+test('the context without its reverted lines keeps the lists and the signals\' lines, and is nothing when no line is left', () => {
+  const smaller = withoutReverted(withReverted)!;
+  assert.deepEqual(smaller, { directories: withReverted.directories, categories: withReverted.categories, lines: [withReverted.lines[0]] });
+  assert.equal(memoryParts(smaller).pullRequest.includes(REVERTED_LINE_RULES), false);
+  assert.equal(withoutReverted({ ...withReverted, lines: withReverted.lines.slice(1) }), undefined);
+  assert.deepEqual(withoutReverted(context), context);
+});
+
+test('the largest memory with a reverted line costs under 3,450 tokens', async () => {
+  const longest = [...CATEGORIES].sort((a, b) => b.length - a.length)[0]!;
+  const name = (i: number): string => `src/${String(i).padStart(2, '0')}${'x'.repeat(114)}`;
+  const count = Number.MAX_SAFE_INTEGER;
+  const pullRequest = Array.from({ length: MEMORY_LINES }, (_, i) => line({ ref: `${i}:h:${name(i)}`, near: false, path: name(i), category: longest, missed: true }));
+  pullRequest[MEMORY_LINES - 1] = reverted({ ref: `${MEMORY_LINES - 1}:reverts:1:${name(MEMORY_LINES - 1)}`, path: name(MEMORY_LINES - 1) });
+  const answer: MemoryBlocks = {
+    repository: {
+      directories: Array.from({ length: MEMORY_DIRECTORIES }, (_, i) => ({ name: name(i), pullRequests: count })),
+      categories: Array.from({ length: MEMORY_CATEGORIES }, () => ({ name: longest, pullRequests: count })),
+    },
+    pullRequest,
+    cut: noCut,
+  };
+  const got = await askMemory(answering(answer), files, asOf);
+  assert.equal(got.status.lines, MEMORY_LINES);
+  assert.equal(got.context!.lines[MEMORY_LINES - 1]!.reverted, true);
+  const parts = memoryParts(got.context!);
+  assert.ok(parts.pullRequest.includes(REVERTED_LINE_RULES));
+  const tokens = estimateTokens(parts.repository) + estimateTokens(`\n${parts.pullRequest}`);
+  assert.ok(tokens < 3_450, String(tokens));
+  assert.ok(tokens > 3_200, String(tokens));
 });

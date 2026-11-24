@@ -8,7 +8,7 @@ import { changedLines, leftBlocksOf } from './context/increment.ts';
 import type { Changed } from './context/increment.ts';
 import { askLessons } from './context/lessons.ts';
 import type { LessonsContext } from './context/lessons.ts';
-import { askMemory } from './context/memory.ts';
+import { askMemory, withoutReverted } from './context/memory.ts';
 import type { MemoryContext } from './context/memory.ts';
 import { renderAnchoredDiff } from './context/diff.ts';
 import { orderByPriority } from './context/priority.ts';
@@ -398,6 +398,19 @@ async function chooseMemory(
   const budget = budgetWith(context);
   const again = budget > 0 ? pack(budget) : null;
   if (again === null || JSON.stringify([again.notReviewed, again.audit]) !== JSON.stringify([first.notReviewed, first.audit])) {
+    // Reverted lines are the first to give way for room: the same memory without them is tried before it gives up (call 14).
+    const smaller = context.lines.some((l) => l.reverted === true) ? withoutReverted(context) : undefined;
+    if (smaller !== undefined) {
+      const less = budgetWith(smaller);
+      const retry = less > 0 ? pack(less) : null;
+      if (retry !== null && JSON.stringify([retry.notReviewed, retry.audit]) === JSON.stringify([first.notReviewed, first.audit])) {
+        audit.push({ stage: 'context', action: 'memory_cut', subject: 'reverted', reason: 'over_call_budget' });
+        for (const line of smaller.lines) {
+          audit.push({ stage: 'context', action: 'memory_shown', subject: inlineText(line.ref), reason: line.near ? 'near' : 'changed' });
+        }
+        return { packed: retry, shown: smaller, status: { status: 'ok', code: 'ok', lines: smaller.lines.length }, audit };
+      }
+    }
     audit.push({ stage: 'context', action: 'memory_cut', subject: 'memory', reason: 'over_call_budget' });
     return { packed: first, shown: undefined, status: memorySkipped('no_room'), audit };
   }

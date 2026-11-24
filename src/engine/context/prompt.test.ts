@@ -10,7 +10,7 @@ import { LAST_OVERVIEW_CHARS, buildMessages, fixedTokens, headerStripCounts, pul
 import { MEASURE_NUMBER, MEASURE_TOKEN } from './section.ts';
 import { EXTENSION_LINE, extensionPart } from './extensions.ts';
 import type { ExtensionContext } from './extensions.ts';
-import { memoryParts, PULL_REQUEST_MEMORY_RULES } from './memory.ts';
+import { memoryParts, PULL_REQUEST_MEMORY_RULES, REVERTED_LINE_RULES } from './memory.ts';
 import type { MemoryContext } from './memory.ts';
 import { LESSON_RULES, lessonsPart } from './lessons.ts';
 import type { LessonsContext } from './lessons.ts';
@@ -442,4 +442,24 @@ test('the rules say what a lesson is by its marker, so a description that imitat
   const labelled = header.match(/<<<data t0k lesson L[^>]*>>>/g);
   assert.deepEqual(labelled, ['<<<data t0k lesson L1>>>', '<<<data t0k lesson L2>>>']);
   assert.equal(header.split(lessonsPart(lessons, 't0k')).length, 2);
+});
+
+// Reverted lines (plan of reverts, Task 4).
+test('a reverted line stands in the header message with its rule, and counts in the fixed tokens', () => {
+  const plainLine = { ref: '9:reverts:7:src/a.ts', near: false, path: 'src/a.ts', day: '2026-03-10', category: null, missed: false };
+  const withRevert: MemoryContext = { directories: [], categories: [], lines: [{ ...plainLine, reverted: true }] };
+  const without: MemoryContext = { directories: [], categories: [], lines: [plainLine] };
+  const part = memoryParts(withRevert).pullRequest;
+  assert.ok(part.includes(REVERTED_LINE_RULES));
+  assert.ok(part.endsWith('\nchanged | `src/a.ts` | 2026-03-10 | - | reverted'));
+  for (const batchIndex of [0, 1]) {
+    const shown = buildMessages({ ...args, batchIndex, memory: withRevert });
+    assert.equal(shown[1]!.content, `${pullRequestHeader(pr, 3, 'tok')}\n${part}`);
+    assert.equal(shown[2]!.content.includes(REVERTED_LINE_RULES), false);
+  }
+  assert.equal(
+    fixedTokens('CONTRACT', pr, false, undefined, undefined, withRevert) - fixedTokens('CONTRACT', pr, false, undefined, undefined, without),
+    estimateTokens(`\n${part}`) - estimateTokens(`\n${memoryParts(without).pullRequest}`),
+  );
+  assert.ok(estimateTokens(`\n${part}`) > estimateTokens(`\n${memoryParts(without).pullRequest}`));
 });

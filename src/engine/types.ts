@@ -121,6 +121,8 @@ export interface MemoryLine {
   day: string;               // YYYY-MM-DD, UTC: the day the record was made
   category: string | null;   // the kind of change the review had given that code; null when it had given none
   missed: boolean;           // the review had left that code below the threshold
+  // The line stands for a pull request that changed this file and was reverted; absent on every other line. Such a line has near false, category null and missed false.
+  reverted?: true;
 }
 export interface MemoryCount { name: string; pullRequests: number }
 export interface MemoryBlocks {
