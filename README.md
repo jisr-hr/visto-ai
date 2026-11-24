@@ -66,7 +66,7 @@ The full design, with every decision and its reason, is in [docs/superpowers/spe
 | Memory: lessons from replies to findings, shown to later reviews as data (off unless learning is switched on) | Built. What lessons do to findings and to the score is not measured |
 | Memory: reverts, told to later reviews as context for the score (off unless learning is switched on) | Built. What it does to the score is not measured |
 | Evals with lessons as of each case: the findings replay with memory, lessons in both evals, and what a lesson does to findings and to the score | Planned |
-| Automatic approval and its withdrawal (off unless switched on; refused while the audit share is not 0) | Built |
+| Automatic approval and its withdrawal (off unless switched on; refused while the audit share is not 0) | Built. Tried in part against a real GitHub App on a private scratch repository, and under Docker (see "What was tried" under [Automatic approval](#automatic-approval-optional)): not an approval decided and posted by the service, a merge under a standing approval, GitHub's own deliveries, a pull request from a fork, or a branch name with a slash |
 | Audit sample | Planned |
 | UI | Planned |
 
@@ -401,6 +401,12 @@ Dismiss that approval on the pull request's page. The service also tries again a
 - With approval off too: out of dry run, every delivery of a push, a retarget, a reopening, a merge and a dismissed review reads `review_runs` once in its transaction, and so do each publication, each start and each gate evaluation; the withdraw lane looks for due jobs with the other lanes; the state of the app's listed reviews and the access of thread comments are read and not stored; a review GitHub holds as an approval, found already posted, is recorded as one; a review another job recorded, when GitHub refuses its inline comments, is written whole naming no requester.
 
 **The migration.** Automatic approval adds one migration, `0013_approval`: six columns of `review_runs` and one index. It is applied once, and every row stored before it reads as no approval. A previous release finds a migration it does not know and refuses to start on that database, so it cannot be put back.
+
+**What was tried.**
+
+- **Against a real GitHub App, on a private scratch repository.** GitHub names the app's permission `administration` with `read`. The thread query with `authorAssociation` is accepted: a member's reply reads `member`, and the app's own comments `none`. Both reads of the rule answer 403 on a private repository whose plan holds neither rulesets nor branch protection, for any branch, one that does not exist included: so the reviewer cannot approve there, and says `rule_unreadable` with that code. One review through the service with approval on was posted as a comment ending with that paragraph, and its run stored the code. Through the adapters, an approval posted with the event `APPROVE` was listed and read as approved, dismissed, then read and listed as dismissed. A second dismissal of the same review answers 422, which the withdrawal's read after a failed dismissal treats as no failure.
+- **Under Docker, in a network with no way out, on a real Postgres.** The migration over the previous release's database: the rows stored before read as no approval, and the previous release then refuses to start. The refusal of `autoApprove` without `auditShare: 0`. A push of a gated pull request with a standing approval: a withdraw job stored in the delivery, its retries, its give-up with the failure recorded, one alert and the gate asked, and the start's sweep asking again. A withdraw job older than a day dropped, recorded and alerted. Every statement of the record and of the lane.
+- **Not tried.** An approval decided and posted by the service: it needs a repository whose rules dismiss stale approvals, a public one or one on a plan that holds rules. A merge under a standing approval. GitHub's own deliveries: the scratch app has no webhook, so neither GitHub's own dismissal on a push nor a `dismissed` delivery was seen. A pull request from a fork. How a slash in a branch name is taken by the two reads. The run under Docker came before the last fixes, so a withdraw job dropped as `too_old` being asked for again, and the alert of a drop raised only for a new failure, were not run there.
 
 ### Extensions (optional)
 
