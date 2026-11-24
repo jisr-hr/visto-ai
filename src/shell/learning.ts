@@ -6,10 +6,13 @@ import { inlineComments, markLearned, noteLearnFailure, noteLearning, pullReques
 import type { ToLearn } from '../db/learning.ts';
 import { addRecords, retireExpired } from '../db/memory-records.ts';
 import type { NewRecord } from '../db/memory-records.ts';
+import { revertOf } from '../db/pull-requests.ts';
 import { listComments, NOTE } from '../db/review-comments.ts';
-import { scoredAt } from '../db/review-runs.ts';
+import { lastFiles, scoredAt } from '../db/review-runs.ts';
 import type { Db } from '../db/types.ts';
 import type { PullRequestRef } from '../forge/types.ts';
+import { revertedFiles, revertsOf } from '../memory/reverts.ts';
+import type { Revert, RevertCode } from '../memory/reverts.ts';
 import { mayCount, readScored, signalsOf } from '../memory/signals.ts';
 import type { PersonComment, ScoredRun, Signal } from '../memory/signals.ts';
 import type { Alert } from './alerts.ts';
@@ -55,8 +58,16 @@ const recordOf = (s: Signal): NewRecord => ({
   createdAt: s.createdAt, expiresAt: s.expiresAt,
 });
 
-/** One pull request, in one transaction (rule 2). Resolves with what it looked at and added. */
-async function learnOne(tx: Db, pr: ToLearn, now: string): Promise<{ examined: number; added: number }> {
+const revertRecordOf = (r: Revert): NewRecord => ({
+  kind: 'revert', sourceRef: r.sourceRef, number: r.number, reverted: r.reverted, path: r.path, directory: r.directory,
+  category: null, reason: null, missed: false, excerpt: '', comment: null, createdAt: r.createdAt, expiresAt: r.expiresAt,
+});
+
+/** What the pass logs of a revert it looked at, once its transaction has committed: numbers and a code only. */
+interface RevertLine { reverted: number; code: RevertCode; files: number; added: number; cut: number }
+
+/** One pull request, in one transaction (rule 2). Resolves with what it looked at and added, and the revert it looked at. */
+async function learnOne(tx: Db, pr: ToLearn, now: string): Promise<{ examined: number; added: number; revert: RevertLine | null }> {
   const stored = await inlineComments(tx, pr.ref);
   const comments = stored.map((s) => personOf(s.comment));
   const counting = comments.filter((c) => mayCount(c, pr.author));
@@ -71,10 +82,24 @@ async function learnOne(tx: Db, pr: ToLearn, now: string): Promise<{ examined: n
   }
   const signals = signalsOf({ number: pr.ref.number, author: pr.author, closedAt: pr.closedAt, comments, posted, scored });
   const kept = pr.closedAt === null ? signals.filter((s) => s.missed) : signals;
-  const added = await addRecords(tx, { service: pr.ref.service, owner: pr.ref.owner, repo: pr.ref.repo }, kept.map(recordOf));
+  const repo = { service: pr.ref.service, owner: pr.ref.owner, repo: pr.ref.repo };
+  let added = await addRecords(tx, repo, kept.map(recordOf));
+  // A merged pull request that names the one it reverts (6.5, 7.3): the files of that one's last review.
+  let revert: RevertLine | null = null;
+  const names = await revertOf(tx, pr.ref);
+  if (names !== null) {
+    const files = revertedFiles(await lastFiles(tx, { ...pr.ref, number: names.reverted }));
+    const made = revertsOf({
+      number: pr.ref.number, mergedAt: pr.closedAt, reverted: names.reverted,
+      revertedStored: names.stored, revertedMergedAt: names.revertedMergedAt, files,
+    });
+    const more = made.records.length > 0 ? await addRecords(tx, repo, made.records.map(revertRecordOf)) : 0;
+    added += more;
+    revert = { reverted: names.reverted, code: made.code, files: made.records.length, added: more, cut: made.cut };
+  }
   const fresh = stored.filter((s) => !s.learned).map((s) => s.comment.sourceId);
   await markLearned(tx, pr.ref, fresh, now, pr.closedAt);
-  return { examined: fresh.length, added };
+  return { examined: fresh.length, added, revert };
 }
 
 /** One pass. Rejects when the database does not answer; what it committed before stays. counts: whether a pull request that fails has one more failed attempt; absent: true. batch, batches: for tests; absent: LEARN_BATCH, LEARN_BATCHES. */
@@ -120,6 +145,11 @@ async function pass(deps: Parameters<typeof learnOnce>[0], log: Log): Promise<Le
         out.pullRequests += 1;
         out.examined += done.examined;
         out.added += done.added;
+        // Only once its transaction has committed (rule 5 of the reverts).
+        if (done.revert !== null) {
+          const r = done.revert;
+          log({ event: 'revert', repo: repoOf(pr.ref), number: pr.ref.number, reverted: r.reverted, code: r.code, files: r.files, added: r.added, cut: r.cut });
+        }
       } catch (err) {
         // This pull request fails; the database not answering is told by the statement below rejecting.
         const attempts = await noteLearnFailure(db, pr.ref, counts);

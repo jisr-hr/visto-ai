@@ -288,6 +288,8 @@ async function memoryCountCommand(argv: string[], out: (line: string) => void): 
   for (const r of count.rows) {
     out(`${r.key}: records ${r.records}, lines ${r.lines}, changed ${r.changed}, near ${r.near}, labelled files ${r.labelled_files}, labelled with a line ${r.labelled_with_line}`);
   }
+  out(`reverts named ${count.reverts.named}, with their pull request in the file ${count.reverts.held}, cases shown a reverted line ${count.reverts.cases}`);
+  for (const r of count.reverts.rows) out(`${r.key}: reverted lines ${r.lines}`);
 }
 
 // The importer's database output (7.5, call 29): reads a history file, never the git service, and never migrates.

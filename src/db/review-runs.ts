@@ -220,3 +220,24 @@ export async function scoredAt(db: Db, ref: PullRequestRef, commits: string[]): 
     [r.service, r.owner, r.repo, r.number, JSON.stringify(commits.map(storable))]);
   return rows.map((x) => ({ commit: x.head_sha, scores: x.scores, threshold: x.threshold }));
 }
+
+/**
+ * The files of the pull request's last review: for its newest run whose outcome is ok and whose stored scores are a list that is not empty, a dry run
+ * included, a list with one entry for each stored score, in its order, that holds its `path` and its `previousPath` as stored and nothing else.
+ * null when it has no such run. An entry that is no object gives null for both.
+ */
+export async function lastFiles(db: Db, ref: PullRequestRef): Promise<unknown> {
+  const r = lowered(ref);
+  const rows = await db.query<{ files: unknown }>(
+    `select coalesce(
+              (select jsonb_agg(jsonb_build_object('path', x.f -> 'path', 'previousPath', x.f -> 'previousPath') order by x.o)
+               from jsonb_array_elements(r.result -> 'scores') with ordinality as x(f, o)),
+              '[]'::jsonb) as files
+     from visto_ai.review_runs r
+     where r.service = $1 and r.owner = $2 and r.repo = $3 and r.number = $4 and r.outcome = 'ok'
+       and jsonb_array_length(case when jsonb_typeof(r.result -> 'scores') = 'array' then r.result -> 'scores' else '[]'::jsonb end) > 0
+     order by r.id desc
+     limit 1`,
+    [r.service, r.owner, r.repo, r.number]);
+  return rows[0] === undefined ? null : rows[0].files;
+}

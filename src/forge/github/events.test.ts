@@ -215,3 +215,90 @@ test('a check run with no name, no app or no head is malformed', () => {
 test('a re-run of a check suite is not taken in', () => {
   assert.deepEqual(eventOf('check_suite', { action: 'rerequested', repository: repo(), check_suite: { head_sha: 'abc123', pull_requests: [{ number: 7 }] } }), { kind: 'ignored', reason: 'unknown_event' });
 });
+
+const MERGED = { merged: true, state: 'closed', merged_at: T, closed_at: T, merge_commit_sha: 'def456' };
+const mergedFacts = (over: Record<string, unknown> = {}) => facts({ state: 'merged', mergedAt: TI, closedAt: TI, mergeCommit: 'def456', ...over });
+const factsIn = (event: unknown): Record<string, unknown> => (event as { facts: Record<string, unknown> }).facts;
+
+test('a pull request whose description names no revert is read as before', () => {
+  const bodies: Array<Record<string, unknown>> = [{}, { body: null }, { body: '' }, { body: 'Fixes the rounding of totals.' }];
+  for (const over of bodies) {
+    const opened = eventOf('pull_request', pr(over));
+    assert.deepEqual(opened, { kind: 'pull_request', action: 'opened', facts: facts() }, JSON.stringify(over));
+    assert.equal('reverts' in factsIn(opened), false);
+    const merged = eventOf('pull_request', pr({ ...MERGED, ...over }, { action: 'closed' }));
+    assert.deepEqual(merged, { kind: 'pull_request', action: 'closed', facts: mergedFacts() }, JSON.stringify(over));
+    assert.equal('reverts' in factsIn(merged), false);
+  }
+});
+
+test('a description whose first line names a revert of its own repository gives the number, before the merge and in the delivery of the merge', () => {
+  const body = 'Reverts acme/shop#6';
+  for (const action of ['opened', 'synchronize']) {
+    assert.deepEqual(eventOf('pull_request', pr({ body }, { action })), { kind: 'pull_request', action, facts: facts({ reverts: 6 }) });
+  }
+  assert.deepEqual(eventOf('pull_request', pr({ ...MERGED, body }, { action: 'closed' })), { kind: 'pull_request', action: 'closed', facts: mergedFacts({ reverts: 6 }) });
+  const upper = eventOf('pull_request', pr({ body }, { repository: { name: 'Shop', owner: { login: 'Acme' } } }));
+  assert.equal(factsIn(upper).reverts, 6);
+  const below = eventOf('pull_request', pr({ body: 'Fixes it.\nReverts acme/shop#6' }));
+  assert.deepEqual(below, { kind: 'pull_request', action: 'opened', facts: facts() });
+  assert.equal('reverts' in factsIn(below), false);
+});
+
+test('the parser reads the line as it is written', () => {
+  for (const body of ['Reverts acme/shop#6\r3', 'Reverts acme/shop#6\u20283']) {
+    assert.deepEqual(eventOf('pull_request', pr({ body })), { kind: 'pull_request', action: 'opened', facts: facts({ reverts: 6 }) }, JSON.stringify(body));
+  }
+  for (const body of ['Rev\u200berts acme/shop#6', 'Reverts acme/shop#6\u202e3', 'Reverts acme/shop#6.', 'Reverts acme/shop#6 because it broke']) {
+    const event = eventOf('pull_request', pr({ body }));
+    assert.deepEqual(event, { kind: 'pull_request', action: 'opened', facts: facts() }, JSON.stringify(body));
+    assert.equal('reverts' in factsIn(event), false, JSON.stringify(body));
+  }
+});
+
+test('an event of a merged pull request other than its closed one says that what is stored is kept, whatever its description names', () => {
+  for (const action of ['edited', 'labeled', 'synchronize']) {
+    for (const over of [{ body: 'Reverts acme/shop#6' }, { body: 'Fixes the rounding of totals.' }, {}]) {
+      const event = eventOf('pull_request', pr({ ...MERGED, ...over }, { action }));
+      assert.equal(event.kind, 'pull_request', `${action} ${JSON.stringify(over)}`);
+      assert.equal(factsIn(event).reverts, 'kept', `${action} ${JSON.stringify(over)}`);
+    }
+  }
+  const closed = eventOf('pull_request', pr({ state: 'closed', closed_at: T, body: 'Reverts acme/shop#6' }, { action: 'closed' }));
+  assert.deepEqual(closed, { kind: 'pull_request', action: 'closed', facts: facts({ state: 'closed', closedAt: TI, reverts: 6 }) });
+});
+
+test('an edited event stays another action, and carries what the description names now while the pull request is not merged', () => {
+  const body = 'Reverts acme/shop#6';
+  assert.deepEqual(eventOf('pull_request', pr({ body }, { action: 'edited', changes: { body: { from: 'x' } } })), { kind: 'pull_request', action: 'other', facts: facts({ reverts: 6 }) });
+  assert.deepEqual(eventOf('pull_request', pr({ body }, { action: 'edited', changes: { base: { ref: { from: 'dev' } } } })), { kind: 'pull_request', action: 'retargeted', facts: facts({ reverts: 6 }) });
+});
+
+test('a body that is no string, or that names another repository, gives no number and no malformed event', () => {
+  const bodies: unknown[] = [5, {}, ['Reverts acme/shop#6'], 'Reverts other/shop#6', `${'x'.repeat(60_000)}Reverts acme/shop#6`];
+  for (const body of bodies) {
+    const event = eventOf('pull_request', pr({ body }));
+    assert.deepEqual(event, { kind: 'pull_request', action: 'opened', facts: facts() }, typeof body);
+    assert.equal('reverts' in factsIn(event), false);
+  }
+});
+
+test('the repository a revert must name is the one of the payload', () => {
+  const cart = { repository: { name: 'cart', owner: { login: 'octo' } } };
+  const own = eventOf('pull_request', pr({ body: 'Reverts octo/cart#6' }, cart));
+  assert.deepEqual(own, { kind: 'pull_request', action: 'opened', facts: facts({ ref: { ...ref, owner: 'octo', repo: 'cart' }, reverts: 6 }) });
+  const other = eventOf('pull_request', pr({ body: 'Reverts acme/shop#6' }, cart));
+  assert.deepEqual(other, { kind: 'pull_request', action: 'opened', facts: facts({ ref: { ...ref, owner: 'octo', repo: 'cart' } }) });
+  assert.equal('reverts' in factsIn(other), false);
+});
+
+test('no word of the description is in the event', () => {
+  const body = 'Reverts acme/shop#6\n\nThe totals of March were doubled.';
+  for (const over of [{}, MERGED]) {
+    const event = eventOf('pull_request', pr({ ...over, body, title: 'Revert "Double the totals"' }, { action: 'closed' }));
+    const text = JSON.stringify(event);
+    assert.equal(factsIn(event).reverts, 6);
+    assert.equal(text.includes('doubled'), false);
+    assert.equal(text.includes('Double'), false);
+  }
+});

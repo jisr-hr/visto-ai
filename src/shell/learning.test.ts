@@ -9,7 +9,7 @@ import { savePullRequest } from '../db/pull-requests.ts';
 import { recordRun } from '../db/review-runs.ts';
 import type { RunRecord } from '../db/review-runs.ts';
 import { recordComments } from '../db/review-comments.ts';
-import { addRecords } from '../db/memory-records.ts';
+import { addRecords, liveReverts } from '../db/memory-records.ts';
 import { noteLearning, pullRequestsToLearn, readLearning } from '../db/learning.ts';
 import { createLearning, LEARN_ATTEMPTS, learnOnce, STALE_AFTER_MS, WORK } from './learning.ts';
 
@@ -1163,5 +1163,294 @@ test('a wake after a counted pass does not count', async () => {
   assert.deepEqual(failedAttempts(logged), [0, 1, 1]);
   assert.equal(await attemptsOf(db, 7), 1);
   learning.stop();
+  await db.close();
+});
+
+// Reverts (Task 6): 7 is the pull request that gets reverted, 9 the one that reverts it.
+const MERGED_7 = '2026-03-05T09:00:00.000Z';
+const MERGED_9 = '2026-03-10T12:00:00.000Z';
+const NOW = '2026-03-10T12:05:00.000Z';
+const TAX = 'src/billing/tax.ts';
+const ADD = 'src/cart/add.ts';
+const OLD = 'src/cart/old.ts';
+/** Stores the pull request as merged at that time. */
+const merged = async (db: Db, number: number, iso: string, over: Partial<PullRequestFacts> = {}): Promise<void> => {
+  await savePullRequest(db, facts({ ref: refOf(number), state: 'merged', mergedAt: iso, closedAt: iso, updatedAt: iso, ...over }));
+};
+const filesResult = (files: Array<[string, string | null]>) =>
+  ({ scores: files.map(([path, previousPath]) => ({ path, previousPath, diffHash: 'd', changeSummary: '', changedLines: 3, blocks: [], wholeFile: null, fileLevel: null, finalScore: 0, covered: true })), verdict: { threshold: 70 } });
+const FILES_7 = filesResult([[TAX, null], [ADD, OLD]]);
+/** 7 merged with a completed run of its two files, and 9 merged after it naming 7. */
+async function reverted(db: Db): Promise<void> {
+  await merged(db, 7, MERGED_7);
+  await recordRun(db, run({ ref: refOf(7), result: FILES_7 }));
+  await merged(db, 9, MERGED_9, { reverts: 7 });
+}
+interface RevertDbRow { id: number; number: number; reverted: number | null; source_ref: string; created_at: Date; expires_at: Date; status: string; category: string | null; reason: string | null; missed: boolean; excerpt: string; comment: string | null; path: string | null; directory: string | null }
+const revertRows = async (db: Db): Promise<RevertDbRow[]> =>
+  db.query<RevertDbRow>("select id, number, reverted, source_ref, created_at, expires_at, status, category, reason, missed, excerpt, comment, path, directory from visto_ai.memory_records where kind = 'revert' order by id");
+const revertLines = (logged: Array<Record<string, unknown>>) => logged.filter((e) => e['event'] === 'revert');
+const collect = () => {
+  const logged: Array<Record<string, unknown>> = [];
+  return { logged, log: (e: Record<string, unknown>) => { logged.push(e); } };
+};
+
+test('a pass over pull requests that name no revert writes and logs what it did', async () => {
+  const db = await testDb();
+  await savePullRequest(db, closed());
+  await recordActivity(db, comment());
+  await merged(db, 8, MERGED_9);
+  await recordRun(db, run({ ref: refOf(8), result: FILES_7 }));
+  const { logged, log } = collect();
+  const learned = await bounded(learnOnce({ db, clock: fixed(NOW), log }), 2_000);
+  assert.deepEqual(learned, { pullRequests: 2, examined: 1, added: 1, retired: 0, failed: 0, more: false });
+  assert.deepEqual(await refs(db), ['7:file:src/billing/tax.ts']);
+  assert.deepEqual(logged, [{ event: 'learning', pull_requests: 2, examined: 1, added: 1, retired: 0, failed: 0, more: false }]);
+  const row = await readLearning(db, WORK);
+  assert.deepEqual({ examined: row!.examined, added: row!.added, retired: row!.retired, failed: row!.failed }, { examined: 1, added: 1, retired: 0, failed: 0 });
+  const marks = await db.query<{ number: number; learned_at: Date | null }>('select number, learned_at from visto_ai.pull_requests order by number');
+  assert.deepEqual(marks.map((m) => [m.number, m.learned_at?.toISOString() ?? null]), [[7, CLOSED], [8, MERGED_9]]);
+  assert.deepEqual(await work(db), []);
+  await db.close();
+});
+
+test('a merged pull request that names a revert records the files of the pull request it reverted, dated by its own merge', async () => {
+  const db = await testDb();
+  await reverted(db);
+  const { logged, log } = collect();
+  const learned = await bounded(learnOnce({ db, clock: fixed(NOW), log }), 2_000);
+  assert.deepEqual(learned, { pullRequests: 2, examined: 0, added: 3, retired: 0, failed: 0, more: false });
+  const rows = await revertRows(db);
+  assert.deepEqual(rows.map((r) => r.source_ref), [`9:reverts:7:${TAX}`, `9:reverts:7:${ADD}`, `9:reverts:7:${OLD}`]);
+  assert.deepEqual(rows.map((r) => [r.path, r.directory]), [[TAX, 'src/billing'], [ADD, 'src/cart'], [OLD, 'src/cart']]);
+  for (const r of rows) {
+    assert.equal(r.number, 9);
+    assert.equal(r.reverted, 7);
+    assert.equal(r.created_at.toISOString(), MERGED_9);
+    assert.equal(r.expires_at.toISOString(), plus(MERGED_9, 180 * DAY_MS));
+    assert.equal(r.status, 'active');
+    assert.equal(r.category, null);
+    assert.equal(r.reason, null);
+    assert.equal(r.missed, false);
+    assert.equal(r.excerpt, '');
+    assert.equal(r.comment, null);
+  }
+  assert.equal((await readLearning(db, WORK))!.added, 3);
+  assert.deepEqual(revertLines(logged), [{ event: 'revert', repo: 'acme/shop', number: 9, reverted: 7, code: 'recorded', files: 3, added: 3, cut: 0 }]);
+  assert.deepEqual(await work(db), []);
+  await db.close();
+});
+
+test('a revert of a pull request of one file is recorded under the pull request\'s own repository, and its line names that repository', async () => {
+  for (const [owner, repo] of [['acme', 'shop'], ['octo', 'cart']] as const) {
+    const db = await testDb();
+    const at = (number: number): PullRequestRef => ({ ...REF, owner, repo, number });
+    await merged(db, 7, MERGED_7, { ref: at(7) });
+    await recordRun(db, run({ ref: at(7), result: filesResult([[TAX, null]]) }));
+    await merged(db, 9, MERGED_9, { ref: at(9), reverts: 7 });
+    const { logged, log } = collect();
+    await bounded(learnOnce({ db, clock: fixed(NOW), log }), 2_000);
+    const own = await liveReverts(db, { service: 'github', owner, repo }, NOW, 10);
+    assert.deepEqual(own.map((r) => r.sourceRef), [`9:reverts:7:${TAX}`], `${owner}/${repo}`);
+    const other = owner === 'acme' ? { owner: 'octo', repo: 'cart' } : { owner: 'acme', repo: 'shop' };
+    assert.deepEqual(await liveReverts(db, { service: 'github', ...other }, NOW, 10), [], `${owner}/${repo}`);
+    assert.deepEqual(revertLines(logged), [{ event: 'revert', repo: `${owner}/${repo}`, number: 9, reverted: 7, code: 'recorded', files: 1, added: 1, cut: 0 }]);
+    await db.close();
+  }
+});
+
+test('the files are those of the reverted pull request\'s newest completed run that lists a file, a dry run included', async () => {
+  const db = await testDb();
+  await merged(db, 7, MERGED_7);
+  await recordRun(db, run({ ref: refOf(7), result: filesResult([[TAX, null]]) }));
+  await recordRun(db, run({ ref: refOf(7), dryRun: true, result: FILES_7 }));
+  await recordRun(db, run({ ref: refOf(7), outcome: 'failed', failureStage: 'model', failureCode: 'model_error', result: filesResult([['src/cart/z.ts', null]]) }));
+  await recordRun(db, run({ ref: refOf(7), result: { scores: [] } }));
+  await merged(db, 9, MERGED_9, { reverts: 7 });
+  await bounded(learnOnce({ db, clock: fixed(NOW) }), 2_000);
+  assert.deepEqual((await revertRows(db)).map((r) => r.path), [TAX, ADD, OLD]);
+  await db.close();
+});
+
+test('a revert of a pull request that is not stored, not merged, merged later, itself, or never reviewed makes no record and says why', async () => {
+  const cases: Array<[string, (db: Db) => Promise<void>, number, string]> = [
+    ['not stored', async () => {}, 6, 'not_stored'],
+    ['open', async (db) => {
+      await savePullRequest(db, facts({ ref: refOf(7) }));
+      await recordRun(db, run({ ref: refOf(7), result: FILES_7 }));
+    }, 7, 'not_merged'],
+    ['closed', async (db) => {
+      await savePullRequest(db, closed({ ref: refOf(7), closedAt: MERGED_7, updatedAt: MERGED_7 }));
+      await recordRun(db, run({ ref: refOf(7), result: FILES_7 }));
+    }, 7, 'not_merged'],
+    ['merged later', async (db) => {
+      await merged(db, 7, plus(MERGED_9, HOUR_MS));
+      await recordRun(db, run({ ref: refOf(7), result: FILES_7 }));
+    }, 7, 'not_merged'],
+    ['itself', async (db) => { await recordRun(db, run({ ref: refOf(9), result: FILES_7 })); }, 9, 'same'],
+    ['no run', async (db) => { await merged(db, 7, MERGED_7); }, 7, 'no_files'],
+    ['a failed run only', async (db) => {
+      await merged(db, 7, MERGED_7);
+      await recordRun(db, run({ ref: refOf(7), outcome: 'failed', failureStage: 'model', failureCode: 'model_error', result: FILES_7 }));
+    }, 7, 'no_files'],
+  ];
+  for (const [name, setup, names, code] of cases) {
+    const db = await testDb();
+    await setup(db);
+    await merged(db, 9, MERGED_9, { reverts: names });
+    const { logged, log } = collect();
+    await bounded(learnOnce({ db, clock: fixed(NOW), log }), 2_000);
+    assert.deepEqual(await revertRows(db), [], name);
+    assert.deepEqual(revertLines(logged), [{ event: 'revert', repo: 'acme/shop', number: 9, reverted: names, code, files: 0, added: 0, cut: 0 }], name);
+    const [p9] = await db.query<{ learned_at: Date | null }>('select learned_at from visto_ai.pull_requests where number = 9');
+    assert.equal(p9!.learned_at?.toISOString(), MERGED_9, name);
+    assert.equal((await work(db)).includes(9), false, name);
+    await db.close();
+  }
+});
+
+test('a revert of a pull request with more paths than are recorded says how many it left out', async () => {
+  const db = await testDb();
+  await merged(db, 7, MERGED_7);
+  const files: Array<[string, string | null]> = Array.from({ length: 302 }, (_, i) => [`src/billing/f${i}.ts`, null]);
+  files.splice(10, 0, ['src/billing/my file.ts', null]);
+  await recordRun(db, run({ ref: refOf(7), result: filesResult(files) }));
+  await merged(db, 9, MERGED_9, { reverts: 7 });
+  const { logged, log } = collect();
+  const learned = await bounded(learnOnce({ db, clock: fixed(NOW), log }), 5_000);
+  assert.equal(learned.added, 300);
+  const rows = await revertRows(db);
+  assert.equal(rows.length, 300);
+  assert.deepEqual(rows.map((r) => r.path), Array.from({ length: 300 }, (_, i) => `src/billing/f${i}.ts`));
+  assert.deepEqual(revertLines(logged), [{ event: 'revert', repo: 'acme/shop', number: 9, reverted: 7, code: 'recorded', files: 300, added: 300, cut: 2 }]);
+  await db.close();
+});
+
+test('a closed pull request that was not merged makes no revert, whatever its description named', async () => {
+  const db = await testDb();
+  await merged(db, 7, MERGED_7);
+  await recordRun(db, run({ ref: refOf(7), result: FILES_7 }));
+  await savePullRequest(db, closed({ ref: refOf(9), reverts: 7 }));
+  const { logged, log } = collect();
+  await bounded(learnOnce({ db, clock: fixed(NOW), log }), 2_000);
+  assert.deepEqual(await revertRows(db), []);
+  assert.deepEqual(revertLines(logged), []);
+  assert.deepEqual(await work(db), []);
+  await db.close();
+});
+
+test('two passes over the same revert make each record once', async () => {
+  const db = await testDb();
+  await reverted(db);
+  await bounded(learnOnce({ db, clock: fixed(NOW) }), 2_000);
+  const before = await revertRows(db);
+  assert.equal(before.length, 3);
+  await recordActivity(db, comment({ ref: refOf(9), sourceId: 'c-9', at: plus(MERGED_9, 60_000) }));
+  assert.deepEqual(await work(db), [9]);
+  const { logged, log } = collect();
+  await bounded(learnOnce({ db, clock: fixed(plus(NOW, HOUR_MS)), log }), 2_000);
+  assert.deepEqual(await revertRows(db), before);
+  assert.deepEqual(revertLines(logged), [{ event: 'revert', repo: 'acme/shop', number: 9, reverted: 7, code: 'recorded', files: 3, added: 0, cut: 0 }]);
+
+  const fresh = await testDb();
+  await reverted(fresh);
+  await bounded(Promise.all([learnOnce({ db: fresh, clock: fixed(NOW) }), learnOnce({ db: fresh, clock: fixed(NOW) })]), 2_000);
+  assert.equal((await revertRows(fresh)).length, 3);
+  await fresh.close();
+  await db.close();
+});
+
+test('a revert whose transaction fails leaves nothing of its pull request, and the next pass makes it', async () => {
+  const db = await testDb();
+  await reverted(db);
+  let failures = 1;
+  const once = wrap(db, {
+    transaction: <T,>(work: (tx: Db) => Promise<T>) => db.transaction((tx) => work(wrap(tx, {
+      query: async <R,>(text: string, params?: unknown[]) => {
+        if (text.includes('insert into visto_ai.memory_records') && failures > 0) {
+          failures -= 1;
+          throw new Error('injected');
+        }
+        return tx.query<R>(text, params);
+      },
+    }))),
+  });
+  const { logged, log } = collect();
+  const learned = await bounded(learnOnce({ db: once, clock: fixed(NOW), log }), 2_000);
+  assert.equal(learned.failed, 1);
+  assert.deepEqual(await db.query("select 1 from visto_ai.memory_records where number = 9"), []);
+  const [p9] = await db.query<{ learned_at: Date | null }>('select learned_at from visto_ai.pull_requests where number = 9');
+  assert.equal(p9!.learned_at, null);
+  assert.equal(await attemptsOf(db, 9), 1);
+  assert.deepEqual(logged.filter((e) => e['event'] === 'learning_pr_failed').map((e) => e['number']), [9]);
+  assert.deepEqual(revertLines(logged), []);
+  const next = collect();
+  await bounded(learnOnce({ db, clock: fixed(plus(NOW, HOUR_MS)), log: next.log }), 2_000);
+  assert.equal((await revertRows(db)).length, 3);
+  assert.deepEqual(revertLines(next.logged), [{ event: 'revert', repo: 'acme/shop', number: 9, reverted: 7, code: 'recorded', files: 3, added: 3, cut: 0 }]);
+  await db.close();
+});
+
+test('a revert merged while nothing ran is recorded by the first pass', async () => {
+  const db = await testDb();
+  const seven = plus(NOW, -2 * DAY_MS - 3 * HOUR_MS);
+  const nine = plus(NOW, -2 * DAY_MS);
+  await merged(db, 7, seven);
+  await recordRun(db, run({ ref: refOf(7), result: FILES_7 }));
+  await merged(db, 9, nine, { reverts: 7 });
+  await bounded(learnOnce({ db, clock: fixed(NOW) }), 2_000);
+  const rows = await revertRows(db);
+  assert.equal(rows.length, 3);
+  for (const r of rows) assert.equal(r.created_at.toISOString(), nine);
+  await db.close();
+});
+
+test('a revert merged more than 180 days ago is recorded and retired in the same pass', async () => {
+  const db = await testDb();
+  await merged(db, 7, '2025-07-31T10:00:00.000Z');
+  await recordRun(db, run({ ref: refOf(7), result: FILES_7 }));
+  await merged(db, 9, '2025-08-01T10:00:00.000Z', { reverts: 7 });
+  const learned = await bounded(learnOnce({ db, clock: fixed(NOW) }), 2_000);
+  assert.equal(learned.added, 3);
+  assert.equal(learned.retired, 3);
+  assert.deepEqual((await revertRows(db)).map((r) => r.status), ['expired', 'expired', 'expired']);
+  assert.deepEqual(await liveReverts(db, { service: 'github', owner: 'acme', repo: 'shop' }, NOW, 100), []);
+  await db.close();
+});
+
+test('the line of a revert holds numbers, a repository\'s name and short codes only', async () => {
+  const db = await testDb();
+  await reverted(db);
+  await recordActivity(db, comment({ ref: refOf(9), sourceId: 'c-9', at: plus(MERGED_9, -60_000) }));
+  await merged(db, 10, MERGED_9, { reverts: 6 });
+  const { logged, log } = collect();
+  await bounded(learnOnce({ db, clock: fixed(NOW), log }), 2_000);
+  const lines = revertLines(logged);
+  assert.equal(lines.length, 2);
+  for (const entry of lines) {
+    for (const [key, value] of Object.entries(entry)) {
+      const ok = (typeof value === 'number' && Number.isInteger(value)) || value === 'acme/shop' || value === 'revert' || (typeof value === 'string' && SHORT_CODE.test(value));
+      assert.ok(ok, `${key}: ${String(value)}`);
+    }
+  }
+  const text = JSON.stringify(logged);
+  for (const word of ['src/', 'octo-']) assert.equal(text.includes(word), false, word);
+  await db.close();
+});
+
+test('a result that cannot be read makes no record and stops nothing', async () => {
+  const db = await testDb();
+  await merged(db, 7, MERGED_7);
+  await recordRun(db, run({ ref: refOf(7), result: FILES_7 }));
+  await recordRun(db, run({ ref: refOf(7), result: { scores: [null, 5, { path: 3 }] } }));
+  await merged(db, 9, MERGED_9, { reverts: 7 });
+  await savePullRequest(db, closed({ ref: refOf(10) }));
+  await recordActivity(db, comment({ ref: refOf(10), sourceId: 'c-10' }));
+  const { logged, log } = collect();
+  const learned = await bounded(learnOnce({ db, clock: fixed(NOW), log }), 2_000);
+  assert.equal(learned.failed, 0);
+  assert.deepEqual(await revertRows(db), []);
+  assert.deepEqual(revertLines(logged), [{ event: 'revert', repo: 'acme/shop', number: 9, reverted: 7, code: 'no_files', files: 0, added: 0, cut: 0 }]);
+  assert.deepEqual(await refs(db), ['10:file:src/billing/tax.ts']);
   await db.close();
 });

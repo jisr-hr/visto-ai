@@ -14,11 +14,14 @@ export interface NewRecord {
   comment: string | null;       // the id of the comment the excerpt came from
   createdAt: string; expiresAt: string;
   lesson?: string | null;       // a lesson's text; absent reads as null
+  reverted?: number | null;     // of a record of a revert: the pull request that was reverted; absent reads as null
 }
 /** What a lookup reads of a record: never its excerpt or its reason. */
 export interface LiveRow { id: number; sourceRef: string; number: number; path: string | null; directory: string | null; category: string | null; missed: boolean; createdAt: string }
 /** What a read of lessons hands back: never the quote. */
 export interface LessonRow { id: number; sourceRef: string; number: number; path: string; lesson: string; createdAt: string }
+/** What a read of reverts hands back. */
+export interface RevertRow { id: number; sourceRef: string; number: number; reverted: number; path: string; directory: string; createdAt: string }
 
 const lowered = (repo: RepoKey): RepoKey => ({
   service: repo.service, owner: storable(repo.owner).toLowerCase(), repo: storable(repo.repo).toLowerCase(),
@@ -31,15 +34,15 @@ export async function addRecords(db: Db, repo: RepoKey, records: NewRecord[]): P
   const rows = records.map((x) => ({
     kind: x.kind, source_ref: x.sourceRef, number: x.number, path: x.path, directory: x.directory,
     category: x.category, reason: x.reason, missed: x.missed, excerpt: x.excerpt, comment: x.comment,
-    created_at: x.createdAt, expires_at: x.expiresAt, lesson: x.lesson ?? null,
+    created_at: x.createdAt, expires_at: x.expiresAt, lesson: x.lesson ?? null, reverted: x.reverted ?? null,
   }));
   const added = await db.query(
     `insert into visto_ai.memory_records
-       (service, owner, repo, kind, source_ref, created_at, expires_at, number, path, directory, category, reason, missed, excerpt, comment, lesson)
-     select $1, $2, $3, s.kind, s.source_ref, s.created_at, s.expires_at, s.number, s.path, s.directory, s.category, s.reason, s.missed, s.excerpt, s.comment, s.lesson
+       (service, owner, repo, kind, source_ref, created_at, expires_at, number, path, directory, category, reason, missed, excerpt, comment, lesson, reverted)
+     select $1, $2, $3, s.kind, s.source_ref, s.created_at, s.expires_at, s.number, s.path, s.directory, s.category, s.reason, s.missed, s.excerpt, s.comment, s.lesson, s.reverted
      from jsonb_to_recordset($4::jsonb) as s(kind text, source_ref text, number integer, path text, directory text, category text,
                                               reason text, missed boolean, excerpt text, comment text, created_at timestamptz, expires_at timestamptz,
-                                              lesson text)
+                                              lesson text, reverted integer)
      on conflict (service, owner, repo, kind, source_ref) do nothing
      returning id`,
     [r.service, r.owner, r.repo, storableJson(rows)]);
@@ -131,6 +134,42 @@ export async function liveLessonsWithin(db: Db, repo: RepoKey, at: string, limit
   return db.transaction(async (tx) => {
     await tx.query(`set local statement_timeout = ${ms}`);
     return liveLessons(tx, repo, at, limit, except);
+  });
+}
+
+interface RevertDbRow { id: number; source_ref: string; number: number; reverted: number; path: string; directory: string; created_at: unknown }
+
+/**
+ * The repository's records of reverts live at `at`, with a path, a directory and a reverted pull request. Newest first (made, then id), at most `limit`.
+ * `except`: a pull request that is shown none of them, the one that made the revert and the one reverted alike. A row whose time cannot be read is passed over.
+ */
+export async function liveReverts(db: Db, repo: RepoKey, at: string, limit: number, except?: number): Promise<RevertRow[]> {
+  const r = lowered(repo);
+  const rows = await db.query<RevertDbRow>(
+    `select id, source_ref, number, reverted, path, directory, created_at
+     from visto_ai.memory_records
+     where service = $1 and owner = $2 and repo = $3 and kind = 'revert'
+       and status = 'active' and created_at <= $4::timestamptz and expires_at > $4::timestamptz
+       and path is not null and directory is not null and reverted is not null
+       and ($6::integer is null or (number <> $6::integer and reverted <> $6::integer))
+     order by created_at desc, id desc
+     limit $5`,
+    [r.service, r.owner, r.repo, at, limit, except ?? null]);
+  const out: RevertRow[] = [];
+  for (const x of rows) {
+    const createdAt = isoOf(x.created_at);
+    if (createdAt === null) continue;
+    out.push({ id: x.id, sourceRef: x.source_ref, number: x.number, reverted: x.reverted, path: x.path, directory: x.directory, createdAt });
+  }
+  return out;
+}
+
+/** `liveReverts` in one transaction that first sets its statement limit to `ms`, as `liveRecordsWithin` does, with the same refusal of a bad `ms`. */
+export async function liveRevertsWithin(db: Db, repo: RepoKey, at: string, limit: number, ms: number, except?: number): Promise<RevertRow[]> {
+  if (typeof ms !== 'number' || !Number.isSafeInteger(ms) || ms <= 0) throw new Error('bad_statement_limit');
+  return db.transaction(async (tx) => {
+    await tx.query(`set local statement_timeout = ${ms}`);
+    return liveReverts(tx, repo, at, limit, except);
   });
 }
 

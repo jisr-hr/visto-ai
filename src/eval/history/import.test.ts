@@ -7,6 +7,7 @@ import test from 'node:test';
 import type {
   GeneralComment, HistorySource, HumanInlineComment, HumanReview, MergedPullRequest, RepoRef,
 } from '../../forge/types.ts';
+import { revertedNumber } from '../../memory/reverts.ts';
 import { parseHistory } from './file.ts';
 import { firstReviewedHead, importPullRequest, runImport } from './import.ts';
 
@@ -205,4 +206,25 @@ test('a dangling link at the output path is replaced, never followed', async () 
   assert.equal(lstatSync(outFile).isFile(), true);
   assert.equal(existsSync(target), false);
   assert.equal(parseHistory(readFileSync(outFile, 'utf8')).length, 1);
+});
+
+test('a description is written to the file as it was sent, cut at 4,000 characters, so a revert is read there as the service reads it', async () => {
+  const zeroWidth = String.fromCodePoint(0x200b);
+  const lineSeparator = String.fromCodePoint(0x2028);
+  const descriptions = [
+    `Reverts acme/shop#7${zeroWidth}`,
+    'Reverts acme/shop#7\r3',
+    `Reverts acme/shop#7${lineSeparator}3`,
+    `${zeroWidth}\r\nReverts acme/shop#7\r\n`,
+    `Reverts acme/shop#7${lineSeparator}` + `x${zeroWidth}\r`.repeat(2_000),
+  ];
+  const outFile = tempFile();
+  const prs = descriptions.map((description, i) => ({ ...pr, number: 20 + i, description }));
+  await runImport({ repo, ...window, maxPrs: 200, outFile }, stub({ listMergedPullRequests: async () => listed(prs) }), () => {});
+  const raw = readFileSync(outFile, 'utf8');
+  const bodies = parseHistory(raw).map((c) => c.body);
+  assert.deepEqual(bodies, descriptions.map((d) => d.slice(0, 4000)));
+  for (const body of bodies) assert.ok(raw.includes(JSON.stringify(body)));
+  assert.deepEqual(bodies.map((b) => revertedNumber(b, repo)), descriptions.map((d) => revertedNumber(d, repo)));
+  assert.deepEqual(bodies.map((b) => revertedNumber(b, repo)), [null, 7, 7, null, 7]);
 });

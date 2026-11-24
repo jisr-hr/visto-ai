@@ -4,13 +4,13 @@ import { testDb } from '../db/testing.ts';
 import type { Db } from '../db/types.ts';
 import { addRecords } from '../db/memory-records.ts';
 import type { NewRecord, RepoKey } from '../db/memory-records.ts';
-import { MEMORY_TIMEOUT_MS } from '../engine/context/memory.ts';
+import { MEMORY_TIMEOUT_MS, REVERTED_LINE_RULES } from '../engine/context/memory.ts';
 import { review } from '../engine/review.ts';
 import { SUBMIT_REVIEW } from '../engine/model/submit-review.ts';
 import type { Memory, ModelClient, ModelRequest, ModelResponse, ReviewInput, ReviewResult } from '../engine/types.ts';
 import type { Source } from '../forge/types.ts';
 import { LESSONS_READ } from '../memory/lessons.ts';
-import { RECORDS_READ } from '../memory/select.ts';
+import { RECORDS_READ, REVERTS_READ } from '../memory/select.ts';
 import { recordsMemory } from './memory.ts';
 import { createMemoryHealth } from './memory-health.ts';
 
@@ -138,10 +138,10 @@ test('each read sets its own statement limit inside its transaction, and the lim
   assert.notEqual(outside, String(MEMORY_TIMEOUT_MS));
   const blocks = await recordsMemory(wrapped, REF).blocks([TAX], AS_OF, signal);
   assert.equal(blocks.pullRequest.length, 1);
-  // two reads: as of the time, and as of the start of its day; each is the limit, then the lookup, in one transaction
-  assert.equal(seen.length, 4);
+  // three reads: the signals and the reverts as of the time, then the signals as of the start of its day; each is the limit, then the lookup, in one transaction
+  assert.equal(seen.length, 6);
   assert.ok(seen.every((s) => s.inTransaction));
-  for (const [i, at] of [[0, '2026-03-12T10:00:00.000Z'], [2, '2026-03-12T00:00:00.000Z']] as const) {
+  for (const [i, at] of [[0, '2026-03-12T10:00:00.000Z'], [4, '2026-03-12T00:00:00.000Z']] as const) {
     assert.match(seen[i]!.text, /^set local statement_timeout = \d+$/);
     assert.equal(seen[i]!.params, undefined);
     assert.equal(seen[i]!.limit, String(MEMORY_TIMEOUT_MS));
@@ -149,6 +149,10 @@ test('each read sets its own statement limit inside its transaction, and the lim
     // the pull request's own records are left out by the statement
     assert.deepEqual(seen[i + 1]!.params, ['github', 'acme', 'shop', 'human_signal', at, RECORDS_READ + 1, 7]);
   }
+  assert.match(seen[2]!.text, /^set local statement_timeout = \d+$/);
+  assert.equal(seen[2]!.limit, String(MEMORY_TIMEOUT_MS));
+  assert.match(seen[3]!.text, /kind = 'revert'/);
+  assert.deepEqual(seen[3]!.params, ['github', 'acme', 'shop', '2026-03-12T10:00:00.000Z', REVERTS_READ + 1, 7]);
   // after the transaction the limit is what it was
   assert.equal(await setting(db), outside);
 });
@@ -398,4 +402,177 @@ test('a lesson reaches the model between markers, and the reply\'s words never d
   for (const text of requests.map((request) => JSON.stringify(request))) {
     for (const row of stored) assert.equal(text.includes(row.excerpt), false, row.excerpt);
   }
+});
+
+/** A revert by pull request 9 of pull request 6, on src/billing/tax.ts, made on 10 March, live for 180 days. */
+const revertRecord = (over: Partial<NewRecord> = {}): NewRecord => {
+  const createdAt = over.createdAt ?? '2026-03-10T09:00:00.000Z';
+  return {
+    kind: 'revert', sourceRef: '9:reverts:6:src/billing/tax.ts', number: 9, reverted: 6,
+    path: 'src/billing/tax.ts', directory: 'src/billing',
+    category: null, reason: null, missed: false, excerpt: '', comment: null,
+    createdAt, expiresAt: later(createdAt, 180 * DAY), ...over,
+  };
+};
+const REVERTED = { ref: '9:reverts:6:src/billing/tax.ts', near: false, path: 'src/billing/tax.ts', day: '2026-03-10', category: null, missed: false, reverted: true };
+
+test('a revert of another pull request on a changed file reaches the blocks as a reverted line, after the signals\' lines', async () => {
+  await addRecords(db, REPO, [revertRecord()]);
+  const alone = await recordsMemory(db, REF).blocks([TAX], AS_OF, signal);
+  assert.deepEqual(alone.pullRequest, [REVERTED]);
+  // with the file's signal of 3 March: the signal's line first though it is older, then the revert
+  await addRecords(db, REPO, [record()]);
+  const both = await recordsMemory(db, REF).blocks([TAX], AS_OF, signal);
+  assert.deepEqual(both.pullRequest, [
+    { ref: '8:file:src/billing/tax.ts', near: false, path: 'src/billing/tax.ts', day: '2026-03-03', category: 'calculation', missed: true },
+    REVERTED,
+  ]);
+  assert.equal('reverted' in both.pullRequest[0]!, false);
+});
+
+test('a pull request is shown neither the revert it made nor its own revert', async () => {
+  await addRecords(db, REPO, [revertRecord()]);
+  for (const number of [9, 6]) {
+    const { wrapped, seen } = watched(db);
+    const blocks = await recordsMemory(wrapped, { ...REF, number }).blocks([TAX], AS_OF, signal);
+    assert.deepEqual(blocks.pullRequest, [], String(number));
+    const read = seen.find((s) => /kind = 'revert'/.test(s.text));
+    assert.equal(read!.params!.at(-1), number);
+  }
+  const of8 = await recordsMemory(db, OF_8).blocks([TAX], AS_OF, signal);
+  assert.deepEqual(of8.pullRequest, [REVERTED]);
+});
+
+test('a disabled revert, an expired one and one made after the as-of time are in no block', async () => {
+  const cases: Array<[string, string]> = [
+    ['off', "update visto_ai.memory_records set status = 'disabled'"],
+    // expired the day before, and not yet retired by a pass: it is still active
+    ['gone', "update visto_ai.memory_records set expires_at = '2026-03-11T12:00:00.000Z'"],
+    ['soon', "update visto_ai.memory_records set created_at = '2026-03-12T10:00:00.001Z'"],
+  ];
+  for (const [name, change] of cases) {
+    await db.query('delete from visto_ai.memory_records');
+    await addRecords(db, REPO, [revertRecord()]);
+    await db.query(change);
+    assert.deepEqual((await recordsMemory(db, REF).blocks([TAX], AS_OF, signal)).pullRequest, [], name);
+  }
+  // the same record, active and live
+  await db.query('delete from visto_ai.memory_records');
+  await addRecords(db, REPO, [revertRecord()]);
+  assert.deepEqual((await recordsMemory(db, REF).blocks([TAX], AS_OF, signal)).pullRequest, [REVERTED]);
+});
+
+test('another repository\'s reverts are never read', async () => {
+  await addRecords(db, { service: 'github', owner: 'acme', repo: 'other' }, [revertRecord()]);
+  const blocks = await recordsMemory(db, REF).blocks([TAX], AS_OF, signal);
+  assert.deepEqual(blocks, { repository: { directories: [], categories: [] }, pullRequest: [], cut: { directories: 0, categories: 0, lines: 0, names: 0, records: false } });
+  // and the repository's own are
+  await addRecords(db, REPO, [revertRecord()]);
+  assert.deepEqual((await recordsMemory(db, REF).blocks([TAX], AS_OF, signal)).pullRequest, [REVERTED]);
+});
+
+test('a reverted line reaches the model with its rule, and nothing of either pull request but a path and a day', async () => {
+  await addRecords(db, REPO, [revertRecord()]);
+  const { result: r, requests } = await reviewWith(recordsMemory(db, REF), [TAX.path]);
+  assert.ok(requests.length >= 1);
+  for (const request of requests) {
+    const header = request.messages.filter((m) => m.content.includes(REVERTED_LINE_RULES));
+    assert.equal(header.length, 1);
+    assert.equal(header[0]!.content.includes('changed | `src/billing/tax.ts` | 2026-03-10 | - | reverted'), true);
+    const text = JSON.stringify(request);
+    assert.equal(text.includes('9:reverts'), false);
+    // the author of the pull request under review is printed by the prompt itself; nothing else of a login is sent
+    assert.equal(text.replace('Author: octo-dev', '').includes('octo-'), false);
+  }
+  assert.deepEqual(r.dependencies.memory, { status: 'ok', code: 'ok', lines: 1, lessons: { status: 'empty', code: 'no_lessons', shown: 0 } });
+});
+
+test('thirty signals\' lines and a revert: the review is shown the thirty, and the audit says a line was cut', async () => {
+  const files = [TAX.path, ...[1, 2, 3, 4, 5, 6, 7, 8, 9].map((n) => `src/cart/c${n}.ts`)];
+  const signals = files.flatMap((path, f) => [1, 2, 3].map((k) => record({
+    sourceRef: `${10 + k}:file:${path}`, number: 10 + k, path, directory: path.slice(0, path.lastIndexOf('/')),
+    createdAt: `2026-03-0${k}T0${f}:00:00.000Z`,
+  })));
+  await addRecords(db, REPO, [...signals, revertRecord()]);
+  const { result: r, requests } = await reviewWith(recordsMemory(db, REF), files);
+  assert.equal(r.dependencies.memory?.lines, 30);
+  assert.ok(requests.length >= 1);
+  for (const request of requests) {
+    const text = JSON.stringify(request);
+    assert.equal(text.includes(' | reverted'), false);
+    assert.equal(text.includes(REVERTED_LINE_RULES), false);
+  }
+  assert.ok(r.audit.some((e) => e.stage === 'context' && e.action === 'memory_cut' && e.subject === 'lines' && e.reason === '1'));
+  const shown = r.audit.filter((e) => e.action === 'memory_shown');
+  assert.equal(shown.length, 30);
+  assert.equal(shown.some((e) => e.subject.includes(':reverts:')), false);
+});
+
+test('two reverts on two changed files are both shown, each as a reverted line', async () => {
+  const ADD = { path: 'src/cart/add.ts', previousPath: null };
+  await addRecords(db, REPO, [
+    revertRecord(),
+    revertRecord({ sourceRef: '11:reverts:5:src/cart/add.ts', number: 11, reverted: 5, path: ADD.path, directory: 'src/cart', createdAt: '2026-03-11T09:00:00.000Z' }),
+  ]);
+  const blocks = await recordsMemory(db, REF).blocks([TAX, ADD], AS_OF, signal);
+  assert.deepEqual(blocks.pullRequest.map((l) => [l.ref, l.path, l.reverted]).sort(), [
+    ['11:reverts:5:src/cart/add.ts', 'src/cart/add.ts', true],
+    ['9:reverts:6:src/billing/tax.ts', 'src/billing/tax.ts', true],
+  ]);
+});
+
+test('a read of reverts that fails costs the review its memory, not the review', async () => {
+  await addRecords(db, REPO, [record(), revertRecord()]);
+  const failing: Db = {
+    query: (text, params) => { if (text.includes("kind = 'revert'")) throw new Error('db_down'); return db.query(text, params); },
+    script: (sql) => db.script(sql),
+    close: () => db.close(),
+    transaction: (work) => db.transaction((tx) => work({
+      query: async <Row>(text: string, params?: unknown[]) => {
+        if (text.includes("kind = 'revert'")) throw new Error('db_down');
+        return tx.query<Row>(text, params);
+      },
+      script: (sql) => tx.script(sql),
+      close: () => tx.close(),
+      transaction: (w) => tx.transaction(w),
+    })),
+  };
+  await assert.rejects(recordsMemory(failing, REF).blocks([TAX], AS_OF, signal), /db_down/);
+  // The review of reviewWith, with a model whose answer is valid for the file sent: an overview that names it.
+  const reviewOk = async (memory: Memory | undefined): Promise<{ result: ReviewResult; requests: ModelRequest[] }> => {
+    const source: Source = {
+      listFiles: () => Promise.resolve([{ path: TAX.path, previousPath: null, status: 'modified' as const, additions: 1, deletions: 0, patch: '@@ -1,1 +1,2 @@\n head\n+const a = 1;' }]),
+      getFileContent: () => Promise.resolve(null),
+      getDefaultBranchFile: () => Promise.resolve(null),
+    };
+    const requests: ModelRequest[] = [];
+    const model: ModelClient = {
+      complete: (request): Promise<ModelResponse> => {
+        requests.push(structuredClone(request));
+        return Promise.resolve({
+          toolName: SUBMIT_REVIEW, toolArguments: JSON.stringify({ overview: `${TAX.path} is fine.`, findings: [], files: [] }), text: null, model: 'm', provider: null,
+          usage: { calls: 1, inputTokens: 10, outputTokens: 5, cachedTokens: 0, cost: 0.1 },
+        });
+      },
+    };
+    const input: ReviewInput = {
+      pullRequest: { ref: REF, title: 'Add things', description: '', author: 'octo-dev', baseBranch: 'main', headBranch: 'feat', baseSha: 'merge000', headSha: 'h1', draft: false },
+      trigger: 'automatic', repoConfig: { primaryBranches: ['main'], scoreThreshold: 70 },
+      limits: { inputTokensPerCall: 200_000, batchesPerReview: 6, modelTimeoutSeconds: 30 }, asOf: AS_OF, earlier: null,
+    };
+    const result = await review(input, { source, model, contract: 'You review pull requests.', clock: () => AS_OF, token: () => 'abcdef0123456789', log: () => {}, ...(memory === undefined ? {} : { memory }) });
+    return { result, requests };
+  };
+  const { result: r, requests } = await reviewOk(recordsMemory(failing, REF));
+  assert.equal(r.status, 'ok');
+  assert.equal(r.failure, null);
+  assert.equal(r.dependencies.memory?.status, 'error');
+  assert.match(r.dependencies.memory!.code, /^[a-z][a-z0-9_]{0,39}$/);
+  assert.deepEqual(r.coverage.reviewed, [TAX.path]);
+  // the review ends as a review with no memory ends, and its requests are that review's
+  const none = await reviewOk(undefined);
+  assert.equal(none.result.dependencies.memory, undefined);
+  assert.equal(none.result.status, 'ok');
+  assert.equal(r.overview, none.result.overview);
+  assert.deepEqual(requests, none.requests);
 });

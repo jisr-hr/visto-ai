@@ -8,7 +8,7 @@ import { changedLines, leftBlocksOf } from './context/increment.ts';
 import type { Changed } from './context/increment.ts';
 import { askLessons } from './context/lessons.ts';
 import type { LessonsContext } from './context/lessons.ts';
-import { askMemory } from './context/memory.ts';
+import { askMemory, withoutReverted } from './context/memory.ts';
 import type { MemoryContext } from './context/memory.ts';
 import { renderAnchoredDiff } from './context/diff.ts';
 import { orderByPriority } from './context/priority.ts';
@@ -374,7 +374,8 @@ const memorySkipped = (code: string): MemoryStatus => ({ status: 'skipped', code
 
 /**
  * Asks memory once, for the files of the first packing, and shows it only when packing the files with it counted cuts
- * nothing more and leaves nothing more unreviewed than the first packing (5.3, call 23). Never rejects, never fails a review.
+ * nothing more and leaves nothing more unreviewed than the first packing (5.3, call 23). Its reverted lines are shown only
+ * when the files are packed in the same batches with them as without them (call 14). Never rejects, never fails a review.
  */
 async function chooseMemory(
   deps: ReviewDeps, first: Packing, asOf: Date, budgetWith: (shown: MemoryContext) => number, pack: (budget: number) => Packing,
@@ -395,9 +396,34 @@ async function chooseMemory(
   const audit = [...asked.audit];
   const context = asked.context;
   if (context === undefined) return { packed: first, shown: undefined, status: asked.status, audit };
+  // A packing fits when it cuts nothing more and leaves nothing more unreviewed than the first packing.
+  const same = JSON.stringify([first.notReviewed, first.audit]);
+  const fits = (p: Packing | null): p is Packing => p !== null && JSON.stringify([p.notReviewed, p.audit]) === same;
+  // The paths of each batch's files, in order.
+  const batchesOf = (p: Packing): string => JSON.stringify(p.batches.map((b) => b.files.map((c) => c.file.path)));
   const budget = budgetWith(context);
   const again = budget > 0 ? pack(budget) : null;
-  if (again === null || JSON.stringify([again.notReviewed, again.audit]) !== JSON.stringify([first.notReviewed, first.audit])) {
+  // Reverted lines are the first to give way: the same memory without them is packed whenever it holds one, and is shown
+  // when the memory does not fit with them, or when they would change the files' batches (call 14).
+  const reverted = context.lines.some((l) => l.reverted === true);
+  const smaller = reverted ? withoutReverted(context) : undefined;
+  // Of reverted lines alone, the memory without them is empty: the packing to compare with is the first.
+  if (reverted && smaller === undefined && fits(again) && batchesOf(again) !== batchesOf(first)) {
+    audit.push({ stage: 'context', action: 'memory_cut', subject: 'reverted', reason: 'changes_batches' });
+    return { packed: first, shown: undefined, status: memorySkipped('no_room'), audit };
+  }
+  if (smaller !== undefined) {
+    const less = budgetWith(smaller);
+    const retry = less > 0 ? pack(less) : null;
+    if (fits(retry) && (!fits(again) || batchesOf(again) !== batchesOf(retry))) {
+      audit.push({ stage: 'context', action: 'memory_cut', subject: 'reverted', reason: fits(again) ? 'changes_batches' : 'over_call_budget' });
+      for (const line of smaller.lines) {
+        audit.push({ stage: 'context', action: 'memory_shown', subject: inlineText(line.ref), reason: line.near ? 'near' : 'changed' });
+      }
+      return { packed: retry, shown: smaller, status: { status: 'ok', code: 'ok', lines: smaller.lines.length }, audit };
+    }
+  }
+  if (!fits(again)) {
     audit.push({ stage: 'context', action: 'memory_cut', subject: 'memory', reason: 'over_call_budget' });
     return { packed: first, shown: undefined, status: memorySkipped('no_room'), audit };
   }

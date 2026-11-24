@@ -1,6 +1,7 @@
 import type { ForgeEvent, PullRequestAction, PullRequestFacts, PullRequestRef } from '../types.ts';
 import { isObject } from './http.ts';
 import { authorOf, generalCommentOf, inlineCommentOf, reviewOf } from './objects.ts';
+import { revertedNumber } from '../../memory/reverts.ts';
 
 export const MAX_ID_CHARS = 200;
 const MAX_INT = 2147483647;
@@ -81,7 +82,16 @@ function pullRequestEvent(p: Record<string, unknown>): ForgeEvent {
   let action: PullRequestAction = 'other';
   if (typeof p.action === 'string' && PR_ACTIONS.has(p.action)) action = p.action as PullRequestAction;
   else if (p.action === 'edited' && isObject(p.changes) && p.changes.base !== undefined) action = 'retargeted';
-  return { kind: 'pull_request', action, facts: factsOf(p) };
+  return { kind: 'pull_request', action, facts: withReverts(factsOf(p), p) };
+}
+
+// What the description says the pull request reverts (6.5, 7.1): only the number leaves here, never a word of the
+// description. Once merged, only the merge's own delivery may say it; any other event of it keeps what is stored, and
+// its description is not read. With no reference the facts are the object they were.
+function withReverts(facts: PullRequestFacts, p: Record<string, unknown>): PullRequestFacts {
+  if (facts.state === 'merged' && p.action !== 'closed') return { ...facts, reverts: 'kept' };
+  const reverts = revertedNumber(obj(p.pull_request).body, { owner: facts.ref.owner, repo: facts.ref.repo });
+  return reverts === null ? facts : { ...facts, reverts };
 }
 
 const prNumber = (p: Record<string, unknown>): unknown => obj(p.pull_request).number;

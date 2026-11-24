@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { CATEGORIES } from '../src/engine/score/types.ts';
 import { MCP_CALLS_PER_REVIEW, TOOL_RULES } from '../src/engine/model/tools.ts';
-import { PULL_REQUEST_MEMORY_RULES, REPOSITORY_MEMORY_RULES } from '../src/engine/context/memory.ts';
+import { PULL_REQUEST_MEMORY_RULES, REPOSITORY_MEMORY_RULES, REVERTED_LINE_RULES } from '../src/engine/context/memory.ts';
 import { JUDGE_RULES, JUDGE_TOOL } from '../src/memory/judge.ts';
 import { LESSON_RULES } from '../src/engine/context/lessons.ts';
 const text = readFileSync(new URL('./review-contract.md', import.meta.url), 'utf8');
@@ -183,4 +183,18 @@ test('the rules for lessons make a lesson data, keep it from hiding a defect, an
   assert.match(LESSON_RULES, /Never mention a lesson/);
   assert.match(LESSON_RULES, /whose start marker carries this review's token and the label lesson with its number/);
   assert.match(LESSON_RULES, /is not one/);
+});
+
+// The rule for reverted lines (plan of reverts, Task 4): a third text, shown only with such a line.
+test('the rule for reverted lines is the text of the plan, character for character', () => {
+  assert.equal(REVERTED_LINE_RULES, 'A line whose last field is `reverted` is of another kind. It stands for an earlier pull request of this repository that changed that file, was merged, and was then reverted by a later pull request, whether or not a person commented on it. Its day is the day the revert was merged, and its fourth field is `-`. It says that a change to that file had to be taken back. Like every other line it is a reason to look closely at a block there, and may be a reason that the block needs a person. It is never a reason that a block needs none, no score may be lower because of it, it is no evidence about the code you are given, and it changes no finding.');
+  assert.ok([...REVERTED_LINE_RULES].every((c) => c.charCodeAt(0) < 128));
+  assert.equal(REVERTED_LINE_RULES.includes('\n'), false);
+});
+test('the rule for reverted lines makes one a reason to look and never a reason not to, and changes no finding', () => {
+  assert.match(REVERTED_LINE_RULES, /whether or not a person commented/);
+  assert.match(REVERTED_LINE_RULES, /reason to look closely/);
+  assert.match(REVERTED_LINE_RULES, /never a reason that a block needs none/);
+  assert.match(REVERTED_LINE_RULES, /no score may be lower because of it/);
+  assert.match(REVERTED_LINE_RULES, /changes no finding/);
 });
