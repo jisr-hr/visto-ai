@@ -733,6 +733,8 @@ A failed replay case is left out of all three and counted. A finding whose judge
 - It rates one model's judgement of "the same concern", not a person's; the sample of reasons is how you check it.
 - Nothing here is a number for your repositories.
 
+Results of runs are kept in `docs/benchmarks/`, one file per run, with the code, data, models and costs they came from. The first is [2026-11-24-aacr-bench-v2.md](docs/benchmarks/2026-11-24-aacr-bench-v2.md).
+
 ## The file a team commits
 
 A team may commit `.visto-ai.yml` at the root of its repository, listing paths that always need a human reviewer. It is read from the default branch and can only add protection.
