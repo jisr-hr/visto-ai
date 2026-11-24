@@ -208,7 +208,7 @@ For the pull request:
 
 - Title, description and branch names.
 - The bot's earlier threads with replies and state, and in incremental mode the previous review's overview and acceptance rows. Of those rows the model is shown each criterion's status, in the service's own words, and not its note.
-- Memory blocks (section 7.4). They hold no words a person wrote in a comment, so they are not wrapped as data; a file's or a directory's name stands in a code span, and the rules for memory say that a name is never an instruction. They are shown, whole or not at all, only when they cost the files and the threads nothing, and they are fitted before extension context and tool room. Lessons are words a model wrote from a person's reply: each stands between data markers with the review's token, under rules of their own, after the pull request block, and they are fitted after the blocks.
+- Memory blocks (section 7.4). They hold no words a person wrote in a comment, so they are not wrapped as data; a file's or a directory's name stands in a code span, and the rules for memory say that a name is never an instruction. They are shown, whole or not at all, only when they cost the files and the threads nothing, and they are fitted before extension context and tool room. A line may also stand for a pull request that was reverted: it holds a path, a day and the word `reverted`. When the blocks do not fit with such lines, they are tried without them before nothing is shown. Lessons are words a model wrote from a person's reply: each stands between data markers with the review's token, under rules of their own, after the pull request block, and they are fitted after the blocks.
 - Extension context, such as a ticket's acceptance criteria.
 
 Files are ordered by a priority heuristic ported from the predecessor: size of change, raised for source directories and for paths that suggest services, models, authorization, payments, migrations, routes or API definitions, and lowered for documentation, generated output, fixtures and binary assets. The predecessor matched substrings; the port matches path segments.
@@ -231,7 +231,7 @@ All text supplied by the pull request, the repository, a ticket or a tool is dat
 - **Retries.** Invalid output gets one retry, with the validation reason appended. A timeout on a batch of several files splits the batch in two and retries once. A provider error moves to the next model in the configured fallback list. The model that answered is read from the response and recorded.
 - **What counts as a provider error.** Any status outside 2xx. Also a 200 response that carries an `error` object, has no choices, or ends a choice with `finish_reason: "error"`: OpenRouter reports failures of the upstream model this way. Two errors are not retried on another model, because the next model would fail the same way: a rejected key (401) and a key with no credit left (402). On either, reviews pause, gated checks say why, and an alert fires. A rate limit (429) is retried after the delay the response names.
 
-The contract is one file in git, and a test asserts its key rules, so a careless edit fails the build. The rules for tools are a text in the code, added to the system message only when a tool is offered, and the same test pins that text whole. So are the rules for memory, shown only with its blocks, and the rules for lessons, shown only with them.
+The contract is one file in git, and a test asserts its key rules, so a careless edit fails the build. The rules for tools are a text in the code, added to the system message only when a tool is offered, and the same test pins that text whole. So are the rules for memory, shown only with its blocks, and the rules for lessons, shown only with them. A rule for reverted lines is shown only with one.
 
 ### 5.5 What the model returns
 
@@ -417,7 +417,7 @@ Where a repository requires code-owner review, GitHub still waits for a person o
 Once the bot approves a kind of change, no person looks at it, so nothing would ever record that it needed one. Two outside signals break that loop:
 
 - **Audit sample (D9).** A share of approvable pull requests is sent to a human anyway and labelled as an audit. The share is set in the deployment config, as a default and per repository, and is 5% unless changed. At 0% the audit is off, and reverts are the only outside signal left. Selection is a hash of the pull request's identity, keyed with the deployment's audit key (section 11.1). Pushing again does not re-roll it, and an author cannot work out beforehand whether a pull request will be drawn. Opening a new pull request for the same change does give a new draw. That gap is accepted.
-- **Reverts.** When a pull request is reverted, its files are recorded as having needed more attention. A revert is recognised nightly: a merged pull request whose description or commit messages carry the git service's standard revert reference to an earlier pull request or to its merge commit. Reverts enter none of the three numbers in section 6.6. The UI shows them as their own count, with how many of the reverted pull requests the bot had approved. Reverts are not recorded yet: they come in the plan after the lessons.
+- **Reverts.** When a pull request is reverted, its files are recorded as having needed more attention. A revert is recognised when the merge of the reverting pull request is stored: the first line of its description that is not blank, as the delivery of its merge carried it, is exactly the reference the git service's revert button writes to an earlier pull request of the same repository, with nothing else on the line. The line is read as it is written: no character is stripped first, and every line end a renderer honours ends it. No other line and no commit message is read, so a reference below the first line, one with a reason or an invisible character on its line, and a revert made on the command line, are not recorded. The files are those of the reverted pull request's last completed review; with none, nothing is recorded. Reverts enter none of the three numbers in section 6.6. The UI shows them as their own count, with how many of the reverted pull requests the bot had approved.
 
 ### 6.6 Measuring the score
 
@@ -431,7 +431,7 @@ Safety is also reported per file, using each file's final score. Both views come
 
 A block **needed a human** when a person who is not the author left an inline comment on one of its lines, context lines included, that is not a reply inside one of the bot's finding threads. A reply inside a human-review note does count, for the block the note is on. A file needed a human when one of its blocks did, or when such a comment was left on the file as a whole. The stricter form, used for the headline number, also requires that the block's lines, or for a file its diff, changed in a later commit of the same pull request. Both are stored.
 
-Any account that is not a bot and not the author counts here, with or without access to the repository. A human signal can only raise a score (D8), so a stranger can make the bot more careful and never less. The rules that can loosen something count only people with access (D23). A record of memory (section 7.2) is narrower than this label: it is made only from a comment by a person with access, because its place and its counts reach every review of the repository.
+Any account that is not a bot and not the author counts here, with or without access to the repository. A human signal can only raise a score (D8), so a stranger can make the bot more careful and never less. The rules that can loosen something count only people with access (D23). A record of memory (section 7.2) is narrower than this label: it is made only from a comment by a person with access, because its place and its counts reach every review of the repository. A record of a revert is the one exception: it is made from a merge, which takes a person with write access, of a pull request whose description's first line names the one it reverts; the description's author may have no access (section 6.5).
 
 **Matching a comment to a block.** A person's inline comment is stored with its path, side, line and the commit it was made on (section 7.1). It is matched by line to the blocks of the run that scored that commit. When no run scored that commit, the comment counts for its file only. A block with no score of its own is measured with its file's score.
 
@@ -471,7 +471,7 @@ From the first webhook, for every pull request, whether or not the bot has revie
 - Inline comments by people, with path, side, line, the commit they were made on and the comment they reply to.
 - General comments by people.
 - Thread resolutions.
-- Merges, closes and reverts.
+- Merges, closes and reverts. Of a revert, the number of the pull request the description names is stored, whether or not learning is on, and nothing else of the description.
 
 Every review and comment is stored with its author's association with the repository, as the git service reports it at that moment: owner, member, collaborator or none.
 
@@ -485,9 +485,9 @@ A record is one learned item, scoped to a repository:
 |---|---|---|
 | `lesson` | A reply, by someone with access to the repository, that correctly showed a finding was wrong | Findings |
 | `human_signal` | A block that needed a human (section 6.6), with its file's path and directory and a short excerpt of what the person wrote. When the bot had scored that block, also its category and reason | Score. The model is told where and when a person stepped in, the category and whether it was a miss; it is shown no words a person wrote. The excerpt is stored for the UI. |
-| `revert` | A reverted pull request's files | Score |
+| `revert` | A reverted pull request's files | Score. The model is told the file, the day the revert was merged, and that the change was reverted. |
 
-A signal is one for each pull request, file and block, or for the file when the comment cannot be matched to a block. Its excerpt is at most 200 characters, with quoted lines and fenced blocks left out. It is made only from a comment by a person with access who is not the author. A lesson is one for a reply. It holds the finding's file, one sentence of 30 to 300 characters that a model wrote, and the words of the reply the model quoted. It is live from the start of the UTC day after its reply.
+A signal is one for each pull request, file and block, or for the file when the comment cannot be matched to a block. Its excerpt is at most 200 characters, with quoted lines and fenced blocks left out. It is made only from a comment by a person with access who is not the author. A lesson is one for a reply. It holds the finding's file, one sentence of 30 to 300 characters that a model wrote, and the words of the reply the model quoted. It is live from the start of the UTC day after its reply. A revert is one record for each path of the reverted pull request, at most 300, made at the merge of the revert.
 
 Every record has a source reference, a status (`active`, `disabled`, or `expired` once it is retired), a creation time and an expiry. Lessons expire after 90 days, as in the predecessor. Signals and reverts expire after 180 days.
 
@@ -495,7 +495,7 @@ Every record has a source reference, a status (`active`, `disabled`, or `expired
 
 - **When a pull request closes:** its human signals are derived. This needs no model call.
 - **When a person comments inside a block the bot scored below the threshold:** the miss is recorded immediately. Both are done by one pass inside the process, every five minutes and when a comment or a close arrives. A miss is recorded at the comment when the review had already scored that commit; otherwise at the close. The scores of a dry run count. A pull request whose signals cannot be made in three passes of the timer running, at least ten minutes, is given up and logged; a pass a delivery woke tries it again but does not count.
-- **Nightly:** replies to the bot's findings are judged by a model call into `confirmed_fix`, `valid_pushback`, `invalid_pushback`, `question` or `noise`. A valid pushback may become a lesson. Reverts are not detected yet (section 6.5), and expired records are retired by the five-minute pass. Nightly is once in a UTC day, at the first tick of the learning timer after 00:00 UTC; a run judges the replies written before that 00:00, one model call for each and one more when the answer is no verdict, 100 at most; a run that does not complete is tried again an hour later.
+- **Nightly:** replies to the bot's findings are judged by a model call into `confirmed_fix`, `valid_pushback`, `invalid_pushback`, `question` or `noise`. A valid pushback may become a lesson. A revert is recorded by the five-minute pass when the merge of the reverting pull request is stored (section 6.5), and expired records are retired by it. Nightly is once in a UTC day, at the first tick of the learning timer after 00:00 UTC; a run judges the replies written before that 00:00, one model call for each and one more when the answer is no verdict, 100 at most; a run that does not complete is tried again an hour later.
 
 Guardrails on lessons, inherited, because lessons edit the reviewer's own prompt:
 
@@ -512,10 +512,10 @@ The learning job reports when it last ran and how many records it added. It keep
 
 ### 7.4 Retrieval
 
-Retrieval is deterministic lookups in Postgres. Every lookup takes an "as of" time. The database is asked for a repository's live records, at most 5,000, and the choice is made in code the eval shares. The two blocks hold only what the service computes: the model is shown no words a person wrote, and a path or a directory only when it is made of letters, digits and the marks ordinary in file names (dot, underscore, slash, hyphen, square brackets, parentheses, `@`, `+`, `$`, `~`), never one with a space, a colon, a quote or a backtick. A name stands in a code span. A pull request is not shown a record made from itself.
+Retrieval is deterministic lookups in Postgres. Every lookup takes an "as of" time. The database is asked for a repository's live records, at most 5,000, and the choice is made in code the eval shares. Records of reverts are read apart, at most 1,000, once for a review. The two blocks hold only what the service computes: the model is shown no words a person wrote, and a path or a directory only when it is made of letters, digits and the marks ordinary in file names (dot, underscore, slash, hyphen, square brackets, parentheses, `@`, `+`, `$`, `~`), never one with a space, a colon, a quote or a backtick. A name stands in a code span. A pull request is not shown a record made from itself.
 
 - **Repository block.** Stable for a day, so it sits in the cached part of the prompt. It lists the directories and categories where people most often had to step in, with counts. It is counted from the records live at 00:00 UTC of the day, lists at most 10 directories and 8 categories, each from two pull requests up, and is shown only when the pull request block has a line.
-- **Pull request block.** For each changed file: records on the same path, newest first, otherwise records from the nearest directory that has any. Lessons are chosen by shared directory or file type with the changed files first, then by recency. At most 8, each at most 300 characters: a lesson on a changed file first, then by the leading directories shared, the deeper first, then by file type. One that shares none of these is not shown, which leaves out little in a repository under one top directory or in one language: there the order and the size decide. At most 3 records on a file, 2 from the nearest directory, 30 in all. The nearest directory is the deepest one above the file under which a record's file lies, never the repository's root. A record on a file the review sends to the model is never a near line of another file.
+- **Pull request block.** For each changed file: records on the same path, newest first, otherwise records from the nearest directory that has any. Lessons are chosen by shared directory or file type with the changed files first, then by recency. At most 8, each at most 300 characters: a lesson on a changed file first, then by the leading directories shared, the deeper first, then by file type. One that shares none of these is not shown, which leaves out little in a repository under one top directory or in one language: there the order and the size decide. At most 3 records on a file, 2 from the nearest directory, 30 in all. The nearest directory is the deepest one above the file under which a record's file lies, never the repository's root. A record on a file the review sends to the model is never a near line of another file. A record of a revert is a line of the same block, with `reverted` where a miss stands, under a rule of its own: at most one for a changed file, the newest, after every line of a signal and never in place of one, and, within the block, the first to be cut by the limit of lines or for room. It is counted in neither list of the repository block, and is shown neither to the pull request that made the revert nor to the one reverted.
 
 Each block has a fixed size. What is cut is named in the audit list. The predecessor injected lessons newest-first within a size limit, so most of a large repository's lessons never reached the reviewer.
 
@@ -530,7 +530,7 @@ A repository with history should not start empty. One importer reads a repositor
 It has two outputs:
 
 - **A local history file**, which is both the case file for the score backtest and the source of "as of" memory during it.
-- **On request, rows in the database**: the human activity and the human signals derived from it. This seeds a new deployment's memory. It is a second command, which reads the history file and writes nothing for a signal of a pull request the service already stores.
+- **On request, rows in the database**: the human activity and the human signals derived from it. This seeds a new deployment's memory. It is a second command, which reads the history file and writes nothing for a signal of a pull request the service already stores. It writes no record of a revert.
 
 Imported signals have no category or reason, because the bot never scored those blocks. They carry path, directory and the excerpt.
 
@@ -745,7 +745,7 @@ The schema is designed fresh. Identity everywhere is the git service, the reposi
 | `gate_evaluations`, `gate_overrides` | Gate history and skips |
 | `review_feedback` | Thumbs up or down per run and person, with the reason (section 11.3) |
 
-Stage 8 adds a table `learning` for the learning work's own record, and on `human_activity` and `pull_requests` markers of what was learned and of how often learning a pull request failed. The lessons add `judge_calls`, the cost of each call of the judge with the pull request and the reply it was for, and a column for a lesson's text on `memory_records`. `file_scores` and `thread_verdicts` are still not built: their content is in each run's stored result.
+Stage 8 adds a table `learning` for the learning work's own record, and on `human_activity` and `pull_requests` markers of what was learned and of how often learning a pull request failed. The lessons add `judge_calls`, the cost of each call of the judge with the pull request and the reply it was for, and a column for a lesson's text on `memory_records`. Reverts add a column on `pull_requests` for the pull request a description says it reverts, and one on `memory_records` for the pull request a revert took back. `file_scores` and `thread_verdicts` are still not built: their content is in each run's stored result.
 
 Finished jobs are deleted after 14 days. Nothing else is pruned in the first version.
 
@@ -771,7 +771,7 @@ A deployment that ran the predecessor brings its history across with a one-off m
 
 ## 15. Evaluation
 
-Two commands. The findings replay arrives with stage 2 of the build order and the score backtest with stage 3. Memory joins both in stage 8. The score backtest first, after a count that calls no model; the findings replay in the plan after the lessons. Neither can write: the eval builds its source in a read-only mode in which any write call throws.
+Two commands. The findings replay arrives with stage 2 of the build order and the score backtest with stage 3. Memory joins both in stage 8. The score backtest first, after a count that calls no model; the findings replay in the plan after the lessons. The backtest's memory holds reverts as of each case; the findings replay with memory, and lessons in both evals, come in the plan after the reverts. Neither can write: the eval builds its source in a read-only mode in which any write call throws.
 
 ### 15.1 Findings replay
 
@@ -828,7 +828,7 @@ Each stage ends with something that can be measured or shown.
 5. **Gate.**
 6. **Extensions and MCP tools,** including feedback routes.
 7. **Shadow at the first deployment, then cut-over.** Tracked in that deployment's private repository. From here the first deployment runs on this project: findings, the gate, and the score shown in every review, with automatic approval off and no learned records yet. Capture is already storing the human activity that memory and the live numbers need.
-8. **Memory.** Records, learning, retrieval, and the importer's database output. Both evals are re-run with memory "as of" each case. Until the UI exists, a record can be disabled only in the database. A deployment may leave learning off in configuration until stage 10. Cut in three plans: memory for the score and lessons from replies, which are built, and reverts with the evals' memory, which is next.
+8. **Memory.** Records, learning, retrieval, and the importer's database output. Both evals are re-run with memory "as of" each case. Until the UI exists, a record can be disabled only in the database. A deployment may leave learning off in configuration until stage 10. Cut in four plans: memory for the score, lessons from replies and reverts, which are built, and the evals with lessons as of each case, which is next.
 9. **Automatic approval and withdrawal.**
 10. **UI.** Three screens: score numbers per repository, learned records with their kill switch, recent reviews with failures, feedback and dependency health. Sign-in is through the same app, and access is limited to the accounts or the one team named in the deployment config. With neither named, the UI is off.
 
@@ -859,8 +859,9 @@ Each of these comes from documentation or third-party reports, not from a test.
 11. That a decision model's answer to one question does not depend on which other questions travel in the same request. The question set was reduced after it was first tried.
 12. That the review model's findings are the same under the contract it gets when a scorer is named (section 6.7) as under the review contract. The findings rules are the same text in both; the replay eval run with a scorer named is what shows it.
 13. That the endpoint accepts a request that names a tool after turns whose reasoning was sent back. Where it does not, the batch is reviewed without tools (section 5.4).
+14. That the git service's revert button writes `Reverts <owner>/<name>#<number>`, and nothing else on that line, as the first line of the description of the pull request it opens, and that the delivery of that pull request's merge carries the description (section 6.5). The descriptions of pull requests the button opened in public repositories were read: the whole description is that one line, with the repository's full name, and the page shows it as a short link. Two other merged reverts read there had a description written by hand or on the command line, and name nothing under the rule. A repository renamed since keeps its old name in such a line, which then names nothing. Not verified: that the delivery of the merge carries the line, since no revert was made on a repository the app is installed on.
 
-Items 1 to 3 and 6 to 9 need a scratch repository and the owner's go-ahead. Items 4, 12 and 13 need an OpenRouter key and the owner's go-ahead, because they spend money.
+Items 1 to 3, 6 to 9 and 14 need a scratch repository and the owner's go-ahead. Items 4, 12 and 13 need an OpenRouter key and the owner's go-ahead, because they spend money.
 
 ## 21. Open points for the owner
 
