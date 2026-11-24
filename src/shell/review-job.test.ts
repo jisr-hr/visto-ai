@@ -2652,6 +2652,23 @@ async function standing(head = 'h0', reviewId = '401', number = 7): Promise<numb
   await markPublished(db, id, { reviewId, publishedAt: at(-3400), body: 'Approved earlier.', inlineDropped: false, approved: true, approvalCode: 'approved' });
   return id;
 }
+/** Every statement the job runs from now on, those of its transactions included, in the order it runs them. */
+function statementsOf(h: Harness): string[] {
+  const seen: string[] = [];
+  const spy = (inner: Db): Db => ({
+    query: (text, params) => { seen.push(text); return inner.query(text, params); },
+    script: (sql) => inner.script(sql),
+    close: () => inner.close(),
+    transaction: (work) => inner.transaction((tx) => work(spy(tx))),
+  });
+  h.deps.db = spy(h.deps.db);
+  return seen;
+}
+/** The statement of listRuns. */
+const isListRuns = (text: string): boolean => text.includes('from visto_ai.review_runs') && /number = \$4\s+order by id$/.test(text);
+/** The statements that serve approval alone: the runs and comments read for the decision, the newest review's reading, a standing approval, a withdraw job. */
+const approvalStatements = (statements: string[]): string[] => statements.filter((s) => isListRuns(s) || s.includes('select run, comment_id')
+  || s.includes('select approved from') || s.includes('approved and dismissed_at is null') || s.includes("'withdraw'"));
 
 test('with approval off the job records, posts and logs what it did', async () => {
   /** One review of an approvable result under `settings`, with the approvals fake and onWithdraw given or not. */
@@ -2825,8 +2842,11 @@ test('with approval on, a push that tells nothing new after an approval is publi
   await standing('h1', '401', 9);
   const off = await live({ pullRequest: 9, head: 'h2', live: liveAt('h2'), own: [[{ id: '401', commit: 'h1' }]], result: nothing });
   approving(off);
+  const statements = statementsOf(off);
   await runReviewJob(off.job, off.deps);
   assert.deepEqual([(await getJob(db, off.job.id))?.outcome, off.drafts.length, await withdrawJobs(9)], ['nothing_new', 0, []]);
+  // The newest review is not even read with approval off.
+  assert.deepEqual(statements.filter((s) => s.includes('select approved from')), []);
 });
 
 test('a read of the newest approval that fails before a nothing-new push posts the review as a comment with record_unreadable', async () => {
@@ -2849,7 +2869,6 @@ test('a read of the newest approval that fails before a nothing-new push posts t
 
 test('runs that cannot be read before the post give record_unreadable, and the review is still posted', async () => {
   // The statement of listRuns: the first read is the record's, the second the one made just before the post.
-  const isListRuns = (text: string): boolean => text.includes('from visto_ai.review_runs') && /number = \$4\s+order by id$/.test(text);
   const h = await live({ settings: APPROVING, live: LIVE_OK, result: approvable() });
   const seen = approving(h);
   const query = h.deps.db.query;
@@ -2907,4 +2926,46 @@ test('a resumed review is decided at its post like a first one, and one another 
   approving(older);
   await runReviewJob(older.job, older.deps);
   assert.equal(older.drafts[0]!.body, renderReview(result, { trigger: 'manual', requestedBy: 'octo-dev', inline: true, ...LINKS, approval: paragraphOf('approved') }).body);
+});
+
+test('the decision at the post is made under the thread rule in force and the repository\'s clearing by reply', async () => {
+  // The major 8001 of h0, whose thread octo-dev, the author, replied to and resolved: open under the strict rule; closed under the gate's
+  // rule with clearing by reply on; open again with it off.
+  const RESOLVED: ReviewThread = { ...THREAD, resolved: true };
+  const GATE_RULE: RepoSettings = { ...SETTINGS, approval: { enabled: true, threads: 'gate', auditShare: 0 } };
+  const cases: Array<[number, RepoSettings, 'strict' | 'gate', ApprovalCode]> = [
+    [7, APPROVING, 'strict', 'open_thread'],
+    [8, GATE_RULE, 'gate', 'approved'],
+    [9, REPLY_OFF(GATE_RULE), 'gate', 'open_thread'],
+  ];
+  for (const [number, settings, rule, code] of cases) {
+    await published({ pullRequest: number });
+    const h = await live({ pullRequest: number, settings, live: LIVE_OK, result: approvable(), own: OWN_401, threads: [[RESOLVED]] });
+    const seen = approving(h);
+    await runReviewJob(h.job, h.deps);
+    assert.deepEqual([h.drafts.length, h.drafts[0]!.event, reviewLine(h).approval], [1, code === 'approved' ? 'approve' : undefined, code], String(number));
+    // The paragraph names the rule in force; the branch's rule is read only once the threads let it be.
+    assert.ok(h.drafts[0]!.body.endsWith(`\n\n${approvalParagraph(code, { head: 'h1', threshold: 70, rule })}`), String(number));
+    assert.deepEqual(seen.calls, code === 'approved' ? [['staleApprovals', 'main']] : [], String(number));
+    assert.deepEqual((await approvalRows(number)).map((r) => [r.head_sha, r.approved, r.approval_code]), [['h0', false, null], ['h1', code === 'approved', code]], String(number));
+  }
+});
+
+test('in dry run nothing of approval runs: no read for it, no withdraw job, nothing posted', async () => {
+  // A standing approval of h0 on each: out of dry run a review of h1 would be decided and a withdraw job stored after it,
+  // and a push that tells nothing new would read the newest review.
+  for (const [number, result] of [[7, approvable()], [8, approvable({ nothingToDo: true, mode: 'incremental' })]] as const) {
+    await standing('h0', '401', number);
+    const h = await harness({ pullRequest: number, settings: APPROVING, live: LIVE_OK, result, own: OWN_401 });
+    const seen = approving(h);
+    const statements = statementsOf(h);
+    await runReviewJob(h.job, h.deps);
+    assert.deepEqual([(await getJob(db, h.job.id))?.outcome, h.writes, seen.calls, seen.woken(), await withdrawJobs(number)], ['reviewed', [], [], 0, []], String(number));
+    assert.deepEqual(approvalStatements(statements), [], String(number));
+    // The spy sees the statements of a transaction: the run is recorded in the one that finishes the job.
+    assert.equal(statements.some((s) => s.includes('insert into visto_ai.review_runs')), true, String(number));
+    const line = reviewLine(h);
+    assert.deepEqual([line.dry_run, line.published, 'approved' in line, 'approval' in line], [true, false, false, false], String(number));
+    assert.deepEqual((await approvalRows(number)).map((r) => [r.head_sha, r.approved, r.approval_code]), [['h0', true, 'approved'], ['h1', false, null]], String(number));
+  }
 });
