@@ -13,9 +13,12 @@ export interface NewRecord {
   excerpt: string;              // the start of what the person wrote; '' when there is none
   comment: string | null;       // the id of the comment the excerpt came from
   createdAt: string; expiresAt: string;
+  lesson?: string | null;       // a lesson's text; absent reads as null
 }
 /** What a lookup reads of a record: never its excerpt or its reason. */
 export interface LiveRow { id: number; sourceRef: string; number: number; path: string | null; directory: string | null; category: string | null; missed: boolean; createdAt: string }
+/** What a read of lessons hands back: never the quote. */
+export interface LessonRow { id: number; sourceRef: string; number: number; path: string; lesson: string; createdAt: string }
 
 const lowered = (repo: RepoKey): RepoKey => ({
   service: repo.service, owner: storable(repo.owner).toLowerCase(), repo: storable(repo.repo).toLowerCase(),
@@ -28,14 +31,15 @@ export async function addRecords(db: Db, repo: RepoKey, records: NewRecord[]): P
   const rows = records.map((x) => ({
     kind: x.kind, source_ref: x.sourceRef, number: x.number, path: x.path, directory: x.directory,
     category: x.category, reason: x.reason, missed: x.missed, excerpt: x.excerpt, comment: x.comment,
-    created_at: x.createdAt, expires_at: x.expiresAt,
+    created_at: x.createdAt, expires_at: x.expiresAt, lesson: x.lesson ?? null,
   }));
   const added = await db.query(
     `insert into visto_ai.memory_records
-       (service, owner, repo, kind, source_ref, created_at, expires_at, number, path, directory, category, reason, missed, excerpt, comment)
-     select $1, $2, $3, s.kind, s.source_ref, s.created_at, s.expires_at, s.number, s.path, s.directory, s.category, s.reason, s.missed, s.excerpt, s.comment
+       (service, owner, repo, kind, source_ref, created_at, expires_at, number, path, directory, category, reason, missed, excerpt, comment, lesson)
+     select $1, $2, $3, s.kind, s.source_ref, s.created_at, s.expires_at, s.number, s.path, s.directory, s.category, s.reason, s.missed, s.excerpt, s.comment, s.lesson
      from jsonb_to_recordset($4::jsonb) as s(kind text, source_ref text, number integer, path text, directory text, category text,
-                                              reason text, missed boolean, excerpt text, comment text, created_at timestamptz, expires_at timestamptz)
+                                              reason text, missed boolean, excerpt text, comment text, created_at timestamptz, expires_at timestamptz,
+                                              lesson text)
      on conflict (service, owner, repo, kind, source_ref) do nothing
      returning id`,
     [r.service, r.owner, r.repo, storableJson(rows)]);
@@ -92,6 +96,55 @@ export async function liveRecordsWithin(db: Db, repo: RepoKey, kind: RecordKind,
     await tx.query(`set local statement_timeout = ${ms}`);
     return liveRecords(tx, repo, kind, at, limit, except);
   });
+}
+
+interface LessonDbRow { id: number; source_ref: string; number: number; path: string; lesson: string; created_at: unknown }
+
+/**
+ * The repository's lessons live at `at`: active, made at or before it, expiring after it, with a path and a text. Newest first (made, then id), at most `limit`.
+ * `except`: a pull request whose lessons are left out. A row whose time cannot be read is passed over.
+ */
+export async function liveLessons(db: Db, repo: RepoKey, at: string, limit: number, except?: number): Promise<LessonRow[]> {
+  const r = lowered(repo);
+  const rows = await db.query<LessonDbRow>(
+    `select id, source_ref, number, path, lesson, created_at
+     from visto_ai.memory_records
+     where service = $1 and owner = $2 and repo = $3 and kind = 'lesson'
+       and status = 'active' and created_at <= $4::timestamptz and expires_at > $4::timestamptz
+       and path is not null and lesson is not null
+       and ($6::integer is null or number <> $6::integer)
+     order by created_at desc, id desc
+     limit $5`,
+    [r.service, r.owner, r.repo, at, limit, except ?? null]);
+  const out: LessonRow[] = [];
+  for (const x of rows) {
+    const createdAt = isoOf(x.created_at);
+    if (createdAt === null) continue;
+    out.push({ id: x.id, sourceRef: x.source_ref, number: x.number, path: x.path, lesson: x.lesson, createdAt });
+  }
+  return out;
+}
+
+/** `liveLessons` in one transaction that first sets its statement limit to `ms`, as `liveRecordsWithin` does, with the same refusal of a bad `ms`. */
+export async function liveLessonsWithin(db: Db, repo: RepoKey, at: string, limit: number, ms: number, except?: number): Promise<LessonRow[]> {
+  if (typeof ms !== 'number' || !Number.isSafeInteger(ms) || ms <= 0) throw new Error('bad_statement_limit');
+  return db.transaction(async (tx) => {
+    await tx.query(`set local statement_timeout = ${ms}`);
+    return liveLessons(tx, repo, at, limit, except);
+  });
+}
+
+/** The texts of the repository's lessons that are active or disabled and expire after `at`, newest first, at most `limit`. */
+export async function standingLessons(db: Db, repo: RepoKey, at: string, limit: number): Promise<string[]> {
+  const r = lowered(repo);
+  const rows = await db.query<{ lesson: string }>(
+    `select lesson from visto_ai.memory_records
+     where service = $1 and owner = $2 and repo = $3 and kind = 'lesson'
+       and status in ('active', 'disabled') and expires_at > $4::timestamptz and lesson is not null
+     order by created_at desc, id desc
+     limit $5`,
+    [r.service, r.owner, r.repo, at, limit]);
+  return rows.map((x) => x.lesson);
 }
 
 /** Every active record whose expiry is at or before `now` becomes expired. Returns how many. */

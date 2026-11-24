@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { isApplied, loadMigrations, MIGRATIONS_DIR, migrate } from './migrate.ts';
 import { pgliteDb } from './pglite.ts';
+import { recordRun, spentSince } from './review-runs.ts';
 import { testDb } from './testing.ts';
 import type { Db } from './types.ts';
 
@@ -106,10 +107,50 @@ test('the memory migration applies over rows of the release before it, and leave
   await db.query(
     `insert into visto_ai.human_activity (service, owner, repo, number, kind, source_id, author, body, at)
      values ('github', 'acme', 'shop', 7, 'inline_comment', 'c-1', 'octo-lead', 'check this', '2026-03-01T10:00:00Z')`);
-  assert.deepEqual(await migrate(db, all), ['0010_memory']);
+  assert.deepEqual(await migrate(db, all.filter((m) => m.name <= '0010_memory')), ['0010_memory']);
   assert.deepEqual(await db.query('select learned_at, learn_attempts from visto_ai.pull_requests'), [{ learned_at: null, learn_attempts: 0 }]);
   assert.deepEqual(await db.query('select learned_at, body from visto_ai.human_activity'), [{ learned_at: null, body: 'check this' }]);
   assert.deepEqual(await db.query('select count(*)::int as n from visto_ai.memory_records'), [{ n: 0 }]);
   assert.deepEqual(await db.query('select count(*)::int as n from visto_ai.learning'), [{ n: 0 }]);
+  await db.close();
+});
+test('0011_lessons comes right after 0010_memory, and applies over the rows of the release before it', async () => {
+  const ledger = await testDb();
+  const names = (await ledger.query<{ name: string }>('select name from visto_ai.schema_migrations order by name')).map((r) => r.name);
+  assert.equal(names.indexOf('0011_lessons'), names.indexOf('0010_memory') + 1);
+  await ledger.close();
+  const db = await pgliteDb();
+  const all = loadMigrations(MIGRATIONS_DIR);
+  await migrate(db, all.filter((m) => m.name < '0011_lessons'));
+  await db.query(
+    `insert into visto_ai.memory_records (service, owner, repo, kind, source_ref, created_at, expires_at, number, path, directory, excerpt)
+     values ('github', 'acme', 'shop', 'human_signal', '7:h1:src/billing/tax.ts', '2026-03-01T10:00:00Z', '2026-08-28T10:00:00Z', 7,
+             'src/billing/tax.ts', 'src/billing', 'check this')`);
+  await recordRun(db, {
+    ref: { service: 'github', owner: 'acme', repo: 'shop', number: 7 }, job: null, trigger: 'automatic', mode: 'full', dryRun: true,
+    headSha: 'h1', baseSha: 'b1', baseBranch: 'main', outcome: 'ok', failureStage: null, failureCode: null, needsHuman: false, highestScore: 35,
+    body: 'text', comments: [], result: { findings: [] },
+    usage: { calls: 1, inputTokens: 1000, outputTokens: 200, cachedTokens: 0, cost: 0.5 },
+    startedAt: '2026-03-01T10:00:00.000Z', finishedAt: '2026-03-01T10:01:00.000Z',
+  });
+  assert.deepEqual(await migrate(db, all.filter((m) => m.name <= '0011_lessons')), ['0011_lessons']);
+  assert.deepEqual(await db.query('select source_ref, lesson from visto_ai.memory_records'), [{ source_ref: '7:h1:src/billing/tax.ts', lesson: null }]);
+  assert.equal(await spentSince(db, '2026-03-01T00:00:00.000Z'), 0.5);
+  assert.deepEqual(await db.query('select count(*)::int as n from visto_ai.reply_verdicts'), [{ n: 0 }]);
+  assert.deepEqual(await db.query('select count(*)::int as n from visto_ai.judge_calls'), [{ n: 0 }]);
+  await db.close();
+});
+test('a verdict\'s classification is one of five, in lower case, a reply has one row, and its attempts start at 0', async () => {
+  const db = await testDb();
+  const insert = (reply: string, classification: string | null, owner = 'acme'): Promise<unknown> => db.query(
+    `insert into visto_ai.reply_verdicts (service, owner, repo, number, reply, finding, classification, outcome, judged_at)
+     values ('github', $1, 'shop', 7, $2, 'c-1', $3, 'none', '2026-03-02T10:00:00Z')`, [owner, reply, classification]);
+  await assert.rejects(insert('r-1', 'praise'));
+  await assert.rejects(insert('r-1', 'Noise'));
+  for (const c of ['confirmed_fix', 'valid_pushback', 'invalid_pushback', 'question', 'noise']) await insert(`r-${c}`, c);
+  await insert('r-null', null);
+  await assert.rejects(insert('r-null', 'noise', 'octo'));
+  assert.deepEqual(await db.query("select attempts from visto_ai.reply_verdicts where reply = 'r-null'"), [{ attempts: 0 }]);
+  assert.deepEqual(await db.query('select count(*)::int as n from visto_ai.reply_verdicts'), [{ n: 6 }]);
   await db.close();
 });

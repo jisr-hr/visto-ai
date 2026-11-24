@@ -38,6 +38,19 @@ export async function noteLearning(db: Db, work: string, now: string, counts: { 
     [storable(work), now, counts.examined, counts.added, counts.retired, counts.failed]);
 }
 
+/** Raises the totals of that work's row and leaves `ran_at` as it is. Makes the row, with `since = now` and no `ran_at`, when it is not there. */
+export async function addToLearning(db: Db, work: string, now: string, counts: { examined: number; added: number; retired: number; failed: number }): Promise<void> {
+  await db.query(
+    `insert into visto_ai.learning (work, since, examined, added, retired, failed)
+     values ($1, $2::timestamptz, $3, $4, $5, $6)
+     on conflict (work) do update set
+       examined = visto_ai.learning.examined + excluded.examined,
+       added = visto_ai.learning.added + excluded.added,
+       retired = visto_ai.learning.retired + excluded.retired,
+       failed = visto_ai.learning.failed + excluded.failed`,
+    [storable(work), now, counts.examined, counts.added, counts.retired, counts.failed]);
+}
+
 export async function readLearning(db: Db, work: string): Promise<LearningState | null> {
   const rows = await db.query<StateRow>(
     'select since, ran_at, examined, added, retired, failed from visto_ai.learning where work = $1',

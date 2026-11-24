@@ -50,9 +50,9 @@ const whole = (v: unknown): v is number => typeof v === 'number' && Number.isSaf
 // Thrown when an answer does not have the shape of one; any other throw while reading means the same.
 class BadAnswer extends Error {}
 
-// Reads a list entry by entry into one of our own: no method of the memory's object is called and no iterator of it is run.
+// Reads a list entry by entry into one of our own, at most MEMORY_READ of them: no method of the memory's object is called and no iterator of it is run.
 // A hole reads as undefined, which is passed over like any other entry that is not kept.
-function entries(list: unknown): unknown[] {
+export function entries(list: unknown): unknown[] {
   if (!Array.isArray(list)) throw new BadAnswer();
   const length: unknown = (list as { length: unknown }).length;
   if (!whole(length) || length < 0 || length > MEMORY_READ) throw new BadAnswer();
@@ -151,19 +151,27 @@ function codeOf(error: unknown): string {
   return 'lookup_failed';
 }
 
-/** Asks once, under `timeoutMs` (absent: MEMORY_TIMEOUT_MS). Never rejects. `context` is undefined when there is nothing to show. */
-export function askMemory(memory: Memory, files: Array<{ path: string; previousPath: string | null }>, asOf: Date, timeoutMs?: number):
-  Promise<{ context: MemoryContext | undefined; status: MemoryStatus; audit: AuditEntry[] }> {
+/**
+ * The guard of a lookup in memory, shared by its two parts: `ask` is called once, with a copy of the files and of the time,
+ * under `timeoutMs`; a throw, a rejection, a hostile thenable or a time that is no Date is `failed` with a short code, never a
+ * throw; at the limit the signal is aborted and a later answer is dropped; the timer does not hold the process open. `read`
+ * reads the answer, and a throw while reading is `failed('bad_answer')`. Never rejects.
+ */
+export function lookUp<T>(
+  ask: (files: Array<{ path: string; previousPath: string | null }>, asOf: Date, signal: AbortSignal) => unknown,
+  files: Array<{ path: string; previousPath: string | null }>, asOf: Date, timeoutMs: number,
+  read: (answer: unknown) => T, failed: (code: string) => T,
+): Promise<T> {
   return new Promise((resolve) => {
     const controller = new AbortController();
     let done = false;
-    const finish = (read: () => Asked): void => {
+    const finish = (settle: () => T): void => {
       if (done) return;
       done = true;
       clearTimeout(timer);
-      let out: Asked;
+      let out: T;
       try {
-        out = read();
+        out = settle();
       } catch {
         out = failed('bad_answer');
       }
@@ -172,7 +180,7 @@ export function askMemory(memory: Memory, files: Array<{ path: string; previousP
     const timer = setTimeout(() => {
       controller.abort();
       finish(() => failed('timeout'));
-    }, timeoutMs ?? MEMORY_TIMEOUT_MS);
+    }, timeoutMs);
     timer.unref?.();
     // The memory is given a copy: nothing it does to the list reaches the review.
     const given = files.map((f) => ({ path: f.path, previousPath: f.previousPath }));
@@ -183,16 +191,22 @@ export function askMemory(memory: Memory, files: Array<{ path: string; previousP
       try {
         if (!(asOf instanceof Date)) throw new TypeError();
         const time = new Date(asOf.getTime());
-        settle(memory.blocks(given, time, controller.signal));
+        settle(ask(given, time, controller.signal));
       } catch (error) {
         refuse(error);
       }
     });
     pending.then(
-      (answer) => finish(() => readAnswer(answer)),
+      (answer) => finish(() => read(answer)),
       (error) => finish(() => failed(codeOf(error))),
     );
   });
+}
+
+/** Asks once, under `timeoutMs` (absent: MEMORY_TIMEOUT_MS). Never rejects. `context` is undefined when there is nothing to show. */
+export function askMemory(memory: Memory, files: Array<{ path: string; previousPath: string | null }>, asOf: Date, timeoutMs?: number):
+  Promise<{ context: MemoryContext | undefined; status: MemoryStatus; audit: AuditEntry[] }> {
+  return lookUp((given, time, signal) => memory.blocks(given, time, signal), files, asOf, timeoutMs ?? MEMORY_TIMEOUT_MS, readAnswer, failed);
 }
 
 // A name people chose stands in a code span; MEMORY_NAME refuses a backtick, so a name cannot close its span.

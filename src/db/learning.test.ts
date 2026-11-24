@@ -6,7 +6,7 @@ import type { Db } from './types.ts';
 import { recordActivity } from './human-activity.ts';
 import type { Activity } from './human-activity.ts';
 import { savePullRequest } from './pull-requests.ts';
-import { inlineComments, markLearned, noteLearnFailure, noteLearning, pullRequestsToLearn, readLearning, startLearning } from './learning.ts';
+import { addToLearning, inlineComments, markLearned, noteLearnFailure, noteLearning, pullRequestsToLearn, readLearning, startLearning } from './learning.ts';
 
 const REF: PullRequestRef = { service: 'github', owner: 'acme', repo: 'shop', number: 7 };
 const T1 = '2026-03-01T10:00:00.000Z';
@@ -224,5 +224,16 @@ test('a closed pull request is marked learned for its close, never for a later n
   assert.equal(await learnedAt(db), CLOSED);
   await markLearned(db, REF, [], '2026-03-12T00:00:00.000Z', null);
   assert.equal(await learnedAt(db), CLOSED);
+  await db.close();
+});
+
+test('totals can be raised without moving ran_at, and the row is made when it is not there', async () => {
+  const db = await testDb();
+  await addToLearning(db, 'lessons', T1, { examined: 3, added: 1, retired: 1, failed: 2 });
+  assert.deepEqual(await readLearning(db, 'lessons'), { since: T1, ranAt: null, examined: 3, added: 1, retired: 1, failed: 2 });
+  await noteLearning(db, 'lessons', T2, { examined: 1, added: 0, retired: 0, failed: 0 });
+  await addToLearning(db, 'lessons', T3, { examined: 2, added: 2, retired: 0, failed: 1 });
+  assert.deepEqual(await readLearning(db, 'lessons'), { since: T1, ranAt: T2, examined: 6, added: 3, retired: 1, failed: 3 });
+  assert.equal(await readLearning(db, 'signals'), null);
   await db.close();
 });

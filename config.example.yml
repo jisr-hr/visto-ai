@@ -51,10 +51,16 @@ limits:
 dryRun: true
 
 # false: nothing is learned, and no review is shown anything learned. It is false when not written.
-# true: when a pull request closes, the service records where a person with access to the repository, other than
-# the author, commented on the code, and later reviews of that repository are told where people stepped in before,
-# as context for the score. The start of what the person wrote, 200 characters at most, is stored for the UI to come.
+# true: two things are learned from what people do on pull requests.
+# When a pull request closes, the service records where a person with access to the repository, other than the
+# author, commented on the code, and later reviews of that repository are told where people stepped in before, as
+# context for the score. The start of what the person wrote, 200 characters at most, is stored for the UI to come.
 # It is never sent to the model.
+# Once in a UTC day, each reply a person wrote under one of the reviewer's findings is sent to the model with that
+# finding, to be judged: the reply's own words (what it quotes is left out), one model call for a reply, at most
+# 100 replies a run and at most 20 of them from accounts with no access, counted in limits.spendPerDay.
+# A reply by a person with access that shows a finding was wrong may become a lesson: one sentence the model
+# writes, shown as data to later reviews of that repository for 90 days.
 # Until the UI exists a record is switched off only in the database: see "Memory" in the README.
 learning: false
 
@@ -87,7 +93,7 @@ learning: false
 #   # The port the service listens on (1 to 65535). It is 8080 when not written.
 #   port: 8080
 # alerts:
-#   # The environment variable that holds the URL (http or https) that gets the alerts: model_error, model_ok, spend_80, spend_limit, cost_unknown, redelivery_failed, feature_off, gate_check_failed, gate_bypass, extension_error, extension_ok, mcp_error, mcp_ok, memory_error, memory_ok and learning_stale.
+#   # The environment variable that holds the URL (http or https) that gets the alerts: model_error, model_ok, spend_80, spend_limit, cost_unknown, redelivery_failed, feature_off, gate_check_failed, gate_bypass, extension_error, extension_ok, mcp_error, mcp_ok, memory_error, memory_ok, learning_stale and lessons_stale.
 #   webhook: { env: ALERT_WEBHOOK_URL }
 
 # Optional extension modules: code of your own that the service loads once, at start. A module can give the reviewer

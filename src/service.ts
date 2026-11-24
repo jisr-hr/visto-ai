@@ -6,7 +6,7 @@ import { getPullRequest } from './db/pull-requests.ts';
 import type { Db, InstanceLock } from './db/types.ts';
 import { gateUseOf, repoSettingsFor } from './config/load.ts';
 import type { ServiceConfig } from './config/load.ts';
-import type { ReviewDeps, ReviewInput, ReviewResult } from './engine/types.ts';
+import type { ModelClient, ReviewDeps, ReviewInput, ReviewResult } from './engine/types.ts';
 import { alertSinksOf, notifiersOf } from './extensions/load.ts';
 import type { LoadedExtension } from './extensions/types.ts';
 import type { AppIdentity, ForgeAccess, ForgeChecks, ForgeWriter, HookDeliveries, PullRequestRef, Source, WebhookReader } from './forge/types.ts';
@@ -26,6 +26,7 @@ import type { RequestLike, ResponseLike } from './shell/http.ts';
 import { createMcpHealth } from './shell/mcp-health.ts';
 import { checkModelKey, createModelHealth } from './shell/model-health.ts';
 import type { KeyCheck } from './shell/model-health.ts';
+import { createNightly } from './shell/judge.ts';
 import { createLearning, LEARN_MS } from './shell/learning.ts';
 import { createMemoryHealth } from './shell/memory-health.ts';
 import { recordsMemory } from './shell/memory.ts';
@@ -63,6 +64,10 @@ export interface ServiceDeps {
   /** Links a notice carries: to one review of a pull request, and to the pull request. */
   reviewUrl: (ref: PullRequestRef, reviewId: string) => string;
   pullRequestUrl: (ref: PullRequestRef) => string;
+  /** The review model's client; the judge's calls go through it. Read only with learning on. */
+  model: ModelClient;
+  /** Fresh random text for data markers. Read only with learning on. */
+  token: () => string;
 }
 export const STOP_WAIT_MS = 10_000;
 export const CLOSE_WAIT_MS = 5_000;
@@ -105,7 +110,7 @@ export function gateForge(dryRun: boolean, checks: ForgeChecks, writer: ForgeWri
 
 /**
  * Takes the lock, migrates, recovers, then listens; the work that follows listening is not waited for.
- * `settled` resolves when the work that follows listening has had its first try: the key check, the app check, with learning on the learning work's start (its first pass is not waited for), the redelivery attempt and, when that worked, the first beat.
+ * `settled` resolves when the work that follows listening has had its first try: the key check, the app check, with learning on the learning work's start and the judge's row (the first pass is not waited for, and no run of the judge starts), the redelivery attempt and, when that worked, the first beat.
  * `stop` drains both runners (at most DRAIN_WAIT_MS between them), closes the listener and waits for requests in flight (at most STOP_WAIT_MS),
  * beats once more, waits for alerts, closes the database and releases the lock. It never rejects.
  */
@@ -160,6 +165,13 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps): Pr
     if (health.paused(clock())) return 'model_error';
     return (await spend.level()) === 'limit' ? 'spend_limit' : null;
   }
+  // With learning on, the judge runs once a day on the learning timer, in dry run too, with the review model, its tool
+  // choice and its time limit; its calls count in the day's spend, and it makes none while reviews are paused (calls 15 to 17).
+  const nightly = config.learning ? createNightly({
+    db, clock, log: say, alert, model: deps.model, token: deps.token,
+    auto: config.model.toolChoice === 'auto', timeoutMs: config.model.timeoutSeconds * 1000,
+    paused: pauseCode, noteUsage: (usage) => { spend.noteRun(usage); },
+  }) : null;
   /** Whether the gate is in use here: out of dry run, with some repository's gate enabled. */
   const gateLive = !config.dryRun && gateUseOf(config).check;
   /** The pause the review runner's last pass saw; null at start. */
@@ -350,13 +362,16 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps): Pr
     await beatOnce(event);
     every(BEAT_MS, async () => { if (!ending) await beatOnce('beat_failed'); });
   }
-  /** The learning work's row and its first pass, which is not waited for; then its own timer, whether or not the row could be made. */
+  /** The learning work's row and its first pass, which is not waited for, then the judge's row; then their one timer, whether or not the rows could be made. No run of the judge starts here. */
   async function startLearning(): Promise<void> {
-    if (learning === null || ending) return;
-    await guarded('start_step_failed', 'learning', () => learning.start());
+    if (learning === null || nightly === null || ending) return;
+    await guarded('start_step_failed', 'learning', async () => {
+      await learning.start();
+      await nightly.start();
+    });
     if (ending) return;
     learning.wake();
-    every(LEARN_MS, () => learning.tick());
+    every(LEARN_MS, async () => { await Promise.all([learning.tick(), nightly.tick()]); });
   }
   async function upkeep(): Promise<void> {
     if (ending) return;
@@ -381,6 +396,7 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps): Pr
   async function stopOnce(): Promise<void> {
     ending = true;
     learning?.stop();
+    nightly?.stop();
     for (const cancel of cancels) {
       try {
         cancel();
@@ -405,10 +421,11 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps): Pr
     } catch {
       // idle never rejects
     }
-    // A pass under way must not meet a closed database, and one that hangs must not hold the stop.
-    if (learning !== null) {
+    // A pass or a run under way must not meet a closed database, and one that hangs must not hold the stop: a run told
+    // to stop sends no statement after it, so a call of the judge under way is not waited for further.
+    if (learning !== null && nightly !== null) {
       try {
-        await within(CLOSE_WAIT_MS, learning.idle());
+        await within(CLOSE_WAIT_MS, Promise.all([learning.idle(), nightly.idle()]));
       } catch {
         // idle never rejects
       }

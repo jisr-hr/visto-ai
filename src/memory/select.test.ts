@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import type { MemoryBlocks } from '../engine/types.ts';
 import { MEMORY_NAME } from '../engine/context/memory.ts';
 import { countsOf, createMemory, dayStart, linesFor, readTime, RECORDS_READ, type LiveRecord, type RecordSource } from './select.ts';
+import { LESSONS_READ, type LiveLesson } from './lessons.ts';
 
 let serial = 0;
 function rec(number: number, path: string, createdAt: string, over: Partial<LiveRecord> = {}): LiveRecord {
@@ -374,4 +375,99 @@ test('a time the database cannot hold is no time', () => {
   assert.equal(readTime('0001-01-01T00:00:00Z'), Date.parse('0001-01-01T00:00:00Z'));
   assert.equal(readTime('2024-02-29T23:59:59Z'), Date.parse('2024-02-29T23:59:59Z'));
   assert.equal(readTime('2026-03-01T00:30:00+01:00'), Date.parse('2026-02-28T23:30:00Z'));
+});
+
+const lessonOf = (number: number, ref: string, createdAt: string, path = 'src/billing/tax.ts'): LiveLesson =>
+  ({ ref, number, path, text: 'Do not report a missing null check on what OrderStore.find returns: it throws.', createdAt });
+
+test('a memory made from a source with no lessons has no lessons function', async () => {
+  const records = [rec(8, 'src/billing/tax.ts', day(2))];
+  const memory = createMemory(source(records), 7);
+  assert.equal('lessons' in memory, false);
+  const got = await memory.blocks([file('src/billing/tax.ts')], AS_OF, signal);
+  assert.deepEqual(got.pullRequest.map((l) => l.ref), [records[0]!.ref]);
+  // A source that has lessons gives a memory that has them, and its blocks answer as before.
+  const both = createMemory({ ...source(records), lessons: async () => [] }, 7);
+  assert.equal(typeof both.lessons, 'function');
+  assert.deepEqual(await both.blocks([file('src/billing/tax.ts')], AS_OF, signal), got);
+});
+
+test('the lessons of the pull request the memory was made for are never shown', async () => {
+  const seven = lessonOf(7, '7:r1', day(3));
+  const eight = lessonOf(8, '8:r2', day(2));
+  const asked: Date[] = [];
+  const memory = createMemory({ live: async () => [], lessons: async (at) => { asked.push(at); return [seven, eight]; } }, 7);
+  const got = await memory.lessons!([file('src/billing/tax.ts')], AS_OF, signal);
+  assert.deepEqual(got, {
+    lessons: [{ ref: '8:r2', why: 'file', path: 'src/billing/tax.ts', day: '2026-03-02', text: eight.text }],
+    cut: { lessons: 0, names: 0, records: false },
+  });
+  assert.deepEqual(asked, [AS_OF]);
+});
+
+test('more lessons than are read: the newest are kept, and the answer says so', async () => {
+  const start = Date.parse('2026-01-01T00:00:00.000Z');
+  const many = Array.from({ length: LESSONS_READ + 1 }, (_, i) =>
+    lessonOf(8, `8:r${String(i).padStart(5, '0')}`, new Date(start + i * 60_000).toISOString(), 'lib/x.ts'));
+  const files = [file('lib/x.ts')];
+  // Handed oldest first, with one whose time cannot be read among them: keeping what comes first would keep the oldest.
+  const undated = lessonOf(8, '8:undated', '2026-03-10T01:00:00', 'lib/x.ts');
+  const memory = createMemory({ live: async () => [], lessons: async () => [...many.slice(0, 500), undated, ...many.slice(500)] }, 7);
+  const got = await memory.lessons!(files, AS_OF, signal);
+  assert.equal(got.cut.records, true);
+  assert.equal(got.cut.lessons, LESSONS_READ - 8);
+  assert.deepEqual(got.lessons.map((l) => l.ref), many.slice(-8).reverse().map((l) => l.ref));
+  // The oldest one is the one left out: with it alone gone, all that are read are counted.
+  const exact = createMemory({ live: async () => [], lessons: async () => many.slice(1) }, 7);
+  const fewer = await exact.lessons!(files, AS_OF, signal);
+  assert.equal(fewer.cut.records, false);
+  assert.deepEqual(fewer, { ...got, cut: { ...got.cut, records: false } });
+  // The lessons of the pull request under review are dropped before the read's limit is counted.
+  const withOwn = createMemory({ live: async () => [], lessons: async () => [...many.slice(1), lessonOf(7, '7:r', day(19), 'lib/x.ts')] }, 7);
+  assert.equal((await withOwn.lessons!(files, AS_OF, signal)).cut.records, false);
+  // One over the limit only by a lesson with no time: that one is the first left out, and every lesson that has one is read.
+  const one = createMemory({ live: async () => [], lessons: async () => [undated, ...many.slice(1)] }, 7);
+  const read = await one.lessons!(files, AS_OF, signal);
+  assert.equal(read.cut.records, true);
+  assert.equal(read.cut.lessons, LESSONS_READ - 8);
+});
+
+test('more records than are read, handed oldest first: the newest are kept, and one with no time is the first left out', async () => {
+  const base = Date.parse('2026-03-15T00:00:00.000Z');
+  // Oldest first; the oldest and the newest are on the changed file.
+  const make = (count: number) => Array.from({ length: count }, (_, i) =>
+    rec(100 + (i % 50), i === 0 || i === count - 1 ? 'src/billing/tax.ts' : 'src/cart/c.ts', new Date(base - (count - 1 - i) * 60_000).toISOString()));
+  const undated = rec(150, 'src/cart/c.ts', '2026-03-10T01:00:00');
+  const over = make(RECORDS_READ + 1);
+  const got = await blocksOf([...over.slice(0, 2_000), undated, ...over.slice(2_000)], [file('src/billing/tax.ts')]);
+  assert.equal(got.cut.records, true);
+  assert.deepEqual(got.pullRequest.map((l) => l.ref), [over[RECORDS_READ]!.ref]);   // the newest; the oldest was not read
+  const exact = make(RECORDS_READ);
+  const one = await blocksOf([undated, ...exact], [file('src/billing/tax.ts')]);
+  assert.equal(one.cut.records, true);
+  assert.deepEqual(one.pullRequest.map((l) => l.ref), [exact[RECORDS_READ - 1]!.ref, exact[0]!.ref]);   // the oldest was read: the one with no time was left out
+});
+
+test('the lessons passed over for a path that is not printable are counted through the memory', async () => {
+  const spaced = lessonOf(8, '8:r1', day(3), 'src/billing/my tax.ts');
+  const good = lessonOf(8, '8:r2', day(2));
+  const memory = createMemory({ live: async () => [], lessons: async () => [spaced, good] }, 7);
+  const got = await memory.lessons!([file('src/billing/tax.ts')], AS_OF, signal);
+  assert.deepEqual(got.cut, { lessons: 0, names: 1, records: false });
+  assert.deepEqual(got.lessons.map((l) => l.ref), ['8:r2']);
+});
+
+test('a source of lessons that hands over entries that are no object: they are passed over', async () => {
+  const good = lessonOf(8, '8:r2', day(2));
+  const junk = [null, 'x', 5, undefined] as unknown as LiveLesson[];
+  const memory = createMemory({ live: async () => [], lessons: async () => [...junk, good] }, 7);
+  const clean = createMemory({ live: async () => [], lessons: async () => [good] }, 7);
+  assert.deepEqual(await memory.lessons!([file('src/billing/tax.ts')], AS_OF, signal), await clean.lessons!([file('src/billing/tax.ts')], AS_OF, signal));
+});
+
+test('a source of lessons that rejects is passed on, and the blocks are not asked', async () => {
+  let live = 0;
+  const memory = createMemory({ live: async () => { live += 1; return []; }, lessons: async () => { throw new Error('lessons_down'); } }, 7);
+  await assert.rejects(memory.lessons!([file('src/billing/tax.ts')], AS_OF, signal), /lessons_down/);
+  assert.equal(live, 0);
 });

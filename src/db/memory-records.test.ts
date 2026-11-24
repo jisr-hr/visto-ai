@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { testDb } from './testing.ts';
-import { addRecords, liveRecords, liveRecordsWithin, retireExpired } from './memory-records.ts';
+import { addRecords, liveLessons, liveLessonsWithin, liveRecords, liveRecordsWithin, retireExpired, standingLessons } from './memory-records.ts';
 import type { NewRecord, RepoKey } from './memory-records.ts';
 
 const REPO: RepoKey = { service: 'github', owner: 'acme', repo: 'shop' };
@@ -214,5 +214,139 @@ test('a read within a limit sets the limit inside its transaction, and refuses a
     await assert.rejects(liveRecordsWithin(watched, REPO, 'human_signal', ms(T, DAY), 10, bad, 7), /bad_statement_limit/, String(bad));
     assert.deepEqual(seen, [], String(bad));
   }
+  await db.close();
+});
+
+const TAX_RULE = 'A rounding helper in billing is meant to round half up, by design.';
+const lesson = (over: Partial<NewRecord> = {}): NewRecord => record({
+  kind: 'lesson', sourceRef: '7:r-1', category: null, reason: null, missed: false,
+  excerpt: 'we round half up on purpose here', comment: 'r-1', lesson: TAX_RULE, expiresAt: ms(T, 90 * DAY), ...over,
+});
+
+test('a lesson is stored with its text, and a record added with no lesson key has none', async () => {
+  const db = await testDb();
+  assert.equal(await addRecords(db, REPO, [lesson(), record()]), 2);
+  assert.deepEqual(await db.query('select kind, lesson, excerpt, comment from visto_ai.memory_records order by kind'), [
+    { kind: 'human_signal', lesson: null, excerpt: 'this rounds before the discount', comment: 'c-1' },
+    { kind: 'lesson', lesson: TAX_RULE, excerpt: 'we round half up on purpose here', comment: 'r-1' },
+  ]);
+  await db.close();
+});
+
+test('the live lessons are read with their text, newest first, and a signal is never read as one', async () => {
+  const db = await testDb();
+  await addRecords(db, REPO, [
+    lesson({ sourceRef: '7:r-1', lesson: 'first rule of the billing module, kept as it is' }),
+    lesson({ sourceRef: '7:r-2', createdAt: ms(T, 1000), lesson: 'second rule of the billing module, kept as it is' }),
+    lesson({ sourceRef: '7:r-3', createdAt: ms(T, 2000), path: 'src/cart/cart.ts', directory: 'src/cart', lesson: 'third rule of the cart module, kept as it is' }),
+    record({ sourceRef: '7:h9', createdAt: ms(T, 3000), lesson: 'a signal that carries a text is still no lesson at all' }),
+  ]);
+  const rows = await liveLessons(db, REPO, ms(T, DAY), 2);
+  assert.deepEqual(Object.keys(rows[0]!).sort(), ['createdAt', 'id', 'lesson', 'number', 'path', 'sourceRef']);
+  assert.deepEqual(rows.map((r) => ({ ...r, id: 0 })), [
+    { id: 0, sourceRef: '7:r-3', number: 7, path: 'src/cart/cart.ts', lesson: 'third rule of the cart module, kept as it is', createdAt: ms(T, 2000) },
+    { id: 0, sourceRef: '7:r-2', number: 7, path: 'src/billing/tax.ts', lesson: 'second rule of the billing module, kept as it is', createdAt: ms(T, 1000) },
+  ]);
+  assert.deepEqual((await liveLessons(db, REPO, ms(T, DAY), 10)).map((r) => r.sourceRef), ['7:r-3', '7:r-2', '7:r-1']);
+  await db.close();
+});
+
+test('a lesson is live from the time it was made until it expires, and a disabled one, one with no text and one with no path are not read', async () => {
+  const db = await testDb();
+  await addRecords(db, REPO, [
+    lesson(),
+    lesson({ sourceRef: '7:r-2' }),
+    lesson({ sourceRef: '7:r-3', lesson: null }),
+    lesson({ sourceRef: '7:r-4', path: null, directory: null }),
+  ]);
+  await db.query("update visto_ai.memory_records set status = 'disabled' where source_ref = '7:r-2'");
+  assert.deepEqual(await liveLessons(db, REPO, ms(T, -1), 10), []);
+  assert.deepEqual((await liveLessons(db, REPO, T, 10)).map((r) => r.sourceRef), ['7:r-1']);
+  assert.deepEqual((await liveLessons(db, REPO, ms(T, 90 * DAY - 1), 10)).map((r) => r.sourceRef), ['7:r-1']);
+  assert.deepEqual(await liveLessons(db, REPO, ms(T, 90 * DAY), 10), []);
+  assert.deepEqual(await db.query("select status from visto_ai.memory_records where source_ref = '7:r-1'"), [{ status: 'active' }]);
+  await db.close();
+});
+
+test('the lessons of the pull request left out take no place in the read', async () => {
+  const db = await testDb();
+  await addRecords(db, REPO, [
+    lesson({ sourceRef: '8:r-1', number: 8 }),
+    lesson({ sourceRef: '7:r-2', createdAt: ms(T, 1000) }),
+    lesson({ sourceRef: '7:r-3', createdAt: ms(T, 2000) }),
+  ]);
+  assert.deepEqual((await liveLessons(db, REPO, ms(T, DAY), 1, 7)).map((r) => r.sourceRef), ['8:r-1']);
+  assert.deepEqual((await liveLessons(db, REPO, ms(T, DAY), 1)).map((r) => r.sourceRef), ['7:r-3']);
+  await db.close();
+});
+
+test('the standing lessons are the active and the disabled ones that have not expired', async () => {
+  const db = await testDb();
+  await addRecords(db, REPO, [
+    lesson({ sourceRef: '7:r-1', lesson: 'the active rule, which still stands for now' }),
+    lesson({ sourceRef: '7:r-2', createdAt: ms(T, 1000), lesson: 'the disabled rule, which still stands for now' }),
+    lesson({ sourceRef: '7:r-3', createdAt: ms(T, 2000), lesson: 'the rule expired by its status alone' }),
+    lesson({ sourceRef: '7:r-4', createdAt: ms(T, 3000), expiresAt: ms(T, DAY), lesson: 'the rule whose expiry is behind' }),
+    record({ sourceRef: '7:h1', createdAt: ms(T, 4000), lesson: 'a signal that carries a text is still no lesson at all' }),
+  ]);
+  await db.query("update visto_ai.memory_records set status = 'disabled' where source_ref = '7:r-2'");
+  await db.query("update visto_ai.memory_records set status = 'expired' where source_ref = '7:r-3'");
+  assert.deepEqual(await standingLessons(db, REPO, ms(T, 2 * DAY), 10),
+    ['the disabled rule, which still stands for now', 'the active rule, which still stands for now']);
+  assert.deepEqual(await standingLessons(db, REPO, ms(T, 2 * DAY), 1), ['the disabled rule, which still stands for now']);
+  await db.close();
+});
+
+test('a read of lessons within a limit sets it inside its transaction, and refuses a limit that is no whole number above 0', async () => {
+  const db = await testDb();
+  await addRecords(db, REPO, [lesson({ sourceRef: '7:r-1', number: 7 }), lesson({ sourceRef: '8:r-1', number: 8 })]);
+  const setting = async (): Promise<string> => (await db.query<{ setting: string }>("select setting from pg_settings where name = 'statement_timeout'"))[0]!.setting;
+  const outside = await setting();
+  const seen: string[] = [];
+  const watched = {
+    ...db,
+    query: db.query.bind(db), script: db.script.bind(db), close: db.close.bind(db),
+    transaction: <R>(work: (tx: typeof db) => Promise<R>) => db.transaction((tx) => work({
+      query: async <Row>(text: string, params?: unknown[]) => {
+        const rows = await tx.query<Row>(text, params);
+        seen.push((await tx.query<{ setting: string }>("select setting from pg_settings where name = 'statement_timeout'"))[0]!.setting);
+        return rows;
+      },
+      script: (sql: string) => tx.script(sql), close: () => tx.close(), transaction: (w) => tx.transaction(w),
+    })),
+  };
+  const rows = await liveLessonsWithin(watched, REPO, ms(T, DAY), 10, 1234, 7);
+  assert.deepEqual(rows.map((r) => r.sourceRef), ['8:r-1']);
+  assert.deepEqual(seen, ['1234', '1234']);
+  assert.equal(await setting(), outside);
+  for (const bad of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, '5' as unknown as number, null as unknown as number]) {
+    seen.length = 0;
+    await assert.rejects(liveLessonsWithin(watched, REPO, ms(T, DAY), 10, bad, 7), /bad_statement_limit/, String(bad));
+    assert.deepEqual(seen, [], String(bad));
+  }
+  await db.close();
+});
+
+test('the standing lessons are read for a repository named in any case, end at their expiry, need a text, and two made at once come newest id first', async () => {
+  const db = await testDb();
+  await addRecords(db, REPO, [
+    lesson({ sourceRef: '7:r-1', lesson: 'the first rule stored, made at the same time' }),
+    lesson({ sourceRef: '7:r-2', lesson: 'the second rule stored, made at the same time' }),
+    lesson({ sourceRef: '7:r-3', createdAt: ms(T, 1000), expiresAt: ms(T, 2 * DAY), lesson: 'the rule whose expiry is the time asked' }),
+    lesson({ sourceRef: '7:r-4', createdAt: ms(T, 2000), lesson: null }),
+  ]);
+  const upper: RepoKey = { service: 'github', owner: 'Acme', repo: 'Shop' };
+  assert.deepEqual(await standingLessons(db, upper, ms(T, 2 * DAY), 10),
+    ['the second rule stored, made at the same time', 'the first rule stored, made at the same time']);
+  assert.deepEqual(await standingLessons(db, REPO, ms(T, 2 * DAY - 1), 10), [
+    'the rule whose expiry is the time asked', 'the second rule stored, made at the same time', 'the first rule stored, made at the same time',
+  ]);
+  await db.close();
+});
+
+test('two live lessons made at the same time come newest id first', async () => {
+  const db = await testDb();
+  await addRecords(db, REPO, [lesson({ sourceRef: '7:r-1' }), lesson({ sourceRef: '7:r-2' })]);
+  assert.deepEqual((await liveLessons(db, REPO, ms(T, DAY), 10)).map((r) => r.sourceRef), ['7:r-2', '7:r-1']);
   await db.close();
 });

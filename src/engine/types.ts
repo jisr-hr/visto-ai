@@ -129,12 +129,25 @@ export interface MemoryBlocks {
   // What was left out: by the fixed sizes; `names`, because a path or a directory is not printable; `records`, because the repository has more records than are read.
   cut: { directories: number; categories: number; lines: number; names: number; records: boolean };
 }
+/** One lesson, as a memory hands it over. Its text is words a model wrote from a person's reply: the engine cleans it, checks it and shows it only between data markers. */
+export interface MemoryLesson {
+  ref: string;                             // the record's source reference, for the audit; never shown to the model
+  why: 'file' | 'directory' | 'type';      // what it shares with the files under review
+  path: string;                            // the file the finding was on
+  day: string;                             // YYYY-MM-DD, UTC: the day the lesson is live from
+  text: string;
+}
+export interface MemoryLessons { lessons: MemoryLesson[]; cut: { lessons: number; names: number; records: boolean } }   // in the order shown
 export interface Memory {
   /** The two blocks for these files as of that time (7.4). Reads only. May reject or never settle: the engine bounds it. */
   blocks(files: Array<{ path: string; previousPath: string | null }>, asOf: Date, signal: AbortSignal): Promise<MemoryBlocks>;
+  /** The lessons for these files as of that time (7.4). Absent: the memory has no lessons, and a review is what it was. Reads only. May reject or never settle. */
+  lessons?(files: Array<{ path: string; previousPath: string | null }>, asOf: Date, signal: AbortSignal): Promise<MemoryLessons>;
 }
 export type MemoryState = 'ok' | 'empty' | 'skipped' | 'error';
-export interface MemoryStatus { status: MemoryState; code: string; lines: number }   // code: a short code; lines: the lines shown
+export interface LessonsStatus { status: MemoryState; code: string; shown: number }   // code: a short code; shown: the lessons shown
+// lessons: absent when the memory has no `lessons`, and when the review ended before they were asked.
+export interface MemoryStatus { status: MemoryState; code: string; lines: number; lessons?: LessonsStatus }   // code: a short code; lines: the lines shown
 
 export interface ReviewDeps {
   source: Source;

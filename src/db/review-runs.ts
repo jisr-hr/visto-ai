@@ -158,12 +158,24 @@ export async function lastPublishedRun(db: Db, ref: PullRequestRef): Promise<Sto
   return rows[0] === undefined ? null : toRun(rows[0], r);
 }
 
-/** The summed cost of the runs started at or after `since`. 0 when there are none. */
+/** The summed cost of the runs started, and of the judge's calls made, at or after `since`. 0 when there are none. */
 export async function spentSince(db: Db, since: string): Promise<number> {
   const rows = await db.query<{ spent: number }>(
-    'select coalesce(sum(cost), 0)::float8 as spent from visto_ai.review_runs where started_at >= $1::timestamptz',
+    `select ((select coalesce(sum(cost), 0) from visto_ai.review_runs where started_at >= $1::timestamptz)
+           + (select coalesce(sum(cost), 0) from visto_ai.judge_calls where at >= $1::timestamptz))::float8 as spent`,
     [since]);
   return rows[0]!.spent;
+}
+
+/** One call of the judge, for that reply of that pull request. Counts are rounded; a count or a cost that is no finite number at or above 0 is stored as 0. */
+export async function recordJudgeCall(db: Db, ref: PullRequestRef, reply: string, at: string, usage: RunUsage): Promise<void> {
+  await db.query(
+    `insert into visto_ai.judge_calls (service, owner, repo, number, reply, at, calls, input_tokens, output_tokens, cached_tokens, cost)
+     values ($1, $2, $3, $4, $5, $6::timestamptz, $7, $8, $9, $10, $11)`,
+    [
+      ref.service, storable(ref.owner).toLowerCase(), storable(ref.repo).toLowerCase(), ref.number, storable(reply), at,
+      count(usage.calls), count(usage.inputTokens), count(usage.outputTokens), count(usage.cachedTokens), amount(usage.cost),
+    ]);
 }
 
 /** Whether the pull request has a run at this head, of the same kind (dry or live), whatever its outcome; a run whose job ended dropped as superseded does not count. */

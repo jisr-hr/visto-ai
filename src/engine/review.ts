@@ -6,6 +6,8 @@ import { extensionPart, gatherContext } from './context/extensions.ts';
 import type { ExtensionContext } from './context/extensions.ts';
 import { changedLines, leftBlocksOf } from './context/increment.ts';
 import type { Changed } from './context/increment.ts';
+import { askLessons } from './context/lessons.ts';
+import type { LessonsContext } from './context/lessons.ts';
 import { askMemory } from './context/memory.ts';
 import type { MemoryContext } from './context/memory.ts';
 import { renderAnchoredDiff } from './context/diff.ts';
@@ -35,7 +37,7 @@ import { shownOf } from './score/shown.ts';
 import type { ScoredBy, ScoreEntry, ScoreHistory } from './score/types.ts';
 import { askScorer, summariesOf } from './scorer/ask.ts';
 import type {
-  AcceptanceRow, AuditEntry, ChangedFile, Discussed, EarlierThread, Effort, ExtensionStatus, Finding, MemoryStatus, NotReviewed, PullRequestInfo, RepoConfig, ReviewDeps, ReviewInput, ReviewResult,
+  AcceptanceRow, AuditEntry, ChangedFile, Discussed, EarlierThread, Effort, ExtensionStatus, Finding, LessonsStatus, Memory, MemoryStatus, NotReviewed, PullRequestInfo, RepoConfig, ReviewDeps, ReviewInput, ReviewResult,
   Severity, Side, Source, ToolDefinition, Usage,
 } from './types.ts';
 
@@ -128,6 +130,7 @@ interface Run {
   withAcceptance: boolean; // the criteria are shown: the run's calls take the tool with rows
   tools: Offered | undefined; // the servers' tools, when the review offers them; undefined when it offers none
   memory: MemoryContext | undefined; // where people stepped in before, as it is shown in every call; undefined when nothing is
+  lessons: LessonsContext | undefined; // lessons from earlier reviews, as they are shown in every call; undefined when none are
 }
 
 // The tools a review offers, shared by its batches: one count of calls for the whole review (5.4, 12).
@@ -163,6 +166,7 @@ async function oneCall(run: Run, files: FileContext[], firstFileNumber: number, 
     batchIndex, batchCount: run.batchCount, token: run.token, ...(run.lastOverview === undefined ? {} : { lastOverview: run.lastOverview }),
     ...(run.extension === undefined ? {} : { extension: run.extension }),
     ...(run.memory === undefined ? {} : { memory: run.memory }),
+    ...(run.lessons === undefined ? {} : { lessons: run.lessons }),
   });
   const answer = await callBatch(
     { messages, effort: run.effort, timeoutMs: run.limits.modelTimeoutSeconds * 1000, prPaths: files.map((f) => f.file.path), ...(run.withThreads ? { withThreads: true } : {}),
@@ -403,6 +407,53 @@ async function chooseMemory(
   return { packed: again, shown: context, status: asked.status, audit };
 }
 
+/**
+ * Asks for lessons once, for the files of the first packing, after memory, and shows them only when packing the files with
+ * them and the memory shown counted cuts nothing more and leaves nothing more unreviewed than the packing memory chose
+ * (5.3, call 19). With a second scorer too (call 20). Never rejects, never fails a review.
+ */
+async function chooseLessons(
+  deps: ReviewDeps, first: Packing, chosen: Packing, asOf: Date, budgetWith: (shown: LessonsContext) => number, pack: (budget: number) => Packing,
+): Promise<{ packed: Packing; shown: LessonsContext | undefined; status: LessonsStatus | undefined; audit: AuditEntry[] }> {
+  const memory = deps.memory;
+  if (memory === undefined) return { packed: chosen, shown: undefined, status: undefined, audit: [] };
+  const failed = (): { packed: Packing; shown: undefined; status: LessonsStatus; audit: AuditEntry[] } => ({
+    packed: chosen, shown: undefined, status: { status: 'error', code: 'lookup_failed', shown: 0 },
+    audit: [{ stage: 'context', action: 'lessons_failed', subject: 'lessons', reason: 'lookup_failed' }],
+  });
+  // Read once, inside a guard: a getter may throw, or answer otherwise the second time.
+  let lessons: unknown;
+  try {
+    lessons = memory.lessons;
+  } catch {
+    return failed();
+  }
+  if (typeof lessons !== 'function') return { packed: chosen, shown: undefined, status: undefined, audit: [] };
+  const ask = lessons as NonNullable<Memory['lessons']>;
+  // What was read is handed on, so that the lookup does not read the memory's property again; it is called on the memory.
+  const once: Memory = { blocks: () => Promise.reject(new Error('not_asked')), lessons: (files, asOf, signal) => ask.call(memory, files, asOf, signal) };
+  if (first.batches.length === 0) return { packed: chosen, shown: undefined, status: { status: 'skipped', code: 'no_model_call', shown: 0 }, audit: [] };
+  const files = first.batches.flatMap((b) => b.files).map((c) => ({ path: c.file.path, previousPath: c.file.previousPath }));
+  let asked: Awaited<ReturnType<typeof askLessons>>;
+  try {
+    asked = await askLessons(once, files, asOf);
+  } catch {
+    // askLessons never rejects; guarded all the same, as memory's lookup is.
+    asked = { context: undefined, status: { status: 'error', code: 'lookup_failed', shown: 0 }, audit: [{ stage: 'context', action: 'lessons_failed', subject: 'lessons', reason: 'lookup_failed' }] };
+  }
+  const audit = [...asked.audit];
+  const context = asked.context;
+  if (context === undefined) return { packed: chosen, shown: undefined, status: asked.status, audit };
+  const budget = budgetWith(context);
+  const again = budget > 0 ? pack(budget) : null;
+  if (again === null || JSON.stringify([again.notReviewed, again.audit]) !== JSON.stringify([chosen.notReviewed, chosen.audit])) {
+    audit.push({ stage: 'context', action: 'lessons_cut', subject: 'lessons', reason: 'over_call_budget' });
+    return { packed: chosen, shown: undefined, status: { status: 'skipped', code: 'no_room', shown: 0 }, audit };
+  }
+  for (const one of context.lessons) audit.push({ stage: 'context', action: 'lesson_shown', subject: inlineText(one.ref), reason: one.why });
+  return { packed: again, shown: context, status: asked.status, audit };
+}
+
 export async function review(input: ReviewInput, deps: ReviewDeps): Promise<ReviewResult> {
   // Set once the providers are asked, or the servers opened: every result returned from then on says how each of them did.
   const asked: Asked = {};
@@ -533,11 +584,18 @@ async function reviewOnce(input: ReviewInput, deps: ReviewDeps, asked: Asked): P
       (b) => packBatches(plan.send, b, input.limits.batchesPerReview),
     );
     if (remembered.status !== undefined) asked.memory = remembered.status;
+    // Lessons are fitted after memory, whatever it decided, and before extension context and the tools, which then count them (call 19).
+    const taught = await chooseLessons(
+      deps, firstPacking, remembered.packed, input.asOf,
+      (shown) => input.limits.inputTokensPerCall - fixedTokens(deps.contract, pr, withThreads, lastOverview, undefined, remembered.shown, shown),
+      (b) => packBatches(plan.send, b, input.limits.batchesPerReview),
+    );
+    if (taught.status !== undefined && asked.memory !== undefined) asked.memory = { ...asked.memory, lessons: taught.status };
     const room = extension === undefined
-      ? { packed: remembered.packed, shown: undefined, audit: [] }
+      ? { packed: taught.packed, shown: undefined, audit: [] }
       : chooseRoom(
-        extension, remembered.packed,
-        (shown) => input.limits.inputTokensPerCall - fixedTokens(deps.contract, pr, withThreads, lastOverview, shown, remembered.shown),
+        extension, taught.packed,
+        (shown) => input.limits.inputTokensPerCall - fixedTokens(deps.contract, pr, withThreads, lastOverview, shown, remembered.shown, taught.shown),
         (b) => packBatches(plan.send, b, input.limits.batchesPerReview),
       );
     let packed = room.packed;
@@ -552,7 +610,7 @@ async function reviewOnce(input: ReviewInput, deps: ReviewDeps, asked: Asked): P
       toolsAudit.push(...opened.audit);
       if (opened.definitions.length > 0) {
         const system = `${deps.contract}\n\n${TOOL_RULES}`;
-        const withTools = input.limits.inputTokensPerCall - fixedTokens(system, pr, withThreads, lastOverview, room.shown, remembered.shown) - toolRoomTokens(opened.definitions);
+        const withTools = input.limits.inputTokensPerCall - fixedTokens(system, pr, withThreads, lastOverview, room.shown, remembered.shown, taught.shown) - toolRoomTokens(opened.definitions);
         const again = withTools > 0 ? packBatches(plan.send, withTools, input.limits.batchesPerReview) : null;
         if (again !== null && JSON.stringify([again.notReviewed, again.audit]) === JSON.stringify([packed.notReviewed, packed.audit])) {
           packed = again;
@@ -566,7 +624,7 @@ async function reviewOnce(input: ReviewInput, deps: ReviewDeps, asked: Asked): P
       // `review`'s finally then has nothing left to end.
       if (offered === undefined) await opened.close();
     }
-    audit.push(...built.audit, ...reuseAudit, ...attached.audit, ...leftOutAudit, ...packed.audit, ...remembered.audit, ...room.audit, ...toolsAudit);
+    audit.push(...built.audit, ...reuseAudit, ...attached.audit, ...leftOutAudit, ...packed.audit, ...remembered.audit, ...taught.audit, ...room.audit, ...toolsAudit);
     // A covered file that found no room was read, as it is, by an earlier review: it is left out too.
     const roomless = plan.send.filter((c) => c.kept?.covered === true && packed.notReviewed.some((n) => n.path === c.file.path && n.reason === 'over_batch_limit'));
     audit.push(...roomless.flatMap(leaveOut));
@@ -595,6 +653,7 @@ async function reviewOnce(input: ReviewInput, deps: ReviewDeps, asked: Asked): P
       effort: chooseEffort(pr, files, input.repoConfig), token: deps.token(), pr, deps,
       fileCount: packed.batches.reduce((n, b) => n + b.files.length, 0), batchCount: packed.batches.length, withThreads, lastOverview,
       extension: room.shown, withAcceptance: (room.shown?.criteria.length ?? 0) > 0, tools: offered, memory: remembered.shown,
+      lessons: taught.shown,
     };
     const firsts: number[] = [];
     let seen = 0;

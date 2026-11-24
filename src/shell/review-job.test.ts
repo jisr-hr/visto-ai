@@ -2499,3 +2499,91 @@ test('a memory health that returns a rejected promise leaves no rejection unhand
     process.off('unhandledRejection', listener);
   }
 });
+
+test('with learning off the review line and the alerts are those of before', async () => {
+  const alerts: unknown[][] = [];
+  const health = createMemoryHealth((code, details) => { alerts.push([code, details]); });
+  for (const [number, dryRun] of [[100, true], [101, false]] as const) {
+    const h = await harness({ pullRequest: number, dryRun });
+    await runReviewJob(h.job, { ...h.deps, memoryHealth: health });
+    assert.equal(h.engines.length, 1);
+    assert.equal('memory' in h.engines[0]!, false, String(number));
+    assert.deepEqual(Object.keys(reviewLine(h)), REVIEW_LINE_KEYS, String(number));
+    assert.equal('memory' in reviewLine(h), false, String(number));
+  }
+  assert.deepEqual(alerts, []);
+});
+
+test('a status with no lessons part logs as it did, and a damaged part is not logged', async () => {
+  const signals: MemoryStatus = { status: 'ok', code: 'ok', lines: 2 };
+  let number = 110;
+  for (const lessons of [undefined, 'x', { status: 'fine' }, { status: 'fine', code: 'ok', shown: 0 }, { status: 'ok', code: 'ok', shown: -1 }, { status: 'ok', code: 'ok', shown: 1.5 }, { status: 'ok', code: 'Not A Code', shown: 0 }, null, []]) {
+    number += 1;
+    const memory = lessons === undefined ? signals : { ...signals, lessons };
+    const dependencies = { model: 'ok', memory } as unknown as ReviewResult['dependencies'];
+    const told: unknown[][] = [];
+    const h = await harness({ pullRequest: number, result: okResult({ dependencies }) });
+    await runReviewJob(h.job, { ...h.deps, memoryHealth: memoryHealthInto(told) });
+    assert.deepEqual(reviewLine(h).memory, signals, JSON.stringify(lessons));
+    assert.deepEqual(Object.keys(reviewLine(h).memory as object), ['status', 'code', 'lines'], JSON.stringify(lessons));
+    assert.deepEqual(told, [[true, 'ok']], JSON.stringify(lessons));
+  }
+  // a stored result written before this plan, read by a later start
+  await recorded({ ref: { ...REF, number: 130 }, result: okResult({ dependencies: { model: 'ok', memory: signals } }) });
+  const resumed = await live({ pullRequest: 130 });
+  await runReviewJob(resumed.job, resumed.deps);
+  assert.deepEqual([reviewLine(resumed).memory, reviewLine(resumed).resumed], [signals, true]);
+});
+
+test('the review line carries how each part of memory did', async () => {
+  const memory: MemoryStatus = { status: 'skipped', code: 'second_scorer', lines: 0, lessons: { status: 'ok', code: 'ok', shown: 3 } };
+  for (const [number, dryRun] of [[140, true], [141, false]] as const) {
+    const h = await harness({ pullRequest: number, dryRun, result: okResult({ dependencies: { model: 'ok', memory } }) });
+    await runReviewJob(h.job, h.deps);
+    assert.deepEqual(reviewLine(h).memory, memory, String(number));
+    const keys = Object.keys(reviewLine(h));
+    assert.deepEqual(keys.slice(keys.indexOf('extensions')), ['extensions', 'memory']);
+  }
+  // a part with a key too many is logged with its three keys, and nothing else of it
+  const extra = { status: 'ok', code: 'ok', lines: 1, lessons: { status: 'ok', code: 'ok', shown: 2, text: 'octo-lead wrote src/billing/tax.ts' } };
+  const wide = await harness({ pullRequest: 143, result: okResult({ dependencies: { model: 'ok', memory: extra } as unknown as ReviewResult['dependencies'] }) });
+  await runReviewJob(wide.job, wide.deps);
+  assert.deepEqual(reviewLine(wide).memory, { status: 'ok', code: 'ok', lines: 1, lessons: { status: 'ok', code: 'ok', shown: 2 } });
+  assert.deepEqual(Object.keys((reviewLine(wide).memory as { lessons: object }).lessons), ['status', 'code', 'shown']);
+  assert.equal(JSON.stringify(reviewLine(wide)).includes('octo-lead'), false);
+  // a review an earlier start recorded: its line carries what it stored
+  await recorded({ ref: { ...REF, number: 142 }, result: okResult({ dependencies: { model: 'ok', memory } }) });
+  const resumed = await live({ pullRequest: 142 });
+  await runReviewJob(resumed.job, resumed.deps);
+  assert.deepEqual([reviewLine(resumed).memory, reviewLine(resumed).resumed], [memory, true]);
+});
+
+test('the health is told once for a review: an error of either part is a failure, and both skipped tells nothing', async () => {
+  const cases: Array<[MemoryStatus, unknown[][]]> = [
+    [{ status: 'ok', code: 'ok', lines: 2, lessons: { status: 'error', code: 'timeout', shown: 0 } }, [[false, 'timeout']]],
+    [{ status: 'skipped', code: 'second_scorer', lines: 0, lessons: { status: 'ok', code: 'ok', shown: 2 } }, [[true, 'ok']]],
+    [{ status: 'error', code: 'lookup_failed', lines: 0, lessons: { status: 'ok', code: 'ok', shown: 2 } }, [[false, 'lookup_failed']]],
+    [{ status: 'skipped', code: 'no_room', lines: 0, lessons: { status: 'skipped', code: 'no_room', shown: 0 } }, []],
+    [{ status: 'error', code: 'timeout', lines: 0, lessons: { status: 'error', code: 'lookup_failed', shown: 0 } }, [[false, 'timeout']]],
+    [{ status: 'skipped', code: 'second_scorer', lines: 0, lessons: { status: 'empty', code: 'no_lessons', shown: 0 } }, [[true, 'no_lessons']]],
+    // the code of the first part that was asked
+    [{ status: 'ok', code: 'ok', lines: 2, lessons: { status: 'empty', code: 'no_lessons', shown: 0 } }, [[true, 'ok']]],
+  ];
+  let number = 150;
+  for (const [memory, expected] of cases) {
+    for (const dryRun of [true, false]) {
+      number += 1;
+      const told: unknown[][] = [];
+      const h = await harness({ pullRequest: number, dryRun, result: okResult({ dependencies: { model: 'ok', memory } }) });
+      await runReviewJob(h.job, { ...h.deps, memoryHealth: memoryHealthInto(told) });
+      assert.deepEqual(told, expected, `${JSON.stringify(memory)} ${dryRun}`);
+    }
+  }
+  // a review an earlier start recorded tells nothing
+  const memory: MemoryStatus = { status: 'ok', code: 'ok', lines: 1, lessons: { status: 'error', code: 'timeout', shown: 0 } };
+  await recorded({ ref: { ...REF, number: 170 }, result: okResult({ dependencies: { model: 'ok', memory } }) });
+  const told: unknown[][] = [];
+  const resumed = await live({ pullRequest: 170 });
+  await runReviewJob(resumed.job, { ...resumed.deps, memoryHealth: memoryHealthInto(told) });
+  assert.deepEqual([resumed.inputs.length, told], [0, []]);
+});

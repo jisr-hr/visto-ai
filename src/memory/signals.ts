@@ -77,12 +77,12 @@ function htmlDepth(line: string): { opens: number; net: number } {
 }
 
 /**
- * The start of what a comment says in its writer's own words, one line, cut. Left out: fenced blocks (closed only by a
+ * What a comment says in its writer's own words, with its line feeds. Left out: fenced blocks (closed only by a
  * line of the same character, at least as long, with nothing after it; an unclosed fence takes the rest), quoted lines
  * (after any list markers, at any depth) and the lines right after them up to a blank line, and html quotes and details
  * through their closing tag (an unclosed one takes the rest).
  */
-export function excerptOf(body: string): string {
+export function ownWords(body: string): string {
   if (typeof body !== 'string') return '';
   // Invisible characters are stripped before lines are read, so that one cannot hide a quote or a fence.
   const lines = stripControl(body.replace(LINE_ENDS, '\n')).text.split('\n');
@@ -119,7 +119,12 @@ export function excerptOf(body: string): string {
     quoted = false;
     kept.push(line);
   }
-  return cleanLine(kept.join('\n'), EXCERPT_CHARS).text;
+  return kept.join('\n');
+}
+
+/** The start of what a comment says in its writer's own words, one line, cut: `ownWords` cleaned to one line of EXCERPT_CHARS. */
+export function excerptOf(body: string): string {
+  return cleanLine(ownWords(body), EXCERPT_CHARS).text;
 }
 
 /** Whether the comment is by a person with access who is not the author, on a file. Its thread is not looked at here. */

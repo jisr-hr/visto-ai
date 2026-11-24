@@ -5,6 +5,8 @@ import { buildFileContexts, hunksOf } from './context/build.ts';
 import { ANCHOR_LEGEND } from './context/diff.ts';
 import { ACCEPTANCE_HEADING, ACCEPTANCE_RULES, EXTENSION_LINE, extensionPart } from './context/extensions.ts';
 import type { ExtensionContext } from './context/extensions.ts';
+import { LESSON_RULES, lessonsPart } from './context/lessons.ts';
+import type { LessonsContext } from './context/lessons.ts';
 import { memoryParts } from './context/memory.ts';
 import type { MemoryContext } from './context/memory.ts';
 import { buildMessages, fixedTokens } from './context/prompt.ts';
@@ -18,7 +20,7 @@ import { blocksOf, fileDiffHash } from './score/blocks.ts';
 import { shownOf } from './score/shown.ts';
 import type { BlockScore, ScoreEntry, ScoreHistory } from './score/types.ts';
 import type {
-  ChangedFile, ContextProvider, EarlierThread, McpAnswer, McpServer, McpSession, Memory, MemoryBlocks, MemoryLine, ModelClient, ModelRequest, ModelResponse, PullRequestInfo, RepoConfig,
+  ChangedFile, ContextProvider, EarlierThread, McpAnswer, McpServer, McpSession, Memory, MemoryBlocks, MemoryLesson, MemoryLessons, MemoryLine, ModelClient, ModelRequest, ModelResponse, PullRequestInfo, RepoConfig,
   ReviewDeps, ReviewInput, ReviewResult, ScoreAnswer, ScoreRequest, Scorer, Severity, Source, ToolCall, ToolDefinition, Usage,
 } from './types.ts';
 
@@ -2981,4 +2983,460 @@ test('the stub answers each batch from its own files, whatever paths the memory 
   assert.ok(d.model.requests.every((q) => q.messages[2]!.content.includes('changed | `src/b.ts`') && !q.messages[2]!.content.includes('src/a.ts')));
   assert.deepEqual(r.findings.map((f) => f.path), ['src/a.ts']);
   assert.deepEqual([r.overview.includes('src/a.ts has a problem.'), r.overview.includes('src/b.ts is fine.')], [true, true]);
+});
+
+// Lessons: sentences a model wrote from people's replies, shown to later reviews as data (7.2 to 7.4).
+const lesson = (over: Partial<MemoryLesson> = {}): MemoryLesson => ({
+  ref: '7:101', why: 'file', path: 'src/a.ts', day: '2026-03-10',
+  text: 'Do not report a missing null check on what OrderStore.find returns: it throws when nothing is found.', ...over,
+});
+const twoLessons = [
+  lesson(),
+  lesson({ ref: '7:102', why: 'directory', path: 'src/cart/add.ts', day: '2026-03-02', text: 'A retry around the payment client is no finding here: the client already retries three times.' }),
+];
+const noLessonCut = { lessons: 0, names: 0, records: false };
+const lessonsOf = (lessons: MemoryLesson[], cut = noLessonCut): MemoryLessons => ({ lessons, cut });
+const taughtCtx = (answer: MemoryLessons): LessonsContext => ({ lessons: answer.lessons });
+// A memory with both parts, recording the calls of each.
+function teaching(blocks: MemoryBlocks, answer: MemoryLessons | (() => Promise<MemoryLessons>)):
+  Memory & { calls: Array<[MemoryFiles, Date]>; lessonCalls: Array<[MemoryFiles, Date, AbortSignal]> } {
+  const calls: Array<[MemoryFiles, Date]> = [];
+  const lessonCalls: Array<[MemoryFiles, Date, AbortSignal]> = [];
+  return {
+    calls, lessonCalls,
+    blocks: async (files, asOf) => { calls.push([files, asOf]); return blocks; },
+    lessons: async (files, asOf, signal) => { lessonCalls.push([files, asOf, signal]); return typeof answer === 'function' ? answer() : answer; },
+  };
+}
+const withoutLessons = (r: ReviewResult): ReviewResult => {
+  if (r.dependencies.memory === undefined) return r;
+  const memory = { ...r.dependencies.memory };
+  delete memory.lessons;
+  return { ...r, dependencies: { ...r.dependencies, memory } };
+};
+const lessonTokens = (answer: MemoryLessons): number =>
+  fixedTokens(CONTRACT, own.pullRequest, false, undefined, undefined, undefined, taughtCtx(answer)) - fixedTokens(CONTRACT, own.pullRequest);
+
+test('with a memory that has no lessons the requests, the result and the log are those of before', async () => {
+  const answer = memoryAnswer(twoLines);
+  const lim = await memoryRoom(answer, 1.5);
+  const d = deps({ files: [fileA, fileB], answerFor: { 'src/a.ts': answerOnA, 'src/b.ts': answerOnB }, memory: memoryOf(answer) });
+  const r = await review(lim, d);
+  assert.equal('lessons' in r.dependencies.memory!, false);
+  assert.deepEqual(r.dependencies, { model: 'ok', memory: { status: 'ok', code: 'ok', lines: 2 } });
+  const built = await buildFileContexts(own.pullRequest, [fileA, fileB], d.source);
+  assert.equal(d.model.requests.length, 2);
+  d.model.requests.forEach((q, i) => {
+    assert.deepEqual(q, {
+      messages: buildMessages({
+        contract: CONTRACT, pr: own.pullRequest, fileCount: 2, firstFileNumber: i + 1,
+        batch: { files: [built.contexts[i]!], tokens: 0 }, batchIndex: i, batchCount: 2, token: TOKEN, memory: contextOf(answer),
+      }),
+      tools: [submitReviewTool], forcedTool: 'submit_review', effort: 'default', timeoutMs: 30_000,
+    });
+    assert.equal(JSON.stringify(q).includes(LESSON_RULES.split('\n')[0]!), false);
+  });
+  assert.deepEqual(d.logged, [0, 1].map(() => ({
+    event: 'model_call', files: 1, effort: 'default', code: 'ok', usage: usage(), model: 'm', provider: null,
+  })));
+  assert.equal(r.audit.some((e) => e.action.startsWith('lesson')), false);
+  assert.deepEqual(r.audit.filter((e) => e.action.startsWith('memory_')).map((e) => e.action), ['memory_shown', 'memory_shown']);
+});
+
+test('a memory with no lesson for the changed files changes no request, and the result says so', async () => {
+  const answer = memoryAnswer(twoLines);
+  const plain = deps({ files: [fileA, fileB], answers: [answerOnA, answerOnB], memory: memoryOf(answer) });
+  const expected = await review(own, plain);
+  const memory = teaching(answer, lessonsOf([]));
+  const d = deps({ files: [fileA, fileB], answers: [answerOnA, answerOnB], memory });
+  const r = await review(own, d);
+  assert.equal(memory.lessonCalls.length, 1);
+  assert.deepEqual(d.model.requests, plain.model.requests);
+  assert.deepEqual(d.logged, plain.logged);
+  assert.deepEqual(r.dependencies.memory!.lessons, { status: 'empty', code: 'no_lessons', shown: 0 });
+  assert.deepEqual(withoutLessons(r), expected);
+  // An empty answer that names cuts: the requests are still the same, and the audit gains an entry for each cut, after memory's.
+  const cutting = deps({ files: [fileA, fileB], answers: [answerOnA, answerOnB], memory: teaching(answer, lessonsOf([], { lessons: 0, names: 2, records: true })) });
+  const c = await review(own, cutting);
+  assert.deepEqual(cutting.model.requests, plain.model.requests);
+  const at = expected.audit.findLastIndex((e) => e.action.startsWith('memory_')) + 1;
+  assert.ok(at > 0);
+  const audit = [...expected.audit];
+  audit.splice(at, 0,
+    { stage: 'context', action: 'lessons_cut', subject: 'names', reason: '2' },
+    { stage: 'context', action: 'lessons_cut', subject: 'records', reason: 'over_read_limit' });
+  assert.deepEqual(withoutLessons(c), { ...expected, audit });
+});
+
+test('lessons are asked once for a review of two batches, with the files the run sends and the time it was given', async () => {
+  const answer = memoryAnswer([]);
+  const memory = teaching(answer, lessonsOf(twoLessons));
+  const asOf = new Date('2026-03-12T10:00:00.000Z');
+  const lim = limitsOf(fixedTokens(CONTRACT, own.pullRequest, false, undefined, undefined, undefined, taughtCtx(lessonsOf(twoLessons))) + Math.floor(1.5 * (await unitOf(fileA, false))));
+  const d = deps({ files: [fileA, fileB], answers: [answerOnA, answerOnB], memory });
+  const r = await review({ ...lim, asOf }, d);
+  assert.equal(d.model.requests.length, 2);
+  assert.equal(memory.lessonCalls.length, 1);
+  assert.deepEqual(memory.lessonCalls[0]![0], [{ path: 'src/a.ts', previousPath: null }, { path: 'src/b.ts', previousPath: null }]);
+  assert.deepEqual(memory.lessonCalls[0]![1], asOf);
+  assert.notEqual(memory.lessonCalls[0]![1], asOf);
+  assert.ok(memory.lessonCalls[0]![2] instanceof AbortSignal);
+  assert.deepEqual(r.dependencies.memory, { status: 'empty', code: 'no_records', lines: 0, lessons: { status: 'ok', code: 'ok', shown: 2 } });
+});
+
+test('both batches are sent the same lessons in the header, and the result and the audit count them', async () => {
+  const answer = memoryAnswer(twoLines);
+  const taught = lessonsOf(twoLessons);
+  const parts = memoryParts(contextOf(answer));
+  const lim = limitsOf(fixedTokens(CONTRACT, own.pullRequest, false, undefined, undefined, contextOf(answer), taughtCtx(taught)) + Math.floor(1.5 * (await unitOf(fileA, false))));
+  const d = deps({ files: [fileA, fileB], answers: [answerOnA, answerOnB], memory: teaching(answer, taught) });
+  const r = await review(lim, d);
+  assert.equal(d.model.requests.length, 2);
+  const part = lessonsPart(taughtCtx(taught), TOKEN);
+  for (const q of d.model.requests) {
+    assert.equal(q.messages.length, 4);
+    assert.deepEqual(q.messages[1], { role: 'user', content: parts.repository });
+    assert.equal(q.messages[2]!.content.endsWith(`\n${parts.pullRequest}\n${part}`), true);
+    assert.equal(q.messages[3]!.content.includes(LESSON_RULES.split('\n')[0]!), false);
+  }
+  assert.deepEqual(r.dependencies.memory, { status: 'ok', code: 'ok', lines: 2, lessons: { status: 'ok', code: 'ok', shown: 2 } });
+  const at = r.audit.findIndex((e) => e.action === 'lesson_shown');
+  assert.deepEqual(r.audit.slice(at - 2, at + 2), [
+    { stage: 'context', action: 'memory_shown', subject: '8:file:src/a.ts', reason: 'changed' },
+    { stage: 'context', action: 'memory_shown', subject: '9:file:src/cart/add.ts', reason: 'near' },
+    { stage: 'context', action: 'lesson_shown', subject: '7:101', reason: 'file' },
+    { stage: 'context', action: 'lesson_shown', subject: '7:102', reason: 'directory' },
+  ]);
+  assert.deepEqual(r.coverage, { reviewed: ['src/a.ts', 'src/b.ts'], notReviewed: [] });
+});
+
+test('with a second scorer lessons are shown, the signals part is not asked, and the scorer\'s requests are those of before', async () => {
+  const taught = lessonsOf([lesson()]);
+  const memory = teaching(memoryAnswer(twoLines), taught);
+  const scorer = scorerStub(() => ({ blocks: { B1: refunds } }));
+  const d = deps({ files: [fileA], answers: [answerOnA], scorer, memory });
+  const r = await review(own, d);
+  const plainScorer = scorerStub(() => ({ blocks: { B1: refunds } }));
+  const plain = deps({ files: [fileA], answers: [answerOnA], scorer: plainScorer });
+  await review(own, plain);
+  assert.deepEqual([memory.calls.length, memory.lessonCalls.length], [0, 1]);
+  assert.deepEqual(r.dependencies.memory, { status: 'skipped', code: 'second_scorer', lines: 0, lessons: { status: 'ok', code: 'ok', shown: 1 } });
+  assert.equal(d.model.requests[0]!.messages[1]!.content.endsWith(`\n${lessonsPart(taughtCtx(taught), TOKEN)}`), true);
+  assert.ok(scorer.requests.length > 0);
+  assert.deepEqual(scorer.requests, plainScorer.requests);
+  assert.equal(JSON.stringify(scorer.requests).includes(lesson().text), false);
+  assert.equal(JSON.stringify(scorer.requests).includes(LESSON_RULES.split('\n')[0]!), false);
+});
+
+test('lessons that would cost a file its contents are not shown, and the audit says so', async () => {
+  const taught = lessonsOf([lesson()]);
+  const full = await unitOf(fileA, true);
+  assert.ok(full - (await unitOf(fileA, false)) > lessonTokens(taught));
+  const lim = limitsOf(fixedTokens(CONTRACT, own.pullRequest) + full);
+  const d = withContent(deps({ files: [fileA], answers: [answerOnA], memory: teaching(memoryAnswer([]), taught) }));
+  const r = await review(lim, d);
+  const plain = withContent(deps({ files: [fileA], answers: [answerOnA], memory: memoryOf(memoryAnswer([])) }));
+  const expected = await review(lim, plain);
+  assert.deepEqual(d.model.requests, plain.model.requests);
+  assert.ok(d.model.requests[0]!.messages[2]!.content.includes('### Full file'));
+  assert.deepEqual(r.audit.filter((e) => e.action.startsWith('lesson')), [{ stage: 'context', action: 'lessons_cut', subject: 'lessons', reason: 'over_call_budget' }]);
+  assert.equal(r.audit.some((e) => e.action === 'full_file_cut'), false);
+  assert.deepEqual(r.dependencies.memory!.lessons, { status: 'skipped', code: 'no_room', shown: 0 });
+  assert.deepEqual(r.coverage, expected.coverage);
+});
+
+test('the signals part keeps its place when both cannot be shown', async () => {
+  const answer = memoryAnswer(twoLines);
+  const parts = memoryParts(contextOf(answer));
+  const taught = lessonsOf([lesson()]);
+  assert.ok(lessonTokens(taught) >= 1);
+  const full = await unitOf(fileA, true);
+  const lim = limitsOf(fixedTokens(CONTRACT, own.pullRequest, false, undefined, undefined, contextOf(answer)) + full);
+  const d = withContent(deps({ files: [fileA], answers: [answerOnA], memory: teaching(answer, taught) }));
+  const r = await review(lim, d);
+  const plain = withContent(deps({ files: [fileA], answers: [answerOnA], memory: memoryOf(answer) }));
+  await review(lim, plain);
+  assert.deepEqual(d.model.requests, plain.model.requests);
+  const header = d.model.requests[0]!.messages[2]!.content;
+  assert.equal(header.endsWith(`\n${parts.pullRequest}`), true);
+  assert.equal(header.includes(LESSON_RULES.split('\n')[0]!), false);
+  assert.ok(d.model.requests[0]!.messages[3]!.content.includes('### Full file'));
+  assert.deepEqual(r.dependencies.memory, { status: 'ok', code: 'ok', lines: 2, lessons: { status: 'skipped', code: 'no_room', shown: 0 } });
+  assert.deepEqual(r.audit.filter((e) => e.action === 'lessons_cut'), [{ stage: 'context', action: 'lessons_cut', subject: 'lessons', reason: 'over_call_budget' }]);
+  assert.equal(r.audit.some((e) => e.action === 'memory_cut'), false);
+});
+
+test('extension context and tools are offered only when they cost lessons nothing', async () => {
+  const taught = lessonsOf([lesson()]);
+  const ctx = taughtCtx(taught);
+  const part = lessonsPart(ctx, TOKEN);
+  const full = await unitOf(fileA, true);
+  // Room for the lessons and the full file, and not for the ticket as well; without lessons the ticket would fit.
+  assert.ok(partTokens() >= 1 && partTokens() <= lessonTokens(taught));
+  const lim = limitsOf(fixedTokens(CONTRACT, own.pullRequest, false, undefined, undefined, undefined, ctx) + full);
+  const d = withContent(deps({ files: [fileA], answers: [answerOnA], memory: teaching(memoryAnswer([]), taught), contextProviders: [ticketProvider()] }));
+  const r = await review(lim, d);
+  const header = d.model.requests[0]!.messages[1]!.content;
+  assert.equal(header.endsWith(`\n${part}`), true);
+  assert.equal(header.includes(EXTENSION_LINE), false);
+  assert.ok(d.model.requests[0]!.messages[2]!.content.includes('### Full file'));
+  assert.deepEqual(r.audit.filter((e) => e.action === 'extension_context_cut'), [{ stage: 'context', action: 'extension_context_cut', subject: 'extensions', reason: 'over_call_budget' }]);
+  assert.deepEqual(r.dependencies.memory!.lessons, { status: 'ok', code: 'ok', shown: 1 });
+  const at = r.audit.findIndex((e) => e.action === 'extension_context_cut');
+  assert.deepEqual(r.audit[at - 1], { stage: 'context', action: 'lesson_shown', subject: '7:101', reason: 'file' });
+  const ticketOnly = withContent(deps({ files: [fileA], answers: [answerOnA], memory: memoryOf(memoryAnswer([])), contextProviders: [ticketProvider()] }));
+  await review(lim, ticketOnly);
+  assert.ok(ticketOnly.model.requests[0]!.messages[1]!.content.includes(EXTENSION_LINE));
+  // With room for both, the lessons stand before what the providers gave.
+  const roomy = deps({ files: [fileA], answers: [answerOnA], memory: teaching(memoryAnswer([]), taught), contextProviders: [ticketProvider()] });
+  await review(own, roomy);
+  assert.equal(roomy.model.requests[0]!.messages[1]!.content.endsWith(`\n${part}\n${extensionPart(ticketContext, TOKEN)}`), true);
+
+  // One token short of the room the tools need with the lessons counted: without lessons there is room for them.
+  const limTools = limitsOf(fixedTokens(SYSTEM_WITH_TOOLS, own.pullRequest, false, undefined, undefined, undefined, ctx) + toolRoomTokens([docsSearch]) + full - 1);
+  const bare = withContent(deps({ files: [fileA], answers: [answerOnA], memory: memoryOf(memoryAnswer([])), mcpServers: [fakeServer().server] }));
+  await review(limTools, bare);
+  assert.deepEqual(bare.model.requests[0]!.tools, [submitReviewTool, docsSearch]);
+  assert.ok(bare.model.requests[0]!.messages[2]!.content.includes('### Full file'));
+  const t = withContent(deps({ files: [fileA], answers: [answerOnA], memory: teaching(memoryAnswer([]), taught), mcpServers: [fakeServer().server] }));
+  const rt = await review(limTools, t);
+  assert.deepEqual(t.model.requests[0]!.tools, [submitReviewTool]);
+  assert.equal(t.model.requests[0]!.messages[1]!.content.endsWith(`\n${part}`), true);
+  assert.ok(t.model.requests[0]!.messages[2]!.content.includes('### Full file'));
+  assert.deepEqual(rt.audit.filter((e) => e.action === 'tools_cut'), [{ stage: 'context', action: 'tools_cut', subject: 'tools', reason: 'over_call_budget' }]);
+  assert.deepEqual(rt.dependencies.mcp, { docs: { status: 'skipped', code: 'no_room', calls: 0 } });
+  assert.deepEqual(rt.dependencies.memory!.lessons, { status: 'ok', code: 'ok', shown: 1 });
+});
+
+test('lessons that fail cost the review its lessons, not the review', async () => {
+  const answer = memoryAnswer(twoLines);
+  const parts = memoryParts(contextOf(answer));
+  const plain = deps({ files: [fileA], answers: [answerOnA], memory: memoryOf(answer) });
+  const expected = await review(own, plain);
+  const d = deps({ files: [fileA], answers: [answerOnA], memory: teaching(answer, () => Promise.reject(new Error('storage_unavailable'))) });
+  const r = await review(own, d);
+  assert.equal(r.status, 'ok');
+  assert.deepEqual(d.model.requests, plain.model.requests);
+  assert.ok(d.model.requests[0]!.messages[2]!.content.endsWith(`\n${parts.pullRequest}`));
+  assert.deepEqual(r.dependencies.memory, { status: 'ok', code: 'ok', lines: 2, lessons: { status: 'error', code: 'storage_unavailable', shown: 0 } });
+  assert.deepEqual(r.audit.filter((e) => e.action.startsWith('lesson')), [{ stage: 'context', action: 'lessons_failed', subject: 'lessons', reason: 'storage_unavailable' }]);
+  assert.deepEqual(r.findings, expected.findings);
+});
+
+test('a review that calls no model asks for no lessons and says so, and one that ends before its files are packed says nothing', async () => {
+  const memory = teaching(memoryAnswer(twoLines), lessonsOf([lesson()]));
+  const r = await review(own, deps({ files: [binaryNoPatch], memory }));
+  assert.equal(memory.lessonCalls.length, 0);
+  assert.deepEqual(r.dependencies.memory, { status: 'skipped', code: 'no_model_call', lines: 0, lessons: { status: 'skipped', code: 'no_model_call', shown: 0 } });
+  const listed = await review(own, deps({ files: [fileA], listError: new Error('github_500'), memory }));
+  assert.equal(listed.status, 'failed');
+  assert.equal('memory' in listed.dependencies, false);
+  const small = await review({ ...own, limits: { ...own.limits, inputTokensPerCall: 10 } }, deps({ files: [fileA], memory }));
+  assert.deepEqual(small.failure, { stage: 'context', code: 'budget_too_small' });
+  assert.equal('memory' in small.dependencies, false);
+  assert.equal(memory.lessonCalls.length, 0);
+});
+
+test('a second try and the halves of a split batch are sent the same lessons', async () => {
+  const taught = lessonsOf(twoLessons);
+  const part = lessonsPart(taughtCtx(taught), TOKEN);
+  const d = deps({ files: [fileA, fileB], answers: [new ProviderError('timeout', 't', null, null), answerOnA, answerOnB], memory: teaching(memoryAnswer([]), taught) });
+  const r = await review(own, d);
+  assert.equal(d.model.requests.length, 3);
+  for (const q of d.model.requests) assert.equal(q.messages[1]!.content.endsWith(`\n${part}`), true);
+  assert.deepEqual(r.coverage.reviewed, ['src/a.ts', 'src/b.ts']);
+  // A first call offered tools and refused, then a second try without them: both are sent the lessons.
+  const tools = deps({ files: [fileA], answers: [new ProviderError('provider', 'p', 400, null), answerOnA], memory: teaching(memoryAnswer([]), taught), mcpServers: [fakeServer().server] });
+  await review(own, tools);
+  assert.equal(tools.model.requests.length, 2);
+  assert.deepEqual(tools.model.requests.map((q) => q.tools.length), [2, 1]);
+  for (const q of tools.model.requests) assert.equal(q.messages[1]!.content.endsWith(`\n${part}`), true);
+});
+
+test('lessons change nothing by themselves: with the same answers the findings, the scores and the verdict are those of a review with none', async () => {
+  const answer = { ...answerOnA, files: [{ path: 'src/a.ts', change_summary: 'Changes the retry delay.', blocks: [{ id: 'B1', score: 20, category: 'fix', reason: 'Changes the retry delay.' }] }] };
+  const three = [lesson(), twoLessons[1]!, lesson({ ref: '7:103', why: 'type', path: 'lib/util.ts', text: 'Unused exports in the util module are kept on purpose for the plugins that load them.' })];
+  const plain = await review(own, deps({ files: [fileA], answers: [answer] }));
+  const d = deps({ files: [fileA], answers: [answer], memory: teaching(memoryAnswer([]), lessonsOf(three)) });
+  const r = await review(own, d);
+  assert.ok(d.model.requests[0]!.messages[1]!.content.includes('Lesson L1, from a finding on `src/a.ts`, 2026-03-10:'));
+  assert.deepEqual(r.dependencies.memory!.lessons, { status: 'ok', code: 'ok', shown: 3 });
+  assert.equal(r.findings.length, 1);
+  assert.deepEqual([r.findings, r.scores, r.verdict, r.threadVerdicts], [plain.findings, plain.scores, plain.verdict, plain.threadVerdicts]);
+});
+
+test('a failed review still says how lessons did', async () => {
+  const r = await review(own, deps({ files: [fileA], answers: [new ProviderError('auth', 'c', 401, null)], memory: teaching(memoryAnswer(twoLines), lessonsOf([lesson()])) }));
+  assert.equal(r.status, 'failed');
+  assert.deepEqual(r.dependencies, { model: 'error', memory: { status: 'ok', code: 'ok', lines: 2, lessons: { status: 'ok', code: 'ok', shown: 1 } } });
+});
+
+test('two reviews of one pull request are sent the same lessons under different tokens, and the repository message holds none', async () => {
+  const answer = memoryAnswer(twoLines);
+  const taught = lessonsOf(twoLessons);
+  const blocksOnly = deps({ files: [fileA], answers: [answerOnA], memory: memoryOf(answer) });
+  await review(own, blocksOnly);
+  const one = deps({ files: [fileA], answers: [answerOnA], memory: teaching(answer, taught) });
+  const two = deps({ files: [fileA], answers: [answerOnA], memory: teaching(answer, taught) });
+  two.token = () => 'fedcba9876543210';
+  await review(own, one);
+  await review(own, two);
+  const [q1, q2] = [one.model.requests[0]!, two.model.requests[0]!];
+  assert.equal(q1.messages[1]!.content, blocksOnly.model.requests[0]!.messages[1]!.content);
+  assert.equal(q2.messages[1]!.content, blocksOnly.model.requests[0]!.messages[1]!.content);
+  assert.equal(q1.messages[1]!.content.includes(lesson().text), false);
+  assert.equal(q1.messages[2]!.content.endsWith(`\n${lessonsPart(taughtCtx(taught), TOKEN)}`), true);
+  assert.equal(q2.messages[2]!.content.endsWith(`\n${lessonsPart(taughtCtx(taught), 'fedcba9876543210')}`), true);
+  assert.notEqual(q1.messages[2]!.content, q2.messages[2]!.content);
+});
+
+test('a memory whose lessons cannot be read costs the review its lessons, not the review', async () => {
+  const plain = deps({ files: [fileA], answers: [answerOnA], memory: memoryOf(memoryAnswer([])) });
+  const expected = await review(own, plain);
+  const throwing = { blocks: async () => memoryAnswer([]), get lessons(): never { throw new Error('getter'); } } as Memory;
+  const d = deps({ files: [fileA], answers: [answerOnA], memory: throwing });
+  const r = await review(own, d);
+  assert.equal(r.status, 'ok');
+  assert.deepEqual(d.model.requests, plain.model.requests);
+  assert.deepEqual(r.dependencies.memory, { status: 'empty', code: 'no_records', lines: 0, lessons: { status: 'error', code: 'lookup_failed', shown: 0 } });
+  assert.deepEqual(r.audit.filter((e) => e.action.startsWith('lesson')), [{ stage: 'context', action: 'lessons_failed', subject: 'lessons', reason: 'lookup_failed' }]);
+  assert.deepEqual(r.findings, expected.findings);
+  // A getter that answers a function on its first read and throws on a second: it is read once, and its lessons are shown.
+  let reads = 0;
+  const once = {
+    blocks: async () => memoryAnswer([]),
+    get lessons() {
+      reads += 1;
+      if (reads > 1) throw new Error('read twice');
+      return async () => lessonsOf([lesson()]);
+    },
+  } as Memory;
+  const o = deps({ files: [fileA], answers: [answerOnA], memory: once });
+  const ro = await review(own, o);
+  assert.equal(reads, 1);
+  assert.deepEqual(ro.dependencies.memory!.lessons, { status: 'ok', code: 'ok', shown: 1 });
+  assert.ok(o.model.requests[0]!.messages[1]!.content.endsWith(`\n${lessonsPart(taughtCtx(lessonsOf([lesson()])), TOKEN)}`));
+  // The function read is called on the memory, as a method.
+  let onMemory = false;
+  const method: Memory = { blocks: async () => memoryAnswer([]), async lessons() { onMemory = this === method; return lessonsOf([]); } };
+  await review(own, deps({ files: [fileA], answers: [answerOnA], memory: method }));
+  assert.equal(onMemory, true);
+});
+
+test('a memory whose lessons is no function is a memory with no lessons', async () => {
+  const plain = deps({ files: [fileA], answers: [answerOnA], memory: memoryOf(memoryAnswer([])) });
+  const expected = await review(own, plain);
+  for (const value of [5, 'lessons', null]) {
+    const memory = { blocks: async () => memoryAnswer([]), lessons: value } as unknown as Memory;
+    const d = deps({ files: [fileA], answers: [answerOnA], memory });
+    const r = await review(own, d);
+    assert.deepEqual(d.model.requests, plain.model.requests, String(value));
+    assert.deepEqual(r, expected, String(value));
+    assert.equal('lessons' in r.dependencies.memory!, false);
+  }
+});
+
+test('a renamed file is handed to the lookup of lessons with the path it had', async () => {
+  const renamed: ChangedFile = { ...fileAt('src/cart/new.ts'), previousPath: 'src/cart/old.ts', status: 'renamed' };
+  const memory = teaching(memoryAnswer([]), lessonsOf([]));
+  const r = await review(own, deps({ files: [renamed], answers: [{ overview: 'src/cart/new.ts is fine.', findings: [], files: [] }], memory }));
+  assert.deepEqual(r.failure, null);
+  assert.deepEqual(memory.lessonCalls.map(([files]) => files), [[{ path: 'src/cart/new.ts', previousPath: 'src/cart/old.ts' }]]);
+});
+
+test('with nothing to show the review goes on with the packing memory chose', async () => {
+  const answer = memoryAnswer(twoLines);
+  const lim = await memoryRoom(answer, 1.5);
+  // Without memory the two files share one call; with memory shown they take two.
+  assert.ok(memoryTokens(answer) > 0.5 * (await unitOf(fileA, false)));
+  const bare = deps({ files: [fileA, fileB], answerFor: { 'src/a.ts': answerOnA, 'src/b.ts': answerOnB } });
+  await review(lim, bare);
+  assert.equal(bare.model.requests.length, 1);
+  const plain = deps({ files: [fileA, fileB], answerFor: { 'src/a.ts': answerOnA, 'src/b.ts': answerOnB }, memory: memoryOf(answer) });
+  await review(lim, plain);
+  assert.equal(plain.model.requests.length, 2);
+  const d = deps({ files: [fileA, fileB], answerFor: { 'src/a.ts': answerOnA, 'src/b.ts': answerOnB }, memory: teaching(answer, lessonsOf([])) });
+  const r = await review(lim, d);
+  assert.deepEqual(d.model.requests, plain.model.requests);
+  assert.deepEqual(r.dependencies.memory, { status: 'ok', code: 'ok', lines: 2, lessons: { status: 'empty', code: 'no_lessons', shown: 0 } });
+});
+
+// The smallest limit under which a review with no lessons, made by `run`, keeps its file whole; lessons then need their own tokens more.
+async function edgeOf(low: number, keeps: (limit: number) => Promise<boolean>): Promise<number> {
+  let high = low + 10_000;
+  assert.ok(await keeps(high));
+  assert.equal(await keeps(low), false);
+  while (high - low > 1) {
+    const mid = Math.floor((low + high) / 2);
+    if (await keeps(mid)) high = mid; else low = mid;
+  }
+  return high;
+}
+
+test('lessons are fitted with the threads counted', async () => {
+  const taught = lessonsOf([lesson()]);
+  const thread = earlierThread({ resolved: false });
+  const later = (inputTokensPerCall: number): ReviewInput => ({ ...limitsOf(inputTokensPerCall), earlier: { head: 'abcdef0', threads: [thread] } });
+  const run = async (inputTokensPerCall: number, memory?: Memory) => {
+    const d = withContent(deps({ files: [fileA], answers: [answerOnA], ...(memory === undefined ? {} : { memory }) }));
+    return { r: await review(later(inputTokensPerCall), d), d };
+  };
+  const keeps = async (n: number) => { const { r } = await run(n); return r.status === 'ok' && !r.audit.some((e) => e.action === 'full_file_cut'); };
+  const high = await edgeOf(fixedTokens(CONTRACT, own.pullRequest, true), keeps);
+  assert.ok(fixedTokens(CONTRACT, own.pullRequest, true) - fixedTokens(CONTRACT, own.pullRequest, false) >= 1);
+  // One token short of the room lessons need with the threads counted.
+  const edge = high + lessonTokens(taught) - 1;
+  const short = await run(edge, teaching(memoryAnswer([]), taught));
+  const plain = await run(edge, memoryOf(memoryAnswer([])));
+  assert.ok(short.d.model.requests[0]!.messages[2]!.content.includes('### Thread T1'));
+  assert.deepEqual(short.d.model.requests, plain.d.model.requests);
+  assert.deepEqual(short.r.dependencies.memory!.lessons, { status: 'skipped', code: 'no_room', shown: 0 });
+  const shown = await run(edge + 1, teaching(memoryAnswer([]), taught));
+  assert.deepEqual(shown.r.dependencies.memory!.lessons, { status: 'ok', code: 'ok', shown: 1 });
+  assert.ok(shown.d.model.requests[0]!.messages[2]!.content.includes('### Full file'));
+});
+
+test('lessons are fitted with the last overview counted', async () => {
+  const taught = lessonsOf([lesson({ path: 'src/u.ts' })]);
+  const first = await firstOf([fileT, fileU], blockAnswer({ 'src/t.ts': 40, 'src/u.ts': 20 }));
+  const later = (inputTokensPerCall: number): ReviewInput =>
+    ({ ...limitsOf(inputTokensPerCall), mode: 'incremental', history: historyFrom(first, { covered: true, lastReview: LAST }) });
+  const run = async (inputTokensPerCall: number, memory?: Memory) => {
+    const d = deps({ files: [fileT, valueFile('src/u.ts', 5)], answers: [blockAnswer({ 'src/u.ts': 30 })], ...(memory === undefined ? {} : { memory }) });
+    return { r: await review(later(inputTokensPerCall), d), d };
+  };
+  const keeps = async (n: number) => { const { r } = await run(n); return r.status === 'ok' && r.coverage.reviewed.includes('src/u.ts'); };
+  const high = await edgeOf(fixedTokens(CONTRACT, own.pullRequest, false, LAST.overview), keeps);
+  assert.ok(fixedTokens(CONTRACT, own.pullRequest, false, LAST.overview) - fixedTokens(CONTRACT, own.pullRequest) >= 1);
+  const edge = high + lessonTokens(taught) - 1;
+  const short = await run(edge, teaching(memoryAnswer([]), taught));
+  const plain = await run(edge, memoryOf(memoryAnswer([])));
+  assert.ok(short.d.model.requests[0]!.messages[1]!.content.includes(LAST.overview));
+  assert.deepEqual(short.d.model.requests, plain.d.model.requests);
+  assert.deepEqual(short.r.dependencies.memory!.lessons, { status: 'skipped', code: 'no_room', shown: 0 });
+  const shown = await run(edge + 1, teaching(memoryAnswer([]), taught));
+  assert.deepEqual(shown.r.dependencies.memory!.lessons, { status: 'ok', code: 'ok', shown: 1 });
+  assert.deepEqual(shown.r.coverage.reviewed, ['src/u.ts']);
+});
+
+test('extension context that does not fit beside lessons leaves the review the packing lessons chose', async () => {
+  const taught = lessonsOf(twoLessons);
+  const ctx = taughtCtx(taught);
+  const unit = await unitOf(fileA, false);
+  // With the lessons each call holds one file; without them the two files share one call.
+  assert.ok(lessonTokens(taught) >= unit);
+  const lim = limitsOf(fixedTokens(CONTRACT, own.pullRequest, false, undefined, undefined, undefined, ctx) + unit);
+  const bare = deps({ files: [fileA, fileB], answerFor: { 'src/a.ts': answerOnA, 'src/b.ts': answerOnB } });
+  await review(lim, bare);
+  assert.equal(bare.model.requests.length, 1);
+  const d = deps({ files: [fileA, fileB], answerFor: { 'src/a.ts': answerOnA, 'src/b.ts': answerOnB }, memory: teaching(memoryAnswer([]), taught), contextProviders: [ticketProvider()] });
+  const r = await review(lim, d);
+  assert.equal(d.model.requests.length, 2);
+  for (const q of d.model.requests) {
+    assert.equal(q.messages[1]!.content.endsWith(`\n${lessonsPart(ctx, TOKEN)}`), true);
+    assert.equal(q.messages[1]!.content.includes(EXTENSION_LINE), false);
+  }
+  assert.deepEqual(r.dependencies.memory!.lessons, { status: 'ok', code: 'ok', shown: 2 });
+  assert.deepEqual(r.audit.filter((e) => e.action === 'extension_context_cut'), [{ stage: 'context', action: 'extension_context_cut', subject: 'extensions', reason: 'over_call_budget' }]);
+  assert.deepEqual(r.coverage, { reviewed: ['src/a.ts', 'src/b.ts'], notReviewed: [] });
 });

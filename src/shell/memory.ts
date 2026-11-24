@@ -1,10 +1,12 @@
-// The engine's memory backed by the database (7.4): the repository's live signals, read under a statement limit of
-// their own, and chosen by the rule the eval runs too. Only the columns a lookup needs are read: never an excerpt or a reason.
-import { liveRecordsWithin } from '../db/memory-records.ts';
+// The engine's memory backed by the database (7.4): the repository's live signals and lessons, each read under a statement
+// limit of its own, and chosen by the rules the eval runs too. Only the columns a lookup needs are read: never an excerpt or a reason.
+import { liveLessonsWithin, liveRecordsWithin } from '../db/memory-records.ts';
 import type { Db } from '../db/types.ts';
 import { MEMORY_TIMEOUT_MS } from '../engine/context/memory.ts';
 import type { Memory } from '../engine/types.ts';
 import type { PullRequestRef } from '../forge/types.ts';
+import { LESSONS_READ } from '../memory/lessons.ts';
+import type { LiveLesson } from '../memory/lessons.ts';
 import { createMemory, RECORDS_READ } from '../memory/select.ts';
 import type { LiveRecord } from '../memory/select.ts';
 
@@ -23,6 +25,11 @@ export function recordsMemory(db: Db, ref: PullRequestRef): Memory {
         records.push({ ref: row.sourceRef, number: row.number, path: row.path, directory: row.directory, category: row.category, missed: row.missed, createdAt: row.createdAt });
       }
       return records;
+    },
+    // The pull request's own lessons are left out by the read; createMemory drops them too. Never the quote.
+    lessons: async (at) => {
+      const rows = await liveLessonsWithin(db, repo, at.toISOString(), LESSONS_READ + 1, MEMORY_TIMEOUT_MS, ref.number);
+      return rows.map((row): LiveLesson => ({ ref: row.sourceRef, number: row.number, path: row.path, text: row.lesson, createdAt: row.createdAt }));
     },
   }, ref.number);
 }

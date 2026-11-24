@@ -13,7 +13,7 @@ import { renderReview } from '../engine/render/body.ts';
 import type { InlineComment } from '../engine/render/body.ts';
 import { renderNotes } from '../engine/render/notes.ts';
 import type { Category, ScoredBy, Span } from '../engine/score/types.ts';
-import type { EarlierState, Limits, Memory, MemoryState, ReviewDeps, ReviewInput, ReviewResult, ThreadVerdict, Usage } from '../engine/types.ts';
+import type { EarlierState, LessonsStatus, Limits, Memory, MemoryState, ReviewDeps, ReviewInput, ReviewResult, ThreadVerdict, Usage } from '../engine/types.ts';
 import type { ForgeAccess, ForgeWriter, LivePullRequest, PullRequestInfo, PullRequestRef, ReviewThread, Source } from '../forge/types.ts';
 import type { ReviewNotice } from '../extensions/types.ts';
 import { PAUSE_MS } from './model-health.ts';
@@ -178,19 +178,33 @@ function mcpOf(result: unknown): Record<string, { status: 'ok' | 'skipped' | 'er
   return out;
 }
 
+const isMemoryState = (value: unknown): value is MemoryState => value === 'ok' || value === 'empty' || value === 'skipped' || value === 'error';
+
+/** The lessons part of a stored memory status when it reads: a status, a short code and a count shown from 0 up; else undefined. */
+function lessonsOf(entry: unknown): LessonsStatus | undefined {
+  if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) return undefined;
+  const { status, code, shown } = entry as { status?: unknown; code?: unknown; shown?: unknown };
+  if (!isMemoryState(status)) return undefined;
+  if (typeof code !== 'string' || !isShortCode(code)) return undefined;
+  if (typeof shown !== 'number' || !Number.isInteger(shown) || shown < 0) return undefined;
+  return { status, code, shown };
+}
+
 /**
  * How memory did in an engine result, or in a stored one: its status when that is ok, empty, skipped or error, its code a short code
- * and its count of lines a whole number from 0 up, as { status, code, lines }. null when the result has none, or one that cannot be read.
+ * and its count of lines a whole number from 0 up, as { status, code, lines }, with `lessons` when that part reads too.
+ * null when the result has no signals part, or one that cannot be read.
  */
-function memoryOf(result: unknown): { status: MemoryState; code: string; lines: number } | null {
+function memoryOf(result: unknown): { status: MemoryState; code: string; lines: number; lessons?: LessonsStatus } | null {
   const dependencies = (result as { dependencies?: unknown } | null | undefined)?.dependencies;
   const entry = typeof dependencies === 'object' && dependencies !== null ? (dependencies as { memory?: unknown }).memory : undefined;
   if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) return null;
   const { status, code, lines } = entry as { status?: unknown; code?: unknown; lines?: unknown };
-  if (status !== 'ok' && status !== 'empty' && status !== 'skipped' && status !== 'error') return null;
+  if (!isMemoryState(status)) return null;
   if (typeof code !== 'string' || !isShortCode(code)) return null;
   if (typeof lines !== 'number' || !Number.isInteger(lines) || lines < 0) return null;
-  return { status, code, lines };
+  const lessons = lessonsOf((entry as { lessons?: unknown }).lessons);
+  return lessons === undefined ? { status, code, lines } : { status, code, lines, lessons };
 }
 
 /** The findings of an engine result, or of a stored one, counted by severity; 0 each when they cannot be read. */
@@ -679,11 +693,16 @@ export async function runReviewJob(job: Job, deps: ReviewJobDeps): Promise<void>
           // a health that fails changes nothing
         }
       }
-      // How memory did; in dry run too. Memory the engine skipped did nothing.
+      // How memory did, once for the review and in dry run too: the signals part first, then the lessons part. An error of
+      // either is a failure; else a part that was asked is a success; a part the engine skipped did nothing.
       const memory = memoryOf(result);
-      if (memory !== null && memory.status !== 'skipped') {
+      const parts = memory === null ? [] : memory.lessons === undefined ? [memory] : [memory, memory.lessons];
+      const failed = parts.find((part) => part.status === 'error');
+      const asked = parts.find((part) => part.status === 'ok' || part.status === 'empty');
+      const told = failed ?? asked;
+      if (told !== undefined) {
         try {
-          const out: unknown = deps.memoryHealth?.noted(memory.status !== 'error', memory.code);
+          const out: unknown = deps.memoryHealth?.noted(failed === undefined, told.code);
           // A health that returns a rejected promise changes nothing either.
           if (typeof out === 'object' && out !== null) Promise.resolve(out).catch(() => {});
         } catch {

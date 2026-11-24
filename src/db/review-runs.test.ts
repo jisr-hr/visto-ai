@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { testDb } from './testing.ts';
-import { adoptableRun, hasOkRun, hasRun, lastPublishedRun, listRuns, claimNotice, markPublished, markPublishTried, recordRun, scoredAt, spentSince, unpublishedRun } from './review-runs.ts';
+import { adoptableRun, hasOkRun, hasRun, lastPublishedRun, listRuns, claimNotice, markPublished, markPublishTried, recordJudgeCall, recordRun, scoredAt, spentSince, unpublishedRun } from './review-runs.ts';
 import type { RunRecord } from './review-runs.ts';
 import { enqueueJob, finishJob } from './jobs.ts';
 
@@ -242,5 +242,61 @@ test('a commit whose newest ok run holds no list of scores is absent, and an old
   await recordRun(db, run({ headSha: 'h1', result: { scores: [{ path: 'a.ts' }], verdict: { threshold: 40 } } }));
   await recordRun(db, run({ headSha: 'h1', result: { findings: [] } }));
   assert.deepEqual(await scoredAt(db, REF, ['h1']), []);
+  await db.close();
+});
+
+const judgeUsage = (cost: number) => ({ calls: 1, inputTokens: 2400, outputTokens: 80, cachedTokens: 0, cost });
+
+test('with no judge call the day\'s spend is what it was', async () => {
+  const db = await testDb();
+  await recordRun(db, run({ startedAt: at(-10), usage: { ...run().usage, cost: 4 } }));
+  await recordRun(db, run({ startedAt: at(0), usage: { ...run().usage, cost: 0.5 } }));
+  await recordRun(db, run({ startedAt: at(100), usage: { ...run().usage, cost: 0.25 } }));
+  assert.deepEqual(await db.query('select count(*)::int as n from visto_ai.judge_calls'), [{ n: 0 }]);
+  assert.equal(await spentSince(db, at(0)), 0.75);
+  await db.close();
+});
+test('the day\'s spend is the cost of the runs and of the judge\'s calls since its start', async () => {
+  const db = await testDb();
+  await recordRun(db, run({ startedAt: at(0), usage: { ...run().usage, cost: 1.5 } }));
+  await recordRun(db, run({ startedAt: at(50), usage: { ...run().usage, cost: 2 } }));
+  await recordJudgeCall(db, REF, 'r-1', at(0), judgeUsage(0.25));
+  await recordJudgeCall(db, REF, 'r-2', new Date(Date.parse(at(0)) - 1).toISOString(), judgeUsage(0.5));
+  assert.equal(await spentSince(db, at(0)), 3.75);
+  await db.close();
+  const only = await testDb();
+  await recordJudgeCall(only, REF, 'r-1', at(10), judgeUsage(0.125));
+  assert.equal(await spentSince(only, at(0)), 0.125);
+  await only.close();
+});
+test('a judge call is stored with its pull request and its reply, its counts rounded, and a cost that is no number at or above 0 stored as 0', async () => {
+  const db = await testDb();
+  const upper = { service: 'github', owner: 'Acme', repo: 'Shop', number: 7 } as const;
+  await recordJudgeCall(db, upper, 'r-1', at(0), { calls: 1.6, inputTokens: 12.5, outputTokens: Number.NaN, cachedTokens: -1, cost: Number.NaN });
+  await recordJudgeCall(db, upper, 'r-2', at(1), { ...judgeUsage(-1) });
+  await recordJudgeCall(db, upper, 'r-3', at(2), { ...judgeUsage(Number.POSITIVE_INFINITY) });
+  await recordJudgeCall(db, upper, 'r-4', at(3), { ...judgeUsage(0.25) });
+  await recordJudgeCall(db, { service: 'github', owner: 'acme', repo: 'web', number: 3 }, 'r-5', at(4), judgeUsage(0.5));
+  assert.deepEqual(await db.query(
+    `select service, owner, repo, number, reply, at, calls, input_tokens, output_tokens, cached_tokens, cost
+     from visto_ai.judge_calls where reply = 'r-1'`), [{
+    service: 'github', owner: 'acme', repo: 'shop', number: 7, reply: 'r-1', at: new Date(at(0)),
+    calls: 2, input_tokens: 13, output_tokens: 0, cached_tokens: 0, cost: 0,
+  }]);
+  assert.deepEqual(await db.query('select reply, cost from visto_ai.judge_calls order by id'), [
+    { reply: 'r-1', cost: 0 }, { reply: 'r-2', cost: 0 }, { reply: 'r-3', cost: 0 }, { reply: 'r-4', cost: 0.25 }, { reply: 'r-5', cost: 0.5 },
+  ]);
+  assert.deepEqual(await db.query(
+    'select owner, repo, sum(cost)::float8 as cost from visto_ai.judge_calls group by owner, repo order by owner, repo'), [
+    { owner: 'acme', repo: 'shop', cost: 0.25 }, { owner: 'acme', repo: 'web', cost: 0.5 },
+  ]);
+  await db.close();
+});
+test('a judge call with ordinary counts is stored as given', async () => {
+  const db = await testDb();
+  await recordJudgeCall(db, REF, 'r-1', at(0), { calls: 2, inputTokens: 2400, outputTokens: 80, cachedTokens: 30, cost: 0.25 });
+  assert.deepEqual(await db.query('select calls, input_tokens, output_tokens, cached_tokens, cost from visto_ai.judge_calls'), [
+    { calls: 2, input_tokens: 2400, output_tokens: 80, cached_tokens: 30, cost: 0.25 },
+  ]);
   await db.close();
 });

@@ -9,6 +9,7 @@ import { review } from '../engine/review.ts';
 import { SUBMIT_REVIEW } from '../engine/model/submit-review.ts';
 import type { Memory, ModelClient, ModelRequest, ModelResponse, ReviewInput, ReviewResult } from '../engine/types.ts';
 import type { Source } from '../forge/types.ts';
+import { LESSONS_READ } from '../memory/lessons.ts';
 import { RECORDS_READ } from '../memory/select.ts';
 import { recordsMemory } from './memory.ts';
 import { createMemoryHealth } from './memory-health.ts';
@@ -172,8 +173,8 @@ test('a read that fails rejects, and leaves no limit behind', async () => {
   assert.deepEqual(await db.query('show statement_timeout'), outside);
 });
 
-/** The real review of pull request 7 over these changed files, with a stub source and a stub model, given this memory; every request the model got. */
-async function reviewWith(memory: Memory, files: string[]): Promise<{ result: ReviewResult; requests: ModelRequest[] }> {
+/** The real review of pull request 7 (or `number`) over these changed files, with a stub source and a stub model, given this memory; every request the model got. */
+async function reviewWith(memory: Memory, files: string[], number: number = REF.number): Promise<{ result: ReviewResult; requests: ModelRequest[] }> {
   const source: Source = {
     listFiles: () => Promise.resolve(files.map((path) => ({ path, previousPath: null, status: 'modified' as const, additions: 1, deletions: 0, patch: '@@ -1,1 +1,2 @@\n head\n+const a = 1;' }))),
     getFileContent: () => Promise.resolve(null),
@@ -190,7 +191,7 @@ async function reviewWith(memory: Memory, files: string[]): Promise<{ result: Re
     },
   };
   const input: ReviewInput = {
-    pullRequest: { ref: REF, title: 'Add things', description: '', author: 'octo-dev', baseBranch: 'main', headBranch: 'feat', baseSha: 'merge000', headSha: 'h1', draft: false },
+    pullRequest: { ref: { ...REF, number }, title: 'Add things', description: '', author: 'octo-dev', baseBranch: 'main', headBranch: 'feat', baseSha: 'merge000', headSha: 'h1', draft: false },
     trigger: 'automatic', repoConfig: { primaryBranches: ['main'], scoreThreshold: 70 },
     limits: { inputTokensPerCall: 200_000, batchesPerReview: 6, modelTimeoutSeconds: 30 }, asOf: AS_OF, earlier: null,
   };
@@ -213,7 +214,7 @@ test('nothing a person wrote reaches the model through memory', async () => {
   ]);
   const files = ['src/billing/tax.ts', 'src/billing/fees.ts'];
   const { result: r, requests } = await reviewWith(recordsMemory(db, REF), files);
-  assert.deepEqual(r.dependencies.memory, { status: 'ok', code: 'ok', lines: 2 });
+  assert.deepEqual(r.dependencies.memory, { status: 'ok', code: 'ok', lines: 2, lessons: { status: 'empty', code: 'no_lessons', shown: 0 } });
   assert.ok(requests.length >= 1);
   const sent = requests.map((request) => JSON.stringify(request));
   const stored = await db.query<{ excerpt: string; reason: string | null; path: string }>('select excerpt, reason, path from visto_ai.memory_records');
@@ -271,7 +272,7 @@ test('a record whose time cannot be read is passed over, and the review still ha
   const alerts: unknown[][] = [];
   const health = createMemoryHealth((code, details) => { alerts.push([code, details]); });
   const r = await reviewWith(recordsMemory(db, REF), [TAX.path]);
-  assert.deepEqual(r.result.dependencies.memory, { status: 'ok', code: 'ok', lines: 2 });
+  assert.deepEqual(r.result.dependencies.memory, { status: 'ok', code: 'ok', lines: 2, lessons: { status: 'empty', code: 'no_lessons', shown: 0 } });
   health.noted(r.result.dependencies.memory!.status !== 'error', r.result.dependencies.memory!.code);
   assert.deepEqual(alerts, []);
 });
@@ -283,4 +284,118 @@ test('a live record of another kind on the changed file is in no block', async (
   const blocks = await recordsMemory(db, REF).blocks([TAX], AS_OF, signal);
   assert.deepEqual(blocks.pullRequest.map((l) => l.ref), ['8:file:src/billing/tax.ts']);
   assert.deepEqual(blocks.repository, { directories: [], categories: [] });
+});
+
+const OF_8 = { ...REF, number: 8 };
+const RULE = 'Tax totals are rounded once by the ledger service, so a missing rounding call in this module is no defect.';
+
+/** A lesson of pull request 7 on src/billing/tax.ts, made from reply r-71, live from 4 March for 90 days. */
+const lessonRecord = (over: Partial<NewRecord> = {}): NewRecord => {
+  const createdAt = over.createdAt ?? '2026-03-04T00:00:00.000Z';
+  return {
+    kind: 'lesson', sourceRef: '7:r-71', number: 7,
+    path: 'src/billing/tax.ts', directory: 'src/billing',
+    category: null, reason: null, missed: false,
+    excerpt: 'the ledger already rounds every total before it is stored', comment: 'r-71',
+    createdAt, expiresAt: later(createdAt, 90 * DAY), lesson: RULE, ...over,
+  };
+};
+
+test('a lesson of another pull request on a changed file reaches a review as a lesson', async () => {
+  await addRecords(db, REPO, [lessonRecord()]);
+  const taught = await recordsMemory(db, OF_8).lessons!([TAX], AS_OF, signal);
+  assert.deepEqual(taught, {
+    lessons: [{ ref: '7:r-71', why: 'file', path: 'src/billing/tax.ts', day: '2026-03-04', text: RULE }],
+    cut: { lessons: 0, names: 0, records: false },
+  });
+  assert.deepEqual(Object.keys(taught.lessons[0]!).sort(), ['day', 'path', 'ref', 'text', 'why']);
+});
+
+test('a pull request is never shown a lesson made from itself', async () => {
+  await addRecords(db, REPO, [lessonRecord()]);
+  const of7 = await recordsMemory(db, REF).lessons!([TAX], AS_OF, signal);
+  assert.deepEqual(of7, { lessons: [], cut: { lessons: 0, names: 0, records: false } });
+  const of8 = await recordsMemory(db, OF_8).lessons!([TAX], AS_OF, signal);
+  assert.deepEqual(of8.lessons.map((l) => l.ref), ['7:r-71']);
+});
+
+test('a disabled lesson, an expired one and one dated after the as-of time are never shown', async () => {
+  await addRecords(db, REPO, [
+    lessonRecord({ sourceRef: 'kept', comment: 'r-1' }),
+    lessonRecord({ sourceRef: 'off', comment: 'r-2' }),
+    lessonRecord({ sourceRef: 'gone', comment: 'r-3' }),
+    lessonRecord({ sourceRef: 'soon', comment: 'r-4' }),
+  ]);
+  await db.query("update visto_ai.memory_records set status = 'disabled' where source_ref = 'off'");
+  // expired the day before, and not yet retired by a pass: it is still active
+  await db.query("update visto_ai.memory_records set expires_at = '2026-03-11T12:00:00.000Z' where source_ref = 'gone'");
+  await db.query("update visto_ai.memory_records set created_at = '2026-03-12T10:00:00.001Z' where source_ref = 'soon'");
+  const taught = await recordsMemory(db, OF_8).lessons!([TAX], AS_OF, signal);
+  assert.deepEqual(taught.lessons.map((l) => l.ref), ['kept']);
+  // the same lessons at a time all four were live, once the switched-off one is switched on again
+  await db.query("update visto_ai.memory_records set status = 'active'");
+  const before = await recordsMemory(db, OF_8).lessons!([TAX], new Date('2026-03-11T11:00:00.000Z'), signal);
+  assert.deepEqual(before.lessons.map((l) => l.ref).sort(), ['gone', 'kept', 'off']);
+  const after = await recordsMemory(db, OF_8).lessons!([TAX], new Date('2026-03-12T11:00:00.000Z'), signal);
+  assert.deepEqual(after.lessons.map((l) => l.ref).sort(), ['kept', 'off', 'soon']);
+});
+
+test('another repository\'s lessons are never read, and a signal is never shown as a lesson', async () => {
+  await addRecords(db, { service: 'github', owner: 'acme', repo: 'shop-admin' }, [lessonRecord()]);
+  await addRecords(db, { service: 'github', owner: 'acme-labs', repo: 'shop' }, [lessonRecord({ sourceRef: '9:r-91', number: 9, comment: 'r-91' })]);
+  // a signal of pull request 9 on the changed file, whose excerpt would pass as a lesson's text
+  await addRecords(db, REPO, [record({ sourceRef: '9:file:src/billing/tax.ts', number: 9, excerpt: RULE })]);
+  const memory = recordsMemory(db, OF_8);
+  assert.deepEqual(await memory.lessons!([TAX], AS_OF, signal), { lessons: [], cut: { lessons: 0, names: 0, records: false } });
+  assert.deepEqual((await memory.blocks([TAX], AS_OF, signal)).pullRequest.map((l) => l.ref), ['9:file:src/billing/tax.ts']);
+  // and the repository's own are
+  await addRecords(db, REPO, [lessonRecord()]);
+  assert.deepEqual((await recordsMemory(db, OF_8).lessons!([TAX], AS_OF, signal)).lessons.map((l) => l.ref), ['7:r-71']);
+});
+
+test('the read of lessons sets its own statement limit inside its transaction', async () => {
+  await addRecords(db, REPO, [lessonRecord()]);
+  const { wrapped, seen, setting } = watched(db);
+  const outside = await setting(db);
+  assert.notEqual(outside, String(MEMORY_TIMEOUT_MS));
+  const taught = await recordsMemory(wrapped, OF_8).lessons!([TAX], AS_OF, signal);
+  assert.equal(taught.lessons.length, 1);
+  // one read: the limit, then the lookup, in one transaction
+  assert.equal(seen.length, 2);
+  assert.ok(seen.every((s) => s.inTransaction));
+  assert.match(seen[0]!.text, /^set local statement_timeout = \d+$/);
+  assert.equal(seen[0]!.params, undefined);
+  assert.equal(seen[0]!.limit, String(MEMORY_TIMEOUT_MS));
+  assert.match(seen[1]!.text, /from visto_ai\.memory_records/);
+  assert.match(seen[1]!.text, /kind = 'lesson'/);
+  // the pull request's own lessons are left out by the statement
+  assert.deepEqual(seen[1]!.params, ['github', 'acme', 'shop', '2026-03-12T10:00:00.000Z', LESSONS_READ + 1, 8]);
+  // after the transaction the limit is what it was
+  assert.equal(await setting(db), outside);
+});
+
+test('a lesson reaches the model between markers, and the reply\'s words never do', async () => {
+  const QUOTE = 'Narwhals juggle saffron accordions every afternoon.';
+  await addRecords(db, REPO, [
+    lessonRecord({ excerpt: QUOTE }),
+    record({ sourceRef: '9:file:src/billing/rates.ts', number: 9, path: 'src/billing/rates.ts', excerpt: WRITTEN[0]!, reason: WRITTEN[1]!, comment: 'c-91' }),
+  ]);
+  const { result: r, requests } = await reviewWith(recordsMemory(db, OF_8), ['src/billing/fees.ts'], 8);
+  assert.equal(r.dependencies.memory?.lessons?.status, 'ok');
+  assert.deepEqual(r.dependencies.memory?.lessons, { status: 'ok', code: 'ok', shown: 1 });
+  assert.ok(requests.length >= 1);
+  const wrapped = `<<<data abcdef0123456789 lesson L1>>>\n${RULE}\n<<<end abcdef0123456789>>>`;
+  for (const request of requests) {
+    const all = request.messages.map((m) => m.content).join('\n');
+    // the lesson's text once, between a start and an end marker with the review's token
+    assert.equal(all.split(RULE).length, 2);
+    const header = request.messages.filter((m) => m.content.includes(RULE));
+    assert.equal(header.length, 1);
+    assert.equal(header[0]!.content.includes(wrapped), true);
+  }
+  const stored = await db.query<{ excerpt: string }>('select excerpt from visto_ai.memory_records');
+  assert.equal(stored.length, 2);
+  for (const text of requests.map((request) => JSON.stringify(request))) {
+    for (const row of stored) assert.equal(text.includes(row.excerpt), false, row.excerpt);
+  }
 });
