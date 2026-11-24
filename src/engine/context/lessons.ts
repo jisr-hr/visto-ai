@@ -26,8 +26,11 @@ export function lessonText(raw: unknown): { ok: true; text: string } | { ok: fal
   if (typeof raw !== 'string' || raw.length > 4 * LESSON_CHARS) return { ok: false, code: 'not_a_rule' };
   const text = cleanLine(raw.replace(DEFAULT_IGNORABLE, ''), 4 * LESSON_CHARS).text;
   if (text.length < LESSON_MIN_CHARS || text.length > LESSON_CHARS) return { ok: false, code: 'not_a_rule' };
-  if (NOT_GENERAL.some((pattern) => pattern.test(text))) return { ok: false, code: 'not_a_rule' };
-  if (NAMES_THE_SCORE.test(text)) return { ok: false, code: 'names_the_score' };
+  // Checked on the text and on its compatibility form, where a full-width digit, mark or letter is the plain one;
+  // the text returned is the cleaned text, not that form.
+  const forms = [text, text.normalize('NFKC')];
+  if (forms.some((form) => NOT_GENERAL.some((pattern) => pattern.test(form)))) return { ok: false, code: 'not_a_rule' };
+  if (forms.some((form) => NAMES_THE_SCORE.test(form))) return { ok: false, code: 'names_the_score' };
   return { ok: true, text };
 }
 

@@ -161,7 +161,7 @@ async function runOnce(deps: Deps, log: Log): Promise<Judged> {
     }
 
     // Rule 5: the call.
-    const asked = await askJudge(deps.model, { path: r.path, severity: r.severity, finding, reply: r.body }, deps.token(), deps.auto, deps.timeoutMs);
+    const asked = await askJudge(deps.model, { path: r.path, severity: r.severity, finding, reply: r.body }, deps.token(), deps.auto, deps.timeoutMs, stopping);
     const answered = asked.usage.calls > 0;
     if (answered) {
       out.calls += finite(asked.usage.calls);

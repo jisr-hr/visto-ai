@@ -139,8 +139,18 @@ function usageOf(response: unknown): Usage {
   return isObject(response) && isObject(response.usage) ? (response.usage as unknown as Usage) : zeroUsage();
 }
 
-/** One reply: one request, and one more when the answer is no verdict. A provider error is an answer, never a rejection; anything else the model throws is passed on. timeoutMs: the time limit of each request, which the caller takes from the configuration of the review model. */
-export async function askJudge(model: ModelClient, input: JudgeInput, token: string, auto: boolean, timeoutMs: number): Promise<Asked> {
+/**
+ * One reply: one request, and one more when the answer is no verdict. A provider error is an answer, never a rejection; anything else the model throws is passed on. timeoutMs: the time limit of each request, which the caller takes from the configuration of the review model.
+ * stopped: asked before the second request; when it answers true, or throws, no second request is made and the call ends as an answer with no verdict, with the usage of the first. Absent: never stopped.
+ */
+export async function askJudge(model: ModelClient, input: JudgeInput, token: string, auto: boolean, timeoutMs: number, stopped?: () => boolean): Promise<Asked> {
+  const isStopped = (): boolean => {
+    try {
+      return stopped?.() === true;
+    } catch {
+      return true;   // a stop that cannot be read is a stop
+    }
+  };
   const request = (messages: ChatMessage[]): ModelRequest =>
     ({ messages, tools: [JUDGE_TOOL], forcedTool: auto ? null : SUBMIT_VERDICT, effort: 'default', timeoutMs });
   const messages = judgeMessages(input, token);
@@ -151,6 +161,7 @@ export async function askJudge(model: ModelClient, input: JudgeInput, token: str
     const firstCall = callOf(first);
     const read = readVerdict(firstCall.called ? firstCall.args : null);
     if (read.ok) return { ok: true, value: read.value, usage };
+    if (isStopped()) return { ok: false, code: 'invalid_output', usage };
     const again: unknown = await model.complete(request([
       ...messages,
       { role: 'assistant', content: rejectedText(first) },

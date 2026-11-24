@@ -95,6 +95,21 @@ test('automatic approval is a name of the score, and what is read stops at four 
   assert.deepEqual(lessonText(`${at} `), { ok: false, code: 'not_a_rule' });
 });
 
+test('the checks for a number, a link and the score see full-width forms, and the text comes back as it was', () => {
+  const refused: Array<[string, string, 'not_a_rule' | 'names_the_score']> = [
+    ['Do not flag the retry loop in the cart, as in #12 we agreed.', 'Do not flag the retry loop in the cart, as in #\uff11\uff12 we agreed.', 'not_a_rule'],
+    ['Do not flag the retry loop in the cart, as in #12 we agreed.', 'Do not flag the retry loop in the cart, as in \uff0312 we agreed.', 'not_a_rule'],
+    ['Do not flag the retry loop in the cart, see https://example.test/x for why.', 'Do not flag the retry loop in the cart, see https:\uff0f\uff0fexample.test/x for why.', 'not_a_rule'],
+    ['Do not raise the score of a change that only renames a variable.', 'Do not raise the \uff53\uff43\uff4f\uff52\uff45 of a change that only renames a variable.', 'names_the_score'],
+  ];
+  for (const [plain, wide, code] of refused) {
+    assert.deepEqual(lessonText(plain), { ok: false, code }, plain);
+    assert.deepEqual(lessonText(wide), { ok: false, code }, wide);
+  }
+  const kept = 'Do not report a missing null check on what OrderStore.\uff46ind returns: it throws when nothing is found.';
+  assert.deepEqual(lessonText(kept), { ok: true, text: kept });
+});
+
 // Asking for lessons, checking them, and the part of the prompt (plan Task 4).
 const files = [{ path: 'src/billing/tax.ts', previousPath: null }];
 const asOf = new Date('2026-03-12T12:00:00Z');

@@ -690,6 +690,58 @@ test('a stopping that throws is read as a stop', async () => {
   await db.close();
 });
 
+test('a stop raised during the first verdict\'s transaction is seen before the next reply: one request, and no statement after it', async () => {
+  const db = await setup();
+  await startLearning(db, WORK_LESSONS, '2026-03-01T00:00:00.000Z');
+  for (let i = 0; i < 3; i += 1) await recordActivity(db, reply({ sourceId: `r-${i}`, at: plus(REPLY_AT, i * 60_000) }));
+  let stop = false;
+  const after: string[] = [];
+  const watched = wrap(db, {
+    query: <R,>(text: string, params?: unknown[]) => { if (stop) after.push(text); return db.query<R>(text, params); },
+    transaction: <T,>(work: (tx: Db) => Promise<T>) => {
+      if (stop) after.push('transaction');
+      return db.transaction(async (tx) => {
+        const result = await work(tx);
+        stop = true;
+        return result;
+      });
+    },
+  });
+  const { model, requests } = modelOf(() => noise());
+  const judged = await judge({ db: watched, model, stopping: () => stop });
+  assert.equal(requests.length, 1);
+  assert.deepEqual(after, []);
+  assert.deepEqual(judged, done({ judged: 1, calls: 1, cost: 0.25, end: 'stopped', complete: false, more: true }));
+  assert.deepEqual((await verdicts(db)).map((v) => v.reply), ['r-0']);
+  await db.close();
+});
+
+test('a stop raised during a reply\'s first request whose answer is prose sends no second request and writes nothing for that reply', async () => {
+  const db = await setup();
+  await recordActivity(db, reply());
+  let stop = false;
+  const { model, requests } = modelOf((i) => {
+    if (i === 0) {
+      stop = true;
+      return prose();
+    }
+    return noise();
+  });
+  const judged = await judge({ db, model, stopping: () => stop });
+  assert.equal(requests.length, 1);
+  assert.deepEqual(judged, done({ calls: 1, cost: 0.25, end: 'stopped', complete: false, more: true }));
+  assert.deepEqual(await verdicts(db), []);
+  assert.deepEqual(await calls(db), []);
+
+  stop = false;
+  const next = await judge({ db, model, stopping: () => stop });
+  assert.equal(requests.length, 2);
+  assert.equal(next.judged, 1);
+  assert.deepEqual(await verdicts(db), [{ reply: 'r-1', classification: 'noise', outcome: 'none', attempts: 0 }]);
+  assert.equal((await calls(db)).length, 1);
+  await db.close();
+});
+
 test('an owner and a collaborator are people with access, and take none of the strangers\' twenty', async () => {
   const db = await setup();
   for (let i = 0; i < JUDGE_STRANGERS; i += 1) {

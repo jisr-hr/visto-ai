@@ -167,6 +167,23 @@ test('two answers that are no verdict end as invalid_output, with their usage', 
   assert.equal(m.requests.length, 2);
 });
 
+test('after a stop no second request is made: the call ends as invalid_output with the usage of the first request', async () => {
+  const stops: Array<[string, () => boolean]> = [['true', () => true], ['a throw', () => { throw new Error('unreadable'); }]];
+  for (const [name, stopped] of stops) {
+    const m = model([response({ text: 'prose', usage: usage(0.01) }), called(VERDICT, { usage: usage(0.02) })]);
+    const asked = await askJudge(m, input(), TOKEN, false, 1000, stopped);
+    assert.deepEqual(asked, { ok: false, code: 'invalid_output', usage: usage(0.01) }, name);
+    assert.equal(m.requests.length, 1, name);
+  }
+  const goes: Array<[string, (() => boolean) | undefined]> = [['false', () => false], ['absent', undefined]];
+  for (const [name, stopped] of goes) {
+    const m = model([response({ text: 'prose', usage: usage(0.01) }), called(VERDICT, { usage: usage(0.02) })]);
+    const asked = await askJudge(m, input(), TOKEN, false, 1000, stopped);
+    assert.equal(asked.ok, true, name);
+    assert.equal(m.requests.length, 2, name);
+  }
+});
+
 test('a provider error ends the call with its kind, and keeps the usage of a request that was answered', async () => {
   const first = model([new ProviderError('timeout', 'timeout: status 504', 504, null)]);
   assert.deepEqual(await askJudge(first, input(), TOKEN, false, 1000), { ok: false, code: 'timeout', usage: ZERO });
