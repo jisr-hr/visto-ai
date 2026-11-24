@@ -4,17 +4,19 @@ import { generateKeyPairSync } from 'node:crypto';
 import { pgliteDb } from './db/pglite.ts';
 import type { Db, InstanceLock } from './db/types.ts';
 import { loadMigrations, MIGRATIONS_DIR, migrate } from './db/migrate.ts';
-import { askGate, claimJob, enqueueJob, finishJob, getJob, unfinishedJobs } from './db/jobs.ts';
+import { askGate, askWithdraw, claimJob, enqueueJob, finishJob, getJob, unfinishedJobs } from './db/jobs.ts';
 import type { Job } from './db/jobs.ts';
 import { getPullRequest, savePullRequest } from './db/pull-requests.ts';
 import { NO_COUNTS, recordEvaluation } from './db/gate.ts';
-import { recordRun } from './db/review-runs.ts';
+import { markPublished, recordRun } from './db/review-runs.ts';
 import type { RunRecord } from './db/review-runs.ts';
+import { markDismissFailed } from './db/approvals.ts';
+import { dismissMessage } from './approval/text.ts';
 import { beat, readHeartbeat } from './db/heartbeat.ts';
 import { serviceConfig, parseConfig } from './config/load.ts';
-import type { AppIdentity, FeatureOff, ForgeChecks, ForgeEvent, ForgeWriter, HookDelivery, LivePullRequest, OwnCheck, PostedComment, PullRequestAction, PullRequestFacts, ReviewThread, Source } from './forge/types.ts';
-import type { ModelRequest, ModelResponse, ReviewDeps, ReviewInput, ReviewResult } from './engine/types.ts';
-import { BEAT_MS, CLOSE_WAIT_MS, DRAIN_WAIT_MS, gateForge, startService, STOP_WAIT_MS, TICK_MS, UPKEEP_MS } from './service.ts';
+import type { AppIdentity, FeatureOff, ForgeApprovals, ForgeChecks, ForgeEvent, ForgeWriter, HookDelivery, LivePullRequest, OwnCheck, PostedComment, PullRequestAction, PullRequestFacts, ReviewThread, Source } from './forge/types.ts';
+import type { BlockScore, ModelRequest, ModelResponse, ReviewDeps, ReviewInput, ReviewResult } from './engine/types.ts';
+import { BEAT_MS, CLOSE_WAIT_MS, DRAIN_WAIT_MS, gateForge, startService, STOP_WAIT_MS, TICK_MS, UPKEEP_MS, WITHDRAW_CONCURRENCY } from './service.ts';
 import type { Listening } from './service.ts';
 import type { RequestLike, ResponseLike } from './shell/http.ts';
 import { checkText } from './gate/check.ts';
@@ -101,6 +103,8 @@ interface Options {
   learning?: boolean;
   /** The model's tool choice; the config's own (forced) when not given. */
   toolChoice?: 'auto' | 'forced';
+  /** The approvals the service is given; none when not given. */
+  approvals?: ForgeApprovals;
 }
 interface Timer { ms: number; work: () => Promise<void>; cancelled: boolean }
 
@@ -142,6 +146,8 @@ async function harness(options: Options = {}) {
   const order: string[] = [];
   const lacksCalls: boolean[] = [];
   const gateCalls: unknown[] = [];
+  /** The third argument of each call of `lacks`. */
+  const approvalCalls: unknown[] = [];
   /** Every call of the checks, as [name, ...args]. */
   const checked: unknown[][] = [];
   /** The checks GitHub holds, by commit. */
@@ -154,7 +160,7 @@ async function harness(options: Options = {}) {
   const appInfo: AppIdentity = {
     read: () => Promise.reject(new Error('not_used')),
     canResolve: () => Promise.resolve(false),
-    lacks: (dryRun, gate) => (order.push('lacks'), lacksCalls.push(dryRun), gateCalls.push(gate), options.lacks instanceof Error ? Promise.reject(options.lacks) : Promise.resolve(options.lacks ?? [])),
+    lacks: (dryRun, gate, approval) => (order.push('lacks'), lacksCalls.push(dryRun), gateCalls.push(gate), approvalCalls.push(approval), options.lacks instanceof Error ? Promise.reject(options.lacks) : Promise.resolve(options.lacks ?? [])),
   };
 
   const db: Db = {
@@ -175,7 +181,7 @@ async function harness(options: Options = {}) {
   const lock: InstanceLock = { release: async () => { events.push('release'); } };
 
   const h = {
-    db, queries, allQueries, reviewDeps, modelRequests, events, order, lacksCalls, gateCalls, checked, held, timers, inputs, fetched, listedSince, logged, writes,
+    db, queries, allQueries, reviewDeps, modelRequests, events, order, lacksCalls, gateCalls, approvalCalls, checked, held, timers, inputs, fetched, listedSince, logged, writes,
     port: 0,
     /** What the clock reads; a test may move it. */
     now: options.now ?? at(0),
@@ -334,6 +340,7 @@ async function harness(options: Options = {}) {
       extensions: options.extensions ?? [],
       reviewUrl: (ref, reviewId) => `https://git.example.test/${ref.owner}/${ref.repo}/pull/${ref.number}#review-${reviewId}`,
       pullRequestUrl: (ref) => `https://git.example.test/${ref.owner}/${ref.repo}/pull/${ref.number}`,
+      ...(options.approvals === undefined ? {} : { approvals: options.approvals }),
       });
       started.push(service);
       return service;
@@ -1941,4 +1948,165 @@ test('the judge has the configured tool choice: under auto it names no tool to c
     assert.equal(h.modelRequests[0]!.forcedTool, forced, choice);
     assert.deepEqual(h.modelRequests[0]!.tools.map((tool) => tool.function.name), ['submit_verdict'], choice);
   }
+});
+
+// Withdrawals: a lane of their own.
+
+/** Approvals as GitHub answers them: the branch's rule dismisses, a review stands approved until it is dismissed. `hold` makes readReview wait. Each call is kept as [name, ...args]. */
+function approvalsFake(hold?: Promise<void>): { approvals: ForgeApprovals; calls: unknown[][] } {
+  const calls: unknown[][] = [];
+  const dismissed = new Set<string>();
+  return {
+    calls,
+    approvals: {
+      staleApprovals: async (_ref, installation, branch) => { calls.push(['staleApprovals', installation, branch]); return 'dismissed'; },
+      readReview: async (_ref, installation, reviewId) => {
+        calls.push(['readReview', installation, reviewId]);
+        if (hold !== undefined) await hold;
+        return { state: dismissed.has(reviewId) ? 'dismissed' : 'approved', commit: null };
+      },
+      dismissReview: async (_ref, installation, reviewId, message) => { calls.push(['dismissReview', installation, reviewId, message]); dismissed.add(reviewId); },
+    },
+  };
+}
+/** Automatic approval on for every repository. */
+const APPROVAL_YAML = 'repositories:\n  defaults: { score: { autoApprove: true, auditShare: 0 } }\n';
+/** The pull request, from the repository itself, at `head`. */
+const liveAt = (head: string): LivePullRequest => ({ ...LIVE, info: { ...LIVE.info, headSha: head, fromFork: false } });
+/** A result every stored condition of approval holds for: its one file covered at 35, one minor finding, threshold 70. */
+const approvable = (): ReviewResult => ({
+  ...okResult(),
+  scores: [{
+    path: 'a.ts', previousPath: null, diffHash: 'd', changeSummary: '', changedLines: 1, wholeFile: null, fileLevel: null, finalScore: 35, covered: true,
+    blocks: [{
+      id: 'B1', hunk: 'B1', hunkHash: 'h', hash: 'h', changedLines: 1, span: { side: 'RIGHT', first: 3, last: 3 },
+      lines: { old: [], new: [] } as unknown as BlockScore['lines'], entry: { score: 35, category: 'calculation', reason: '' },
+    }],
+  }],
+});
+/** A run at `head` against main published as review `reviewId`, an approval that stands. Its id is returned. */
+async function approvalOf(db: Db, reviewId: string, head = 'h1', number = 7): Promise<number> {
+  const id = await recordRun(db, run({ ref: { ...REF, number }, dryRun: false, headSha: head, baseSha: 'merge000', baseBranch: 'main', startedAt: at(-60), finishedAt: at(-50) }));
+  await markPublished(db, id, { reviewId, publishedAt: at(-50), body: 'Approved.', inlineDropped: false, approved: true, approvalCode: 'approved' });
+  return id;
+}
+const approvalRows = (db: Db) => db.query<{ id: number; approved: boolean; approval_code: string | null; dismissed_by: string | null; dismiss_failure: string | null }>(
+  'select id, approved, approval_code, dismissed_by, dismiss_failure from visto_ai.review_runs where approved order by id');
+const withdrawRows = (db: Db) => db.query<{ number: number; status: string; outcome: string | null; installation: string | null }>(
+  "select number, status, outcome, installation from visto_ai.jobs where kind = 'withdraw' order by id");
+
+test('a push on an approved pull request withdraws its approval in its own lane', async () => {
+  const seen = approvalsFake();
+  const h = await harness({ dryRun: false, repositoriesYaml: APPROVAL_YAML, threads: [], result: approvable(), approvals: seen.approvals });
+  h.live = liveAt('h1');
+  await (await h.start()).settled;
+  // The review of h1 is posted as an approval; the withdraw job stored with it runs at once and finds nothing to withdraw.
+  await h.webhook(pr('opened'), 'd1');
+  await h.until(async () => (await withdrawRows(h.db)).some((j) => j.status === 'done'));
+  assert.deepEqual((await approvalRows(h.db)).map((r) => [r.approved, r.approval_code, r.dismissed_by]), [[true, 'approved', null]]);
+  assert.deepEqual(await withdrawRows(h.db), [{ number: 7, status: 'done', outcome: 'kept', installation: '99' }]);
+  // Reviews are paused for the day; then a push: its review waits, and the withdrawal does not.
+  await recordRun(h.db, run({ startedAt: at(0), usage: { ...run().usage, cost: 50 } }));
+  h.live = liveAt('h2');
+  h.now = at(5);
+  assert.deepEqual(await h.webhook(pr('synchronize', { headSha: 'h2', updatedAt: at(5) }), 'd2'), { status: 202, body: 'accepted' });
+  // A job's line is the last thing it writes.
+  await h.until(() => h.logged.filter((e) => e.event === 'withdraw').length === 2);
+  assert.deepEqual(seen.calls, [['staleApprovals', '99', 'main'], ['readReview', '99', '501'], ['dismissReview', '99', '501', dismissMessage('h1')]]);
+  assert.deepEqual((await approvalRows(h.db)).map((r) => [r.approved, r.dismissed_by]), [[true, 'app']]);
+  assert.deepEqual((await withdrawRows(h.db)).map((j) => [j.status, j.outcome]), [['done', 'kept'], ['done', 'done']]);
+  assert.deepEqual(h.logged.filter((e) => e.event === 'withdraw').map((e) => [e.outcome, e.dismissed]), [['kept', 0], ['done', 1]]);
+  // No timer ran it; the push's review is still waiting, after its quiet period too.
+  h.now = at(200);
+  await h.runTimer(TICK_MS);
+  await h.flush();
+  assert.deepEqual([h.inputs.length, (await pending(h.db, 'review')).map((j) => [j.reason, j.status])], [1, [['opened', 'done'], ['synchronize', 'pending']]]);
+});
+
+test('at start a standing approval whose withdrawal failed is asked for again on an open pull request, and nothing is logged when none is', async () => {
+  const seen = approvalsFake();
+  const h = await harness({ gate: true, threads: [], approvals: seen.approvals });
+  await migrate(h.db, loadMigrations(MIGRATIONS_DIR));
+  await savePullRequest(h.db, facts({ headSha: 'h2' }));
+  await markDismissFailed(h.db, await approvalOf(h.db, '501'), 'github_403');
+  // A merged pull request keeps its failure as it is.
+  await savePullRequest(h.db, facts({ ref: { ...REF, number: 8 }, headSha: 'h2', state: 'merged', mergedAt: at(-5), closedAt: at(-5) }));
+  await markDismissFailed(h.db, await approvalOf(h.db, '502', 'h1', 8), 'github_403');
+  h.live = liveAt('h2');
+  let atListen: unknown[] = [];
+  h.onListen = async () => { atListen = h.logged.map((e) => e.event); };
+  await (await h.start()).settled;
+  assert.deepEqual(atListen, ['recovery', 'gate_sweep', 'withdraw_sweep']);
+  assert.deepEqual(h.logged.filter((e) => e.event === 'withdraw_sweep'), [{ event: 'withdraw_sweep', asked: 1 }]);
+  await h.until(async () => (await approvalRows(h.db))[0]!.dismissed_by !== null);
+  assert.deepEqual((await approvalRows(h.db)).map((r) => [r.dismissed_by, r.dismiss_failure]), [['app', null], [null, 'github_403']]);
+  assert.deepEqual(seen.calls.filter((c) => c[0] !== 'staleApprovals'), [['readReview', '99', '501'], ['dismissReview', '99', '501', dismissMessage('h1')]]);
+  // None failed: nothing is logged, nothing is asked, and no row of the pull requests is read at start; in dry run nothing is asked either.
+  for (const [options, failed] of [[{ dryRun: false }, false], [{ dryRun: true }, true]] as const) {
+    const other = await harness({ ...options, approvals: approvalsFake().approvals });
+    await migrate(other.db, loadMigrations(MIGRATIONS_DIR));
+    await savePullRequest(other.db, facts({ headSha: 'h2' }));
+    const standing = await approvalOf(other.db, '501');
+    if (failed) await markDismissFailed(other.db, standing, 'github_403');
+    other.allQueries.length = 0;
+    let statements: string[] = [];
+    other.onListen = async () => { statements = other.allQueries.map(([text]) => text); };
+    await (await other.start()).settled;
+    await other.flush();
+    const label = JSON.stringify(options);
+    assert.deepEqual([other.logged.filter((e) => e.event === 'withdraw_sweep'), await withdrawRows(other.db)], [[], []], label);
+    assert.deepEqual(statements.filter((text) => text.includes('visto_ai.pull_requests')), [], label);
+  }
+});
+
+test('the app is asked what it lacks for approval when a repository has it on', async () => {
+  for (const [yaml, approval] of [
+    [APPROVAL_YAML, true], ['repositories:\n  overrides:\n    acme/shop: { score: { autoApprove: true, auditShare: 0 } }\n', true],
+    ['repositories:\n  defaults: { score: { approvalThreads: gate, auditShare: 0 } }\n', false], [undefined, false],
+  ] as const) {
+    const h = await harness({ dryRun: false, ...(yaml === undefined ? {} : { repositoriesYaml: yaml }) });
+    await (await h.start()).settled;
+    assert.deepEqual([h.lacksCalls, h.approvalCalls], [[false], [approval]], String(yaml));
+  }
+});
+
+test('stop drains the withdraw runner too', async (t) => {
+  assert.equal(WITHDRAW_CONCURRENCY, 2);
+  let release!: () => void;
+  const hold = new Promise<void>((done) => { release = done; });
+  const seen = approvalsFake(hold);
+  const h = await harness({ dryRun: false, approvals: seen.approvals });
+  await migrate(h.db, loadMigrations(MIGRATIONS_DIR));
+  await savePullRequest(h.db, facts({ headSha: 'h2' }));
+  await approvalOf(h.db, '501');
+  h.live = liveAt('h2');
+  const service = await h.start();
+  await service.settled;
+  // Stored while the service runs, with no delivery to wake the runner: the timer starts it.
+  await askWithdraw(h.db, REF, at(0), '99');
+  await h.runTimer(TICK_MS);
+  await h.until(() => seen.calls.length === 1);
+  const stopping = service.stop();
+  await h.flush();
+  assert.equal(h.events.includes('listener-close'), false);
+  release();
+  await stopping;
+  assert.deepEqual(h.events.slice(-3), ['listener-close', 'close', 'release']);
+  assert.deepEqual([await withdrawRows(h.db), (await approvalRows(h.db)).map((r) => r.dismissed_by)], [[{ number: 7, status: 'done', outcome: 'done', installation: '99' }], ['app']]);
+  // A withdrawal that never ends is cut once DRAIN_WAIT_MS has passed, and counted.
+  const stuck = await harness({ dryRun: false, approvals: approvalsFake(never()).approvals });
+  await migrate(stuck.db, loadMigrations(MIGRATIONS_DIR));
+  await savePullRequest(stuck.db, facts({ headSha: 'h2' }));
+  await approvalOf(stuck.db, '501');
+  stuck.live = liveAt('h2');
+  await askWithdraw(stuck.db, REF, at(0), '99');
+  const cut = await stuck.start();
+  await cut.settled;
+  await stuck.until(async () => (await withdrawRows(stuck.db))[0]!.status === 'running');
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const ending = cut.stop();
+  await stuck.flush();
+  t.mock.timers.tick(DRAIN_WAIT_MS);
+  await ending;
+  assert.deepEqual(stuck.logged.find((e) => e.event === 'drain_timeout'), { event: 'drain_timeout', running: 1 });
 });

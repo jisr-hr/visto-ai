@@ -1,6 +1,7 @@
 import type { RepoSettings } from '../config/load.ts';
+import { hasStandingApproval } from '../db/approvals.ts';
 import { recordActivity } from '../db/human-activity.ts';
-import { askGate, enqueueJob } from '../db/jobs.ts';
+import { askGate, askWithdraw, enqueueJob } from '../db/jobs.ts';
 import { getPullRequest, savePullRequest } from '../db/pull-requests.ts';
 import { recordDelivery } from '../db/deliveries.ts';
 import type { Db } from '../db/types.ts';
@@ -17,9 +18,9 @@ export interface HttpAnswer { status: number; body: string }
 export interface ReceiveDeps {
   db: Db; reader: WebhookReader; clock: () => Date; log: (entry: Record<string, unknown>) => void;
   settingsFor: (fullName: string) => RepoSettings;   // "owner/name"
-  /** Called after the commit, once per delivery that stored or replaced a review job, or stored a gate job or moved a waiting one's time; also when the delivery itself is recorded as ignored. */
+  /** Called after the commit, once per delivery that stored or replaced a review job, stored a gate job or moved a waiting one's time, or asked for a withdraw job; also when the delivery itself is recorded as ignored. */
   onQueued: () => void;
-  /** In dry run no gate job is stored: /done is a /review, the skip and a re-run are nothing. */
+  /** In dry run no gate job and no withdraw job is stored: /done is a /review, the skip and a re-run are nothing. */
   dryRun: boolean;
   /** The service's own app id: a re-run of any other app's check is not ours. */
   appId: string;
@@ -27,10 +28,12 @@ export interface ReceiveDeps {
   onLearn?: () => void;
 }
 
-/** job: the review job; gate: a gate job was stored or took this delivery's time. */
-interface Queued { job: 'queued' | 'delayed' | null; skip: string | null; command: 'review' | 'done' | 'skip' | 'rerun' | null; gate: boolean }
+/** job: the review job; gate: a gate job was stored or took this delivery's time; withdraw: a withdraw job was asked for. */
+interface Queued { job: 'queued' | 'delayed' | null; skip: string | null; command: 'review' | 'done' | 'skip' | 'rerun' | null; gate: boolean; withdraw: boolean }
 
 const GATE_ACTIONS = new Set(['opened', 'reopened', 'ready_for_review', 'synchronize', 'retargeted']);
+/** The actions after which a standing approval may no longer hold; a close asks only when it is a merge (calls 5, 20). */
+const WITHDRAW_ACTIONS = new Set(['synchronize', 'retargeted', 'reopened']);
 
 interface Who { delivery: string | null; name: string | null; action: string | null }
 const NOBODY: Who = { delivery: null, name: null, action: null };
@@ -75,7 +78,7 @@ export async function receive(
           outcome: capture.outcome, reason: capture.outcome === 'ignored' ? capture.reason : null,
         });
         if (!fresh) return null;
-        const queued: Queued = { job: null, skip: null, command: null, gate: false };
+        const queued: Queued = { job: null, skip: null, command: null, gate: false, withdraw: false };
         const nowIso = receivedAt.toISOString();
         const settingsOf = (ref: PullRequestRef) => deps.settingsFor(`${ref.owner}/${ref.repo}`);
         // The gate is live for a repository: not in dry run, and its gate enabled.
@@ -89,6 +92,12 @@ export async function receive(
         // The sync carries the installation the event came through, when it names one.
         const ask = async (ref: PullRequestRef, installation: string | null | undefined, runAt?: string): Promise<void> => {
           if (await askGate(tx, ref, nowIso, runAt, { installation: installation ?? null }) !== null) queued.gate = true;
+        };
+        // Out of dry run, a withdraw job due now when the pull request has a standing approval (with `review`, that one),
+        // whatever the filters say (call 5). With none, one read and nothing stored.
+        const withdraw = async (ref: PullRequestRef, installation: string | null, review?: string): Promise<void> => {
+          if (deps.dryRun || !(await hasStandingApproval(tx, ref, review))) return;
+          if (await askWithdraw(tx, ref, nowIso, installation) !== null) queued.withdraw = true;
         };
         // A thread event, and a reply, by anyone: also when capture ignores it as a bot's.
         const event = reading.event;
@@ -119,7 +128,15 @@ export async function receive(
               if (GATE_ACTIONS.has(reading.event.action) && liveFor(own.ref) && gatingOf(settingsOf(own.ref), own.baseBranch) !== 'off') {
                 await ask(own.ref, own.installation);
               }
+              // A push, a retarget, a reopening or a merge: the event's own facts, whatever the trigger decided.
+              if (WITHDRAW_ACTIONS.has(reading.event.action) || (reading.event.action === 'closed' && own.state === 'merged')) {
+                await withdraw(own.ref, own.installation);
+              }
             }
+          }
+          // A dismissed review: only one of the app's own approvals that stands (call 21).
+          if (reading.event.kind === 'review_dismissed') {
+            await withdraw(reading.event.ref, reading.event.installation, reading.event.review);
           }
           if (capture.activity) await recordActivity(tx, capture.activity);
           const command = reading.event.kind === 'general_comment' ? commandOf(reading.event.comment.body) : null;
@@ -175,8 +192,9 @@ export async function receive(
       return { status: 202, body: 'duplicate' };
     }
     const gate = stored.gate ? { gate: true } : {};
+    const withdrawn = stored.withdraw ? { withdraw: true } : {};
     const wake = (): void => {
-      if (stored.job === null && !stored.gate) return;
+      if (stored.job === null && !stored.gate && !stored.withdraw) return;
       try {
         deps.onQueued();
       } catch {
@@ -196,9 +214,9 @@ export async function receive(
         // a wake-up that fails changes nothing
       }
     }
-    if (reading.event.kind === 'pull_request') note(who, 'accepted', null, { job: stored.job, skip: stored.skip, ...gate });
+    if (reading.event.kind === 'pull_request') note(who, 'accepted', null, { job: stored.job, skip: stored.skip, ...gate, ...withdrawn });
     else if (stored.command !== null) note(who, 'accepted', null, { command: stored.command, job: stored.job, ...gate });
-    else note(who, 'accepted', null, gate);
+    else note(who, 'accepted', null, { ...gate, ...withdrawn });
     wake();
     return { status: 202, body: 'accepted' };
   } catch (err) {
