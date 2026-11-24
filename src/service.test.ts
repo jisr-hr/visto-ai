@@ -1607,6 +1607,26 @@ test('a start step that fails still leaves the timer, and the stale alert, in pl
   assert.deepEqual(alertsOf(h, 'learning_stale'), [{ event: 'alert', code: 'learning_stale', hours: 37 }]);
 });
 
+test('with learning on, the delivery of a merged revert records the reverted files without waiting for the timer', async () => {
+  const h = await harness({ learning: true });
+  await migrate(h.db, loadMigrations(MIGRATIONS_DIR));
+  const six = { ...REF, number: 6 };
+  await savePullRequest(h.db, facts({ ref: six, state: 'merged', mergedAt: at(-3600), closedAt: at(-3600), updatedAt: at(-3600) }));
+  await recordRun(h.db, run({ ref: six, result: scoredBlock(35) }));
+  await (await h.start()).settled;
+  await h.until(async () => (await ranAt(h)) !== null);
+  const merge = { state: 'merged' as const, mergedAt: at(600), closedAt: at(600), updatedAt: at(600), reverts: 6 };
+  assert.deepEqual(await h.webhook(pr('closed', merge), 'd3'), { status: 202, body: 'accepted' });
+  const reverts = async () =>
+    h.db.query<{ number: number; reverted: number; source_ref: string }>("select number, reverted, source_ref from visto_ai.memory_records where kind = 'revert' order by id");
+  await h.until(async () => (await reverts()).length > 0);
+  assert.deepEqual(await reverts(), [{ number: 7, reverted: 6, source_ref: `7:reverts:6:${TAX}` }]);
+  await h.until(() => h.logged.some((e) => e.event === 'revert'));
+  assert.deepEqual(h.logged.filter((e) => e.event === 'revert'), [
+    { event: 'revert', repo: 'acme/shop', number: 7, reverted: 6, code: 'recorded', files: 1, added: 1, cut: 0 },
+  ]);
+});
+
 test('stop waits for a pass under way and starts none after it', async () => {
   const h = await harness({ learning: true, now: at(2 * 86_400) });
   await migrate(h.db, loadMigrations(MIGRATIONS_DIR));
