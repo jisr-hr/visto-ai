@@ -686,7 +686,7 @@ It reads the file, never GitHub, and needs no GitHub token. The config must have
 
 [AACR-Bench](https://github.com/alibaba/aacr-bench) is a public set of reviewed pull requests. Its version 2 (`dataset/v2/positive_samples.json`) is licensed Apache-2.0 and holds 151 merged pull requests of public repositories, with 944 review comments checked by experts. It is not part of this repository: download it yourself and keep it outside the project folder. These commands read it as untrusted data, never run it, and put nothing made from it in the repository.
 
-The commands make paid model calls and read GitHub, so each takes a ceiling (`--max-cost`) and a token. All files must be outside the project folder.
+`import-aacr` reads GitHub and needs `GITHUB_TOKEN`; it makes no model call and takes no `--max-cost`. `replay` makes paid model calls and reads GitHub, so it needs both tokens and takes `--max-cost`. `judge` makes paid model calls, needs no GitHub token and takes `--max-cost`. All files must be outside the project folder.
 
 ```bash
 export GITHUB_TOKEN=...        # a read-only token
@@ -714,10 +714,10 @@ npm run eval:backtest -- --history ../aacr/history.jsonl --out ../runs/score --l
 **The judge.** `eval:judge` writes `judge.jsonl`, `judge-summary.json` and `judge-summary.md` into the run folder and changes none of the run's own files. It needs no GitHub token. Use a model of another family than the reviewer's, so that the model does not rate its own kind. For each finding, one model call is shown the finding and the reference comments of the same file, and names every reference that raises the same concern about the same code. A finding in a file with no reference comment is unmatched, with no call. The judge reads everything a person would read in the review: findings placed on a line, findings that could not be placed, and findings beyond the diff. The reasons it gives are kept in `judge.jsonl`: read a sample of them by hand before trusting a number.
 
 - **Recall**: the share of reference comments that some finding covers.
-- **Precision**: the share of findings that cover a reference comment, counted by a matching in which each finding and each reference is used at most once, within a case. AACR-Bench's own count depends on the order of the findings, and the two arms order them differently, so it is not used here.
-- **F1**: the harmonic mean of the two, taken from the raw counts. It is 0 when either is 0, and `-` when a number is undefined.
+- **Precision**: the share of findings that cover a reference comment, counted by a maximum one-to-one matching between findings and references within a case (each finding and each reference is used at most once). For recall, one finding may cover several references. AACR-Bench's own count depends on the order of the findings, and the two arms order them differently, so it is not used here.
+- **F1**: the harmonic mean of the two, taken from the raw counts. It is 0 when either is 0 or when only one of the two is undefined, and undefined (printed as an em dash) only when both are.
 
-A failed replay case is left out of all three and counted. A finding whose judge call failed twice counts as unmatched, and is counted. With `--with`, both runs are restricted to the cases that are ok in both, so the control and the reviewer are rated on the same cases; without it, a case one run failed counts for the other. A judge stopped by `--max-cost` rates only the first cases of the case file, in the file's order, and prints how many it did not judge.
+A failed replay case is left out of all three and counted. A finding whose judge call failed twice counts as unmatched, and is counted. As with `replay`, when the provider reports no cost and the configuration has no prices, `--max-cost` stops nothing. With `--with`, both runs are restricted to the cases that are ok in both, so the control and the reviewer are rated on the same cases; without it, a case one run failed counts for the other. A judge stopped by `--max-cost` rates only the first cases of the case file, in the file's order, and prints how many it did not judge.
 
 **The score.** The backtest on the history file reports Safety, Benefit and Focus as above, with these differences:
 
