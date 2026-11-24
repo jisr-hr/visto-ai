@@ -371,7 +371,7 @@ const recordedWith = (result: ReviewResult, meta: { trigger?: 'automatic' | 'man
 const RUN_OK = recordedWith(approvable());
 /** An earlier review of the pull request, published as review 480. */
 const EARLIER: StoredRun = { ...RUN_OK, id: 3, job: 2, published: true, reviewId: '480', publishedAt: at(0) };
-const ctx = (over: Partial<ApprovalContext> = {}): ApprovalContext => ({ rule: 'strict', clearByReply: true, threshold: 70, runs: [RUN_OK], stored: [], ...over });
+const ctx = (over: Partial<ApprovalContext> = {}): ApprovalContext => ({ rule: 'strict', clearByReply: true, threshold: 70, runs: [RUN_OK], stored: [], drawn: () => false, ...over });
 const para = (decided: ApprovalCode, more: { code?: string; rule?: ApprovalThreads } = {}): string =>
   approvalParagraph(decided, { head: 'h1', threshold: 70, rule: more.rule ?? 'strict', ...(more.code === undefined ? {} : { code: more.code }) });
 /** The body this job renders for `result` with the paragraph `p`. */
@@ -735,4 +735,110 @@ test('runs or comments handed in as something that is no list could not be read 
     }, JSON.stringify(over));
     assert.deepEqual(names(h.calls), ['readPullRequest', 'listOwnReviews', 'publishReview'], JSON.stringify(over));
   }
+});
+
+// The audit sample.
+const AUDITED = { approved: false, code: 'audit_sample', dismissed: false } as const;
+/** Approval on, with a draw that answers `answer` and is put in the calls, as ['drawn'], each time it is asked. */
+const drawnHarness = (options: Options = {}, over: Partial<ApprovalContext> = {}, answer = false) => {
+  const into: { calls: unknown[][] } = { calls: [] };
+  const h = onHarness({ ...options, approval: ctx({ ...over, drawn: () => { into.calls.push(['drawn']); return answer; } }) });
+  into.calls = h.calls;
+  return h;
+};
+
+test('a review drawn for the audit sample is posted as a comment that ends with its paragraph, after the threads and the rule were read', async () => {
+  const h = onHarness({ approval: ctx({ drawn: () => true }) });
+  const body = withPara(approvable(), para('audit_sample'));
+  assert.ok(body.endsWith(`\n\n${para('audit_sample')}`));
+  assert.deepEqual(await publishRun(h.deps, h.args), {
+    kind: 'published', reviewId: '501', body, inlineDropped: false, notesDropped: false, adopted: false, approval: AUDITED,
+  });
+  assert.deepEqual(h.calls, [['readPullRequest'], ['listOwnReviews'], ['listThreads'], ['staleApprovals', 'main'], ['publishReview', 'h1', body, 1]]);
+  assert.deepEqual(h.drafts, [{ commit: 'h1', body, comments: RUN_OK.comments }]);
+  // A branch that keeps stale approvals is named, drawn or not.
+  const kept = onHarness({ approval: ctx({ drawn: () => true }), rule: 'kept' });
+  const out = await publishRun(kept.deps, kept.args);
+  assert.deepEqual(out.kind === 'published' && out.approval, { approved: false, code: 'rule_off', dismissed: false });
+  assert.equal(out.kind === 'published' && out.body, withPara(approvable(), para('rule_off')));
+  assert.equal('event' in kept.drafts[0]!, false);
+});
+
+test('the draw is asked once, last, and only when every other condition held', async () => {
+  // Approvable: asked once, after the rule was read and before the post.
+  const ok = drawnHarness();
+  const out = await publishRun(ok.deps, ok.args);
+  assert.deepEqual(out.kind === 'published' && out.approval, { approved: true, code: 'approved', dismissed: false });
+  assert.deepEqual(names(ok.calls), ['readPullRequest', 'listOwnReviews', 'listThreads', 'staleApprovals', 'drawn', 'publishReview']);
+  // An approval GitHub refuses is posted again as a comment: the draw is not asked again.
+  const refused = drawnHarness({ posts: [REJECTED(), { id: '502' }] });
+  const again = await publishRun(refused.deps, refused.args);
+  assert.deepEqual(again.kind === 'published' && again.approval, { approved: false, code: 'refused', dismissed: false });
+  assert.deepEqual(names(refused.calls), ['readPullRequest', 'listOwnReviews', 'listThreads', 'staleApprovals', 'drawn', 'publishReview', 'publishReview']);
+  // Never asked when a condition before it refused, nor on a path that decides nothing.
+  const NOT_COVERED = recordedWith(okResult());
+  const cases: Array<[string, Options, Partial<ApprovalContext>, ApprovalCode | 'unlisted' | 'adopted']> = [
+    ['runs null', {}, { runs: null }, 'record_unreadable'],
+    ['not covered', { run: NOT_COVERED }, { runs: [NOT_COVERED] }, 'not_covered'],
+    ['a draft', { live: { ...LIVE_OK, info: { ...LIVE_OK.info, draft: true } } }, {}, 'draft'],
+    ['an open thread', { threads: [appThread('8001')] }, { runs: [EARLIER, RUN_OK], stored: [STORED_MAJOR] }, 'open_thread'],
+    ["the rule 'kept'", { rule: 'kept' }, {}, 'rule_off'],
+    ['the rule rejecting', { rule: new Error('github_403') }, {}, 'rule_unreadable'],
+    ['a held review', { resumed: true, hold: true }, {}, 'unlisted'],
+    ['an adopted review', { own: [{ id: '480', commit: 'h1', state: 'commented' }] }, {}, 'adopted'],
+    ['an adopted approval', { own: [{ id: '480', commit: 'h1', state: 'approved' }] }, {}, 'adopted'],
+  ];
+  for (const [name, options, over, expected] of cases) {
+    const h = drawnHarness(options, over, true);
+    const outcome = await publishRun(h.deps, h.args);
+    const told = outcome.kind === 'unlisted' ? 'unlisted' : outcome.kind === 'published' && outcome.adopted ? 'adopted' : outcome.kind === 'published' && outcome.approval?.code;
+    assert.equal(told, expected, name);
+    assert.equal(names(h.calls).includes('drawn'), false, name);
+  }
+});
+
+test('a draw that throws or answers anything but false is an audit, never an approval', async () => {
+  const body = withPara(approvable(), para('audit_sample'));
+  const answers: Array<[string, unknown]> = [
+    ['throws', () => { throw new Error('Something private'); }], ['true', () => true], ['undefined', () => undefined], ["'false'", () => 'false'],
+    ['0', () => 0], ['null', () => null], ['a promise of false', () => Promise.resolve(false)], ['no function', undefined],
+  ];
+  for (const [name, drawn] of answers) {
+    const h = onHarness({ approval: ctx({ drawn: drawn as ApprovalContext['drawn'] }) });
+    assert.deepEqual(await publishRun(h.deps, h.args), {
+      kind: 'published', reviewId: '501', body, inlineDropped: false, notesDropped: false, adopted: false, approval: AUDITED,
+    }, name);
+    assert.deepEqual(h.drafts, [{ commit: 'h1', body, comments: RUN_OK.comments }], name);
+  }
+  // false, and false alone, is an approval.
+  const h = onHarness({ approval: ctx({ drawn: () => false }) });
+  const approved = withPara(approvable(), para('approved'));
+  assert.deepEqual(await publishRun(h.deps, h.args), {
+    kind: 'published', reviewId: '501', body: approved, inlineDropped: false, notesDropped: false, adopted: false, approval: { approved: true, code: 'approved', dismissed: false },
+  });
+  assert.deepEqual(h.drafts, [{ commit: 'h1', body: approved, comments: RUN_OK.comments, event: 'approve' }]);
+});
+
+test('when GitHub refuses the comment of an audited review it is posted as today, ending with the audit paragraph', async () => {
+  const asComment = withPara(approvable(), para('audit_sample'));
+  const bodyOnly = withPara(approvable(), para('audit_sample'), false);
+  assert.ok(bodyOnly.endsWith(`\n\n${para('audit_sample')}`));
+  const h = drawnHarness({ posts: [REJECTED(), { id: '502' }] }, {}, true);
+  assert.deepEqual(await publishRun(h.deps, h.args), {
+    kind: 'published', reviewId: '502', body: bodyOnly, inlineDropped: true, notesDropped: false, adopted: false, approval: AUDITED,
+  });
+  assert.deepEqual(h.drafts, [{ commit: 'h1', body: asComment, comments: RUN_OK.comments }, { commit: 'h1', body: bodyOnly, comments: [] }]);
+  assert.equal(names(h.calls).filter((c) => c === 'drawn').length, 1);
+  // With notes: every comment, then without the notes, then the body alone; never an approval.
+  const noted: StoredRun = { ...RUN_OK, comments: [FINDING, NOTE] };
+  const three = drawnHarness({ run: noted, posts: [REJECTED(), REJECTED(), { id: '503' }] }, { runs: [noted] }, true);
+  assert.deepEqual(await publishRun(three.deps, three.args), {
+    kind: 'published', reviewId: '503', body: bodyOnly, inlineDropped: true, notesDropped: true, adopted: false, approval: AUDITED,
+  });
+  assert.deepEqual(three.drafts, [
+    { commit: 'h1', body: asComment, comments: [FINDING, NOTE] },
+    { commit: 'h1', body: asComment, comments: [FINDING] },
+    { commit: 'h1', body: bodyOnly, comments: [] },
+  ]);
+  assert.equal(names(three.calls).filter((c) => c === 'drawn').length, 1);
 });

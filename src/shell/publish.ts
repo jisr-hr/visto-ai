@@ -39,6 +39,7 @@ export interface ApprovalContext {
   rule: ApprovalThreads; clearByReply: boolean; threshold: number;
   runs: StoredRun[] | null;                                      // every run of the pull request, this one included; null: could not be read
   stored: Array<StoredComment & { run: number }> | null;         // the app's stored comments; null: could not be read
+  drawn: () => boolean;   // 6.5: asked once, last, only when every other condition held; a throw or any answer but false is drawn
 }
 
 /** A decision, with the short code of the read that failed when it names one. */
@@ -48,8 +49,8 @@ const isObject = (x: unknown): x is Record<string, unknown> => typeof x === 'obj
 
 /**
  * The decision on automatic approval at the moment of posting (6.4): each condition only when the ones before it held, so that a
- * read is made only when needed: the stored runs and comments, the live pull request, its threads, then the base branch's rule.
- * What cannot be read is never approved.
+ * read is made only when needed: the stored runs and comments, the live pull request, its threads, the base branch's rule, and
+ * last the audit sample (6.5). What cannot be read, or told, is never approved.
  */
 async function decide(deps: PublishDeps, ref: PullRequestRef, installation: string, run: StoredRun, info: PullRequestInfo, ctx: ApprovalContext): Promise<Decision> {
   const runs = ctx.runs;
@@ -87,9 +88,17 @@ async function decide(deps: PublishDeps, ref: PullRequestRef, installation: stri
   } catch (error) {
     return { code: 'rule_unreadable', detail: codeOf(error) };
   }
-  if (rule === 'dismissed') return { code: 'approved' };
   // Any answer but the two is no answer.
-  return rule === 'kept' ? { code: 'rule_off' } : { code: 'rule_unreadable', detail: 'internal_error' };
+  if (rule !== 'dismissed') return rule === 'kept' ? { code: 'rule_off' } : { code: 'rule_unreadable', detail: 'internal_error' };
+
+  // 6. The audit sample, asked once and last: only an answer of exactly false approves; any other, or a throw, sends it to a person.
+  let drawn: unknown;
+  try {
+    drawn = ctx.drawn();
+  } catch {
+    return { code: 'audit_sample' };
+  }
+  return drawn === false ? { code: 'approved' } : { code: 'audit_sample' };
 }
 
 /** Publishes one recorded review, or says why not. Writes nothing to the database. Never rejects. */
