@@ -87,6 +87,14 @@ test('a dismissal is marked once and clears the failure, and a failure is first 
   assert.deepEqual(await failedDismissals(db), [REF, { ...REF, number: 8 }, web]);
   await db.close();
 });
+test('the failure read is the newest standing approval that carries one, not the newest standing approval', async () => {
+  const db = await testDb();
+  const older = await posted(db, '501', true);
+  await posted(db, '502', true, { headSha: 'h2' });
+  assert.equal(await markDismissFailed(db, older, 'github_403'), true);
+  assert.equal(await failedDismissal(db, REF), 'github_403');
+  await db.close();
+});
 test('a merge under a standing approval is marked once, and a dismissed approval is never marked', async () => {
   const db = await testDb();
   const standing = await posted(db, '501', true);

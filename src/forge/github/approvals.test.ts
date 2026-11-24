@@ -57,6 +57,22 @@ test('with no such rule the protection decides: true says dismissed; false, abse
   }
 });
 
+test('a dismiss flag says dismissed only when it is true itself: a string, a number or an object says nothing', async () => {
+  for (const flag of ['true', 1, {}]) {
+    const { approvals } = github({
+      [`GET ${RULES('main')}`]: () => json([{ type: 'pull_request', parameters: { dismiss_stale_reviews_on_push: flag } }]),
+      [`GET ${PROTECTION('main')}`]: () => json({}, 404),
+    });
+    assert.equal(await approvals.staleApprovals(REF, '99', 'main'), 'kept', JSON.stringify(flag));
+  }
+  const { approvals, seen } = github({
+    [`GET ${RULES('main')}`]: () => json([]),
+    [`GET ${PROTECTION('main')}`]: () => json({ required_pull_request_reviews: { dismiss_stale_reviews: 1 } }),
+  });
+  assert.equal(await approvals.staleApprovals(REF, '99', 'main'), 'kept');
+  assert.deepEqual(seen.map((s) => s.path), [RULES('main'), PROTECTION('main')]);
+});
+
 test('a form that could not be read is no answer: kept only when both were read, dismissed when either says so', async () => {
   const denied = () => json({ message: 'Resource not accessible by integration' }, 403);
   const rulesDenied = github({ [`GET ${RULES('main')}`]: denied, [`GET ${PROTECTION('main')}`]: () => json(protectionWith(true)) });

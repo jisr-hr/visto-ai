@@ -638,6 +638,21 @@ test('a give-up records its failures before the job is finished: a refused recor
   assert.ok(marks >= 0 && finish > marks);
 });
 
+test('at the give-up a read of the standing approvals that rejects again counts as new: raised, and the gate asked', async () => {
+  const h = await harness({ failQuery: 'review_id is not null' });
+  await posted(h.db, '501');
+  const job = await h.job(5, { starts: 3 });
+  await h.run(job);
+  // The job's read and the give-up's read both rejected: nothing could be recorded, and GitHub was not read.
+  assert.equal(h.queries.filter((q) => q.includes('review_id is not null')).length, 2);
+  assert.deepEqual(h.calls, []);
+  assert.deepEqual(h.alerts, [['dismissal_failed', { reason: 'db_down', repo: 'acme/shop', number: 7 }]]);
+  // Gated by the stored base branch, with the job's installation.
+  assert.deepEqual(await gateJobs(h.db), [{ reason: 'sync', status: 'pending', installation: '99' }]);
+  assert.equal(h.queued(), 1);
+  assert.deepEqual(await statusOf(h, job), ['done', 'failed', at(5)]);
+});
+
 test('a give-up whose records are written is recorded though the job was finished meanwhile', async () => {
   const h = await harness({ dismissals: { '501': [new Error('github_403')] } });
   const id = await posted(h.db, '501');

@@ -128,6 +128,14 @@ test('a major or blocker left without a thread by any published run holds approv
   assert.equal(storedRefusal(current(), [run(9, approvable({ alreadyDiscussed: [discussed({ settled: true })] }))], 70), null);
 });
 
+test('an earlier run not known to be unpublished is read, and one not known to be posted with its inline comments counts its placed blocker', () => {
+  const unpublished = { ...run(1, approvable({ unplaced: [unplacedOf('major')] })), published: undefined } as unknown as StoredRun;
+  assert.equal(decide(current(), [unpublished]), 'finding_without_thread');
+  const dropped = { ...run(1, approvable({ findings: [finding('blocker')] })), inlineDropped: undefined } as unknown as StoredRun;
+  assert.equal(withoutThread([dropped]), 1);
+  assert.equal(decide(current(), [dropped]), 'finding_without_thread');
+});
+
 test('a stored result that cannot be read is record_unreadable, never approvable', () => {
   for (const result of [null, 'x', [], 7]) assert.equal(decide(current(result)), 'record_unreadable', String(result));
   assert.equal(decide(current(approvable(), { result: undefined })), 'record_unreadable');
