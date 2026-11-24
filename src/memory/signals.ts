@@ -8,6 +8,9 @@ import { stripControl } from '../engine/context/untrusted.ts';
 import { CATEGORIES } from '../engine/score/types.ts';
 import type { Association, Side } from '../forge/types.ts';
 import { readTime } from './select.ts';
+import { directoryOf } from './paths.ts';
+
+export { directoryOf };
 
 export const SIGNAL_DAYS = 180;
 export const EXCERPT_CHARS = 200;
@@ -50,12 +53,6 @@ function timeOf(value: unknown): number | null {
   const ms = readTime(value);
   if (ms === null || !Number.isFinite(new Date(ms + SIGNAL_DAYS * DAY_MS).getTime())) return null;
   return ms;
-}
-
-/** 'src/a/b.ts' gives 'src/a'; 'b.ts' gives '.'. */
-export function directoryOf(path: string): string {
-  const slash = path.lastIndexOf('/');
-  return slash <= 0 ? '.' : path.slice(0, slash);
 }
 
 // Every way a line can end is made a line feed: a quote cannot hide behind a line end the cleaner would strip.
