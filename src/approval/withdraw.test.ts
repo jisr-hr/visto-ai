@@ -718,9 +718,37 @@ test('the gate is not asked for a pull request whose base branch is not gated', 
   assert.deepEqual([await gateJobs(h.db), h.queued()], [[], 0]);
 });
 
-test('at a merge, an approval at the merged head on another base branch is left', async () => {
+test('at a merge, an approval at the merged head for another base branch is recorded and alerted once', async () => {
   const h = await harness({ live: [liveOf({ head: 'h2', state: 'merged' })] });
   const id = await posted(h.db, '501', { headSha: 'h2', baseBranch: 'release/1.0' });
+  const job = await h.job(5);
+  await h.run(job);
+  assert.deepEqual(h.calls, [['readPullRequest', REF, '99'], ['readReview', '501']]);
+  assert.deepEqual([await runRows(h.db), h.alerts], [[row(id, { stood_at_merge: new Date(at(5)) })], [['stale_approval_merged', { repo: 'acme/shop', number: 7 }]]]);
+  assert.deepEqual(await statusOf(h, job), ['done', 'done', at(5)]);
+  assert.deepEqual([lines(h)[0]!['state'], lines(h)[0]!['targets']], ['merged', 1]);
+});
+
+test('at a merge, an approval a later review of the same head did not approve is recorded and alerted once, and never dismissed', async () => {
+  const h = await harness({ live: [liveOf({ head: 'h1', state: 'merged' })] });
+  const stale = await posted(h.db, '501');
+  const comment = await posted(h.db, '502', { approved: false });
+  const job = await h.job(5);
+  await h.run(job);
+  assert.deepEqual(h.calls, [['readPullRequest', REF, '99'], ['readReview', '501']]);
+  assert.deepEqual(await runRows(h.db), [row(stale, { stood_at_merge: new Date(at(5)) }), row(comment)]);
+  assert.deepEqual(h.alerts, [['stale_approval_merged', { repo: 'acme/shop', number: 7 }]]);
+  assert.deepEqual(await statusOf(h, job), ['done', 'done', at(5)]);
+  assert.deepEqual([lines(h)[0]!['state'], lines(h)[0]!['targets']], ['merged', 1]);
+
+  // Asked again: read again, and neither recorded nor alerted a second time.
+  await h.run(await h.job(30));
+  assert.deepEqual([named(h, 'readReview').length, named(h, 'dismissReview').length, h.alerts.length], [2, 0, 1]);
+});
+
+test('at a merge, an approval of the merged head and base is left while the newest review is an approval that stands', async () => {
+  const h = await harness({ live: [liveOf({ head: 'h2', state: 'merged' })] });
+  const id = await posted(h.db, '501', { headSha: 'h2' });
   const job = await h.job(5);
   await h.run(job);
   assert.deepEqual(h.calls, [['readPullRequest', REF, '99']]);

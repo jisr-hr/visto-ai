@@ -148,15 +148,12 @@ async function work(s: Steps): Promise<End> {
   if (live.state === 'closed') return { kind: 'finish', status: 'done', outcome: 'closed' };
 
   const head = live.info.headSha;
-  if (live.state === 'open') {
-    // Every standing approval when the newest review is not an approval that stands (calls 11, 34).
-    const newest = await newestApprovalStands(db, job.ref);
-    found.targets = newest
-      ? found.standing.filter((a) => a.headSha !== head || a.baseBranch !== live.info.baseBranch)
-      : found.standing;
-  } else {
-    found.targets = found.standing.filter((a) => a.headSha !== head);
-  }
+  // The same targets on an open and a merged pull request: the approvals of another head or base branch, or every
+  // standing approval when the newest review is not an approval that stands (calls 11, 20, 34).
+  const newest = await newestApprovalStands(db, job.ref);
+  found.targets = newest
+    ? found.standing.filter((a) => a.headSha !== head || a.baseBranch !== live.info.baseBranch)
+    : found.standing;
   entry.targets = found.targets.length;
   const targets = new Set(found.targets);
   // On an open pull request an approval kept with a recorded failure is read as well: the failure ends once a job

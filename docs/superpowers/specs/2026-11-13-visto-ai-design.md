@@ -550,7 +550,7 @@ Order on every webhook: verify the signature, parse, reject a delivery id alread
 | Pull request new commits | Store a withdrawal of any approval, run at once (section 6.4), then queue a review after a 180-second quiet period. A newer push replaces a pending one |
 | Pull request retargeted to another base branch | Store a withdrawal of any approval, run at once (section 6.4), queue a `full` review |
 | Review dismissed | When it is an approval of the app's own, record it |
-| Pull request closed | Derive learning records. When it is merged, check that no approval of the bot's at another head still stood |
+| Pull request closed | Derive learning records. When it is merged, check that no approval of the bot's that no longer held (of another head or base branch, or followed by a review of the same head that did not approve) still stood |
 | Comment `/review` | Queue a manual review |
 | Comment `/done` | Gate command (section 9) |
 | Comment `/ai-review-skip <reason>` | Gate command (section 9) |
@@ -735,7 +735,7 @@ The schema is designed fresh. Identity everywhere is the git service, the reposi
 | `deliveries` | Webhook delivery ids, for duplicate rejection |
 | `jobs`, `heartbeat` | The queue and the liveness mark |
 | `pull_requests` | Author, state, merge and revert facts |
-| `review_runs` | One per run, append-only: mode, head, status, review id, whether approved and when dismissed, by whom, why a withdrawal failed, whether it stood at a merge of another head, and why the review did or did not approve, body, usage, dependency statuses, coverage, count of blocking findings on unchanged lines, count of blocking findings left without a thread, when its notice was sent to the notifiers |
+| `review_runs` | One per run, append-only: mode, head, status, review id, whether approved and when dismissed, by whom, why a withdrawal failed, whether it still stood at a merge though it no longer held, and why the review did or did not approve, body, usage, dependency statuses, coverage, count of blocking findings on unchanged lines, count of blocking findings left without a thread, when its notice was sent to the notifiers |
 | `review_comments` | The app's published inline comments: findings, with their severity and quoted code, and human-review notes, with their block's hash |
 | `file_scores` | Per run and file: hash of the file's diff, final score, floor source, whole-file score if any, change summary |
 | `block_scores` | Per run, file and block: hash of the block's changed lines, hash of its surroundings, line range, score, what it carried from earlier heads, category, reason, parts if split |
