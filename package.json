@@ -12,6 +12,7 @@
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "eval:replay": "node src/eval/cli.ts replay",
+    "eval:judge": "node src/eval/cli.ts judge",
     "eval:compare": "node src/eval/cli.ts compare",
     "eval:import-history": "node src/eval/cli.ts import-history",
     "eval:import-aacr": "node src/eval/cli.ts import-aacr",

@@ -649,3 +649,33 @@ test('replay accepts --plain, and backtest does not', () => {
   assert.equal(prepareRun('replay', 'cases', [...argv, '--plain'], env, [], ['plain']).flags.has('plain'), true);
   assert.throws(() => prepareRun('replay', 'cases', [...argv, '--plain'], env), /unknown option --plain/);
 });
+
+function judgeArgs(over: Record<string, string> = {}, drop: string[] = []): string[] {
+  const options: Record<string, string> = { cases: join(dir, 'judge-cases.jsonl'), run: join(dir, 'judge-run'), config: join(dir, 'judge-config.yml'), ...over };
+  for (const name of drop) delete options[name];
+  return ['judge', ...Object.entries(options).flatMap(([k, v]) => [`--${k}`, v])];
+}
+
+test('judge needs --run', async () => {
+  const [code, lines] = await run(judgeArgs({}, ['run']), {});
+  assert.equal(code, 2);
+  assert.deepEqual(lines, ['usage: judge needs --run']);
+});
+
+test('judge refuses a run folder inside the project folder', async () => {
+  const [code, lines] = await run(judgeArgs({ run: join(projectRoot, 'run') }), {});
+  assert.equal(code, 2);
+  assert.deepEqual(lines, ['usage: --run must be outside the project folder']);
+});
+
+test('judge refuses a --with folder inside the project folder', async () => {
+  const [code, lines] = await run([...judgeArgs(), '--with', join(projectRoot, 'other')], {});
+  assert.equal(code, 2);
+  assert.deepEqual(lines, ['usage: --with must be outside the project folder']);
+});
+
+test('judge refuses a case file inside the project folder, and needs no GITHUB_TOKEN', async () => {
+  const [code, lines] = await run(judgeArgs({ cases: join(projectRoot, 'c.jsonl') }), {});
+  assert.equal(code, 2);
+  assert.deepEqual(lines, ['usage: --cases must be outside the project folder']);
+});

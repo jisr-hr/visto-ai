@@ -21,6 +21,7 @@ import { scoreMoves, scoreNoise } from './backtest/noise.ts';
 import type { MoveRow } from './backtest/noise.ts';
 import { readCaseScores, runBacktest } from './backtest/run.ts';
 import type { BacktestSummary } from './backtest/run.ts';
+import { runJudge } from './judge/run.ts';
 import { loadHistory } from './history/file.ts';
 import { runImport } from './history/import.ts';
 import { seedCommand } from './history/seed.ts';
@@ -421,6 +422,48 @@ async function importAacr(argv: string[], env: Record<string, string | undefined
     + `pr_unreadable ${result.skipped.pr_unreadable}, head_unreadable ${result.skipped.head_unreadable}, too_many_files ${result.skipped.too_many_files}`);
 }
 
+// Judges a replay run against the case file's reference comments; needs no GITHUB_TOKEN and writes into the run folder.
+async function judgeCommand(argv: string[], env: Record<string, string | undefined>, out: (line: string) => void): Promise<void> {
+  const parsed = parse(argv, ['cases', 'run', 'config', 'with', 'max-cost', 'concurrency'], []);
+  if (parsed.positional.length > 0) throw new UsageError('usage: judge takes no positional arguments');
+  const get = (name: string): string => {
+    const v = parsed.options.get(name);
+    if (v === undefined) throw new UsageError(`usage: judge needs --${name}`);
+    return v;
+  };
+  const casesPath = get('cases');
+  const runDir = get('run');
+  const configPath = get('config');
+  const withDir = parsed.options.get('with');
+  const maxCost = positive(parsed, 'max-cost', 5);
+  const concurrency = positive(parsed, 'concurrency', 2);
+  if (![1, 2, 3].includes(concurrency)) throw new UsageError('usage: --concurrency must be 1, 2 or 3');
+  const root = projectFolder();
+  outsideProject(casesPath, root, 'cases');
+  outsideProject(runDir, root, 'run');
+  if (withDir !== undefined) outsideProject(withDir, root, 'with');
+
+  const config = readable('config', () => loadConfig(configPath, env));
+  const { cases, sha256 } = readable('cases', () => loadCases(casesPath));
+  let keep: Set<string> | null = null;
+  let withRunLabel: string | null = null;
+  if (withDir !== undefined) {
+    const okKeys = (dir: string): Set<string> => new Set(readRows(dir).filter((r) => r.status === 'ok').map((r) => r.key));
+    const other = okKeys(withDir);
+    keep = new Set([...okKeys(runDir)].filter((k) => other.has(k)));
+    withRunLabel = readableAs('the --with run directory', () => readSummary(join(withDir, 'summary.json')).summary.label);
+  }
+  const sleep = (ms: number): Promise<void> => new Promise((done) => { setTimeout(done, ms); });
+  const summary = await runJudge({
+    cases, casesSha256: sha256, runDir, keep, withRunLabel, maxCost, concurrency,
+    model: createModelClient(config.model, { fetch: globalThis.fetch, sleep }),
+    auto: config.model.toolChoice === 'auto', timeoutMs: config.model.timeoutSeconds * 1000,
+    token: () => randomBytes(8).toString('hex'),
+  });
+  out(`cases ${summary.cases}, failed ${summary.failed_cases}, findings ${summary.findings}, references ${summary.references}, `
+    + `precision ${dash(summary.precision)}, recall ${dash(summary.recall)}, f1 ${dash(summary.f1)}, judge_cost ${summary.judge_cost}`);
+}
+
 function compare(argv: string[], out: (line: string) => void): void {
   const parsed = parse(argv, ['noise'], []);
   if (parsed.positional.length !== 2) throw new UsageError('usage: compare <baseline summary.json> <candidate summary.json> [--noise <second baseline summary.json>]');
@@ -434,6 +477,7 @@ export async function main(argv: string[], env: Record<string, string | undefine
     const [command, ...rest] = argv;
     if (command === 'replay') await replay(rest, env, out);
     else if (command === 'compare') compare(rest, out);
+    else if (command === 'judge') await judgeCommand(rest, env, out);
     else if (command === 'backtest') await backtest(rest, env, out);
     else if (command === 'score-noise') scoreNoiseCommand(rest, out);
     else if (command === 'import-history') await importHistory(rest, env, out);
@@ -441,7 +485,7 @@ export async function main(argv: string[], env: Record<string, string | undefine
     else if (command === 'memory-count') await memoryCountCommand(rest, out);
     else if (command === 'score-compare') scoreCompareCommand(rest, out);
     else if (command === 'seed-memory') await seedMemoryCommand(rest, env, out);
-    else throw new UsageError('usage: cli <replay|compare|import-history|import-aacr|backtest|score-noise|memory-count|score-compare|seed-memory> ...');
+    else throw new UsageError('usage: cli <replay|judge|compare|import-history|import-aacr|backtest|score-noise|memory-count|score-compare|seed-memory> ...');
     return 0;
   } catch (error) {
     if (error instanceof UsageError) { out(error.message); return 2; }
