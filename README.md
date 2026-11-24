@@ -621,7 +621,7 @@ npm run eval:replay -- --cases ../cases.jsonl --out ../runs/first --label first 
 npm run eval:compare -- ../runs/baseline/summary.json ../runs/first/summary.json
 ```
 
-The case file and the output folder must be outside the project folder, so that private data cannot be committed by accident. A case file is JSON Lines: each line names a pull request at a fixed head and base, with the review comments people left, labelled by whether they were valid. This repository has no command that builds a case file yet.
+The case file and the output folder must be outside the project folder, so that private data cannot be committed by accident. A case file is JSON Lines: each line names a pull request at a fixed head and base, with the review comments people left, labelled by whether they were valid. `eval:import-aacr` builds one from AACR-Bench (see [Benchmark](#benchmark-aacr-bench)).
 
 The replay loads no extension module, so it runs without extension context and without acceptance rows; what rows cost the findings is therefore not measured. A config that names modules still needs the variables their options name to be set.
 
@@ -681,6 +681,57 @@ npm run eval:seed-memory -- --history ../history.jsonl --config config.local.yml
 ```
 
 It reads the file, never GitHub, and needs no GitHub token. The config must have a `database` block. It never migrates: the service must have started once on that database, or it ends with `database_not_migrated` and has written nothing. For each case it stores the reviews, inline comments and general comments of people (not of bots); for a pull request the service does not store, it also adds its records, dated by its merge, and marks its comments as looked at; for one the service stores, it adds no record, also when the service's row is out of date, and leaves the comments to the learning pass. Every insert leaves an existing row as it is, so nothing the service captured is overwritten and a second run adds nothing. It writes no row of `pull_requests`. It prints `cases <n>, known <n>, activity <n>, signals <n>`: the cases read, those the service stores, the activity rows added and the records added. A case stops it with `bad_case_repo` when its repository is not `owner/name`, with `bad_case_number` when its pull request's number is not a whole number from 1 to 2,147,483,647 or the line or start line of one of its comments or reviews is beyond what the database's integer column takes, and with `bad_case_time` when its merge time or an activity's time names no zone, is before the year 1 or names a day that does not exist. It stops before that case is written; the cases before it stay written. Cost: should the service later store a seeded pull request and review it at the very commit an old comment was made on, the pass makes a second record, for the block, beside the seeded one for the file.
+
+## Benchmark (AACR-Bench)
+
+[AACR-Bench](https://github.com/alibaba/aacr-bench) is a public set of reviewed pull requests. Its version 2 (`dataset/v2/positive_samples.json`) is licensed Apache-2.0 and holds 151 merged pull requests of public repositories, with 944 review comments checked by experts. It is not part of this repository: download it yourself and keep it outside the project folder. These commands read it as untrusted data, never run it, and put nothing made from it in the repository.
+
+The commands make paid model calls and read GitHub, so each takes a ceiling (`--max-cost`) and a token. All files must be outside the project folder.
+
+```bash
+export GITHUB_TOKEN=...        # a read-only token
+export OPENROUTER_API_KEY=...  # or the variable your configuration names
+
+# 1. Turn the raw file into a case file and a history file
+npm run eval:import-aacr -- --input ../aacr/positive_samples.json --cases-out ../aacr/cases.jsonl --history-out ../aacr/history.jsonl
+
+# 2. Replay the reviewer, then the control, on the same cases
+npm run eval:replay -- --cases ../aacr/cases.jsonl --out ../runs/reviewer --label reviewer --config config.local.yml --max-cases 10 --max-cost 3
+npm run eval:replay -- --cases ../aacr/cases.jsonl --out ../runs/plain --label plain --config config.local.yml --max-cases 10 --max-cost 3 --plain
+
+# 3. Judge each run against the reference comments, each one on the cases both runs answered
+npm run eval:judge -- --cases ../aacr/cases.jsonl --run ../runs/reviewer --with ../runs/plain --config judge.local.yml --max-cost 3
+npm run eval:judge -- --cases ../aacr/cases.jsonl --run ../runs/plain --with ../runs/reviewer --config judge.local.yml --max-cost 3
+
+# 4. Replay the score on the history file
+npm run eval:backtest -- --history ../aacr/history.jsonl --out ../runs/score --label score --config config.local.yml --max-cases 10 --max-cost 3
+```
+
+**The import.** `import-aacr` orders the pull requests by a hash of their address and head, so that `--max-cases 10` takes a spread of repositories whatever the order of the file. It reads each pull request's title and description from GitHub, so that the review sees what the app would see, and takes the merge base from a comparison, as `import-history` does. It prints how many records it read and wrote and how many it skipped, by code: `bad_record`, `bad_comment`, `duplicate`, `pr_unreadable`, `head_unreadable`, `too_many_files`.
+
+**The control.** `replay --plain` asks the same model, with the same configuration, one question for each case: the title, the description and every changed file's patch, with a short plain prompt, answered with a list of findings. It builds no context, packs no batches, places no finding and computes no score. A case whose request would not fit in `limits.inputTokensPerCall` fails with `too_large`. The control shows what the engine adds to the model alone.
+
+**The judge.** `eval:judge` writes `judge.jsonl`, `judge-summary.json` and `judge-summary.md` into the run folder and changes none of the run's own files. It needs no GitHub token. Use a model of another family than the reviewer's, so that the model does not rate its own kind. For each finding, one model call is shown the finding and the reference comments of the same file, and names every reference that raises the same concern about the same code. A finding in a file with no reference comment is unmatched, with no call. The judge reads everything a person would read in the review: findings placed on a line, findings that could not be placed, and findings beyond the diff. The reasons it gives are kept in `judge.jsonl`: read a sample of them by hand before trusting a number.
+
+- **Recall**: the share of reference comments that some finding covers.
+- **Precision**: the share of findings that cover a reference comment, counted by a matching in which each finding and each reference is used at most once, within a case. AACR-Bench's own count depends on the order of the findings, and the two arms order them differently, so it is not used here.
+- **F1**: the harmonic mean of the two, taken from the raw counts. It is 0 when either is 0, and `-` when a number is undefined.
+
+A failed replay case is left out of all three and counted. A finding whose judge call failed twice counts as unmatched, and is counted. With `--with`, both runs are restricted to the cases that are ok in both, so the control and the reviewer are rated on the same cases; without it, a case one run failed counts for the other.
+
+**The score.** The backtest on the history file reports Safety, Benefit and Focus as above, with these differences:
+
+- Read only the loose Safety. The history file has no later commits, so strict Safety is meaningless here; and do not use `--memory` with it.
+- Every pull request in the data has at least one expert comment, so Benefit is the share of pull requests the score would have approved with nothing shown to a person despite a known problem. Lower is better.
+- Safety counts expert comments of every weight, nits included, so it understates how well the score keeps defects in view.
+
+**What it does not show.**
+
+- Whether safe pull requests are approved. Every pull request in version 2 has a problem, so the benchmark cannot show a score's false alarms, or whether it approves what is safe.
+- Precision is a lower bound. A real problem the experts did not annotate counts against the finding that raised it.
+- The pull requests are public, merged and may have been seen by the models during their training.
+- It rates one model's judgement of "the same concern", not a person's; the sample of reasons is how you check it.
+- Nothing here is a number for your repositories.
 
 ## The file a team commits
 
