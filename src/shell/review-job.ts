@@ -1,3 +1,4 @@
+import { approvalOf } from '../config/load.ts';
 import type { RepoSettings } from '../config/load.ts';
 import { enqueueJob, finishJob, requeueJob } from '../db/jobs.ts';
 import type { Job } from '../db/jobs.ts';
@@ -587,7 +588,11 @@ export async function runReviewJob(job: Job, deps: ReviewJobDeps): Promise<void>
               // Under the gate with clearing by reply off, a person's reply settles nothing (5.2): the thread is judged again.
               const settings = deps.settingsFor(repo);
               const replySettles = !(reviewedOnRequest(gatingOf(settings, live.info.baseBranch)) && !settings.gate.clearByReply);
-              earlier = earlierOf({ last, runs, stored, threads, replySettles });
+              // With approval on, a thread is settled only when the thread rule in force closes it too (call 7).
+              const approval = approvalOf(settings);
+              earlier = approval.enabled
+                ? earlierOf({ last, runs, stored, threads, replySettles, approval: { rule: approval.threads, author: live.info.author, clearByReply: settings.gate.clearByReply } })
+                : earlierOf({ last, runs, stored, threads, replySettles });
             }
           }
         }

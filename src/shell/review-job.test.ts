@@ -1846,6 +1846,23 @@ test('with clearing by reply off a resolved thread with a person\'s reply is jud
   assert.deepEqual(await settledUnder(REPLY_OFF(SETTINGS), 11), [['PRRT_1', true, true]]);
   assert.deepEqual(await settledUnder(REPLY_OFF({ ...GATED, gate: { ...GATED.gate, branches: ['release'] } }), 12), [['PRRT_1', true, true]]);
 });
+test('with approval on the earlier state is judged under the thread rule in force, the live author and clearing by reply', async () => {
+  const RESOLVED: ReviewThread = { ...THREAD, resolved: true };
+  const under = async (settings: RepoSettings, number: number): Promise<unknown> => {
+    await published({ pullRequest: number });
+    const h = await manualJob({ reason: 'done', settings, pullRequest: number, own: OWN_401, threads: [[RESOLVED]] });
+    await runReviewJob(h.job, h.deps);
+    return h.inputs[0]!.earlier?.threads.map((t) => [t.id, t.settled, 'closedForApproval' in t ? t.closedForApproval : 'absent']);
+  };
+  const approving = (threads: 'strict' | 'gate', enabled = true): RepoSettings => ({ ...SETTINGS, approval: { enabled, threads, auditShare: 0 } });
+  // The reply is the live author's own: it closes nothing under the strict rule.
+  assert.deepEqual(await under(approving('strict'), 7), [['PRRT_1', false, false]]);
+  assert.deepEqual(await under(approving('gate'), 8), [['PRRT_1', true, true]]);
+  assert.deepEqual(await under(REPLY_OFF(approving('gate')), 9), [['PRRT_1', false, false]]);
+  // Approval written but off, and not written: what it was.
+  assert.deepEqual(await under(approving('strict', false), 10), [['PRRT_1', true, 'absent']]);
+  assert.deepEqual(await under(SETTINGS, 11), [['PRRT_1', true, 'absent']]);
+});
 test('a /done review and a re-run start over once when the head moved, with the fields of who asked', async () => {
   const done = await manualJob({ reason: 'done', settings: GATED, liveAfter: MOVED });
   await runReviewJob(done.job, done.deps);

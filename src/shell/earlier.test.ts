@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import type { StoredRun } from '../db/review-runs.ts';
+import { isDue } from '../engine/context/threads.ts';
 import type { ReviewThread, ThreadComment } from '../forge/types.ts';
 import { earlierOf, missedComments } from './earlier.ts';
 
@@ -130,4 +131,101 @@ test('a note the database missed is repaired as a note', () => {
   const withNote = run({ comments: [{ path: 'src/a.ts', side: 'RIGHT', line: 12, body: BODY }, { path: 'src/a.ts', side: 'RIGHT', line: 12, body: NOTE_ROOT.body, note: 'h1' }] });
   assert.deepEqual(missedComments({ runs: [withNote], stored: [STORED], threads: [thread(), thread({ id: 'PRRT_2', comments: [NOTE_ROOT] })] }),
     [{ commentId: '8002', path: 'src/a.ts', side: 'RIGHT', line: 12, severity: 'note', quote: '', blockHash: 'h1', run: 1 }]);
+});
+
+const MARKED = 'Answered.\n\n<!-- visto-ai: review=402 head=h2 -->';
+const appMarked = (): ThreadComment => reply('visto-test', { id: '9002', byApp: true, authorIsBot: true, body: MARKED });
+const STRICT = { rule: 'strict' as const, author: 'octo-dev', clearByReply: true };
+const GATE_RULE = { rule: 'gate' as const, author: 'octo-dev', clearByReply: true };
+/** Threads T1, T2, ... whose first comments 8001, 8002, ... are stored majors of run 1. */
+const numbered = (overs: Array<Partial<ReviewThread>>) => {
+  const threads = overs.map((over, i) => thread({ id: `T${i + 1}`, ...over, comments: [{ ...ROOT, id: String(8001 + i) }, ...(over.comments ?? [])] }));
+  const stored = overs.map((_, i) => ({ ...STORED, commentId: String(8001 + i) }));
+  return { threads, stored };
+};
+
+test('with approval on under the strict rule, a thread the author replied to and resolved is not settled, and is due', () => {
+  const t = thread({ resolved: true, comments: [ROOT, reply('octo-dev', { association: 'member' })] });
+  const off = earlierOf(args([t])).threads[0]!;
+  assert.equal(off.settled, true);
+  assert.equal(isDue(off), false);
+  const on = earlierOf({ ...args([t]), approval: STRICT }).threads[0]!;
+  assert.deepEqual([on.resolved, on.settled, on.closedForApproval], [true, false, false]);
+  assert.equal(isDue(on), true);
+  // A member who is not the author, in the same thread: settled again, and not due.
+  const member = earlierOf({ ...args([thread({ resolved: true, comments: [ROOT, reply('octo-dev'), reply('octo-lead', { id: '9001', association: 'member' })] })]), approval: STRICT }).threads[0]!;
+  assert.deepEqual([member.settled, member.closedForApproval, isDue(member)], [true, true, false]);
+});
+test('under the gate rule for approval with clearing by reply off, a thread a person replied to and resolved is not settled, and is due', () => {
+  const t = thread({ resolved: true, comments: [ROOT, reply('octo-dev')] });
+  for (const replySettles of [undefined, true]) {
+    const gated = replySettles === undefined ? {} : { replySettles };
+    assert.equal(earlierOf({ ...args([t]), ...gated }).threads[0]!.settled, true);
+    const on = earlierOf({ ...args([t]), ...gated, approval: { ...GATE_RULE, clearByReply: false } }).threads[0]!;
+    assert.deepEqual([on.settled, on.closedForApproval], [false, false], String(replySettles));
+    assert.equal(isDue(on), true);
+  }
+  // With clearing by reply on it is closed, and settled as today.
+  const replyOn = earlierOf({ ...args([t]), approval: GATE_RULE }).threads[0]!;
+  assert.deepEqual([replyOn.settled, replyOn.closedForApproval, isDue(replyOn)], [true, true, false]);
+});
+test('with approval off the earlier state is what it was', () => {
+  const runs = [run({ id: 1 }), run({ id: 2, verdicts: [{ threadId: 'T2', verdict: 'fixed', fileChanged: true }, { threadId: 'T3', verdict: 'answered' }] })];
+  const { threads, stored } = numbered([
+    {},
+    { resolved: true, resolvedByApp: true, comments: [appMarked()] },
+    { resolved: true, resolvedByApp: true, comments: [appMarked(), reply('octo-dev')] },
+    { resolved: true, comments: [reply('octo-dev'), reply('octo-lead', { id: '9001', association: 'member' })] },
+    { resolved: true },
+    { resolved: false, comments: [reply('octo-guest', { association: 'none' })] },
+  ]);
+  for (const replySettles of [undefined, true, false]) {
+    const base = { last: run(), runs, stored, threads, ...(replySettles === undefined ? {} : { replySettles }) };
+    const before = earlierOf(base);
+    assert.deepEqual(earlierOf({ ...base, approval: undefined }), before);
+    assert.equal(before.threads.length, 6);
+    for (const t of before.threads) assert.equal('closedForApproval' in t, false, t.id);
+  }
+});
+test('under the gate rule for approval each thread carries whether it was closed for approval', () => {
+  const runs = [run({ id: 1 }), run({ id: 2, verdicts: [{ threadId: 'T2', verdict: 'fixed', fileChanged: false }, { threadId: 'T5', verdict: 'open' }, { threadId: 'T6', verdict: 'answered' }] })];
+  const { threads, stored } = numbered([
+    { resolved: true, comments: [reply('octo-dev')] },                                   // a person replied: closed
+    { resolved: true, resolvedByApp: true, comments: [appMarked()] },                   // the app resolved it after a fixed: closed
+    { resolved: false, comments: [reply('octo-dev')] },                                 // not resolved
+    { resolved: true },                                                                 // resolved, no reply
+    { resolved: true, resolvedByApp: true, comments: [appMarked()] },                   // the app resolved it, the newest verdict open
+    { resolved: true, resolvedByApp: true, comments: [appMarked()] },                   // the app resolved it after an answered: closed
+    { resolved: true, comments: [reply('helper-bot', { authorIsBot: true })] },         // a bot replied
+  ]);
+  const out = earlierOf({ last: run(), runs, stored, threads, approval: GATE_RULE });
+  assert.deepEqual(out.threads.map((t) => [t.id, t.settled, t.closedForApproval]), [
+    ['T1', true, true], ['T2', true, true], ['T3', false, false], ['T4', false, false], ['T5', false, false], ['T6', true, true], ['T7', false, false],
+  ]);
+  // The same threads under the strict rule: only the app's resolve after a fixed on a changed file, or a reply with access, would close one.
+  const strict = earlierOf({ last: run(), runs, stored, threads, approval: STRICT });
+  assert.deepEqual(strict.threads.map((t) => t.closedForApproval), [false, false, false, false, false, false, false]);
+});
+test("with the gate's clearing by reply off and the strict rule, a thread is settled only when both accept it", () => {
+  const runs = [run({ id: 1 }), run({ id: 2, verdicts: [
+    { threadId: 'T1', verdict: 'fixed', fileChanged: true },
+    { threadId: 'T2', verdict: 'fixed', fileChanged: true },
+    { threadId: 'T3', verdict: 'answered', fileChanged: false },
+  ] })];
+  const member = reply('octo-lead', { id: '9001', association: 'member' });
+  const { threads, stored } = numbered([
+    { resolved: true, resolvedByApp: true, comments: [appMarked()] },                    // both accept it
+    { resolved: true, resolvedByApp: true },                                             // strict accepts it; no marked reply of the app's, so today's rule does not
+    { resolved: true, resolvedByApp: true, comments: [appMarked()] },                    // today's rule accepts it; an answered verdict, so the strict rule does not
+    { resolved: true, comments: [member] },                                              // strict accepts it; replies do not settle, so today's rule does not
+    { resolved: true, resolvedByApp: true, comments: [appMarked(), member] },            // both accept it
+    { resolved: true, comments: [reply('octo-dev')] },                                   // neither
+  ]);
+  const out = earlierOf({ last: run(), runs, stored, threads, replySettles: false, approval: { ...STRICT, clearByReply: false } });
+  assert.deepEqual(out.threads.map((t) => [t.id, t.settled, t.closedForApproval]), [
+    ['T1', true, true], ['T2', false, true], ['T3', false, false], ['T4', false, true], ['T5', true, true], ['T6', false, false],
+  ]);
+  assert.deepEqual(out.threads.filter(isDue).map((t) => t.id), ['T2', 'T3', 'T4', 'T6']);
+  // Without approval only today's rule decides.
+  assert.deepEqual(earlierOf({ last: run(), runs, stored, threads, replySettles: false }).threads.map((t) => t.settled), [true, false, true, false, true, false]);
 });
