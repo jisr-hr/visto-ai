@@ -502,7 +502,7 @@ Guardrails on lessons, inherited, because lessons edit the reviewer's own prompt
 - The reply must come from an owner, member or collaborator of the repository, the same check as for commands (D15, D23). On a public repository anyone can reply in a bot thread. A stranger's reply is stored and judged, and never becomes a lesson. The writer may be the pull request's author. Of the replies a run takes, at most 20 are strangers'; the rest of theirs wait, and age out unjudged after 90 days.
 - The judge must quote the reply verbatim. A quote that is not in the reply discards the lesson. The judge is sent the reply's own words only: a line the writer quoted from someone else and a fenced code block are left out, and a reply with no words of its own is not sent. The quote must be in those words, as they are sent, cut at 2,000 characters. It is compared with white space and case ignored, not character for character.
 - A lesson must be a general rule: a length range, and no pull request numbers.
-- A lesson that restates an active one is dropped. So is one that restates a lesson that was switched off. No lesson is made when a later published review of the pull request kept the finding open or found it fixed.
+- A lesson that restates an active one is dropped. So is one that restates a lesson that was switched off. No lesson is made when the newest published review after the reply that holds a verdict for the thread kept the finding open or found it fixed.
 - At most 10 new lessons per run. At ten the run ends, and what is left waits for the next night.
 - Every judged reply is marked, whatever the outcome, so the queue moves forward. A reply the judge keeps omitting is retired after 3 attempts. A call that fails at the provider counts no attempt.
 
