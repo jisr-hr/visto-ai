@@ -1516,6 +1516,29 @@ test('with learning off nothing of learning runs: no timer, no log line, no row,
   assert.equal(h.logged.find((e) => e.event === 'review')!.memory, undefined);
 });
 
+test('with learning off a merged pull request that names a revert stores the number and nothing else', async () => {
+  const h = await harness();
+  await (await h.start()).settled;
+  assert.deepEqual(await h.webhook(pr('opened'), 'd1'), { status: 202, body: 'accepted' });
+  await h.reviewed();
+  await h.until(() => h.logged.some((e) => e.event === 'review'));
+  const merge = { state: 'merged' as const, mergedAt: at(120), closedAt: at(120), updatedAt: at(120), reverts: 6 };
+  assert.deepEqual(await h.webhook(pr('closed', merge), 'd3'), { status: 202, body: 'accepted' });
+  h.now = at(40 * 3600);
+  for (const timer of [...h.timers]) await timer.work();
+  await h.flush();
+  // The service's own statements, before this test reads anything.
+  assert.deepEqual(h.allQueries.filter(([text]) => /visto_ai\.learning|memory_records|learned_at|learn_attempts/.test(text)), []);
+  assert.deepEqual(await h.db.query('select reverts from visto_ai.pull_requests'), [{ reverts: 6 }]);
+  assert.deepEqual(h.timers.map((t) => t.ms), [TICK_MS, UPKEEP_MS, BEAT_MS]);
+  assert.equal(h.logged.some((e) => e.event === 'revert' || (typeof e.event === 'string' && /^(learning|memory)/.test(e.event))), false);
+  assert.equal(h.logged.some((e) => e.event === 'alert'), false);
+  assert.deepEqual(await h.db.query('select 1 from visto_ai.learning'), []);
+  assert.deepEqual(await memoryRows(h), []);
+  assert.equal(h.reviewDeps.length, 1);
+  assert.equal('memory' in h.reviewDeps[0]!, false);
+});
+
 test('with learning on, the start logs what the work has done so far and a first pass runs', async () => {
   const h = await harness({ learning: true });
   await (await h.start()).settled;
