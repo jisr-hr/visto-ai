@@ -405,7 +405,13 @@ async function chooseMemory(
   const again = budget > 0 ? pack(budget) : null;
   // Reverted lines are the first to give way: the same memory without them is packed whenever it holds one, and is shown
   // when the memory does not fit with them, or when they would change the files' batches (call 14).
-  const smaller = context.lines.some((l) => l.reverted === true) ? withoutReverted(context) : undefined;
+  const reverted = context.lines.some((l) => l.reverted === true);
+  const smaller = reverted ? withoutReverted(context) : undefined;
+  // Of reverted lines alone, the memory without them is empty: the packing to compare with is the first.
+  if (reverted && smaller === undefined && fits(again) && batchesOf(again) !== batchesOf(first)) {
+    audit.push({ stage: 'context', action: 'memory_cut', subject: 'reverted', reason: 'changes_batches' });
+    return { packed: first, shown: undefined, status: memorySkipped('no_room'), audit };
+  }
   if (smaller !== undefined) {
     const less = budgetWith(smaller);
     const retry = less > 0 ? pack(less) : null;

@@ -3446,6 +3446,11 @@ const revertedLine = (over: Partial<MemoryLine> = {}): MemoryLine =>
   memoryLine({ ref: '9:reverts:7:src/a.ts', category: null, missed: false, reverted: true, ...over });
 const headerOf = (q: ModelRequest): string => q.messages.find((m) => m.role === 'user' && m.content.startsWith('Repository: '))!.content;
 const memoryEntries = (r: ReviewResult) => r.audit.filter((e) => e.action.startsWith('memory_'));
+// A file of 90 added lines: larger than a memory of one reverted line, so that two of them can take a call each with or without it.
+const tallAt = (path: string): ChangedFile => ({
+  path, previousPath: null, status: 'modified', additions: 91, deletions: 0,
+  patch: `@@ -1,1 +1,91 @@\n head\n${Array.from({ length: 90 }, (_, i) => `+const value${i} = ${i * 7919};`).join('\n')}`,
+});
 
 test('with a memory that shows no reverted line the requests, the result and the audit are those of before', async () => {
   // The memory, the files and the answers of 'both batches are sent the repository message and the same header, and the result counts the lines'.
@@ -3488,8 +3493,13 @@ test('with a memory that shows no reverted line the requests, the result and the
 test('a reverted line reaches every call of a review, is named in the audit by its reference, and changes no score by itself', async () => {
   const answer = memoryAnswer([revertedLine()]);
   const line = 'changed | `src/a.ts` | 2026-03-10 | - | reverted';
-  const d = deps({ files: [fileA, fileB], answers: [answerOnA, answerOnB], memory: memoryOf(answer) });
-  const r = await review(await memoryRoom(answer, 1.5), d);
+  const files = [tallAt('src/a.ts'), tallAt('src/b.ts')];
+  const unit = await unitOf(files[0]!, false);
+  // A call holds one file, with the memory counted and without it: the memory changes no batch.
+  const lim = limitsOf(fixedTokens(CONTRACT, own.pullRequest, false, undefined, undefined, contextOf(answer)) + unit);
+  assert.ok(lim.limits.inputTokensPerCall - fixedTokens(CONTRACT, own.pullRequest) < 2 * unit);
+  const d = deps({ files, answers: [answerOnA, answerOnB], memory: memoryOf(answer) });
+  const r = await review(lim, d);
   assert.equal(d.model.requests.length, 2);
   for (const q of d.model.requests) {
     assert.ok(headerOf(q).includes(REVERTED_LINE_RULES));
@@ -3498,8 +3508,8 @@ test('a reverted line reaches every call of a review, is named in the audit by i
   assert.deepEqual(shownOfMemory(r), [{ stage: 'context', action: 'memory_shown', subject: '9:reverts:7:src/a.ts', reason: 'changed' }]);
   assert.deepEqual(r.dependencies.memory, { status: 'ok', code: 'ok', lines: 1 });
   // The same answers with no memory, in two batches likewise.
-  const plain = deps({ files: [fileA, fileB], answers: [answerOnA, answerOnB] });
-  const expected = await review(limitsOf(fixedTokens(CONTRACT, own.pullRequest) + Math.floor(1.5 * (await unitOf(fileA, false)))), plain);
+  const plain = deps({ files, answers: [answerOnA, answerOnB] });
+  const expected = await review(limitsOf(fixedTokens(CONTRACT, own.pullRequest) + Math.floor(1.5 * unit)), plain);
   assert.equal(plain.model.requests.length, 2);
   assert.deepEqual([r.scores, r.verdict, r.findings], [expected.scores, expected.verdict, expected.findings]);
 });
@@ -3680,6 +3690,31 @@ test('memory whose signals regroup the files and whose reverted line regroups no
     { stage: 'context', action: 'memory_shown', subject: '9:reverts:7:src/a.ts', reason: 'changed' },
   ]);
   assert.deepEqual(r.dependencies.memory, { status: 'ok', code: 'ok', lines: 2 });
+});
+
+test('memory of reverted lines alone that would cost a review one more call is not shown, and the audit says so', async () => {
+  const answer = memoryAnswer([revertedLine()], false);
+  const files = [tallAt('src/a.ts'), tallAt('src/b.ts')];
+  const unit = await unitOf(files[0]!, false);
+  assert.equal(await unitOf(files[1]!, false), unit);
+  // With no memory both files share one call; with the reverted line each call holds one file, and nothing is cut.
+  const lim = limitsOf(fixedTokens(CONTRACT, own.pullRequest) + 2 * unit);
+  const room = lim.limits.inputTokensPerCall - fixedTokens(CONTRACT, own.pullRequest, false, undefined, undefined, contextOf(answer));
+  assert.ok(room >= unit && room < 2 * unit);
+  const answerFor = { 'src/a.ts': answerOnA, 'src/b.ts': answerOnB };
+  const d = deps({ files, answerFor, memory: memoryOf(answer) });
+  const r = await review(lim, d);
+  const plain = deps({ files, answerFor });
+  await review(lim, plain);
+  assert.equal(d.model.requests.length, 1);
+  assert.deepEqual(d.model.requests, plain.model.requests);
+  for (const m of d.model.requests[0]!.messages) {
+    assert.equal(m.content.includes(' | reverted'), false);
+    assert.equal(m.content.includes(REVERTED_LINE_RULES), false);
+  }
+  assert.deepEqual(memoryEntries(r), [{ stage: 'context', action: 'memory_cut', subject: 'reverted', reason: 'changes_batches' }]);
+  assert.deepEqual(r.dependencies.memory, { status: 'skipped', code: 'no_room', lines: 0 });
+  assert.deepEqual(r.coverage, { reviewed: ['src/a.ts', 'src/b.ts'], notReviewed: [] });
 });
 
 test('with a second scorer a memory that would show a reverted line is not asked', async () => {
