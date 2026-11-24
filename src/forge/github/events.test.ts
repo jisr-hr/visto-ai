@@ -75,8 +75,27 @@ test('review', () => {
     kind: 'review', ref,
     review: { id: '11', author: 'octo-dev', authorIsBot: false, association: 'member', state: 'approved', commit: 'abc123', at: TI, body: 'ok' },
   });
-  assert.deepEqual(eventOf('pull_request_review', reviewPayload({}, 'dismissed')), { kind: 'ignored', reason: 'unknown_action' });
+  assert.deepEqual(eventOf('pull_request_review', reviewPayload({}, 'dismissed')), { kind: 'review_dismissed', ref, installation: null, review: '11' });
   assert.deepEqual(eventOf('pull_request_review', reviewPayload({ state: 'pending' })), { kind: 'ignored', reason: 'unknown_action' });
+});
+
+test('a dismissed review names the pull request, the installation and the review', () => {
+  const malformed = { kind: 'ignored', reason: 'malformed' };
+  const dismissed = (over: Record<string, unknown> = {}) => ({ ...reviewPayload({ state: 'dismissed', ...over }, 'dismissed'), installation: { id: 99 } });
+  assert.deepEqual(eventOf('pull_request_review', dismissed()), { kind: 'review_dismissed', ref, installation: '99', review: '11' });
+  // The app's own approval, dismissed: its author is not read.
+  assert.deepEqual(eventOf('pull_request_review', dismissed({ id: 501, user: user('visto-test[bot]', 'Bot') })),
+    { kind: 'review_dismissed', ref, installation: '99', review: '501' });
+  for (const over of [{ id: undefined }, { id: '' }, { id: null }, { id: 1.5 }, { id: 'x'.repeat(MAX_ID_CHARS + 1) }]) {
+    assert.deepEqual(eventOf('pull_request_review', dismissed(over)), malformed, JSON.stringify(over));
+  }
+  assert.deepEqual(eventOf('pull_request_review', { ...dismissed(), review: null }), malformed);
+  assert.deepEqual(eventOf('pull_request_review', { ...dismissed(), repository: undefined }), malformed);
+  assert.deepEqual(eventOf('pull_request_review', dismissed({ id: 'x'.repeat(MAX_ID_CHARS) })),
+    { kind: 'review_dismissed', ref, installation: '99', review: 'x'.repeat(MAX_ID_CHARS) });
+  for (const action of ['edited', 'requested']) {
+    assert.deepEqual(eventOf('pull_request_review', reviewPayload({}, action)), { kind: 'ignored', reason: 'unknown_action' }, action);
+  }
 });
 
 test('inline comment', () => {

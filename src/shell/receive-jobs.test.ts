@@ -45,7 +45,8 @@ const said = (body: string, over = {}): ForgeEvent => ({
 const GATED: RepoSettings = { ...SETTINGS, gate: { ...GATE_OFF, enabled: true, branches: ['main'] } };
 const NAMES: Record<ForgeEvent['kind'], string> = {
   pull_request: 'pull_request', general_comment: 'issue_comment', inline_comment: 'pull_request_review_comment',
-  thread: 'pull_request_review_thread', check_rerun: 'check_run', review: 'pull_request_review', ping: 'ping', ignored: 'other',
+  thread: 'pull_request_review_thread', check_rerun: 'check_run', review: 'pull_request_review', review_dismissed: 'pull_request_review',
+  ping: 'ping', ignored: 'other',
 };
 
 function deliver(

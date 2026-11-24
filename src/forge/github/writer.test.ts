@@ -61,7 +61,45 @@ test("the app's own reviews are listed, newest first: by its own account, with a
     review(4, 'visto-test[bot]', 'User', 'head222', 'text', '2026-03-01T10:07:00Z'),
     review(5, 'visto-test[bot]', 'Bot', 'head222', 'text', '2026-03-01T10:08:00Z'),
   ]) });
-  assert.deepEqual(await writer.listOwnReviews(REF, '99'), [{ id: '5', commit: 'head222' }, { id: '1', commit: 'head111' }]);
+  assert.deepEqual(await writer.listOwnReviews(REF, '99'), [{ id: '5', commit: 'head222', state: 'commented' }, { id: '1', commit: 'head111', state: 'commented' }]);
+});
+test('an approval is posted as the event APPROVE, and a draft without an event is a comment as before', async () => {
+  const approve = github({ [REVIEWS]: () => json({ id: 502 }) });
+  assert.deepEqual(await approve.writer.publishReview(REF, '99', { ...DRAFT, event: 'approve' }), { id: '502' });
+  assert.deepEqual(approve.seen, [{ method: 'POST', path: '/repos/acme/shop/pulls/7/reviews', authorization: 'Bearer tok-99',
+    body: { commit_id: 'head222', body: 'Review text', event: 'APPROVE', comments: DRAFT.comments } }]);
+  const bare = github({ [REVIEWS]: () => json({ id: 502 }) });
+  await bare.writer.publishReview(REF, '99', { ...DRAFT, comments: [], event: 'approve' });
+  assert.deepEqual(bare.seen.map((s) => s.body), [{ commit_id: 'head222', body: 'Review text', event: 'APPROVE' }]);
+  const comment = github({ [REVIEWS]: () => json({ id: 501 }) });
+  assert.deepEqual(await comment.writer.publishReview(REF, '99', DRAFT), { id: '501' });
+  assert.deepEqual(comment.seen.map((s) => s.body), [{ commit_id: 'head222', body: 'Review text', event: 'COMMENT', comments: DRAFT.comments }]);
+});
+test("the app's own reviews carry their state when GitHub gives one", async () => {
+  const review = (id: number, state: unknown) => ({
+    id, user: { login: 'visto-test[bot]', type: 'Bot' }, commit_id: `c${id}`, body: 'text', submitted_at: `2026-03-01T10:0${id}:00Z`,
+    ...(state === undefined ? {} : { state }),
+  });
+  const { writer } = github({ 'GET /repos/acme/shop/pulls/7/reviews?per_page=100&page=1': () => json([
+    review(1, 'APPROVED'), review(2, 'DISMISSED'), review(3, 'COMMENTED'), review(4, 'PENDING'), review(5, undefined), review(6, null),
+  ]) });
+  const own = await writer.listOwnReviews(REF, '99');
+  assert.deepEqual(own, [
+    { id: '6', commit: 'c6' }, { id: '5', commit: 'c5' }, { id: '4', commit: 'c4', state: 'other' },
+    { id: '3', commit: 'c3', state: 'commented' }, { id: '2', commit: 'c2', state: 'dismissed' }, { id: '1', commit: 'c1', state: 'approved' },
+  ]);
+  assert.deepEqual(own.map((r) => 'state' in r), [false, false, true, true, true, true]);
+});
+test("an own review whose commit is null is not listed, and one whose commit is no string still rejects", async () => {
+  const review = (id: number, commit: unknown, at: string) =>
+    ({ id, user: { login: 'visto-test[bot]', type: 'Bot' }, commit_id: commit, body: 'text', submitted_at: at, state: 'COMMENTED' });
+  const reviews = 'GET /repos/acme/shop/pulls/7/reviews?per_page=100&page=1';
+  const { writer } = github({ [reviews]: () => json([review(1, 'head111', '2026-03-01T09:00:00Z'), review(5, null, '2026-03-01T10:08:00Z')]) });
+  assert.deepEqual(await writer.listOwnReviews(REF, '99'), [{ id: '1', commit: 'head111', state: 'commented' }]);
+  for (const commit of [7, undefined, {}]) {
+    const broken = github({ [reviews]: () => json([review(1, 'head111', '2026-03-01T09:00:00Z'), review(5, commit, '2026-03-01T10:08:00Z')]) });
+    await assert.rejects(broken.writer.listOwnReviews(REF, '99'), /^Error: github_bad_response$/, String(commit));
+  }
 });
 test('a review without a readable time sorts last, and ties keep the order given', async () => {
   const review = (id: number, at: unknown) => ({ id, user: { login: 'visto-test[bot]', type: 'Bot' }, commit_id: `c${id}`, body: 'text', submitted_at: at });

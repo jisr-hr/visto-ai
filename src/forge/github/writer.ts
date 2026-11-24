@@ -1,10 +1,13 @@
-import type { AppInfo, ForgeWriter, PostedComment, PullRequestRef, ReviewDraft } from '../types.ts';
+import type { AppInfo, ForgeWriter, OwnReviewState, PostedComment, PullRequestRef, ReviewDraft } from '../types.ts';
 import type { AppAuth } from './app-auth.ts';
 import { createGithubHttp, isObject, jsonOf } from './http.ts';
 import { createGithubThreads } from './threads.ts';
 
 export const MAX_REVIEW_PAGES = 10;
 export const MAX_COMMENT_PAGES = 20;
+
+// A review's state as the list answer writes it; any other is 'other'.
+const OWN_STATE = new Map<string, OwnReviewState>([['APPROVED', 'approved'], ['DISMISSED', 'dismissed'], ['COMMENTED', 'commented']]);
 
 const bad = (): Error => new Error('github_bad_response');
 const wholeNumber = (v: unknown): v is number => typeof v === 'number' && Number.isInteger(v);
@@ -55,7 +58,7 @@ export function createGithubWriter(opts: { auth: AppAuth; info: { read(): Promis
     async publishReview(ref: PullRequestRef, installation: string, draft: ReviewDraft) {
       digits(installation);
       const { token, http } = await httpFor(installation);
-      const body: Record<string, unknown> = { commit_id: draft.commit, body: draft.body, event: 'COMMENT' };
+      const body: Record<string, unknown> = { commit_id: draft.commit, body: draft.body, event: draft.event === 'approve' ? 'APPROVE' : 'COMMENT' };
       if (draft.comments.length > 0) body.comments = draft.comments.map((c) => ({ path: c.path, side: c.side, line: c.line, body: c.body }));
       const res = await post(token, `${http.repoUrl(ref)}/pulls/${ref.number}/reviews`, body);
       if (res.status === 422) throw new Error('review_rejected');
@@ -70,18 +73,22 @@ export function createGithubWriter(opts: { auth: AppAuth; info: { read(): Promis
       const { http } = await httpFor(installation);
       const { botLogin } = await opts.info.read();
       const items = await http.paged(`${http.repoUrl(ref)}/pulls/${ref.number}/reviews`, MAX_REVIEW_PAGES);
-      const own: Array<{ id: string; commit: string; at: number }> = [];
+      const own: Array<{ id: string; commit: string; state?: OwnReviewState; at: number }> = [];
       for (const item of items) {
         if (!isObject(item) || !wholeNumber(item.id)) throw bad();
         const user = item.user;
         // authorOf also counts a login ending in "[bot]" as a bot; the app itself must be of type Bot.
         if (!isObject(user) || user.login !== botLogin || user.type !== 'Bot') continue;
         if (typeof item.body !== 'string' || item.body === '') continue;
+        // A review on a commit pushed away and collected is no head's review.
+        if (item.commit_id === null) continue;
         if (typeof item.commit_id !== 'string') throw bad();
-        own.push({ id: String(item.id), commit: item.commit_id, at: timeOf(item.submitted_at) });
+        const review: (typeof own)[number] = { id: String(item.id), commit: item.commit_id, at: timeOf(item.submitted_at) };
+        if (typeof item.state === 'string') review.state = OWN_STATE.get(item.state) ?? 'other';
+        own.push(review);
       }
       own.sort((a, b) => (a.at === b.at ? 0 : a.at > b.at ? -1 : 1));
-      return own.map(({ id, commit }) => ({ id, commit }));
+      return own.map(({ id, commit, state }) => (state === undefined ? { id, commit } : { id, commit, state }));
     },
 
     async listReviewComments(ref: PullRequestRef, installation: string, reviewId: string) {

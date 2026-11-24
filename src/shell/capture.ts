@@ -25,6 +25,7 @@ export function captureOf(event: ForgeEvent, delivery: string, receivedAt: Date)
     case 'pull_request':
       return { outcome: 'handled', pullRequest: event.facts, activity: null };
     case 'check_rerun':
+    case 'review_dismissed':
       return { outcome: 'handled', pullRequest: null, activity: null };
     case 'review': {
       const r = event.review;

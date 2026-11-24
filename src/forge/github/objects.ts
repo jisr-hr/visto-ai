@@ -10,7 +10,7 @@ function required(v: unknown): string {
   return v;
 }
 
-function idOf(v: unknown): string {
+export function idOf(v: unknown): string {
   if (typeof v === 'number' && Number.isInteger(v)) return String(v);
   if (typeof v === 'string' && v !== '') return v;
   throw bad();
@@ -26,7 +26,7 @@ export function authorOf(v: unknown): { author: string; authorIsBot: boolean } {
 }
 
 const ASSOCIATION = new Map<string, Association>([['OWNER', 'owner'], ['MEMBER', 'member'], ['COLLABORATOR', 'collaborator']]);
-const associationOf = (v: unknown): Association => ASSOCIATION.get(typeof v === 'string' ? v : '') ?? 'none';
+export const associationOf = (v: unknown): Association => ASSOCIATION.get(typeof v === 'string' ? v : '') ?? 'none';
 
 const REVIEW_STATE = new Map<string, HumanReview['state']>([
   ['APPROVED', 'approved'], ['CHANGES_REQUESTED', 'changes_requested'], ['COMMENTED', 'commented'], ['DISMISSED', 'dismissed'],
