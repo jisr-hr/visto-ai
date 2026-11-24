@@ -153,6 +153,8 @@ export async function runAacrImport(
       comparison = await args.source.compare(repo, r.base, r.head);
     } catch (error) {
       if (error instanceof Error && error.message === 'too_many_files') { skipped.too_many_files += 1; continue; }
+      // One record whose commit GitHub refuses (a 422, say) must not end the import.
+      if (error instanceof Error && /^github_\d{3}$/.test(error.message)) { skipped.head_unreadable += 1; continue; }
       throw error;
     }
     if (comparison === null) { skipped.head_unreadable += 1; continue; }

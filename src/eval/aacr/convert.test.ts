@@ -151,7 +151,7 @@ function stub(over: Partial<HistorySource>): HistorySource {
 const outDir = mkdtempSync(join(tmpdir(), 'aacr-'));
 
 function five(): AacrRecord[] {
-  const { records } = parseAacr(file(...[1, 2, 3, 4, 5].map((n) => raw({ githubPrUrl: `https://github.com/acme/shop/pull/${n}`, target_commit: String(n).repeat(40) }))));
+  const { records } = parseAacr(file(...[1, 2, 3, 4, 5, 6].map((n) => raw({ githubPrUrl: `https://github.com/acme/shop/pull/${n}`, target_commit: String(n).repeat(40) }))));
   return records;
 }
 
@@ -168,6 +168,7 @@ test('runAacrImport counts each skip', async () => {
       const n = urlOfHead(head);
       if (n === 3) return null;
       if (n === 4) throw new Error('too_many_files');
+      if (n === 6) throw new Error('github_422');
       return { mergeBase: MERGE_BASE, files: [] };
     },
   });
@@ -175,7 +176,7 @@ test('runAacrImport counts each skip', async () => {
   const historyOut = join(outDir, 'a-history.jsonl');
   writeFileSync(casesOut, 'stale\n');
   const result = await runAacrImport({ records, source, casesOut, historyOut });
-  assert.deepEqual(result, { written: 1, skipped: { pr_unreadable: 2, head_unreadable: 1, too_many_files: 1 } });
+  assert.deepEqual(result, { written: 1, skipped: { pr_unreadable: 2, head_unreadable: 2, too_many_files: 1 } });
   const caseLines = readFileSync(casesOut, 'utf8').trim().split('\n');
   const historyLines = readFileSync(historyOut, 'utf8').trim().split('\n');
   assert.equal(caseLines.length, 1);
@@ -191,4 +192,12 @@ test('runAacrImport ends on any other rejection', async () => {
     { message: 'github_network' },
   );
   assert.equal(existsSync(join(outDir, 'b-cases.jsonl')), true);
+});
+
+test('runAacrImport ends when pullRequest rejects with anything but a status', async () => {
+  const source = stub({ pullRequest: async () => { throw new Error('github_network'); } });
+  await assert.rejects(
+    runAacrImport({ records: five(), source, casesOut: join(outDir, 'c-cases.jsonl'), historyOut: join(outDir, 'c-history.jsonl') }),
+    { message: 'github_network' },
+  );
 });
