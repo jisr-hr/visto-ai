@@ -912,3 +912,15 @@ test('an approval key of the wrong kind is refused by name, and the issue quotes
   const unknown = issuesOf(repos('  defaults: { score: { autoApproval: true } }\n'));
   assert.ok(unknown.length === 1 && unknown[0]!.startsWith('repositories.defaults.score') && unknown[0]!.includes('autoApproval'), unknown.join());
 });
+
+test('the example with its score block switched on reads approval as written: off, strict, share 0', () => {
+  const c = parseConfig(uncomment(example(), '    # score:'), exampleEnv);
+  assert.deepEqual(c.repositories.defaults.approval, { enabled: false, threads: 'strict', auditShare: 0 });
+  for (const name of ['acme/shop', 'acme/other']) {
+    assert.deepEqual(approvalOf(repoSettingsFor(c, name)), { enabled: false, threads: 'strict', auditShare: 0 }, name);
+  }
+  assert.equal(approvalUseOf(c), false);
+  for (const line of ['autoApprove: false', 'approvalThreads: strict', 'auditShare: 0']) {
+    assert.match(example(), new RegExp(`^ {4}# {3}${line}$`, 'm'), line);
+  }
+});
