@@ -945,3 +945,43 @@ test('the body written whole carries the section', () => {
   assert.ok(b.indexOf('## Human review\n') < b.indexOf('## Acceptance criteria\n'));
   assert.ok(b.indexOf('## Acceptance criteria\n') < b.indexOf('## Findings\n'));
 });
+
+// The service's paragraph on automatic approval, as the approval part writes it; the engine only places it.
+const APPROVAL = '**Approved automatically** for commit `abcdef123456`: every file is reviewed, nothing is at or above 70%, and no major or blocker finding is open. A new commit withdraws this approval.';
+const FAILED = result({ status: 'failed', failure: { stage: 'model', code: 'no_credit' } });
+test('with no approval paragraph the body is what it was', () => {
+  assert.equal(renderReview(result(), auto).body, '## Summary\n\nChanges a.ts.\n\n## Human review\n\nNothing here is at or above 70%. The highest score is 0%.\n\n## Overall\n\nNo findings. Human review: not needed (highest score 0%).');
+  assert.match(renderReview(full, auto).body, /\n\n## Coverage\n\nThese files were not reviewed:\n\n- `f0\.bin`: no_diff\n- `f1\.bin`: too_large\n- `f2\.bin`: over_batch_limit\n\n## Overall\n\n1 blocker, 2 major, 0 minor\. 1 could not be placed on the diff\. 3 files were not reviewed\. Human review: not needed \(highest score 0%\)\.$/);
+  const huge = result({ overview: 'x\n'.repeat(60_000), findings: [finding()] });
+  assert.match(renderReview(huge, auto).body, /cut to fit GitHub's limit\]_\n\n## Overall\n\n0 blocker, 1 major, 0 minor\. Human review: not needed \(highest score 0%\)\.$/);
+  for (const r of [result(), full, huge, FAILED]) {
+    for (const meta of [auto, { ...auto, inline: false }, { trigger: 'manual', requestedBy: 'octo-lead', lineUrl: null, inline: true } as const]) {
+      assert.deepEqual(renderReview(r, { ...meta, approval: undefined }), renderReview(r, meta));
+      assert.deepEqual(renderReview(r, { ...meta, approval: '' }), renderReview(r, meta));
+    }
+  }
+});
+test('the approval paragraph stands after the Overall line and survives a cut from the middle', () => {
+  const withIt = { ...auto, approval: APPROVAL };
+  assert.equal(renderReview(result(), withIt).body, `## Summary\n\nChanges a.ts.\n\n## Human review\n\nNothing here is at or above 70%. The highest score is 0%.\n\n## Overall\n\nNo findings. Human review: not needed (highest score 0%).\n\n${APPROVAL}`);
+  assert.ok(renderReview(full, withIt).body.endsWith(`\n\n## Overall\n\n1 blocker, 2 major, 0 minor. 1 could not be placed on the diff. 3 files were not reviewed. Human review: not needed (highest score 0%).\n\n${APPROVAL}`));
+  // The comments are what they were.
+  assert.deepEqual(renderReview(full, withIt).comments, renderReview(full, auto).comments);
+  // A body over 65,536 characters: the cut takes the middle, and the paragraph is its last line, after the Overall line.
+  for (const over of [{ findings: [finding()] }, { findings: [finding()], unplaced: [unplaced()] }]) {
+    const huge = result({ overview: 'x\n'.repeat(60_000), ...over });
+    for (const meta of [withIt, { ...withIt, inline: false }]) {
+      const b = renderReview(huge, meta).body;
+      assert.ok(b.length <= MAX_BODY_CHARS);
+      assert.ok(b.includes("characters of the review were cut to fit GitHub's limit]_"));
+      assert.equal(b.split('\n').at(-1), APPROVAL);
+      assert.match(b, /\n\n## Overall\n\n0 blocker, 1 major, 0 minor\.(?: 1 could not be placed on the diff\.)? Human review: not needed \(highest score 0%\)\.\n\n\*\*Approved automatically\*\* for commit `abcdef123456`: [^\n]*$/);
+      // The cut is from the middle: the body still opens with the summary.
+      assert.equal(b.indexOf('## Summary\n'), 0);
+    }
+    assert.equal(renderReview(huge, withIt).body.includes('## Findings not placed on the diff\n'), 'unplaced' in over);
+  }
+  // A failed result ignores it.
+  assert.deepEqual(renderReview(FAILED, withIt), renderReview(FAILED, auto));
+  assert.equal(renderReview(FAILED, withIt).body.includes('Approved'), false);
+});
