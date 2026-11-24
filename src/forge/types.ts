@@ -80,6 +80,9 @@ export interface PullRequestFacts {
   mergedAt: string | null; closedAt: string | null; mergeCommit: string | null;
   installation: string | null;   // the app installation the event came through
   updatedAt: string;             // the git service's "updated at" of the pull request in this event
+  // a number: the description names that pull request as the one it reverts; absent: it names none;
+  // 'kept': this event may not say (an event of a merged pull request other than its `closed` one): what is stored stays
+  reverts?: number | 'kept';
 }
 export type PullRequestAction = 'opened' | 'reopened' | 'ready_for_review' | 'synchronize' | 'retargeted' | 'closed' | 'other';
 export type ForgeEvent =

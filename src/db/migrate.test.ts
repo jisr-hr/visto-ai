@@ -154,3 +154,29 @@ test('a verdict\'s classification is one of five, in lower case, a reply has one
   assert.deepEqual(await db.query('select count(*)::int as n from visto_ai.reply_verdicts'), [{ n: 6 }]);
   await db.close();
 });
+test('0012_reverts comes right after 0011_lessons, and applies over the rows of the release before it', async () => {
+  const ledger = await testDb();
+  const names = (await ledger.query<{ name: string }>('select name from visto_ai.schema_migrations order by name')).map((r) => r.name);
+  assert.equal(names.indexOf('0012_reverts'), names.indexOf('0011_lessons') + 1);
+  await ledger.close();
+  const db = await pgliteDb();
+  const all = loadMigrations(MIGRATIONS_DIR);
+  await migrate(db, all.filter((m) => m.name <= '0011_lessons'));
+  await db.query(
+    `insert into visto_ai.pull_requests (service, owner, repo, number, author, author_is_bot, base_branch, head_branch, head_sha, draft, state,
+                                         merged_at, closed_at, merge_commit, updated_at)
+     values ('github', 'acme', 'shop', 7, 'octo-dev', false, 'main', 'feature', 'aaa111', false, 'merged',
+             '2026-03-05T09:00:00Z', '2026-03-05T09:00:00Z', 'fff999', '2026-03-05T09:00:00Z')`);
+  await db.query(
+    `insert into visto_ai.memory_records (service, owner, repo, kind, source_ref, created_at, expires_at, number, path, directory, excerpt)
+     values ('github', 'acme', 'shop', 'human_signal', '7:h1:src/billing/tax.ts', '2026-03-01T10:00:00Z', '2026-08-28T10:00:00Z', 7,
+             'src/billing/tax.ts', 'src/billing', 'check this')`);
+  const prs = 'select number, state, merged_at, merge_commit from visto_ai.pull_requests';
+  const records = 'select source_ref, kind, number, path, directory, excerpt, lesson from visto_ai.memory_records';
+  const before = [await db.query(prs), await db.query(records)];
+  assert.deepEqual(await migrate(db, all.filter((m) => m.name <= '0012_reverts')), ['0012_reverts']);
+  assert.deepEqual([await db.query(prs), await db.query(records)], before);
+  assert.deepEqual(await db.query('select reverts from visto_ai.pull_requests'), [{ reverts: null }]);
+  assert.deepEqual(await db.query('select reverted from visto_ai.memory_records'), [{ reverted: null }]);
+  await db.close();
+});

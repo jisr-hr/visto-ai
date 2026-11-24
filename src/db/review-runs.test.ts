@@ -1,9 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { testDb } from './testing.ts';
-import { adoptableRun, hasOkRun, hasRun, lastPublishedRun, listRuns, claimNotice, markPublished, markPublishTried, recordJudgeCall, recordRun, scoredAt, spentSince, unpublishedRun } from './review-runs.ts';
+import { adoptableRun, hasOkRun, hasRun, lastFiles, lastPublishedRun, listRuns, claimNotice, markPublished, markPublishTried, recordJudgeCall, recordRun, scoredAt, spentSince, unpublishedRun } from './review-runs.ts';
 import type { RunRecord } from './review-runs.ts';
 import { enqueueJob, finishJob } from './jobs.ts';
+import { revertedFiles } from '../memory/reverts.ts';
 
 const REF = { service: 'github', owner: 'acme', repo: 'shop', number: 7 } as const;
 const at = (seconds: number): string => new Date(Date.parse('2026-03-01T10:00:00.000Z') + seconds * 1000).toISOString();
@@ -298,5 +299,45 @@ test('a judge call with ordinary counts is stored as given', async () => {
   assert.deepEqual(await db.query('select calls, input_tokens, output_tokens, cached_tokens, cost from visto_ai.judge_calls'), [
     { calls: 2, input_tokens: 2400, output_tokens: 80, cached_tokens: 30, cost: 0.25 },
   ]);
+  await db.close();
+});
+
+const scored = (files: Array<{ path: string; previousPath: string | null }>): { scores: unknown[] } => ({
+  scores: files.map((f) => ({ ...f, blocks: [{ score: 40, category: 'money' }], summary: 'changes the totals', finalScore: 40 })),
+});
+const TAX = { path: 'src/billing/tax.ts', previousPath: null };
+const ADD = { path: 'src/cart/add.ts', previousPath: 'src/cart/old.ts' };
+
+test('the files of a pull request\'s last review are the paths and old paths of its newest run that ended ok and lists a file, a dry run included', async () => {
+  const db = await testDb();
+  await recordRun(db, run({ dryRun: false, result: scored([TAX]) }));
+  await recordRun(db, run({ dryRun: true, result: scored([TAX, ADD]) }));
+  await recordRun(db, run({ outcome: 'failed', failureStage: 'model', failureCode: 'timeout', result: scored([{ path: 'src/cart/z.ts', previousPath: null }]) }));
+  await recordRun(db, run({ ref: { ...REF, number: 8 }, result: scored([{ path: 'src/cart/other.ts', previousPath: null }]) }));
+  assert.deepEqual(await lastFiles(db, REF), [TAX, ADD]);
+  assert.deepEqual(await lastFiles(db, { ...REF, owner: 'Acme' }), [TAX, ADD]);
+  await db.close();
+});
+test('a run that lists no file is passed over for an older one that does, and a pull request with no such run has none', async () => {
+  const db = await testDb();
+  await recordRun(db, run({ dryRun: true, result: scored([TAX, ADD]) }));
+  for (const result of [{ scores: [] }, {}, { scores: 'x' }, { scores: { path: 'a.ts' } }, null, 'x']) await recordRun(db, run({ result }));
+  assert.deepEqual(await lastFiles(db, REF), [TAX, ADD]);
+  await recordRun(db, run({ ref: { ...REF, number: 8 }, outcome: 'failed', failureStage: 'model', failureCode: 'timeout', result: scored([TAX]) }));
+  await recordRun(db, run({ ref: { ...REF, number: 9 }, result: { scores: [] } }));
+  assert.equal(await lastFiles(db, { ...REF, number: 8 }), null);
+  assert.equal(await lastFiles(db, { ...REF, number: 9 }), null);
+  assert.equal(await lastFiles(db, { ...REF, number: 10 }), null);
+  await db.close();
+});
+test('only the path and the old path of each entry are read, and an entry that is no object throws nothing', async () => {
+  const db = await testDb();
+  await recordRun(db, run({ result: { ...scored([TAX, ADD]), summary: 'the whole review', verdict: { threshold: 60 } } }));
+  const files = await lastFiles(db, REF) as Array<Record<string, unknown>>;
+  assert.deepEqual(files.map((f) => Object.keys(f).sort()), [['path', 'previousPath'], ['path', 'previousPath']]);
+  await recordRun(db, run({ result: { scores: [null, 5, [1], { path: 3 }, { path: 'a.ts' }] } }));
+  const odd = await lastFiles(db, REF);
+  assert.equal(Array.isArray(odd) && odd.length, 5);
+  assert.deepEqual(revertedFiles(odd), [{ path: 'a.ts', previousPath: null }]);
   await db.close();
 });

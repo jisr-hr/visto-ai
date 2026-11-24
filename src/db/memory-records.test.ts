@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { testDb } from './testing.ts';
-import { addRecords, liveLessons, liveLessonsWithin, liveRecords, liveRecordsWithin, retireExpired, standingLessons } from './memory-records.ts';
+import { addRecords, liveLessons, liveLessonsWithin, liveRecords, liveRecordsWithin, liveReverts, liveRevertsWithin, retireExpired, standingLessons } from './memory-records.ts';
 import type { NewRecord, RepoKey } from './memory-records.ts';
 
 const REPO: RepoKey = { service: 'github', owner: 'acme', repo: 'shop' };
@@ -348,5 +348,108 @@ test('two live lessons made at the same time come newest id first', async () => 
   const db = await testDb();
   await addRecords(db, REPO, [lesson({ sourceRef: '7:r-1' }), lesson({ sourceRef: '7:r-2' })]);
   assert.deepEqual((await liveLessons(db, REPO, ms(T, DAY), 10)).map((r) => r.sourceRef), ['7:r-2', '7:r-1']);
+  await db.close();
+});
+
+const revert = (over: Partial<NewRecord> = {}): NewRecord => record({
+  kind: 'revert', sourceRef: '9:reverts:7:src/billing/tax.ts', number: 9, reverted: 7, category: null, reason: null, missed: false,
+  excerpt: '', comment: null, ...over,
+});
+
+test('a record of a revert is stored with the pull request it reverted, and a record given none stores none', async () => {
+  const db = await testDb();
+  assert.equal(await addRecords(db, REPO, [revert(), record()]), 2);
+  assert.deepEqual(await db.query('select kind, reverted from visto_ai.memory_records order by kind'),
+    [{ kind: 'human_signal', reverted: null }, { kind: 'revert', reverted: 7 }]);
+  assert.equal(await addRecords(db, REPO, [revert()]), 0);
+  await db.close();
+});
+
+test('the reverts of a repository are read live at the time asked, newest first, no more than the limit, with their seven fields and no other', async () => {
+  const db = await testDb();
+  await addRecords(db, REPO, [
+    revert({ sourceRef: '9:reverts:7:a', createdAt: T }),
+    revert({ sourceRef: '9:reverts:7:b', createdAt: ms(T, DAY) }),
+    revert({ sourceRef: '9:reverts:7:c', createdAt: ms(T, 2 * DAY) }),
+  ]);
+  assert.deepEqual((await liveReverts(db, REPO, ms(T, 3 * DAY), 2)).map((r) => r.sourceRef), ['9:reverts:7:c', '9:reverts:7:b']);
+  const rows = await liveReverts(db, REPO, ms(T, 3 * DAY), 10);
+  assert.deepEqual(Object.keys(rows[0]!).sort(), ['createdAt', 'directory', 'id', 'number', 'path', 'reverted', 'sourceRef']);
+  assert.deepEqual({ ...rows[2]!, id: 0 }, {
+    id: 0, sourceRef: '9:reverts:7:a', number: 9, reverted: 7, path: 'src/billing/tax.ts', directory: 'src/billing', createdAt: T,
+  });
+  await addRecords(db, REPO, [revert({ sourceRef: '9:reverts:7:d', createdAt: ms(T, 2 * DAY) })]);
+  assert.deepEqual((await liveReverts(db, REPO, ms(T, 3 * DAY), 2)).map((r) => r.sourceRef), ['9:reverts:7:d', '9:reverts:7:c']);
+  const one = await testDb();
+  await addRecords(one, REPO, [revert()]);
+  assert.deepEqual(await liveReverts(one, REPO, ms(T, -1), 10), []);
+  assert.equal((await liveReverts(one, REPO, T, 10)).length, 1);
+  assert.equal((await liveReverts(one, REPO, ms(T, 180 * DAY - 1), 10)).length, 1);
+  assert.deepEqual(await liveReverts(one, REPO, ms(T, 180 * DAY), 10), []);
+  await one.close();
+  await db.close();
+});
+
+test('a revert is read neither for the pull request that made it nor for the one it reverted', async () => {
+  const db = await testDb();
+  await addRecords(db, REPO, [revert()]);
+  const at = ms(T, DAY);
+  assert.deepEqual(await liveReverts(db, REPO, at, 10, 9), []);
+  assert.deepEqual(await liveReverts(db, REPO, at, 10, 7), []);
+  assert.deepEqual((await liveReverts(db, REPO, at, 10, 8)).map((r) => r.sourceRef), ['9:reverts:7:src/billing/tax.ts']);
+  assert.deepEqual((await liveReverts(db, REPO, at, 10)).map((r) => r.sourceRef), ['9:reverts:7:src/billing/tax.ts']);
+  await db.close();
+});
+
+test('a row of the kind revert with no reverted pull request, no path or no directory is not read, and neither is a signal or a lesson', async () => {
+  const db = await testDb();
+  await addRecords(db, REPO, [
+    revert({ sourceRef: '9:reverts:7:none', reverted: null }),
+    revert({ sourceRef: '9:reverts:7:nopath', path: null }),
+    revert({ sourceRef: '9:reverts:7:nodir', directory: null }),
+    record({ reverted: 7 }),
+    lesson({ reverted: 7 }),
+    revert({ sourceRef: '9:reverts:7:off' }),
+  ]);
+  await addRecords(db, { ...REPO, repo: 'store' }, [revert()]);
+  await db.query("update visto_ai.memory_records set status = 'disabled' where source_ref = '9:reverts:7:off'");
+  assert.deepEqual(await liveReverts(db, REPO, ms(T, DAY), 10), []);
+  await db.close();
+});
+
+test('a read of reverts within a limit sets the limit inside its transaction, and refuses a limit that is no whole number above 0', async () => {
+  const db = await testDb();
+  await addRecords(db, REPO, [revert()]);
+  const setting = async (): Promise<string> => (await db.query<{ setting: string }>("select setting from pg_settings where name = 'statement_timeout'"))[0]!.setting;
+  const outside = await setting();
+  const seen: string[] = [];
+  let transactions = 0;
+  const watched = {
+    ...db,
+    query: async <Row>(text: string, params?: unknown[]) => { seen.push(`outside: ${text}`); return db.query<Row>(text, params); },
+    script: db.script.bind(db), close: db.close.bind(db),
+    transaction: <R>(work: (tx: typeof db) => Promise<R>) => { transactions += 1; return db.transaction((tx) => work({
+      query: async <Row>(text: string, params?: unknown[]) => {
+        seen.push(text.split('\n')[0]!.trim());
+        if (text.startsWith('select id, source_ref')) {
+          assert.equal((await tx.query<{ setting: string }>("select setting from pg_settings where name = 'statement_timeout'"))[0]!.setting, '5000');
+        }
+        return tx.query<Row>(text, params);
+      },
+      script: (sql: string) => tx.script(sql), close: () => tx.close(), transaction: (w) => tx.transaction(w),
+    })); },
+  };
+  const rows = await liveRevertsWithin(watched, REPO, ms(T, DAY), 10, 5000, 8);
+  assert.deepEqual(rows.map((r) => r.sourceRef), ['9:reverts:7:src/billing/tax.ts']);
+  assert.deepEqual(seen, ['set local statement_timeout = 5000', 'select id, source_ref, number, reverted, path, directory, created_at']);
+  assert.equal(transactions, 1);
+  assert.equal(await setting(), outside);
+  for (const bad of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, '5' as unknown as number, null as unknown as number]) {
+    seen.length = 0;
+    transactions = 0;
+    await assert.rejects(liveRevertsWithin(watched, REPO, ms(T, DAY), 10, bad, 7), /bad_statement_limit/, String(bad));
+    assert.deepEqual(seen, [], String(bad));
+    assert.equal(transactions, 0, String(bad));
+  }
   await db.close();
 });

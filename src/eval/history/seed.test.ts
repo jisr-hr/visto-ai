@@ -312,8 +312,8 @@ test('the seed reads a case\'s comments with the backtest\'s own mapping, and ho
 
 test('a database the seed\'s migration is not applied to is refused before any write', async () => {
   const db = await testDb();
-  // Removing the one ledger row stands in for a database that was never migrated to 0011_lessons.
-  await db.query("delete from visto_ai.schema_migrations where name = '0011_lessons'");
+  // Removing the one ledger row stands in for a database that was never migrated to 0012_reverts.
+  await db.query("delete from visto_ai.schema_migrations where name = '0012_reverts'");
   const before = await snapshot(db);
   await assert.rejects(seedCommand(db, [case7(), case8()], NOW), { message: 'database_not_migrated' });
   assert.deepEqual(await snapshot(db), before);
@@ -396,5 +396,14 @@ test('a database migrated to 0010_memory and no further is refused by the seed b
   await assert.rejects(seedCommand(db, [case7(), case8()], NOW), { message: 'database_not_migrated' });
   assert.deepEqual(await snapshot(db), before);
   assert.deepEqual(Object.entries(before).filter(([t, rows]) => t !== 'schema_migrations' && rows.length > 0), []);
+  await db.close();
+});
+
+test('a database migrated to 0011_lessons and no further is refused by the seed before any write', async () => {
+  const db = await pgliteDb();
+  await migrate(db, loadMigrations(MIGRATIONS_DIR).filter((m) => m.name <= '0011_lessons'));
+  const before = await snapshot(db);
+  await assert.rejects(seedCommand(db, [case7(), case8()], NOW), { message: 'database_not_migrated' });
+  assert.deepEqual(await snapshot(db), before);
   await db.close();
 });
