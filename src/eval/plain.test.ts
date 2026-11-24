@@ -72,6 +72,14 @@ test('plainCase sends one call with the patch between markers and returns its fi
   assert.deepEqual([r.highest_score, r.needs_human, r.calls, r.total_cost, r.total_tokens, r.models], [null, null, 1, 0.01, 110, ['m']]);
 });
 
+test('plainCase normalises a finding path as the engine does, and keeps one outside the pull request as written', async () => {
+  const { deps } = setup([answer([
+    { ...oneFinding, path: './src/cart.ts' }, { ...oneFinding, path: 'b/src/cart.ts' }, { ...oneFinding, path: 'src/other.ts' },
+  ])]);
+  const r = await plainCase(theCase, config, deps);
+  assert.deepEqual(r.findings.map((f) => f.path), ['src/cart.ts', 'src/cart.ts', 'src/other.ts']);
+});
+
 test('plainCase lets the model choose the tool when toolChoice is auto', async () => {
   const { deps, requests } = setup([answer([])], [cart], { toolChoice: 'auto' });
   const r = await plainCase(theCase, config, deps);

@@ -4,6 +4,7 @@ import type { DeploymentConfig } from '../config/load.ts';
 import { estimateTokens } from '../engine/context/batches.ts';
 import { cutText, wrapData } from '../engine/context/untrusted.ts';
 import { ProviderError } from '../engine/model/errors.ts';
+import { normalizePath } from '../engine/reconcile/placement.ts';
 import { chooseEffort } from '../engine/review.ts';
 import type { ChatMessage, ModelRequest, ReviewDeps, ToolDefinition, Usage } from '../engine/types.ts';
 import type { EvalCase } from './cases.ts';
@@ -164,11 +165,14 @@ export async function plainCase(c: EvalCase, config: DeploymentConfig, deps: Rev
         read = readFindings(callArgs(response));
       }
       if (!read.ok) return failed('plain', 'invalid_output');
+      // Paths as the engine reads them (./, a/, b/, a leading slash); a path outside the pull request stays as written.
+      const known = new Set(files.map((f) => f.path));
+      const findings = read.findings.map((f) => ({ ...f, path: normalizePath(f.path, known) ?? f.path }));
       return {
         key: caseKey(c), status: 'ok', failure_stage: null, failure_reason: null, total_cost: usage.cost,
         total_tokens: usage.inputTokens + usage.outputTokens, duration_ms: Date.now() - started, calls: usage.calls,
         cached_tokens: usage.cachedTokens, models, unplaced: 0, files_reviewed: filesReviewed, not_reviewed: notReviewed,
-        findings: read.findings, highest_score: null, needs_human: null,
+        findings, highest_score: null, needs_human: null,
       };
     } catch (error) {
       if (error instanceof ProviderError) return failed('plain', error.kind);
