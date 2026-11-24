@@ -1,6 +1,9 @@
 import type { ApprovalThreads } from '../config/load.ts';
+import type { StoredComment } from '../db/review-comments.ts';
+import { NOTE } from '../db/review-comments.ts';
 import type { StoredRun } from '../db/review-runs.ts';
 import type { Association, ReviewThread, ThreadComment } from '../forge/types.ts';
+import { evaluateGate, storedSeverities } from '../gate/rule.ts';
 
 export interface ThreadContext { rule: ApprovalThreads; author: string; clearByReply: boolean; published: StoredRun[] }
 interface Verdict { verdict: 'fixed' | 'answered' | 'open'; fileChanged: boolean; replies: number | null }
@@ -60,4 +63,78 @@ export function closedBefore(thread: ReviewThread, ctx: ThreadContext): boolean 
   }
   // A rule this code does not know closes nothing.
   return false;
+}
+
+/** How many threads and lost threads are open for approval once `run` is posted as the head's review. Pure; never throws. */
+export function openForApproval(args: {
+  threads: ReviewThread[]; stored: Array<StoredComment & { run: number }>; runs: StoredRun[]; run: StoredRun;
+  rule: ApprovalThreads; author: string; clearByReply: boolean;
+}): number {
+  const { run, rule, author } = args;
+  // What cannot be read is never closed: a list or this run that cannot be read is open, and so is each row or run that is no object.
+  if (!Array.isArray(args.threads) || !Array.isArray(args.stored) || !Array.isArray(args.runs) || !isObject(run)) return 1;
+  const stored = args.stored.filter((s) => isObject(s));
+  const runs = args.runs.filter((r) => isObject(r));
+  let open = args.stored.length - stored.length + args.runs.length - runs.length;
+  const clearByReply = args.clearByReply === true;
+  const severities = storedSeverities(stored);
+  const others = runs.filter((r) => r.id !== run.id);
+  const asHead: StoredRun = { ...run, published: true };
+  // This run's verdicts that are no list: no thread can be told it was not kept open.
+  const verdicts = isObject(run.result) ? run.result['threadVerdicts'] : null;
+  const readable = verdicts === undefined || Array.isArray(verdicts);
+
+  // Rule 1: each listed thread once, the app's own, of a severity that counts; and the app's first comments the list holds (rule 5).
+  const counted: Array<{ thread: ReviewThread; severity: 'blocker' | 'major' | 'unknown' }> = [];
+  const appFirst = new Set<string>();
+  const seen = new Set<unknown>();
+  for (const t of args.threads) {
+    if (!isObject(t)) { open += 1; continue; }
+    if (seen.has(t.id)) continue;
+    seen.add(t.id);
+    const comments = Array.isArray(t.comments) ? t.comments : [];
+    const first = comments[0];
+    // A first comment that cannot be read cannot be told the app's or not.
+    if (!isObject(first) || typeof first.byApp !== 'boolean') { open += 1; continue; }
+    if (!first.byApp) continue;
+    appFirst.add(first.id);
+    const severity = severities.get(first.id) ?? 'unknown';
+    if (severity === 'note' || severity === 'minor') continue;
+    if (!readable || !comments.every((c) => isObject(c))) { open += 1; continue; }
+    counted.push({ thread: t, severity });
+  }
+
+  // Rule 3: the gate, with this run as the head's review and as published.
+  const blocking = rule === 'gate'
+    ? new Set(evaluateGate({ threads: counted.map((c) => c.thread), stored, runs: [...others, asHead], reviewed: asHead, clearByReply }).blocking.map((b) => b.thread))
+    : null;
+  const before: ThreadContext = { rule: 'strict', author, clearByReply, published: others.filter((r) => r.published) };
+  for (const { thread: t, severity } of counted) {
+    // Rule 2: a thread this run kept open is open under both rules, and so is one whose verdict of this run cannot be read.
+    const kept = newestVerdict([run], t.id);
+    if (kept === 'damaged' || kept?.verdict === 'open') { open += 1; continue; }
+    if (blocking !== null) { if (blocking.has(t.id)) open += 1; continue; }
+    // A rule this code does not know closes nothing.
+    if (rule !== 'strict') { open += 1; continue; }
+    // Rule 4. The app's own thread with no stored finding closes only by a reply of case 2 (call 27).
+    if (severity === 'unknown') { if (!(t.resolved === true && accessReplied(t, author))) open += 1; continue; }
+    // Case 1: this run verified the fix in changed code, and no one but the app wrote after the replies it judged.
+    const verified = kept !== null && kept.verdict === 'fixed' && kept.fileChanged
+      && (kept.replies === null || t.comments.slice(1 + kept.replies).every((c) => c.byApp === true));
+    if (!verified && !closedBefore(t, before)) open += 1;
+  }
+
+  // Rule 5: a stored blocker or major of a published run, not a dry run, whose comment is not the first of an app's own listed thread.
+  const runOf = new Map(runs.map((r) => [r.id, r]));
+  const lost = new Set<string>();
+  for (const s of stored) {
+    // A word that is no severity reads as the gate reads it, unknown, and counts: it cannot be told a minor or a note.
+    if (s.severity === 'minor' || s.severity === NOTE) continue;
+    // A row of a run the list does not hold cannot be told unpublished: it counts.
+    const of = runOf.get(s.run);
+    if (of !== undefined && (of.published === false || of.dryRun === true)) continue;
+    if (!appFirst.has(s.commentId)) lost.add(s.commentId);
+  }
+  // Rule 6.
+  return open + lost.size;
 }

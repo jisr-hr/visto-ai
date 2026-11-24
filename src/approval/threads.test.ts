@@ -2,10 +2,11 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import type { ApprovalThreads } from '../config/load.ts';
 import type { StoredComment } from '../db/review-comments.ts';
+import { NOTE } from '../db/review-comments.ts';
 import type { StoredRun } from '../db/review-runs.ts';
 import type { Association, ReviewThread, ThreadComment } from '../forge/types.ts';
-import { evaluateGate } from '../gate/rule.ts';
-import { accessReplied, closedBefore, newestVerdict } from './threads.ts';
+import { evaluateGate, storedSeverities } from '../gate/rule.ts';
+import { accessReplied, closedBefore, newestVerdict, openForApproval } from './threads.ts';
 import type { ThreadContext } from './threads.ts';
 
 const REF = { service: 'github', owner: 'acme', repo: 'shop', number: 7 } as const;
@@ -192,4 +193,183 @@ test('under the gate rule a thread closes before the run as the gate clears it, 
       }
     }
   }
+});
+
+type Stored = StoredComment & { run: number };
+type OpenArgs = Parameters<typeof openForApproval>[0];
+const stored = (commentId: string, severity: string, over: Partial<Stored> = {}): Stored =>
+  ({ commentId, path: 'src/a.ts', side: 'RIGHT', line: 12, severity, quote: 'total = a + b', run: 1, ...over });
+/** This run: 2, recorded at h1 and not yet published, with the verdicts it kept. */
+const thisRun = (verdicts: unknown = []): StoredRun => run(2, { published: false, reviewId: null, publishedAt: null, verdicts });
+/** Open for approval under `rule`: by default the thread of 8001 listed, 8001 stored as a major of the published run 1, and this run with no verdict. */
+const open = (rule: ApprovalThreads, over: Partial<OpenArgs> = {}): number => {
+  const current = over.run ?? thisRun();
+  return openForApproval({ threads: [thread()], stored: STORED, runs: [run(1), current], run: current, rule, author: 'octo-dev', clearByReply: true, ...over });
+};
+/** [strict, gate] */
+const both = (over: Partial<OpenArgs> = {}): [number, number] => [open('strict', over), open('gate', over)];
+
+test("this review's fixed verdict on a changed file closes a thread under the strict rule, unless someone wrote after it was judged", () => {
+  const judged = (verdicts: unknown, replies: ThreadComment[]): number => {
+    const current = thisRun(verdicts);
+    return open('strict', { threads: [thread({ comments: [appComment('8001'), ...replies] })], run: current, runs: [run(1), current] });
+  };
+  const answer = reply('octo-dev');
+  const later = reply('octo-dev', { id: '9005', at: '2026-03-01T12:00:00.000Z' });
+  // Judged with its one reply: closed; a comment of the author after that: open; only the app's own after it: closed.
+  assert.equal(judged([verdict('fixed', { replies: 1 })], [answer]), 0);
+  assert.equal(judged([verdict('fixed', { replies: 1 })], [answer, later]), 1);
+  assert.equal(judged([verdict('fixed', { replies: 1 })], [answer, appReply()]), 0);
+  assert.equal(judged([verdict('fixed', { replies: 0 })], [answer]), 1);
+  // replies absent: none is checked.
+  assert.equal(judged([verdict('fixed')], [answer, later]), 0);
+  // Not on a changed file, or not fixed: open, the thread being unresolved.
+  assert.equal(judged([verdict('fixed', { fileChanged: false })], [answer]), 1);
+  assert.equal(judged([verdict('fixed', { fileChanged: undefined })], []), 1);
+  assert.equal(judged([verdict('answered')], [answer]), 1);
+  assert.equal(judged([], [answer]), 1);
+  // An older review's fixed verdict on a changed file is not this review's: open.
+  assert.equal(open('strict', { runs: [run(1, { verdicts: [verdict('fixed')] }), thisRun()] }), 1);
+});
+
+test('a thread this review kept open is open for approval under both rules, though a member replied and it is resolved', () => {
+  const t = resolvedWith(withAccess('octo-lead', 'member'));
+  const kept = thisRun([verdict('open')]);
+  // Without a verdict of this review the member's reply closes it under both rules; this review's open holds it.
+  assert.deepEqual(both({ threads: [t] }), [0, 0]);
+  assert.deepEqual(both({ threads: [t], run: kept, runs: [run(1), kept] }), [1, 1]);
+  assert.equal(open('gate', { threads: [t], run: kept, runs: [run(1), kept], clearByReply: false }), 1);
+  // Resolved by the app after an older review's fixed verdict on a changed file: this review's open still holds it.
+  const byApp = thread({ resolved: true, resolvedByApp: true, comments: [appComment('8001'), withAccess('octo-lead', 'member')] });
+  const fixedBefore = run(1, { headSha: 'h0', verdicts: [verdict('fixed')] });
+  assert.deepEqual(both({ threads: [byApp], runs: [fixedBefore, thisRun()] }), [0, 0]);
+  assert.deepEqual(both({ threads: [byApp], run: kept, runs: [fixedBefore, kept] }), [1, 1]);
+});
+
+test("the app's own thread with no stored finding is open until a person with access who is not the author replied and it is resolved", () => {
+  const unstored = (over: Partial<ReviewThread> = {}): ReviewThread => thread({ id: 'PRRT_9', comments: [appComment('8009')], ...over });
+  const strictOf = (t: ReviewThread, over: Partial<OpenArgs> = {}): number => open('strict', { threads: [t], stored: [], ...over });
+  assert.equal(strictOf(unstored()), 1);
+  assert.equal(strictOf(unstored({ resolved: true })), 1);
+  assert.equal(strictOf(unstored({ resolved: true, resolvedByApp: true })), 1);
+  assert.equal(strictOf(unstored({ resolved: true, comments: [appComment('8009'), withAccess('octo-dev', 'member')] })), 1);
+  assert.equal(strictOf(unstored({ resolved: true, comments: [appComment('8009'), withAccess('octo-guest', 'none')] })), 1);
+  assert.equal(strictOf(unstored({ comments: [appComment('8009'), withAccess('octo-lead', 'member')] })), 1);
+  assert.equal(strictOf(unstored({ resolved: true, comments: [appComment('8009'), withAccess('octo-lead', 'member')] })), 0);
+  // No verdict closes it: neither this review's fixed on a changed file nor the app's resolve after an older one (call 27).
+  const fixed = [verdict('fixed', { threadId: 'PRRT_9', commentId: '8009' })];
+  const current = thisRun(fixed);
+  assert.equal(strictOf(unstored(), { run: current, runs: [run(1), current] }), 1);
+  assert.equal(strictOf(unstored({ resolved: true, resolvedByApp: true }), { runs: [run(1, { verdicts: fixed }), thisRun()] }), 1);
+  // Under the gate's rule it is the gate's unknown: any person's reply once resolved, while clearing by reply is on.
+  const answered = unstored({ resolved: true, comments: [appComment('8009'), reply('octo-dev')] });
+  assert.equal(open('gate', { threads: [unstored()], stored: [] }), 1);
+  assert.equal(open('gate', { threads: [answered], stored: [] }), 0);
+  assert.equal(open('gate', { threads: [answered], stored: [], clearByReply: false }), 1);
+});
+
+test('notes and minor threads are not counted, and a thread listed twice counts once', () => {
+  // The gate's rank: blocker 4, major 3, unknown 2, minor 1, note 0, whatever the order of the rows.
+  const rows = [
+    stored('8001', 'major'), stored('8002', NOTE), stored('8003', 'minor'),
+    stored('8004', 'minor'), stored('8004', 'major', { run: 2 }), stored('8005', 'blocker'), stored('8005', 'major'),
+    stored('8006', 'nit'), stored('8007', 'nit'), stored('8007', 'minor'), stored('8008', NOTE), stored('8008', 'minor'),
+  ];
+  assert.deepEqual(storedSeverities(rows), new Map([
+    ['8001', 'major'], ['8002', 'note'], ['8003', 'minor'], ['8004', 'major'], ['8005', 'blocker'], ['8006', 'unknown'], ['8007', 'unknown'], ['8008', 'minor'],
+  ]));
+  assert.deepEqual(storedSeverities([]), new Map());
+
+  const note = thread({ id: 'PRRT_2', comments: [appComment('8002')] });
+  const minor = thread({ id: 'PRRT_3', comments: [appComment('8003')] });
+  const smaller = [stored('8002', NOTE), stored('8003', 'minor')];
+  assert.deepEqual(both({ threads: [note, minor], stored: smaller }), [0, 0]);
+  assert.deepEqual(both({ threads: [thread(), thread()] }), [1, 1]);
+  assert.deepEqual(both({ threads: [thread(), note, thread(), minor, note], stored: [...STORED, ...smaller] }), [1, 1]);
+  // The first listing of an id decides; a second one with other contents is not judged again.
+  assert.deepEqual(both({ threads: [resolvedWith(withAccess('octo-lead', 'member')), thread()] }), [0, 0]);
+  // A comment stored as a minor and as a major counts as a major.
+  assert.deepEqual(both({ threads: [thread({ comments: [appComment('8004')] })], stored: [stored('8004', 'minor'), stored('8004', 'major')] }), [1, 1]);
+});
+
+test("the gate rule counts what the gate would block with this review as the head's review", () => {
+  const rows = ['8001', '8002', '8003', '8004'].map((id) => stored(id, 'major'));
+  const threads = [
+    thread(),
+    thread({ id: 'PRRT_2', resolved: true, resolvedByApp: true, comments: [appComment('8002')] }),
+    thread({ id: 'PRRT_3', resolved: true, comments: [appComment('8003'), reply('octo-dev')] }),
+    thread({ id: 'PRRT_4', resolved: true, comments: [appComment('8004')] }),
+  ];
+  const older = run(1, { headSha: 'h0', verdicts: [verdict('fixed', { threadId: 'PRRT_2', commentId: '8002' })] });
+  const current = thisRun();
+  const asHead = { ...current, published: true };
+  const blocked: Record<string, number> = {};
+  for (const clearByReply of [true, false]) {
+    const byHand = evaluateGate({ threads, stored: rows, runs: [older, asHead], reviewed: asHead, clearByReply }).blocking.length;
+    blocked[String(clearByReply)] = byHand;
+    assert.equal(open('gate', { threads, stored: rows, runs: [older, current], run: current, clearByReply }), byHand, String(clearByReply));
+    // Whether or not the runs list this run.
+    assert.equal(open('gate', { threads, stored: rows, runs: [older], run: current, clearByReply }), byHand, String(clearByReply));
+  }
+  assert.deepEqual(blocked, { true: 2, false: 3 });
+  // The strict rule on the same threads: the author's reply closes nothing.
+  assert.equal(open('strict', { threads, stored: rows, runs: [older, current], run: current }), 3);
+});
+
+test('a stored major whose comment was deleted holds approval back, under both rules', () => {
+  const gone = (over: Partial<OpenArgs> = {}): [number, number] => both({ threads: [], ...over });
+  assert.deepEqual(gone(), [1, 1]);
+  assert.deepEqual(gone({ stored: [stored('8001', 'blocker')] }), [1, 1]);
+  // Counted once by comment id.
+  assert.deepEqual(gone({ stored: [stored('8001', 'major'), stored('8001', 'blocker')] }), [1, 1]);
+  assert.deepEqual(gone({ stored: [stored('8001', 'major'), stored('8002', 'major')] }), [2, 2]);
+  // The same row of a dry run, or of a run not published: 0; a stored minor or note: 0.
+  assert.deepEqual(gone({ runs: [run(1, { dryRun: true }), thisRun()] }), [0, 0]);
+  assert.deepEqual(gone({ runs: [run(1, { published: false, reviewId: null, publishedAt: null }), thisRun()] }), [0, 0]);
+  assert.deepEqual(gone({ stored: [stored('8001', 'minor'), stored('8002', NOTE)] }), [0, 0]);
+  // Listed as the first comment of the app's own thread: judged as a thread, and closed here.
+  assert.deepEqual(both({ threads: [resolvedWith(withAccess('octo-lead', 'member'))] }), [0, 0]);
+  // A reply in a listed thread is not its first comment: lost.
+  const moved = thread({ id: 'PRRT_2', comments: [appComment('8002'), appComment('8001')] });
+  assert.deepEqual(both({ threads: [moved], stored: [stored('8001', 'major'), stored('8002', 'minor')] }), [1, 1]);
+});
+
+test("a thread whose first comment is no longer the app's holds approval back", () => {
+  const closed = (byApp: boolean): ReviewThread => thread({ resolved: true, comments: [appComment('8001', { byApp }), withAccess('octo-lead', 'member')] });
+  assert.deepEqual(both({ threads: [closed(false)] }), [1, 1]);
+  assert.deepEqual(both({ threads: [closed(true)] }), [0, 0]);
+  // Unresolved, it counts once, not as a thread and as a lost one.
+  assert.deepEqual(both({ threads: [thread({ comments: [appComment('8001', { byApp: false })] })] }), [1, 1]);
+});
+
+test('what cannot be read is open for approval, under both rules, and nothing throws', () => {
+  const closed = resolvedWith(withAccess('octo-lead', 'member'));
+  assert.deepEqual(both({ threads: [closed] }), [0, 0]);
+  const damagedVerdict = thisRun([verdict('fixed', { replies: -1 })]);
+  const unreadable = (result: unknown): StoredRun => ({ ...thisRun(), result });
+  const cases: Array<[string, Partial<OpenArgs>]> = [
+    ['a verdict of this review that cannot be read', { threads: [closed], run: damagedVerdict, runs: [run(1), damagedVerdict] }],
+    ["this review's verdicts that are no list", { threads: [closed], run: unreadable({ findings: [], threadVerdicts: 5 }) }],
+    ["this review's result that is no object", { threads: [closed], run: unreadable('x') }],
+    ['threads that are no list', { threads: 5 as unknown as ReviewThread[] }],
+    ['a thread that is no object', { threads: [closed, null as unknown as ReviewThread] }],
+    ['a thread whose comments are no list', { threads: [closed, thread({ id: 'PRRT_2', comments: 'x' as unknown as ThreadComment[] })] }],
+    ['a thread with no comment', { threads: [closed, thread({ id: 'PRRT_2', comments: [] })] }],
+    ['a thread whose first comment is no object', { threads: [closed, thread({ id: 'PRRT_2', comments: [7 as unknown as ThreadComment] })] }],
+    ['a first comment whose author flag is not a boolean', { threads: [closed, thread({ id: 'PRRT_2', comments: [appComment('8009', { byApp: undefined as unknown as boolean })] })] }],
+    ['a reply that is no object', { threads: [resolvedWith(withAccess('octo-lead', 'member'), null as unknown as ThreadComment)] }],
+    ['stored rows that are no list', { threads: [closed], stored: null as unknown as Stored[] }],
+    ['a stored row that is no object', { threads: [closed], stored: [...STORED, 7 as unknown as Stored] }],
+    ['a stored row of a severity that is no known word, whose comment is gone', { threads: [closed], stored: [...STORED, stored('8002', 'nit')] }],
+    ['a stored major of a run that is not listed, whose comment is gone', { threads: [closed], stored: [...STORED, stored('8002', 'major', { run: 9 })] }],
+    ['runs that are no list', { threads: [closed], runs: {} as unknown as StoredRun[] }],
+    ['a run that is no object', { threads: [closed], runs: [run(1), null as unknown as StoredRun, thisRun()] }],
+    ['this run that is no object', { threads: [closed], run: null as unknown as StoredRun, runs: [run(1)] }],
+  ];
+  for (const [name, over] of cases) assert.deepEqual(both(over), [1, 1], name);
+  // A thread rule this code does not know closes nothing; a clearing flag that is not true clears nothing under the gate's rule.
+  assert.equal(open('loose' as unknown as ApprovalThreads, { threads: [closed] }), 1);
+  const answered = resolvedWith(reply('octo-dev'));
+  assert.equal(open('gate', { threads: [answered] }), 0);
+  assert.equal(open('gate', { threads: [answered], clearByReply: 'yes' as unknown as boolean }), 1);
 });
