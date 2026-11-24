@@ -278,6 +278,7 @@ const mergedPr = (number: number, description: string): MergedPullRequest => ({
 const importSource: HistorySource = {
   listMergedPullRequests: () => Promise.resolve({ pullRequests: [], pageLimitReached: false }),
   listReviews: () => Promise.resolve([]), listInlineComments: () => Promise.resolve([]), listGeneralComments: () => Promise.resolve([]),
+  pullRequest: async () => null,
   compare: () => Promise.resolve({ mergeBase: 'base0000', files: [] }),
 };
 async function importedBody(description: string): Promise<string> {
