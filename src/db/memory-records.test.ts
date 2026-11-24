@@ -390,6 +390,22 @@ test('the reverts of a repository are read live at the time asked, newest first,
   await db.close();
 });
 
+test('the reverts are ordered by their time, not by when they were stored, read for a repository named in any case, and a row whose time cannot be read is passed over', async () => {
+  const db = await testDb();
+  await addRecords(db, REPO, [
+    revert({ sourceRef: '9:reverts:7:newer', createdAt: ms(T, 2 * DAY) }),
+    revert({ sourceRef: '9:reverts:7:minus', createdAt: ms(T, DAY) }),
+    revert({ sourceRef: '9:reverts:7:older', createdAt: T }),
+  ]);
+  await db.query("update visto_ai.memory_records set created_at = '-infinity' where source_ref = '9:reverts:7:minus'");
+  const at = ms(T, 3 * DAY);
+  const want = ['9:reverts:7:newer', '9:reverts:7:older'];
+  assert.deepEqual((await liveReverts(db, REPO, at, 10)).map((r) => r.sourceRef), want);
+  assert.deepEqual((await liveReverts(db, { ...REPO, owner: 'Acme' }, at, 10)).map((r) => r.sourceRef), want);
+  assert.deepEqual((await liveReverts(db, { ...REPO, owner: 'ACME', repo: 'Shop' }, at, 10)).map((r) => r.sourceRef), want);
+  await db.close();
+});
+
 test('a revert is read neither for the pull request that made it nor for the one it reverted', async () => {
   const db = await testDb();
   await addRecords(db, REPO, [revert()]);

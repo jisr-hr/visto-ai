@@ -178,5 +178,8 @@ test('0012_reverts comes right after 0011_lessons, and applies over the rows of 
   assert.deepEqual([await db.query(prs), await db.query(records)], before);
   assert.deepEqual(await db.query('select reverts from visto_ai.pull_requests'), [{ reverts: null }]);
   assert.deepEqual(await db.query('select reverted from visto_ai.memory_records'), [{ reverted: null }]);
+  assert.deepEqual(
+    await db.query("select data_type, is_nullable from information_schema.columns where table_schema = 'visto_ai' and table_name = 'pull_requests' and column_name = 'reverts'"),
+    [{ data_type: 'integer', is_nullable: 'YES' }]);
   await db.close();
 });

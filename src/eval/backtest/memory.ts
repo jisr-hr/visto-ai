@@ -167,7 +167,8 @@ export async function memoryCount(cases: HistoryCase[], memory: HistoryMemory): 
   for (const c of cases) {
     const files = c.final_files.map((f) => ({ path: f.path, previousPath: f.previous_path }));
     const blocks = await memory.of(c).blocks(files, new Date(c.review_at), new AbortController().signal);
-    const lines = blocks.pullRequest;
+    // The old numbers count the signals' lines only, as before reverts: they decide whether a paid run for signals is worth making.
+    const lines = blocks.pullRequest.filter((l) => l.reverted !== true);
     const own = new Set(lines.filter((l) => !l.near).map((l) => l.path));
     const labels = labelCase(c, unscored(c));
     const labelled = c.final_files.filter((f) => labels.files.get(f.path)?.loose === true);
@@ -177,7 +178,7 @@ export async function memoryCount(cases: HistoryCase[], memory: HistoryMemory): 
       labelled_files: labelled.length,
       labelled_with_line: labelled.filter((f) => own.has(f.path) || (f.previous_path !== null && own.has(f.previous_path))).length,
     });
-    const revertedLines = lines.filter((l) => l.reverted === true).length;
+    const revertedLines = blocks.pullRequest.filter((l) => l.reverted === true).length;
     if (revertedLines > 0) reverted.push({ key: historyKey(c), lines: revertedLines });
   }
   const file = memory.reverts();

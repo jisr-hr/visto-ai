@@ -508,6 +508,19 @@ test('thirty signals\' lines and a revert: the review is shown the thirty, and t
   assert.equal(shown.some((e) => e.subject.includes(':reverts:')), false);
 });
 
+test('two reverts on two changed files are both shown, each as a reverted line', async () => {
+  const ADD = { path: 'src/cart/add.ts', previousPath: null };
+  await addRecords(db, REPO, [
+    revertRecord(),
+    revertRecord({ sourceRef: '11:reverts:5:src/cart/add.ts', number: 11, reverted: 5, path: ADD.path, directory: 'src/cart', createdAt: '2026-03-11T09:00:00.000Z' }),
+  ]);
+  const blocks = await recordsMemory(db, REF).blocks([TAX, ADD], AS_OF, signal);
+  assert.deepEqual(blocks.pullRequest.map((l) => [l.ref, l.path, l.reverted]).sort(), [
+    ['11:reverts:5:src/cart/add.ts', 'src/cart/add.ts', true],
+    ['9:reverts:6:src/billing/tax.ts', 'src/billing/tax.ts', true],
+  ]);
+});
+
 test('a read of reverts that fails costs the review its memory, not the review', async () => {
   await addRecords(db, REPO, [record(), revertRecord()]);
   const failing: Db = {
@@ -525,14 +538,41 @@ test('a read of reverts that fails costs the review its memory, not the review',
     })),
   };
   await assert.rejects(recordsMemory(failing, REF).blocks([TAX], AS_OF, signal), /db_down/);
-  const { result: r, requests } = await reviewWith(recordsMemory(failing, REF), [TAX.path]);
+  // The review of reviewWith, with a model whose answer is valid for the file sent: an overview that names it.
+  const reviewOk = async (memory: Memory | undefined): Promise<{ result: ReviewResult; requests: ModelRequest[] }> => {
+    const source: Source = {
+      listFiles: () => Promise.resolve([{ path: TAX.path, previousPath: null, status: 'modified' as const, additions: 1, deletions: 0, patch: '@@ -1,1 +1,2 @@\n head\n+const a = 1;' }]),
+      getFileContent: () => Promise.resolve(null),
+      getDefaultBranchFile: () => Promise.resolve(null),
+    };
+    const requests: ModelRequest[] = [];
+    const model: ModelClient = {
+      complete: (request): Promise<ModelResponse> => {
+        requests.push(structuredClone(request));
+        return Promise.resolve({
+          toolName: SUBMIT_REVIEW, toolArguments: JSON.stringify({ overview: `${TAX.path} is fine.`, findings: [], files: [] }), text: null, model: 'm', provider: null,
+          usage: { calls: 1, inputTokens: 10, outputTokens: 5, cachedTokens: 0, cost: 0.1 },
+        });
+      },
+    };
+    const input: ReviewInput = {
+      pullRequest: { ref: REF, title: 'Add things', description: '', author: 'octo-dev', baseBranch: 'main', headBranch: 'feat', baseSha: 'merge000', headSha: 'h1', draft: false },
+      trigger: 'automatic', repoConfig: { primaryBranches: ['main'], scoreThreshold: 70 },
+      limits: { inputTokensPerCall: 200_000, batchesPerReview: 6, modelTimeoutSeconds: 30 }, asOf: AS_OF, earlier: null,
+    };
+    const result = await review(input, { source, model, contract: 'You review pull requests.', clock: () => AS_OF, token: () => 'abcdef0123456789', log: () => {}, ...(memory === undefined ? {} : { memory }) });
+    return { result, requests };
+  };
+  const { result: r, requests } = await reviewOk(recordsMemory(failing, REF));
+  assert.equal(r.status, 'ok');
+  assert.equal(r.failure, null);
   assert.equal(r.dependencies.memory?.status, 'error');
-  assert.match(r.dependencies.memory!.code, /^[a-z_]+$/);
-  // the review ends as a review with no memory ends (the stub model's answer is the same for both), and its requests are that review's
-  const none = await reviewWith(undefined as unknown as Memory, [TAX.path]);
+  assert.match(r.dependencies.memory!.code, /^[a-z][a-z0-9_]{0,39}$/);
+  assert.deepEqual(r.coverage.reviewed, [TAX.path]);
+  // the review ends as a review with no memory ends, and its requests are that review's
+  const none = await reviewOk(undefined);
   assert.equal(none.result.dependencies.memory, undefined);
-  assert.equal(r.status, none.result.status);
-  assert.deepEqual(r.failure, none.result.failure);
-  assert.notEqual(r.failure?.stage, 'context');
+  assert.equal(none.result.status, 'ok');
+  assert.equal(r.overview, none.result.overview);
   assert.deepEqual(requests, none.requests);
 });

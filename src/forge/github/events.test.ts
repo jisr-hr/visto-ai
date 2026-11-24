@@ -283,6 +283,15 @@ test('a body that is no string, or that names another repository, gives no numbe
   }
 });
 
+test('the repository a revert must name is the one of the payload', () => {
+  const cart = { repository: { name: 'cart', owner: { login: 'octo' } } };
+  const own = eventOf('pull_request', pr({ body: 'Reverts octo/cart#6' }, cart));
+  assert.deepEqual(own, { kind: 'pull_request', action: 'opened', facts: facts({ ref: { ...ref, owner: 'octo', repo: 'cart' }, reverts: 6 }) });
+  const other = eventOf('pull_request', pr({ body: 'Reverts acme/shop#6' }, cart));
+  assert.deepEqual(other, { kind: 'pull_request', action: 'opened', facts: facts({ ref: { ...ref, owner: 'octo', repo: 'cart' } }) });
+  assert.equal('reverts' in factsIn(other), false);
+});
+
 test('no word of the description is in the event', () => {
   const body = 'Reverts acme/shop#6\n\nThe totals of March were doubled.';
   for (const over of [{}, MERGED]) {

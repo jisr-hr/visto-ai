@@ -3533,6 +3533,32 @@ test('memory that fits only without its reverted lines is shown without them, an
   assert.ok(d.model.requests[0]!.messages.at(-1)!.content.includes('### Full file'));
 });
 
+test('memory that fits only without its reverted lines goes on with the packing made without them, not the first one', async () => {
+  const answer = memoryAnswer([...twoLines, revertedLine()], false);
+  const smaller = memoryAnswer(twoLines, false);
+  const small = valueFile('src/b.ts', 5);
+  const full = await unitOf(fileA, true);
+  const unitB = await unitOf(small, false);
+  // With no memory both files share one call; without the reverted line each call holds one file; with it the full file is cut.
+  assert.ok(memoryTokens(smaller) >= unitB);
+  assert.ok(memoryTokens(answer) > memoryTokens(smaller));
+  const lim = limitsOf(fixedTokens(CONTRACT, own.pullRequest, false, undefined, undefined, contextOf(smaller)) + full);
+  const bare = withContent(deps({ files: [fileA, small], answers: [answerOnA] }));
+  await review(lim, bare);
+  assert.equal(bare.model.requests.length, 1);
+  const d = withContent(deps({ files: [fileA, small], answers: [answerOnA, answerOnB], memory: memoryOf(answer) }));
+  const r = await review(lim, d);
+  assert.equal(d.model.requests.length, 2);
+  const sections = d.model.requests.map((q) => q.messages.find((m) => m.role === 'user' && m.content.includes(ANCHOR_LEGEND))!.content);
+  assert.ok(sections[0]!.includes('### Full file'));
+  assert.equal(sections[0]!.includes('src/b.ts'), false);
+  assert.ok(sections[1]!.includes('src/b.ts'));
+  assert.deepEqual(r.dependencies.memory, { status: 'ok', code: 'ok', lines: 2 });
+  assert.ok(memoryEntries(r).some((e) => e.subject === 'reverted'));
+  assert.equal(r.audit.some((e) => e.action === 'full_file_cut'), false);
+  assert.deepEqual(r.coverage, { reviewed: ['src/a.ts', 'src/b.ts'], notReviewed: [] });
+});
+
 test('memory that fits neither way, or whose only lines are reverted, is not shown, as before', async () => {
   const full = await unitOf(fileA, true);
   const smaller = memoryAnswer(twoLines, false);

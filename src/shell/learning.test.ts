@@ -1241,6 +1241,24 @@ test('a merged pull request that names a revert records the files of the pull re
   await db.close();
 });
 
+test('a revert of a pull request of one file is recorded under the pull request\'s own repository, and its line names that repository', async () => {
+  for (const [owner, repo] of [['acme', 'shop'], ['octo', 'cart']] as const) {
+    const db = await testDb();
+    const at = (number: number): PullRequestRef => ({ ...REF, owner, repo, number });
+    await merged(db, 7, MERGED_7, { ref: at(7) });
+    await recordRun(db, run({ ref: at(7), result: filesResult([[TAX, null]]) }));
+    await merged(db, 9, MERGED_9, { ref: at(9), reverts: 7 });
+    const { logged, log } = collect();
+    await bounded(learnOnce({ db, clock: fixed(NOW), log }), 2_000);
+    const own = await liveReverts(db, { service: 'github', owner, repo }, NOW, 10);
+    assert.deepEqual(own.map((r) => r.sourceRef), [`9:reverts:7:${TAX}`], `${owner}/${repo}`);
+    const other = owner === 'acme' ? { owner: 'octo', repo: 'cart' } : { owner: 'acme', repo: 'shop' };
+    assert.deepEqual(await liveReverts(db, { service: 'github', ...other }, NOW, 10), [], `${owner}/${repo}`);
+    assert.deepEqual(revertLines(logged), [{ event: 'revert', repo: `${owner}/${repo}`, number: 9, reverted: 7, code: 'recorded', files: 1, added: 1, cut: 0 }]);
+    await db.close();
+  }
+});
+
 test('the files are those of the reverted pull request\'s newest completed run that lists a file, a dry run included', async () => {
   const db = await testDb();
   await merged(db, 7, MERGED_7);

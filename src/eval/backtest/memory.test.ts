@@ -333,3 +333,57 @@ test('the count says how many reverts the file names, how many it holds, and whi
     globalThis.fetch = saved;
   }
 });
+
+test('the count\'s numbers of lines count the signals\' lines only, and its reverted lines only in the reverts', async () => {
+  // A is 7 and changes tax.ts; B is 9 and reverts it; C is 8, changes tax.ts, and a member commented on it.
+  const a = mkCase(7, [TAX], '2026-03-05T12:00:00Z');
+  const c = mkCase(8, [TAX], '2026-03-12T12:00:00Z', [comment('c1', TAX, '2026-03-11T10:00:00Z', { commit: 'head8' })], { review_at: '2026-03-11T12:00:00Z' });
+  const cases = [a, B(), c];
+  const memory = historyMemory(cases);
+  assert.deepEqual(await revertedOf(memory, c, c.review_at), [revertedLine(TAX)]);
+  const count = await memoryCount(cases, memory);
+  assert.deepEqual(count.rows.find((r) => r.key === historyKey(c)), {
+    key: historyKey(c), records: 0, lines: 0, changed: 0, near: 0, labelled_files: 1, labelled_with_line: 0,
+  });
+  assert.deepEqual({ with_lines: count.with_lines, with_labelled_line: count.with_labelled_line }, { with_lines: 0, with_labelled_line: 0 });
+  assert.deepEqual(count.reverts, { named: 1, held: 1, cases: 1, rows: [{ key: historyKey(c), lines: 1 }] });
+});
+
+test('the repositories of reverts are compared in lower case: in the reference, in the pull requests held, and in the groups', async () => {
+  // The reference names the repository in another case than the file's cases do, and the other way.
+  for (const [cases, reference] of [['acme/shop', 'Acme/Shop'], ['Acme/Shop', 'acme/shop']] as const) {
+    const c = C({ repo: cases });
+    const memory = historyMemory([revertedA({ repo: cases }), B({ repo: cases, body: `Reverts ${reference}#7` }), c]);
+    assert.deepEqual(memory.reverts(), { named: 1, held: 1 }, cases);
+    assert.deepEqual(await revertedOf(memory, c, c.review_at), [revertedLine(TAX), revertedLine(OLD)], cases);
+  }
+  // A pull request held twice under two letter cases is one.
+  const c = C();
+  const twice = historyMemory([revertedA(), B(), B({ repo: 'ACME/SHOP' }), c]);
+  assert.deepEqual(twice.reverts(), { named: 1, held: 1 });
+  // The reverts of a repository reach its cases whatever the case of either.
+  for (const [made, shown] of [['Acme/Shop', 'acme/shop'], ['acme/shop', 'Acme/Shop'], ['ACME/shop', 'acme/SHOP']] as const) {
+    const under = C({ repo: shown });
+    const memory = historyMemory([revertedA({ repo: made }), B({ repo: made }), under]);
+    assert.deepEqual(memory.reverts(), { named: 1, held: 1 }, `${made} ${shown}`);
+    assert.deepEqual(await revertedOf(memory, under, under.review_at), [revertedLine(TAX), revertedLine(OLD)], `${made} ${shown}`);
+  }
+});
+
+test('with more reverts live at a case\'s date than are read, the newest are kept, though the file holds them oldest first', async () => {
+  // Six reverts of six pull requests, oldest first: 1 + 300 + 300 + 300 + 100 + 1 = 1,002 records, more than REVERTS_READ + 1.
+  const sizes = [1, 300, 300, 300, 100, 1];
+  const cases: HistoryCase[] = [];
+  sizes.forEach((size, k) => {
+    const paths = k === 0 ? ['src/cart/oldest.ts'] : k === sizes.length - 1 ? [TAX] : Array.from({ length: size }, (_, i) => `src/r${k}/f${i}.ts`);
+    cases.push(mkCase(k + 1, paths, '2026-03-01T12:00:00Z'));
+    cases.push(revertCase(101 + k, k + 1, `2026-03-0${k + 2}T12:00:00Z`));
+  });
+  const x = mkCase(500, [TAX, 'src/cart/oldest.ts'], '2026-03-09T12:00:00Z');
+  cases.push(x);
+  const memory = historyMemory(cases);
+  assert.deepEqual(memory.reverts(), { named: 6, held: 6 });
+  const blocks = await memory.of(x).blocks([{ path: TAX, previousPath: null }, { path: 'src/cart/oldest.ts', previousPath: null }], new Date(x.review_at), signal);
+  assert.deepEqual(blocks.pullRequest.filter((l) => l.reverted === true).map((l) => l.ref), [`106:reverts:6:${TAX}`]);
+  assert.equal(blocks.cut.records, true);
+});

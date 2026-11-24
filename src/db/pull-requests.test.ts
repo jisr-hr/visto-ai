@@ -175,6 +175,8 @@ test('a merged pull request that names one is told with whether that one is stor
     ['7 not stored', null, { reverted: 7, stored: false, revertedMergedAt: null }],
     ['7 merged with no closed_at', facts({ state: 'merged', mergedAt: merged7, closedAt: null, updatedAt: '2026-03-06T09:00:00.000Z' }), { reverted: 7, stored: true, revertedMergedAt: merged7 }],
     ['7 of another repository', facts({ ref: { ...ref, repo: 'store' }, state: 'merged', mergedAt: merged7, closedAt: merged7, updatedAt: merged7 }), { reverted: 7, stored: false, revertedMergedAt: null }],
+    ['7 of another owner', facts({ ref: { ...ref, owner: 'octo' }, state: 'merged', mergedAt: merged7, closedAt: merged7, updatedAt: merged7 }), { reverted: 7, stored: false, revertedMergedAt: null }],
+    ['7 merged, closed at another time', facts({ state: 'merged', mergedAt: merged7, closedAt: '2026-03-05T09:30:00.000Z', updatedAt: '2026-03-06T09:00:00.000Z' }), { reverted: 7, stored: true, revertedMergedAt: '2026-03-05T09:30:00.000Z' }],
   ];
   for (const [name, seven, want] of cases) {
     const db = await testDb();

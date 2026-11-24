@@ -515,6 +515,8 @@ test('a reverted line ends in reverted, and the rule for reverted lines stands b
   assert.equal(refused, `${PULL_REQUEST_MEMORY_RULES}\n\nchanged | \`src/billing/tax.ts\` | 2026-03-10 | business_rule | missed`);
   assert.equal(refused.includes(REVERTED_LINE_RULES), false);
   assert.equal(refused.includes('my file'), false);
+  const categorized = memoryParts({ ...withReverted, lines: [reverted({ category: 'business_rule', missed: true })] }).pullRequest;
+  assert.equal(categorized, `${PULL_REQUEST_MEMORY_RULES}\n\n${REVERTED_LINE_RULES}\n\nchanged | \`src/billing/tax.ts\` | 2026-03-10 | - | reverted`);
 });
 
 test('the context without its reverted lines keeps the lists and the signals\' lines, and is nothing when no line is left', () => {
