@@ -201,10 +201,17 @@ const gateOverride = z
   })
   .strict();
 
+/** Automatic approval (section 6.4): no default, so the loaded settings carry approval only when one of these is written. */
+const approvalFields = {
+  autoApprove: z.boolean().optional(),
+  approvalThreads: z.enum(['strict', 'gate']).optional(),
+  auditShare: z.number().min(0).max(100).optional(),
+};
+
 const repoConfig = z
   .object({
     primaryBranches: z.array(z.string().min(1)).default(['main', 'master']),
-    score: z.object({ threshold: threshold.default(70), inlineNotes: z.boolean().default(false) }).strict().prefault({}),
+    score: z.object({ threshold: threshold.default(70), inlineNotes: z.boolean().default(false), ...approvalFields }).strict().prefault({}),
     ignoredAuthors: z.array(z.string().min(1)).default(['dependabot[bot]']),
     baseBranches: z.array(z.string().min(1)).default([]),
     newHead: newHead.optional(),
@@ -215,7 +222,7 @@ const repoConfig = z
 const repoOverride = z
   .object({
     primaryBranches: z.array(z.string().min(1)).optional(),
-    score: z.object({ threshold: threshold.optional(), inlineNotes: z.boolean().optional() }).strict().optional(),
+    score: z.object({ threshold: threshold.optional(), inlineNotes: z.boolean().optional(), ...approvalFields }).strict().optional(),
     ignoredAuthors: z.array(z.string().min(1)).optional(),
     baseBranches: z.array(z.string().min(1)).optional(),
     newHead: newHead.optional(),

@@ -71,6 +71,21 @@ export const GATE_OFF: GateSettings = {
   enabled: false, branches: [], checkName: 'AI Review', mode: 'enforce', clearByReply: true, skipTeam: null, requiredChecks: [],
 };
 
+/** D18: which threads count as closed for an approval. */
+export type ApprovalThreads = 'strict' | 'gate';
+
+/** Automatic approval of one repository (section 6.4). */
+export interface ApprovalSettings {
+  /** 6.4, condition 1. */
+  enabled: boolean;
+  /** D18. */
+  threads: ApprovalThreads;
+  /** 6.5, a percentage from 0 to 100; this release accepts only 0 while enabled. */
+  auditShare: number;
+}
+
+export const APPROVAL_OFF: ApprovalSettings = { enabled: false, threads: 'strict', auditShare: 5 };
+
 export interface RepoSettings extends RepoConfig {
   ignoredAuthors: string[]; baseBranches: string[];
   /** How a head after a review is reviewed; null when the file does not say, which reads as incremental. */
@@ -78,10 +93,12 @@ export interface RepoSettings extends RepoConfig {
   /** Whether a short note is posted in the diff for each block a person should read. */
   inlineNotes: boolean;
   gate: GateSettings;
+  /** Present only when the config writes one of its keys; absent reads as APPROVAL_OFF. */
+  approval?: ApprovalSettings;
 }
 
-/** What a repository's entry under `overrides` sets: each key it writes replaces the default's, and the gate key by key. */
-export type RepoOverride = Partial<Omit<RepoSettings, 'gate'>> & { gate?: Partial<GateSettings> };
+/** What a repository's entry under `overrides` sets: each key it writes replaces the default's, and the gate and approval key by key. */
+export type RepoOverride = Partial<Omit<RepoSettings, 'gate' | 'approval'>> & { gate?: Partial<GateSettings>; approval?: Partial<ApprovalSettings> };
 
 export type ServiceConfig = DeploymentConfig & {
   app: { id: string; privateKey: string; webhookSecret: string }; database: { url: string };
@@ -133,6 +150,33 @@ function gateBranchIssues(repositories: { defaults: { gate: GateSettings }; over
     // Defaults already named as bad cover an override that sets neither key.
     if (defaultsBad && o.gate?.enabled === undefined && o.gate?.branches === undefined) continue;
     issues.push(`repositories.overrides.${name}.gate.branches: ${GATE_NEEDS_BRANCH}`);
+  }
+  return issues;
+}
+
+/** The approval keys of a `score` block, as the schema gives them. */
+interface ApprovalKeys { autoApprove?: boolean | undefined; approvalThreads?: ApprovalThreads | undefined; auditShare?: number | undefined }
+
+/** `{ approval }` with the keys a `score` block writes, under the settings' names; nothing when it writes none. */
+function approvalWritten(score: ApprovalKeys | undefined): { approval?: Partial<ApprovalSettings> } {
+  const approval = definedOnly({ enabled: score?.autoApprove, threads: score?.approvalThreads, auditShare: score?.auditShare });
+  return Object.keys(approval).length === 0 ? {} : { approval };
+}
+
+const AUDIT_NOT_DRAWN = 'must be written as 0 while autoApprove is true: this release does not draw the audit sample yet';
+
+/** Until the audit sample is drawn, approval is on only with an audit share written as 0, dry run or not. No issue quotes a value. */
+function auditShareIssues(repositories: { defaults: { score: ApprovalKeys }; overrides: Record<string, { score?: ApprovalKeys | undefined }> }): string[] {
+  const refused = (a: ApprovalSettings): boolean => a.enabled && a.auditShare !== 0;
+  const defaults = approvalWritten(repositories.defaults.score).approval;
+  const issues: string[] = [];
+  const defaultsBad = refused({ ...APPROVAL_OFF, ...defaults });
+  if (defaultsBad) issues.push(`repositories.defaults.score.auditShare: ${AUDIT_NOT_DRAWN}`);
+  for (const [name, o] of Object.entries(repositories.overrides)) {
+    if (!refused({ ...APPROVAL_OFF, ...defaults, ...approvalWritten(o.score).approval })) continue;
+    // Defaults already named as bad cover an override that writes neither key.
+    if (defaultsBad && o.score?.autoApprove === undefined && o.score?.auditShare === undefined) continue;
+    issues.push(`repositories.overrides.${name}.score.auditShare: ${AUDIT_NOT_DRAWN}`);
   }
   return issues;
 }
@@ -191,8 +235,8 @@ export function parseConfig(yamlText: string, env: Record<string, string | undef
     );
   }
   const raw = result.data;
-  const gateIssues = gateBranchIssues(raw.repositories);
-  if (gateIssues.length > 0) throw new ConfigError(gateIssues);
+  const repositoryIssues = [...gateBranchIssues(raw.repositories), ...auditShareIssues(raw.repositories)];
+  if (repositoryIssues.length > 0) throw new ConfigError(repositoryIssues);
   const varName = raw.model.apiKey.env;
   const apiKey = env[varName];
   if (apiKey === undefined || apiKey === '') {
@@ -292,6 +336,7 @@ export function parseConfig(yamlText: string, env: Record<string, string | undef
     if (other !== undefined) throw new ConfigError([`repositories.overrides: ${other} and ${name} name the same repository`]);
     seen.set(name.toLowerCase(), name);
   }
+  const { approval: defaultsApproval } = approvalWritten(defaults.score);
   return {
     model: { ...raw.model, apiKey },
     scorer,
@@ -309,6 +354,7 @@ export function parseConfig(yamlText: string, env: Record<string, string | undef
         primaryBranches: defaults.primaryBranches, scoreThreshold: defaults.score.threshold,
         ignoredAuthors: defaults.ignoredAuthors, baseBranches: defaults.baseBranches, newHead: defaults.newHead ?? null,
         inlineNotes: defaults.score.inlineNotes, gate: defaults.gate,
+        ...(defaultsApproval === undefined ? {} : { approval: { ...APPROVAL_OFF, ...defaultsApproval } }),
       },
       overrides: Object.fromEntries(
         Object.entries(overrides).map(([name, o]) => [
@@ -321,6 +367,7 @@ export function parseConfig(yamlText: string, env: Record<string, string | undef
             ...(o.baseBranches === undefined ? {} : { baseBranches: o.baseBranches }),
             ...(o.newHead === undefined ? {} : { newHead: o.newHead }),
             ...(o.gate === undefined ? {} : { gate: definedOnly(o.gate) }),
+            ...approvalWritten(o.score),
           },
         ]),
       ),
@@ -345,13 +392,18 @@ export function contractFile(config: DeploymentConfig): string {
   return config.scorer === null ? 'review-contract.md' : 'review-contract-scorer.md';
 }
 
-/** `fullName` is "owner/name", matched without regard to case. An override replaces only the keys it sets. */
+/**
+ * `fullName` is "owner/name", matched without regard to case. An override replaces only the keys it sets.
+ * The settings carry `approval` only when the defaults or the override has one.
+ */
 export function repoSettingsFor(config: DeploymentConfig, fullName: string): RepoSettings {
   const wanted = fullName.toLowerCase();
   const key = Object.keys(config.repositories.overrides).find((name) => name.toLowerCase() === wanted);
-  const override = key === undefined ? {} : config.repositories.overrides[key]!;
+  const { approval, ...override }: RepoOverride = key === undefined ? {} : config.repositories.overrides[key]!;
   const defaults = config.repositories.defaults;
-  return { ...defaults, ...override, gate: { ...defaults.gate, ...override.gate } };
+  const settings: RepoSettings = { ...defaults, ...override, gate: { ...defaults.gate, ...override.gate } };
+  if (defaults.approval === undefined && approval === undefined) return settings;
+  return { ...settings, approval: { ...APPROVAL_OFF, ...defaults.approval, ...approval } };
 }
 
 /** What of the gate some repository switches on. */
@@ -368,6 +420,18 @@ export function gateUseOf(config: DeploymentConfig): GateUse {
     members: gates.some((g) => g.skipTeam !== null),
     bypass: gates.some((g) => g.mode === 'bypass'),
   };
+}
+
+/** A repository's automatic approval: off unless its settings carry one. */
+export function approvalOf(settings: RepoSettings): ApprovalSettings {
+  return settings.approval ?? APPROVAL_OFF;
+}
+
+/** Whether the defaults or some override, once merged, has automatic approval on. */
+export function approvalUseOf(config: DeploymentConfig): boolean {
+  const { defaults, overrides } = config.repositories;
+  const merged = [defaults, ...Object.keys(overrides).map((name) => repoSettingsFor(config, name))];
+  return merged.some((s) => approvalOf(s).enabled);
 }
 
 /** The two keys the engine reads. */
