@@ -7,7 +7,7 @@ import type { ApprovalCode } from '../approval/rule.ts';
 import type { ApprovalThreads } from '../config/load.ts';
 import { approvalParagraph } from '../approval/text.ts';
 import type { StoredComment } from '../db/review-comments.ts';
-import type { ForgeAccess, ForgeApprovals, ForgeWriter, LivePullRequest, OwnReviewState, PostedComment, ReviewDraft, ReviewThread } from '../forge/types.ts';
+import type { Association, ForgeAccess, ForgeApprovals, ForgeWriter, LivePullRequest, OwnReviewState, PostedComment, ReviewDraft, ReviewThread } from '../forge/types.ts';
 import type { StoredRun } from '../db/review-runs.ts';
 import { publishRun } from './publish.ts';
 import type { ApprovalContext, PublishDeps, PublishOutcome } from './publish.ts';
@@ -46,8 +46,8 @@ interface Options {
   hold?: boolean;
   /** What listThreads answers, or the Error it rejects with; no thread when not given. */
   threads?: unknown;
-  /** What the branch's rule answers, or the Error it rejects with; 'dismissed' when not given. */
-  rule?: 'dismissed' | 'kept' | Error;
+  /** What the branch's rule answers, whatever its shape, or the Error it rejects with; 'dismissed' when the key is not given. */
+  rule?: unknown;
   approval?: ApprovalContext;
   ownRun?: boolean;
   trigger?: 'automatic' | 'manual';
@@ -71,9 +71,9 @@ function harness(options: Options = {}) {
   const approvals: ForgeApprovals = {
     staleApprovals: async (_ref, _installation, branch) => {
       calls.push(['staleApprovals', branch]);
-      const rule = options.rule ?? 'dismissed';
+      const rule = 'rule' in options ? options.rule : 'dismissed';
       if (rule instanceof Error) throw rule;
-      return rule;
+      return rule as 'dismissed' | 'kept';
     },
     readReview: () => Promise.reject(new Error('not_expected')),
     dismissReview: () => Promise.reject(new Error('not_expected')),
@@ -387,6 +387,14 @@ const appThread = (commentId: string, body = '**\\[major]** Check it.'): ReviewT
 const STORED_MAJOR: StoredComment & { run: number } = { commentId: '8001', path: 'a.ts', side: 'RIGHT', line: 3, severity: 'major', quote: 'x', run: 3 };
 const names = (calls: unknown[][]): unknown[] => calls.map((c) => c[0]);
 const REJECTED = (): Error => new Error('review_rejected');
+/** A job that did not record the run: asked by someone else, or automatic. */
+const JOBS = [{ trigger: 'manual', requestedBy: 'octo-dev' }, { trigger: 'automatic', requestedBy: null }] as const;
+/** The app's major thread 8001, resolved, with one reply of `author`, whose access GitHub reports as `association`. */
+const repliedThread = (author: string, association: Association): ReviewThread => {
+  const t = appThread('8001');
+  const reply = { id: '9001', node: 'N9001', author, authorIsBot: false, byApp: false, reviewId: null, body: 'Meant to be so.', at: at(5), association };
+  return { ...t, resolved: true, comments: [t.comments[0]!, reply] };
+};
 
 test('with approval off the reads and the post are what they were', async () => {
   // The first test of this file, with the approvals at hand and ownRun said or not: the same reads, the same draft, no event, no approval key.
@@ -614,20 +622,117 @@ test("the prefix never names the current job's requester for a run they did not 
     kind: 'published', reviewId: '501', body, inlineDropped: false, notesDropped: false, adopted: false, approval: { approved: true, code: 'approved', dismissed: false },
   });
   assert.equal(h.drafts[0]?.body.includes('@octo-dev'), false);
-  // GitHub refuses inline: the body alone is rendered with the run's own trigger and no requester, with approval on and off.
+  // GitHub refuses inline: the body alone is rendered with the run's own trigger and no requester, with approval on and off,
+  // whether this job was asked by someone else or is automatic.
   const refused = para('refused', { code: 'review_rejected' });
-  for (const approval of [ctx({ runs: [manual] }), undefined]) {
-    const r = harness({ ...theirs, ...(approval === undefined ? { posts: [REJECTED(), { id: '502' }] } : { approval, posts: [REJECTED(), REJECTED(), { id: '503' }] }) });
-    const expected = renderReview(approvable(), { trigger: 'manual', requestedBy: null, lineUrl, inline: false, commentUrl, ...(approval === undefined ? {} : { approval: refused }) }).body;
-    assert.ok(expected.startsWith('**Full review** requested.'));
-    const out = await publishRun(r.deps, r.args);
-    assert.equal(out.kind === 'published' && out.body, expected);
-    assert.deepEqual(r.drafts.at(-1), { commit: 'h1', body: expected, comments: [] });
-    for (const d of r.drafts) assert.equal(d.body.includes('@octo-dev'), false);
+  for (const job of JOBS) {
+    for (const approval of [ctx({ runs: [manual] }), undefined]) {
+      const posts = approval === undefined ? { posts: [REJECTED(), { id: '502' }] } : { approval, posts: [REJECTED(), REJECTED(), { id: '503' }] };
+      const r = harness({ ...theirs, ...job, ...posts });
+      const name = `${job.trigger} job, approval ${approval === undefined ? 'off' : 'on'}`;
+      const expected = renderReview(approvable(), { trigger: 'manual', requestedBy: null, lineUrl, inline: false, commentUrl, ...(approval === undefined ? {} : { approval: refused }) }).body;
+      assert.ok(expected.startsWith('**Full review** requested.'));
+      const out = await publishRun(r.deps, r.args);
+      assert.equal(out.kind === 'published' && out.body, expected, name);
+      assert.deepEqual(r.drafts.at(-1), { commit: 'h1', body: expected, comments: [] }, name);
+      for (const d of r.drafts) assert.equal(d.body.includes('@octo-dev'), false, name);
+    }
   }
   // A run this job recorded is its own: its body alone names its requester, as before.
   const mine = recordedWith(approvable(), { trigger: 'manual', requestedBy: 'octo-dev' });
   const own = harness({ run: mine, live: LIVE_OK, trigger: 'manual', requestedBy: 'octo-dev', posts: [REJECTED(), { id: '502' }] });
   const out = await publishRun(own.deps, own.args);
   assert.ok(out.kind === 'published' && out.body.startsWith('**Full review** requested by @octo-dev.'));
+});
+
+test('under the strict rule the author alone, replying and resolving, closes nothing, and the review is not approved', async () => {
+  const on = { approval: ctx({ runs: [EARLIER, RUN_OK], stored: [STORED_MAJOR] }) };
+  const open = { approved: false, code: 'open_thread', dismissed: false };
+  const byAuthor = onHarness({ ...on, threads: [repliedThread('octo-dev', 'owner')] });
+  const out = await publishRun(byAuthor.deps, byAuthor.args);
+  assert.deepEqual(out.kind === 'published' && out.approval, open);
+  assert.deepEqual(names(byAuthor.calls), ['readPullRequest', 'listOwnReviews', 'listThreads', 'publishReview']);
+  assert.deepEqual(byAuthor.drafts, [{ commit: 'h1', body: withPara(approvable(), para('open_thread')), comments: RUN_OK.comments }]);
+  // A member who is not the author closes it.
+  const byMember = onHarness({ ...on, threads: [repliedThread('octo-lead', 'member')] });
+  const closed = await publishRun(byMember.deps, byMember.args);
+  assert.deepEqual(closed.kind === 'published' && closed.approval, { approved: true, code: 'approved', dismissed: false });
+  // The author is the live pull request's: when it is that member, the same reply closes nothing.
+  const theirOwn = onHarness({ ...on, live: { ...LIVE_OK, info: { ...LIVE_OK.info, author: 'octo-lead' } }, threads: [repliedThread('octo-lead', 'member')] });
+  const held = await publishRun(theirOwn.deps, theirOwn.args);
+  assert.deepEqual(held.kind === 'published' && held.approval, open);
+  assert.equal(theirOwn.drafts[0]?.event, undefined);
+});
+
+test("under the gate rule with clearing by reply off a person's reply clears nothing, and the review is not approved", async () => {
+  const threads = [repliedThread('octo-lead', 'member')];
+  const off = onHarness({ approval: ctx({ rule: 'gate', clearByReply: false, runs: [EARLIER, RUN_OK], stored: [STORED_MAJOR] }), threads });
+  const out = await publishRun(off.deps, off.args);
+  assert.deepEqual(out.kind === 'published' && out.approval, { approved: false, code: 'open_thread', dismissed: false });
+  assert.deepEqual(names(off.calls), ['readPullRequest', 'listOwnReviews', 'listThreads', 'publishReview']);
+  assert.deepEqual(off.drafts, [{ commit: 'h1', body: withPara(approvable(), para('open_thread', { rule: 'gate' })), comments: RUN_OK.comments }]);
+  // With clearing by reply on, the same reply clears it.
+  const on = onHarness({ approval: ctx({ rule: 'gate', clearByReply: true, runs: [EARLIER, RUN_OK], stored: [STORED_MAJOR] }), threads });
+  const cleared = await publishRun(on.deps, on.args);
+  assert.deepEqual(cleared.kind === 'published' && cleared.approval, { approved: true, code: 'approved', dismissed: false });
+});
+
+test('a rule answer that is neither dismissed nor kept is no answer, and the review is not approved', async () => {
+  const body = withPara(approvable(), para('rule_unreadable', { code: 'internal_error' }));
+  for (const answer of ['yes', true, undefined, null, 'DISMISSED', {}]) {
+    const h = onHarness({ rule: answer });
+    assert.deepEqual(await publishRun(h.deps, h.args), {
+      kind: 'published', reviewId: '501', body, inlineDropped: false, notesDropped: false, adopted: false, approval: { approved: false, code: 'rule_unreadable', dismissed: false },
+    }, String(answer));
+    assert.deepEqual(h.drafts, [{ commit: 'h1', body, comments: RUN_OK.comments }], String(answer));
+  }
+});
+
+test('a review a later start publishes is approved without its notes', async () => {
+  const noted: StoredRun = { ...RUN_OK, comments: [FINDING, NOTE] };
+  const h = onHarness({ run: noted, approval: ctx({ runs: [noted] }), resumed: true });
+  const body = withPara(approvable(), para('approved'));
+  assert.deepEqual(await publishRun(h.deps, h.args), {
+    kind: 'published', reviewId: '501', body, inlineDropped: false, notesDropped: true, adopted: false, approval: { approved: true, code: 'approved', dismissed: false },
+  });
+  assert.deepEqual(h.drafts, [{ commit: 'h1', body, comments: [FINDING], event: 'approve' }]);
+});
+
+test('a repair of the stored comments that throws leaves them as read, and the review is still decided and posted', async () => {
+  // A thread with no comment: tying the threads to the published runs' findings throws on it, and it cannot be told closed.
+  const empty: ReviewThread = { ...appThread('8009'), comments: [] };
+  const h = onHarness({ approval: ctx({ runs: [EARLIER, RUN_OK] }), threads: [empty] });
+  const body = withPara(approvable(), para('open_thread'));
+  assert.deepEqual(await publishRun(h.deps, h.args), {
+    kind: 'published', reviewId: '501', body, inlineDropped: false, notesDropped: false, adopted: false, approval: { approved: false, code: 'open_thread', dismissed: false },
+  });
+  assert.deepEqual(names(h.calls), ['readPullRequest', 'listOwnReviews', 'listThreads', 'publishReview']);
+});
+
+test("an adopted review GitHub holds without its inline comments is written, for a run another job recorded, with that run's trigger and no requester", async () => {
+  const manual = recordedWith(approvable(), { trigger: 'manual', requestedBy: 'octo-lead' });
+  const expected = renderReview(approvable(), { trigger: 'manual', requestedBy: null, lineUrl, inline: false, commentUrl }).body;
+  assert.ok(expected.startsWith('**Full review** requested.'));
+  for (const job of JOBS) {
+    for (const approval of [ctx({ runs: [manual] }), undefined]) {
+      const h = harness({
+        run: manual, live: LIVE_OK, ownRun: false, ...job, own: [{ id: '480', commit: 'h1', state: 'commented' }], posted: [],
+        ...(approval === undefined ? {} : { approval }),
+      });
+      const name = `${job.trigger} job, approval ${approval === undefined ? 'off' : 'on'}`;
+      assert.deepEqual(await publishRun(h.deps, h.args), { kind: 'published', reviewId: '480', body: expected, inlineDropped: true, notesDropped: false, adopted: true }, name);
+      assert.equal(postCount(h.calls), 0, name);
+    }
+  }
+});
+
+test('runs or comments handed in as something that is no list could not be read either', async () => {
+  const body = withPara(approvable(), para('record_unreadable'));
+  for (const over of [{ stored: {} }, { runs: {} }, { stored: 'x' }]) {
+    const h = onHarness({ approval: ctx(over as Partial<ApprovalContext>) });
+    assert.deepEqual(await publishRun(h.deps, h.args), {
+      kind: 'published', reviewId: '501', body, inlineDropped: false, notesDropped: false, adopted: false, approval: { approved: false, code: 'record_unreadable', dismissed: false },
+    }, JSON.stringify(over));
+    assert.deepEqual(names(h.calls), ['readPullRequest', 'listOwnReviews', 'publishReview'], JSON.stringify(over));
+  }
 });
