@@ -3,7 +3,8 @@ import { storable } from './text.ts';
 import type { Db } from './types.ts';
 
 // closed and not_found: a sync found the live pull request closed, or gone; no check was read or written.
-export type GateState = 'waiting' | 'paused' | 'reviewing' | 'passed' | 'blocked' | 'failed' | 'skipped' | 'bypassed' | 'closed' | 'not_found';
+// unwithdrawn: an approval of the app's whose withdrawal failed still stands.
+export type GateState = 'waiting' | 'paused' | 'reviewing' | 'passed' | 'blocked' | 'failed' | 'skipped' | 'bypassed' | 'closed' | 'not_found' | 'unwithdrawn';
 export interface GateCounts {
   blocking: number; clearedByReview: number; clearedByReply: number; silentResolves: number; unknownThreads: number;
   findings: number; notReviewed: number; withoutThread: number; refusedInline: number;

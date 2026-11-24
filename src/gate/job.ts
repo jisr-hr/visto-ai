@@ -1,4 +1,5 @@
 import type { RepoSettings } from '../config/load.ts';
+import { failedDismissal } from '../db/approvals.ts';
 import { lastEvaluation, NO_COUNTS, recordEvaluation, skipOf } from '../db/gate.ts';
 import type { GateCounts, GateState } from '../db/gate.ts';
 import { askGate, finishJob, requeueJob, reviewJobsOf } from '../db/jobs.ts';
@@ -66,12 +67,14 @@ export async function planNow(deps: GateJobDeps, args: {
   const head = args.live.info.headSha;
   const base = args.live.info.baseSha;
   const skip = await skipOf(db, args.ref, head);
+  // A read that rejects rejects the evaluation, as the skip's does: never read as no failure.
+  const unwithdrawn = await failedDismissal(db, args.ref);
   // The jobs before the runs: a review that ends in between is seen with its run, never as ended without it.
   const jobs = await reviewJobsOf(db, args.ref);
   const job = underWay(jobs, args.gating, deps.reviewing(args.ref));
   const paused = job === 'pending' ? await deps.paused() : null;
   const runs = await listRuns(db, args.ref);
-  const before = planBefore({ gating: args.gating, head, base, skip, job, paused, runs });
+  const before = planBefore({ gating: args.gating, head, base, skip, job, paused, runs, unwithdrawn });
   if (before !== null) return { plan: before, run: null };
   const reviewed = reviewedRun(runs, head, base);
   if (reviewed === null) return { plan: { state: 'failed', code: 'internal_error', evaluated: true }, run: null };
@@ -113,7 +116,8 @@ type End =
 /** The reasons of the gate's commands: runGateCommand takes them to their end. */
 const COMMANDS = new Set(['done', 'skip', 'rerun']);
 
-const codeOfPlan = (plan: CheckPlan): string | null => (plan.state === 'failed' || plan.state === 'paused' ? plan.code : null);
+const codeOfPlan = (plan: CheckPlan): string | null =>
+  (plan.state === 'failed' || plan.state === 'paused' || plan.state === 'unwithdrawn' ? plan.code : null);
 
 /** What the job read of the pull request as the database holds it; undefined until it was read. */
 interface Seen { stored?: PullRequestFacts | null }

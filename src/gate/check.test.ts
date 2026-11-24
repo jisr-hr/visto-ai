@@ -304,3 +304,45 @@ test('the counts of a state', () => {
   assert.deepEqual(countsOf({ state: 'waiting' }), NO_COUNTS);
   assert.deepEqual(countsOf({ state: 'failed', code: 'x', evaluated: true }), NO_COUNTS);
 });
+
+test('a recorded failure to withdraw fails the check, outranks a skip and a review, and gives way to bypass', () => {
+  const skip = { actor: 'octo-lead', reason: 'hotfix' };
+  const unwithdrawn: CheckPlan = { state: 'unwithdrawn', code: 'github_403' };
+  const failed = run(2, { published: false, outcome: 'failed', body: '', failureCode: 'github_502' });
+  for (const over of [
+    {}, { skip }, { job: 'running' as const }, { job: 'pending' as const, paused: 'spend_limit' }, { job: 'pending' as const, paused: null },
+    { runs: [run(1)] }, { runs: [failed] }, { skip, job: 'running' as const, runs: [run(1)] }, { gating: 'shadow' as const, skip },
+  ]) {
+    assert.deepEqual(planBefore(facts({ ...over, unwithdrawn: 'github_403' })), unwithdrawn, JSON.stringify(over));
+  }
+  assert.deepEqual(planBefore(facts({ gating: 'bypass', skip, unwithdrawn: 'github_403' })), { state: 'bypassed' });
+  assert.deepEqual(planBefore(facts({ gating: 'bypass', unwithdrawn: 'github_403', runs: [run(1)] })), { state: 'bypassed' });
+  // None recorded, absent or null: what it was.
+  for (const none of [{}, { unwithdrawn: null }]) {
+    assert.deepEqual(planBefore(facts({ ...none, skip })), { state: 'skipped', actor: 'octo-lead', reason: 'hotfix' });
+    assert.deepEqual(planBefore(facts({ ...none, job: 'running' })), { state: 'reviewing' });
+    assert.equal(planBefore(facts({ ...none, runs: [run(1)] })), null);
+    assert.deepEqual(planBefore(facts(none)), { state: 'waiting' });
+  }
+  // A recorded code that is not a short code, the empty one included, is still a recorded failure.
+  for (const code of ['It broke: /srv/app', '', 'GITHUB_403']) {
+    assert.deepEqual(planBefore(facts({ unwithdrawn: code, skip })), { state: 'unwithdrawn', code: 'internal_error' }, code);
+  }
+  assert.deepEqual(countsOf(unwithdrawn), NO_COUNTS);
+});
+
+test('the text of a failed withdrawal is pinned and has no skip line', () => {
+  const summary = (code: string): string => [
+    `This reviewer approved an earlier commit of this pull request, or gave an approval it no longer stands behind, and could not dismiss it (\`${code}\`). While it stands it may count toward the approvals this branch requires, so this check fails.`,
+    "Dismiss that approval on the pull request's page. The service also tries again at the next commit, the next review of this pull request and its next start, and this check is decided again once the approval is gone.",
+  ].join('\n\n');
+  for (const m of [meta(), meta({ canSkip: true }), meta({ canSkip: true, retrying: true, clearByReply: false })]) {
+    const text = checkText({ state: 'unwithdrawn', code: 'github_403' }, m);
+    assert.deepEqual(text, { status: 'completed', conclusion: 'failure', title: 'Earlier approval not withdrawn (github_403)', summary: summary('github_403') });
+    assert.ok(!text.summary.includes(SKIP));
+  }
+  // A code that is not a short code is shown as internal_error, in the title and in the summary.
+  const odd = checkText({ state: 'unwithdrawn', code: 'It broke: /srv/app' }, meta({ canSkip: true }));
+  assert.deepEqual(odd, { status: 'completed', conclusion: 'failure', title: 'Earlier approval not withdrawn (internal_error)', summary: summary('internal_error') });
+  assert.ok(!(odd.title + odd.summary).includes('/srv/app'));
+});
