@@ -41,22 +41,33 @@ export function newestVerdict(published: StoredRun[], threadId: string): Verdict
   return null;
 }
 
-/** A person other than `author` (compared without letter case), with access, wrote a reply in the thread. */
-export function accessReplied(thread: ReviewThread, author: string): boolean {
+/** A person other than `author` (compared without letter case), with access, wrote one of the thread's comments from index `from` on (1: every reply). */
+function accessRepliedFrom(thread: ReviewThread, author: string, from: number): boolean {
   // An author that cannot be read cannot be told apart from anyone: no reply counts.
   if (typeof author !== 'string') return false;
   const who = author.toLowerCase();
-  return repliesOf(thread).some((c) => isPerson(c) && typeof c.author === 'string' && c.author.toLowerCase() !== who && ACCESS.includes(c.association));
+  const comments = Array.isArray(thread.comments) ? thread.comments.slice(Math.max(1, from)) : [];
+  return comments.some((c) => isPerson(c) && typeof c.author === 'string' && c.author.toLowerCase() !== who && ACCESS.includes(c.association));
+}
+
+/** A person other than `author` (compared without letter case), with access, wrote a reply in the thread. */
+export function accessReplied(thread: ReviewThread, author: string): boolean {
+  return accessRepliedFrom(thread, author, 1);
 }
 
 /** The second half of the thread rule: resolved, and closed without a further verdict. Pure. */
 export function closedBefore(thread: ReviewThread, ctx: ThreadContext): boolean {
   if (thread.resolved !== true) return false;
   const byApp = thread.resolvedByApp === true;
-  const newest = byApp ? newestVerdict(ctx.published, thread.id) : null;
+  const newest = newestVerdict(ctx.published, thread.id);
   const known = newest !== null && newest !== 'damaged' ? newest : null;
   if (ctx.rule === 'strict') {
-    return (byApp && known !== null && known.verdict === 'fixed' && known.fileChanged === true) || accessReplied(thread, ctx.author);
+    if (byApp && known !== null && known.verdict === 'fixed' && known.fileChanged === true) return true;
+    // A review that kept the thread open has answered the replies it judged: only a later one counts. When what it judged
+    // cannot be told (its count absent), or the newest entry cannot be read, no reply counts.
+    if (newest === 'damaged') return false;
+    if (known !== null && known.verdict === 'open') return known.replies !== null && accessRepliedFrom(thread, ctx.author, 1 + known.replies);
+    return accessReplied(thread, ctx.author);
   }
   if (ctx.rule === 'gate') {
     return (byApp && known !== null && (known.verdict === 'fixed' || known.verdict === 'answered')) || (ctx.clearByReply === true && repliesOf(thread).some(isPerson));

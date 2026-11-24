@@ -1847,7 +1847,8 @@ test('with clearing by reply off a resolved thread with a person\'s reply is jud
   assert.deepEqual(await settledUnder(REPLY_OFF({ ...GATED, gate: { ...GATED.gate, branches: ['release'] } }), 12), [['PRRT_1', true, true]]);
 });
 test('with approval on the earlier state is judged under the thread rule in force, the live author and clearing by reply', async () => {
-  const RESOLVED: ReviewThread = { ...THREAD, resolved: true };
+  // The reply is by octo-dev, the live author, as a member: under the strict rule only being the author keeps it from closing the thread.
+  const RESOLVED: ReviewThread = { ...THREAD, resolved: true, comments: [THREAD.comments[0]!, { ...THREAD.comments[1]!, association: 'member' }] };
   const under = async (settings: RepoSettings, number: number): Promise<unknown> => {
     await published({ pullRequest: number });
     const h = await manualJob({ reason: 'done', settings, pullRequest: number, own: OWN_401, threads: [[RESOLVED]] });

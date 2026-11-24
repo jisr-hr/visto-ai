@@ -4,10 +4,12 @@ import type { ApprovalThreads } from '../config/load.ts';
 import type { StoredComment } from '../db/review-comments.ts';
 import { NOTE } from '../db/review-comments.ts';
 import type { StoredRun } from '../db/review-runs.ts';
+import type { EarlierThread } from '../engine/types.ts';
 import type { Association, ReviewThread, ThreadComment } from '../forge/types.ts';
 import { evaluateGate, storedSeverities } from '../gate/rule.ts';
 import { accessReplied, closedBefore, newestVerdict, openForApproval } from './threads.ts';
 import type { ThreadContext } from './threads.ts';
+import { earlierOf } from '../shell/earlier.ts';
 
 const REF = { service: 'github', owner: 'acme', repo: 'shop', number: 7 } as const;
 const USAGE = { calls: 1, inputTokens: 1, outputTokens: 1, cachedTokens: 0, cost: 0 };
@@ -44,6 +46,8 @@ const ctx = (over: Partial<ThreadContext> = {}): ThreadContext =>
 const strict = (t: ReviewThread, over: Partial<ThreadContext> = {}): boolean => closedBefore(t, ctx(over));
 const gateRule = (t: ReviewThread, over: Partial<ThreadContext> = {}): boolean => closedBefore(t, ctx({ rule: 'gate', ...over }));
 const resolvedWith = (...replies: ThreadComment[]): ReviewThread => thread({ resolved: true, comments: [appComment('8001'), ...replies] });
+/** Whether a run owes the thread a verdict, as the engine decides it: major or blocker, and not settled. */
+const isDue = (t: EarlierThread): boolean => (t.severity === 'major' || t.severity === 'blocker') && !t.settled;
 
 test('under the strict rule a thread the author replied to and resolved is not closed, and one a member who is not the author replied to is', () => {
   const byAuthor = resolvedWith(withAccess('octo-dev', 'member'));
@@ -372,4 +376,38 @@ test('what cannot be read is open for approval, under both rules, and nothing th
   const answered = resolvedWith(reply('octo-dev'));
   assert.equal(open('gate', { threads: [answered] }), 0);
   assert.equal(open('gate', { threads: [answered], clearByReply: 'yes' as unknown as boolean }), 1);
+});
+
+test('a thread a review kept open after a member\'s reply, then resolved by the author, is not closed for approval, and is due', () => {
+  // octo-lead replies on the open thread; review 2 judges it with that one reply and keeps it open; the author resolves it.
+  const opened = run(1, { headSha: 'h0' });
+  const keptOpen = (over: Record<string, unknown> = { replies: 1 }): StoredRun => run(2, { verdicts: [verdict('open', { fileChanged: false, ...over })] });
+  const ask = withAccess('octo-lead', 'member', { body: 'Please fix the total.' });
+  const later = withAccess('octo-lead', 'member', { id: '9005', at: '2026-03-01T12:00:00.000Z' });
+  const t = resolvedWith(ask);
+  const published = [opened, keptOpen()];
+  assert.equal(strict(t, { published }), false);
+  assert.equal(strict(resolvedWith(ask, appReply()), { published }), false);
+  assert.equal(strict(resolvedWith(ask, withAccess('octo-dev', 'member', { id: '9005' })), { published }), false);
+  // A member's reply after the first 1 + replies comments closes it.
+  assert.equal(strict(resolvedWith(ask, later), { published }), true);
+  assert.equal(strict(resolvedWith(ask, appReply(), later), { published }), true);
+  // replies absent on the open entry: what it judged cannot be told, and no reply counts.
+  assert.equal(strict(resolvedWith(ask, later), { published: [opened, keptOpen({})] }), false);
+  // A damaged newest entry: no reply counts.
+  assert.equal(strict(resolvedWith(ask, later), { published: [opened, run(2, { verdicts: [verdict('fixed', { replies: -1 })] })] }), false);
+  // A newest verdict that is not open, or none, lets the reply count as before.
+  assert.equal(strict(t, { published: [opened, run(2, { verdicts: [verdict('answered', { replies: 1 })] })] }), true);
+  assert.equal(strict(t, { published: [opened] }), true);
+  // Through the earlier state: not settled, and due.
+  const approval = { rule: 'strict' as const, author: 'octo-dev', clearByReply: true };
+  const earlier = earlierOf({ last: keptOpen(), runs: published, stored: STORED, threads: [t], approval }).threads[0]!;
+  assert.deepEqual([earlier.settled, earlier.closedForApproval, isDue(earlier)], [false, false, true]);
+  assert.equal(earlierOf({ last: keptOpen(), runs: published, stored: STORED, threads: [t] }).threads[0]!.settled, true);
+  // And once the next review is posted with no verdict on it, the thread is open.
+  const current = run(3, { published: false, reviewId: null, publishedAt: null });
+  assert.equal(openForApproval({ threads: [t], stored: STORED, runs: [...published, current], run: current, rule: 'strict', author: 'octo-dev', clearByReply: true }), 1);
+  // Under the gate rule the same sequence is what it is today.
+  assert.equal(gateRule(t, { published }), true);
+  assert.equal(gateRule(t, { published, clearByReply: false }), false);
 });
