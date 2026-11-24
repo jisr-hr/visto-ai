@@ -243,6 +243,7 @@ export const configSchema = z
     scorer: scorer.optional(),
     app: app.optional(),
     database: database.optional(),
+    auditKey: secretRef.optional(),
     server: server.prefault({}),
     dryRun: z.boolean().default(true),
     learning: z.boolean().default(false),

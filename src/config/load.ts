@@ -42,6 +42,8 @@ export interface DeploymentConfig {
   scorer: ScorerConfig | null;
   app: { id: string; privateKey: string; webhookSecret: string } | null;
   database: { url: string } | null;
+  /** The value of the variable `auditKey` names; present only when `auditKey` is written. Never logged, stored or posted. */
+  auditKey?: string;
   server: { port: number };
   dryRun: boolean;
   learning: boolean;
@@ -80,7 +82,7 @@ export interface ApprovalSettings {
   enabled: boolean;
   /** D18. */
   threads: ApprovalThreads;
-  /** 6.5, a percentage from 0 to 100; this release accepts only 0 while enabled. */
+  /** 6.5: of the pull requests approval would approve, the percentage (0 to 100) sent to a person anyway; 0 switches the sample off. */
   auditShare: number;
 }
 
@@ -163,22 +165,17 @@ function approvalWritten(score: ApprovalKeys | undefined): { approval?: Partial<
   return Object.keys(approval).length === 0 ? {} : { approval };
 }
 
-const AUDIT_NOT_DRAWN = 'must be written as 0 while autoApprove is true: this release does not draw the audit sample yet';
+const AUDIT_KEY_NEEDED = 'auditKey: must be written while autoApprove is true with an auditShare above 0';
 
-/** Until the audit sample is drawn, approval is on only with an audit share written as 0, dry run or not. No issue quotes a value. */
-function auditShareIssues(repositories: { defaults: { score: ApprovalKeys }; overrides: Record<string, { score?: ApprovalKeys | undefined }> }): string[] {
-  const refused = (a: ApprovalSettings): boolean => a.enabled && a.auditShare !== 0;
+/**
+ * Whether the defaults, or some override merged with them as `repoSettingsFor` merges it, have approval on with a share
+ * above 0 (-0 is 0): the audit sample is then drawn, and it needs the key.
+ */
+function auditKeyNeeded(repositories: { defaults: { score: ApprovalKeys }; overrides: Record<string, { score?: ApprovalKeys | undefined }> }): boolean {
+  const draws = (a: ApprovalSettings): boolean => a.enabled && a.auditShare > 0;
   const defaults = approvalWritten(repositories.defaults.score).approval;
-  const issues: string[] = [];
-  const defaultsBad = refused({ ...APPROVAL_OFF, ...defaults });
-  if (defaultsBad) issues.push(`repositories.defaults.score.auditShare: ${AUDIT_NOT_DRAWN}`);
-  for (const [name, o] of Object.entries(repositories.overrides)) {
-    if (!refused({ ...APPROVAL_OFF, ...defaults, ...approvalWritten(o.score).approval })) continue;
-    // Defaults already named as bad cover an override that writes neither key.
-    if (defaultsBad && o.score?.autoApprove === undefined && o.score?.auditShare === undefined) continue;
-    issues.push(`repositories.overrides.${name}.score.auditShare: ${AUDIT_NOT_DRAWN}`);
-  }
-  return issues;
+  if (draws({ ...APPROVAL_OFF, ...defaults })) return true;
+  return Object.values(repositories.overrides).some((o) => draws({ ...APPROVAL_OFF, ...defaults, ...approvalWritten(o.score).approval }));
 }
 
 function isMapping(value: unknown): value is Record<string, unknown> {
@@ -235,7 +232,9 @@ export function parseConfig(yamlText: string, env: Record<string, string | undef
     );
   }
   const raw = result.data;
-  const repositoryIssues = [...gateBranchIssues(raw.repositories), ...auditShareIssues(raw.repositories)];
+  // Needed with no key written fails closed, dry run or not: one issue, however many repositories need it.
+  const keyIssues = raw.auditKey === undefined && auditKeyNeeded(raw.repositories) ? [AUDIT_KEY_NEEDED] : [];
+  const repositoryIssues = [...gateBranchIssues(raw.repositories), ...keyIssues];
   if (repositoryIssues.length > 0) throw new ConfigError(repositoryIssues);
   const varName = raw.model.apiKey.env;
   const apiKey = env[varName];
@@ -293,6 +292,18 @@ export function parseConfig(yamlText: string, env: Record<string, string | undef
     if (!/^postgres(ql)?:\/\//.test(url) || !URL.canParse(url)) throw new ConfigError(['database.url: must be a postgres URL']);
     database = { url };
   }
+  // Resolved whenever it is written, needed or not.
+  let auditKey: string | undefined;
+  if (raw.auditKey !== undefined) {
+    const auditVar = raw.auditKey.env;
+    const value = env[auditVar];
+    if (value === undefined || value === '') {
+      throw new ConfigError([`auditKey: environment variable ${auditVar} is not set`]);
+    }
+    // A short key could be found from the draws an author has seen. Kept as it is, spaces included; the message never quotes it.
+    if (value.length < 32) throw new ConfigError([`auditKey: environment variable ${auditVar} must hold at least 32 characters`]);
+    auditKey = value;
+  }
   const extensionIssues: string[] = [];
   const extensions: ExtensionConfig[] = raw.extensions.map((e, i) => ({
     name: e.name,
@@ -342,6 +353,7 @@ export function parseConfig(yamlText: string, env: Record<string, string | undef
     scorer,
     app,
     database,
+    ...(auditKey === undefined ? {} : { auditKey }),
     server: raw.server,
     dryRun: raw.dryRun,
     learning: raw.learning,

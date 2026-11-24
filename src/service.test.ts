@@ -62,7 +62,7 @@ const okResult = (): ReviewResult => ({
 
 const appKey = generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey.export({ type: 'pkcs8', format: 'pem' }) as string;
 const BASE_YAML = 'model:\n  apiKey: { env: K }\n  model: vendor/model-a\napp:\n  id: 12345\n  privateKey: { env: A }\n  webhookSecret: { env: S }\ndatabase:\n  url: { env: U }\nserver:\n  port: 9191\nlimits:\n  spendPerDay: 50\ndryRun: true\n';
-const ENV = { K: 'k', A: appKey, S: 's', U: 'postgres://u:p@db.example.test/d' };
+const ENV = { K: 'k', A: appKey, S: 's', U: 'postgres://u:p@db.example.test/d', V: 'audit-key-for-tests-only-0123456789' };
 const config = serviceConfig(parseConfig(BASE_YAML, ENV));
 /** The gate enabled on main for every repository. */
 const GATE_YAML = 'repositories:\n  defaults: { gate: { enabled: true, branches: [main] } }\n';
@@ -2024,6 +2024,33 @@ test('a push on an approved pull request withdraws its approval in its own lane'
   await h.runTimer(TICK_MS);
   await h.flush();
   assert.deepEqual([h.inputs.length, (await pending(h.db, 'review')).map((j) => [j.reason, j.status])], [1, [['opened', 'done'], ['synchronize', 'pending']]]);
+});
+
+test('the service hands the review job the audit key the config names', async () => {
+  // Under the key V holds, acme/shop 7 is drawn above 18.8899: at 18.88 it is approved, at 18.9 it is drawn. Without the key both would be drawn.
+  // approvalRows reads only approved rows, so an audited one is read here by a query of its own.
+  const decided = (db: Db) => db.query<{ approved: boolean; approval_code: string | null }>(
+    'select approved, approval_code from visto_ai.review_runs where number = 7 and published order by id');
+  for (const [share, approved, code] of [['18.88', true, 'approved'], ['18.9', false, 'audit_sample']] as const) {
+    const seen = approvalsFake();
+    const yaml = `auditKey: { env: V }\nrepositories:\n  defaults: { score: { autoApprove: true, auditShare: ${share} } }\n`;
+    const h = await harness({ dryRun: false, repositoriesYaml: yaml, threads: [], result: approvable(), approvals: seen.approvals });
+    h.live = liveAt('h1');
+    await (await h.start()).settled;
+    await h.webhook(pr('opened'), 'd1');
+    // A job's line is the last thing it writes; an approval's withdraw job, stored with it, then runs at once.
+    await h.until(() => h.logged.some((e) => e.event === 'review'));
+    if (approved) await h.until(async () => (await withdrawRows(h.db)).some((j) => j.status === 'done'));
+    await h.flush();
+    assert.deepEqual((await decided(h.db)).map((r) => [r.approved, r.approval_code]), [[approved, code]], share);
+    const line = h.logged.find((e) => e.event === 'review')!;
+    assert.deepEqual([line.approved, line.approval], [approved, code], share);
+    // Posted once. The approval is read back by its withdraw job; the audited review is no approval: nothing stands, and no withdraw job is asked.
+    assert.deepEqual(h.writes.filter((w) => w[0] === 'publishReview'), [['publishReview', 'h1']], share);
+    assert.deepEqual(seen.calls, approved ? [['staleApprovals', '99', 'main'], ['readReview', '99', '501']] : [['staleApprovals', '99', 'main']], share);
+    assert.deepEqual((await withdrawRows(h.db)).map((j) => [j.status, j.outcome]), approved ? [['done', 'kept']] : [], share);
+    assert.equal(JSON.stringify(h.logged).includes(ENV.V), false, share);
+  }
 });
 
 test('at start a standing approval whose withdrawal failed is asked for again on an open pull request, and nothing is logged when none is', async () => {

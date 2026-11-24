@@ -166,6 +166,8 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps): Pr
     ...(extensionHealth === null ? {} : { extensionHealth }),
     ...(mcpHealth === null ? {} : { mcpHealth }),
     ...(memory === null ? {} : memory),
+    // The audit key goes to the review job and to nothing else.
+    ...(config.auditKey === undefined ? {} : { auditKey: config.auditKey }),
   };
   // gate_check_failed is raised once for each reason in a run of the service.
   const raisedGate = new Set<string>();
