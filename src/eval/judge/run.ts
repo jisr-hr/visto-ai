@@ -76,12 +76,14 @@ const summaryTable = (s: JudgeSummary): string =>
 export async function runJudge(args: {
   cases: EvalCase[]; casesSha256: string; runDir: string; keep: Set<string> | null; withRunLabel: string | null; maxCost: number; concurrency: number;
   model: ModelClient; auto: boolean; timeoutMs: number; token: () => string;
-}): Promise<JudgeSummary> {
+}): Promise<JudgeSummary & Pick<JudgeFile, 'stopped_reason' | 'cases_not_judged'>> {
   const results = readResults(args.runDir);
   const run = readRunSummary(args.runDir);
   const byKey = new Map(args.cases.map((c) => [caseKey(c), c]));
   if (results.some((r) => !byKey.has(r.key))) throw new Error('run_case_mismatch');
-  const chosen = results.filter((r) => args.keep === null || args.keep.has(r.key));
+  // The case file's order, not the run's (completion order): a judge stopped by its cost cap then rates the first cases of the file.
+  const position = new Map(args.cases.map((c, i) => [caseKey(c), i]));
+  const chosen = results.filter((r) => args.keep === null || args.keep.has(r.key)).sort((x, y) => position.get(x.key)! - position.get(y.key)!);
 
   // Files from an earlier judging must not sit beside this one's; a link left in place would send the writes elsewhere.
   const names = ['judge.jsonl', 'judge-summary.json', 'judge-summary.md'];
@@ -105,5 +107,5 @@ export async function runJudge(args: {
   };
   writeFileSync(join(args.runDir, names[1]!), JSON.stringify(file, null, 2) + '\n');
   writeFileSync(join(args.runDir, names[2]!), summaryTable(summary));
-  return summary;
+  return { ...summary, stopped_reason: file.stopped_reason, cases_not_judged: file.cases_not_judged };
 }

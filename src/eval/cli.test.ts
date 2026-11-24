@@ -679,3 +679,30 @@ test('judge refuses a case file inside the project folder, and needs no GITHUB_T
   assert.equal(code, 2);
   assert.deepEqual(lines, ['usage: --cases must be outside the project folder']);
 });
+
+test('judge prints judge_failed, and a stopped line when the cost cap ended it', async () => {
+  const c = { repo: 'acme/shop', pr_number: 1, head_sha: 'a'.repeat(12), compare_base: 'b', title: 't', body: '', branch: '', base_branch: '', author: '',
+    labels: [{ comment_id: 'c', path: 'a.ts', line: 5, side: 'RIGHT', severity: '', label: 'valid', text: 'ref', start_line: 4 }] };
+  const runFolder = join(dir, 'judge-run-printed');
+  mkdirSync(runFolder, { recursive: true });
+  const row = (n: number): object => ({
+    key: `acme/shop#${n}@${'a'.repeat(12)}`, status: 'ok', findings: [{ path: 'a.ts', line: 5, side: 'RIGHT', severity: 'minor', body: 'x' }],
+  });
+  const cases = [1, 2].map((n) => ({ ...c, pr_number: n }));
+  writeFileSync(join(dir, 'judge-cases-printed.jsonl'), cases.map((x) => JSON.stringify(x) + '\n').join(''));
+  writeFileSync(join(runFolder, 'results.jsonl'), [row(1), row(2)].map((r) => JSON.stringify(r) + '\n').join(''));
+  writeFileSync(join(runFolder, 'summary.json'), JSON.stringify({ summary: { label: 'r' }, plain: false }));
+  writeFileSync(join(dir, 'judge-config-printed.yml'), 'model:\n  apiKey: { env: MODEL_KEY }\n  model: vendor/model-a\n');
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async () => new Response(JSON.stringify({
+    choices: [{ message: { content: 'no tool call' } }], usage: { prompt_tokens: 1, completion_tokens: 1, cost: 1 },
+  }), { status: 200 })) as typeof fetch;
+  try {
+    const [code, lines] = await run(judgeArgs({ cases: join(dir, 'judge-cases-printed.jsonl'), run: runFolder, config: join(dir, 'judge-config-printed.yml'), 'max-cost': '1', concurrency: '1' }), { MODEL_KEY: 'k' });
+    assert.equal(code, 0);
+    assert.match(lines[0]!, /judge_failed 1,/);
+    assert.equal(lines[1], 'stopped: max_cost, cases not judged 1');
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});

@@ -461,7 +461,8 @@ async function judgeCommand(argv: string[], env: Record<string, string | undefin
     token: () => randomBytes(8).toString('hex'),
   });
   out(`cases ${summary.cases}, failed ${summary.failed_cases}, findings ${summary.findings}, references ${summary.references}, `
-    + `precision ${dash(summary.precision)}, recall ${dash(summary.recall)}, f1 ${dash(summary.f1)}, judge_cost ${summary.judge_cost}`);
+    + `precision ${dash(summary.precision)}, recall ${dash(summary.recall)}, f1 ${dash(summary.f1)}, judge_failed ${summary.judge_failed}, judge_cost ${summary.judge_cost}`);
+  if (summary.stopped_reason !== null) out(`stopped: ${summary.stopped_reason}, cases not judged ${summary.cases_not_judged}`);
 }
 
 function compare(argv: string[], out: (line: string) => void): void {

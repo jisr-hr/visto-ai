@@ -173,3 +173,15 @@ test('runJudge removes earlier judge files and leaves the run\'s files alone', a
   assert.equal(readFileSync(join(dir, 'results.jsonl'), 'utf8'), before);
   assert.doesNotMatch(readFileSync(join(dir, 'judge.jsonl'), 'utf8'), /old/);
 });
+
+test('runJudge judges cases in the case file\'s order whatever the run\'s order', async () => {
+  const a = mkCase(1, [label('a.ts', 'r')]);
+  const b = mkCase(2, [label('a.ts', 'r')]);
+  const dir = runDir([b, a].map((c) => result(c, { findings: [finding('a.ts', 'A:1')] })));
+  const model = stub(1);
+  const s = await runJudge({ ...base, cases: [a, b], runDir: dir, model, maxCost: 1 });
+  assert.equal(model.requests.length, 1);
+  assert.equal((lines(dir, 'judge.jsonl')[0] as { key: string }).key, caseKey(a));
+  assert.equal(s.stopped_reason, 'max_cost');
+  assert.equal(s.cases_not_judged, 1);
+});

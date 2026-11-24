@@ -717,7 +717,7 @@ npm run eval:backtest -- --history ../aacr/history.jsonl --out ../runs/score --l
 - **Precision**: the share of findings that cover a reference comment, counted by a matching in which each finding and each reference is used at most once, within a case. AACR-Bench's own count depends on the order of the findings, and the two arms order them differently, so it is not used here.
 - **F1**: the harmonic mean of the two, taken from the raw counts. It is 0 when either is 0, and `-` when a number is undefined.
 
-A failed replay case is left out of all three and counted. A finding whose judge call failed twice counts as unmatched, and is counted. With `--with`, both runs are restricted to the cases that are ok in both, so the control and the reviewer are rated on the same cases; without it, a case one run failed counts for the other.
+A failed replay case is left out of all three and counted. A finding whose judge call failed twice counts as unmatched, and is counted. With `--with`, both runs are restricted to the cases that are ok in both, so the control and the reviewer are rated on the same cases; without it, a case one run failed counts for the other. A judge stopped by `--max-cost` rates only the first cases of the case file, in the file's order, and prints how many it did not judge.
 
 **The score.** The backtest on the history file reports Safety, Benefit and Focus as above, with these differences:
 
