@@ -108,6 +108,11 @@ test('the checks for a number, a link and the score see full-width forms, and th
   }
   const kept = 'Do not report a missing null check on what OrderStore.\uff46ind returns: it throws when nothing is found.';
   assert.deepEqual(lessonText(kept), { ok: true, text: kept });
+  // An accented letter stays whole in the compatibility form: scor and U+00E9 is no name of the score.
+  const accented = 'Do not flag the scor\u00e9 helper in the cart, it is a dance step on purpose.';
+  assert.deepEqual(lessonText(accented), { ok: true, text: accented });
+  // A combining mark after score is caught on the text itself, where the compatibility form composes it with the e.
+  assert.deepEqual(lessonText('Do not raise the score\u0301 of a change that only renames a variable.'), { ok: false, code: 'names_the_score' });
 });
 
 // Asking for lessons, checking them, and the part of the prompt (plan Task 4).

@@ -175,6 +175,10 @@ test('after a stop no second request is made: the call ends as invalid_output wi
     assert.deepEqual(asked, { ok: false, code: 'invalid_output', usage: usage(0.01) }, name);
     assert.equal(m.requests.length, 1, name);
   }
+  const verdictFirst = model([called(VERDICT, { usage: usage(0.01) }), called(VERDICT, { usage: usage(0.02) })]);
+  const kept = await askJudge(verdictFirst, input(), TOKEN, false, 1000, () => true);
+  assert.deepEqual(kept, { ok: true, value: { classification: 'valid_pushback', lesson: RULE, quote: 'it throws when nothing is found' }, usage: usage(0.01) });
+  assert.equal(verdictFirst.requests.length, 1);
   const goes: Array<[string, (() => boolean) | undefined]> = [['false', () => false], ['absent', undefined]];
   for (const [name, stopped] of goes) {
     const m = model([response({ text: 'prose', usage: usage(0.01) }), called(VERDICT, { usage: usage(0.02) })]);
