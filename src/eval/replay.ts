@@ -9,6 +9,7 @@ import { review } from '../engine/review.ts';
 import type { ReviewDeps, ReviewInput } from '../engine/types.ts';
 import type { EvalCase } from './cases.ts';
 import { caseKey } from './cases.ts';
+import { plainCase } from './plain.ts';
 import { runPool } from './pool.ts';
 import { METRICS, scoreCase, summarize } from './score.ts';
 import type { CaseResult, CaseScore, ReplayFinding, Summary } from './score.ts';
@@ -18,7 +19,7 @@ export interface RunCoverage {
 }
 export interface SummaryFile {
   summary: Summary; cases_file: string; cases_sha256: string; case_count: number; max_cases: number;
-  stopped_reason: 'max_cost' | null; cases_not_started: number; coverage: RunCoverage; scored: CaseScore[];
+  stopped_reason: 'max_cost' | null; cases_not_started: number; coverage: RunCoverage; scored: CaseScore[]; plain: boolean;
 }
 
 const EM_DASH = '\u2014';
@@ -60,7 +61,9 @@ export async function replayCase(c: EvalCase, config: DeploymentConfig, deps: Re
   const started = Date.now();
   try {
     const result = await review(toReviewInput(c, config, deps.clock()), deps);
-    const findings: ReplayFinding[] = result.findings.map((f) => ({ path: f.path, line: f.line, side: f.side, severity: f.severity, body: f.body }));
+    const shown = (f: ReplayFinding): ReplayFinding => ({ path: f.path, line: f.line, side: f.side, severity: f.severity, body: f.body });
+    const findings: ReplayFinding[] = result.findings.map(shown);
+    const extra_findings: ReplayFinding[] = [...result.unplaced.map(shown), ...result.beyondDiff.map(shown)];
     return {
       key: caseKey(c),
       status: result.status,
@@ -76,6 +79,7 @@ export async function replayCase(c: EvalCase, config: DeploymentConfig, deps: Re
       files_reviewed: result.coverage.reviewed.length,
       not_reviewed: countBy(result.coverage.notReviewed.map((n) => n.reason)),
       findings,
+      extra_findings,
       highest_score: result.verdict.highest,
       needs_human: result.verdict.needsHuman,
     };
@@ -147,6 +151,7 @@ function summaryTable(summary: Summary): string {
 export async function runReplay(args: {
   cases: EvalCase[]; casesFile: string; casesSha256: string; label: string; outDir: string;
   maxCases: number; maxCost: number; concurrency: number; config: DeploymentConfig; deps: ReviewDeps;
+  plain?: boolean; // run the plain control in place of the engine; absent reads as false
 }): Promise<SummaryFile> {
   mkdirSync(args.outDir, { recursive: true });
   // Files from an earlier run must not sit beside this run's files.
@@ -155,10 +160,11 @@ export async function runReplay(args: {
   const resultsPath = join(args.outDir, 'results.jsonl');
   writeFileSync(resultsPath, '');
 
+  const plain = args.plain === true;
   const selected = args.cases.slice(0, args.maxCases);
   const results: (CaseResult | undefined)[] = new Array<CaseResult | undefined>(selected.length).fill(undefined);
   const { stoppedByCost, notStarted } = await runPool(
-    selected, { concurrency: args.concurrency, maxCost: args.maxCost }, (c) => replayCase(c, args.config, args.deps),
+    selected, { concurrency: args.concurrency, maxCost: args.maxCost }, (c) => (plain ? plainCase(c, args.config, args.deps) : replayCase(c, args.config, args.deps)),
     (result, index) => { results[index] = result; appendFileSync(resultsPath, JSON.stringify(result) + '\n'); },
   );
 
@@ -169,7 +175,7 @@ export async function runReplay(args: {
   const file: SummaryFile = {
     summary, cases_file: args.casesFile, cases_sha256: args.casesSha256, case_count: args.cases.length, max_cases: args.maxCases,
     stopped_reason: stoppedByCost && notStarted > 0 ? 'max_cost' : null, cases_not_started: notStarted,
-    coverage: runCoverage(started.map((s) => s.r)), scored,
+    coverage: runCoverage(started.map((s) => s.r)), scored, plain,
   };
   writeFileSync(join(args.outDir, 'summary.json'), JSON.stringify(file, null, 2) + '\n');
   writeFileSync(join(args.outDir, 'summary.md'), summaryTable(summary));

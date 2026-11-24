@@ -67,6 +67,8 @@ export interface HistorySource {
   listReviews(repo: RepoRef, number: number): Promise<HumanReview[]>;
   listInlineComments(repo: RepoRef, number: number): Promise<HumanInlineComment[]>;
   listGeneralComments(repo: RepoRef, number: number): Promise<GeneralComment[]>;
+  /** null when the pull request does not exist or was not merged */
+  pullRequest(repo: RepoRef, number: number): Promise<MergedPullRequest | null>;
   /** null when either commit can no longer be read */
   compare(repo: RepoRef, base: string, head: string): Promise<Comparison | null>;
 }

@@ -70,6 +70,14 @@ export function createGithubHistorySource(opts: { token: string; fetch: typeof f
       return done(false);
     },
 
+    async pullRequest(repo, number) {
+      const res = await http.send('GET', `${http.repoUrl(repo)}/pulls/${number}`, 'application/vnd.github+json');
+      if (res.status === 404) return null;
+      if (!res.ok) throw new Error(`github_${res.status}`);
+      const body = objectItem(await jsonOf(res));
+      return typeof body.merged_at === 'string' ? pullOf(body) : null;
+    },
+
     async listReviews(repo, number) {
       const items = await http.paged(`${http.repoUrl(repo)}/pulls/${number}/reviews`, LIST_PAGES);
       const out: HumanReview[] = [];
