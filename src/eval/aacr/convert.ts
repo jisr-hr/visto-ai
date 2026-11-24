@@ -80,12 +80,15 @@ export function parseAacr(json: string): { records: AacrRecord[]; skipped: { bad
     }
     if (comments.length === 0) { skipped.bad_record += 1; continue; }
     const match = URL_PATTERN.exec(raw.githubPrUrl)!;
+    // GitHub reads `.` and `..` as path steps, never as a name.
+    if ([match[1]!, match[2]!].some((name) => name === '.' || name === '..')) { skipped.bad_record += 1; continue; }
     const record: AacrRecord = {
       url: raw.githubPrUrl, owner: match[1]!, repo: match[2]!, number: Number(match[3]),
       base: raw.source_commit.toLowerCase(), head: raw.target_commit.toLowerCase(),
       createdAt: raw.created_at, mergedAt: raw.merged_at, comments,
     };
-    const identity = `${record.url}@${record.head}`;
+    // What the later steps key on, not the raw address: a slash or another letter case is the same pull request.
+    const identity = `${record.owner}/${record.repo}#${record.number}@${record.head}`.toLowerCase();
     if (seen.has(identity)) { skipped.duplicate += 1; continue; }
     seen.add(identity);
     records.push(record);

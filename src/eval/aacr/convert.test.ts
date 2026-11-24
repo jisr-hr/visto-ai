@@ -77,9 +77,11 @@ test('parseAacr skips a record with a bad url, commit or date', () => {
     raw({ githubPrUrl: 'https://example.com/acme/shop/pull/12' }), raw({ githubPrUrl: 'https://github.com/acme/shop/issues/12' }),
     raw({ source_commit: 'abc' }), raw({ target_commit: 'Z'.repeat(40) }), raw({ created_at: '' }), raw({ merged_at: undefined }),
     raw({ comments: 'none' }), 'text' as unknown as Record<string, unknown>,
+    raw({ githubPrUrl: 'https://github.com/./shop/pull/12' }), raw({ githubPrUrl: 'https://github.com/acme/../pull/12' }),
+    raw({ githubPrUrl: 'https://github.com/../shop/pull/12' }), raw({ githubPrUrl: 'https://github.com/acme/./pull/12' }),
   ));
   assert.deepEqual(records, []);
-  assert.equal(skipped.bad_record, 8);
+  assert.equal(skipped.bad_record, 12);
 });
 
 test('parseAacr sorts by the hash of url and head', () => {
@@ -99,6 +101,15 @@ test('parseAacr keeps the first of two records with the same url and head', () =
   assert.equal(records.length, 1);
   assert.equal(records[0]!.comments[0]!.text, 'The total ignores the discount.');
   assert.equal(skipped.duplicate, 1);
+});
+
+test('parseAacr treats a trailing slash and another letter case as the same pull request', () => {
+  const { records, skipped } = parseAacr(file(
+    raw({ githubPrUrl: 'https://github.com/acme/shop/pull/12' }), raw({ githubPrUrl: 'https://github.com/acme/shop/pull/12/' }),
+    raw({ githubPrUrl: 'https://github.com/Acme/Shop/pull/12' }), raw({ target_commit: 'B'.repeat(40) }),
+  ));
+  assert.equal(records.length, 1);
+  assert.equal(skipped.duplicate, 3);
 });
 
 test('toEvalCase maps a comment to a valid label', () => {
