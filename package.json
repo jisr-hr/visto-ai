@@ -14,6 +14,7 @@
     "eval:replay": "node src/eval/cli.ts replay",
     "eval:compare": "node src/eval/cli.ts compare",
     "eval:import-history": "node src/eval/cli.ts import-history",
+    "eval:import-aacr": "node src/eval/cli.ts import-aacr",
     "eval:backtest": "node src/eval/cli.ts backtest",
     "eval:score-noise": "node src/eval/cli.ts score-noise",
     "eval:memory-count": "node src/eval/cli.ts memory-count",

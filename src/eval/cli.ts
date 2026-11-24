@@ -11,6 +11,7 @@ import { createJevScorer } from '../engine/scorer/jev.ts';
 import type { ReviewDeps } from '../engine/types.ts';
 import { createGithubHistorySource } from '../forge/github/history-source.ts';
 import { createGithubReadSource } from '../forge/github/read-source.ts';
+import { parseAacr, runAacrImport } from './aacr/convert.ts';
 import { compareSummaries } from './compare.ts';
 import { loadCases } from './cases.ts';
 import { historyMemory, memoryCount } from './backtest/memory.ts';
@@ -392,6 +393,33 @@ async function importHistory(argv: string[], env: Record<string, string | undefi
   await runImport({ repo: { owner: repoMatch[1]!, repo: repoMatch[2]! }, since, until, maxPrs, outFile }, source, out);
 }
 
+async function importAacr(argv: string[], env: Record<string, string | undefined>, out: (line: string) => void): Promise<void> {
+  const parsed = parse(argv, ['input', 'cases-out', 'history-out'], []);
+  if (parsed.positional.length > 0) throw new UsageError('usage: import-aacr takes no positional arguments');
+  const get = (name: string): string => {
+    const v = parsed.options.get(name);
+    if (v === undefined) throw new UsageError(`usage: import-aacr needs --${name}`);
+    return v;
+  };
+  const input = get('input');
+  const casesOut = get('cases-out');
+  const historyOut = get('history-out');
+  const githubToken = env.GITHUB_TOKEN;
+  if (githubToken === undefined || githubToken === '') throw new UsageError('usage: GITHUB_TOKEN is not set');
+  const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
+  outsideProject(input, projectRoot, 'input');
+  outsideProject(casesOut, projectRoot, 'cases-out');
+  outsideProject(historyOut, projectRoot, 'history-out');
+  for (const [name, path] of [['cases-out', casesOut], ['history-out', historyOut]] as const) {
+    if (isDirectory(path)) throw new UsageError(`usage: --${name} must be a file`);
+  }
+  const { records, skipped } = parseAacr(readable('input', () => readFileSync(input, 'utf8')));
+  const source = createGithubHistorySource({ token: githubToken, fetch: globalThis.fetch });
+  const result = await runAacrImport({ records, source, casesOut, historyOut });
+  out(`records ${records.length}, written ${result.written}, bad_record ${skipped.bad_record}, bad_comment ${skipped.bad_comment}, duplicate ${skipped.duplicate}, `
+    + `pr_unreadable ${result.skipped.pr_unreadable}, head_unreadable ${result.skipped.head_unreadable}, too_many_files ${result.skipped.too_many_files}`);
+}
+
 function compare(argv: string[], out: (line: string) => void): void {
   const parsed = parse(argv, ['noise'], []);
   if (parsed.positional.length !== 2) throw new UsageError('usage: compare <baseline summary.json> <candidate summary.json> [--noise <second baseline summary.json>]');
@@ -408,10 +436,11 @@ export async function main(argv: string[], env: Record<string, string | undefine
     else if (command === 'backtest') await backtest(rest, env, out);
     else if (command === 'score-noise') scoreNoiseCommand(rest, out);
     else if (command === 'import-history') await importHistory(rest, env, out);
+    else if (command === 'import-aacr') await importAacr(rest, env, out);
     else if (command === 'memory-count') await memoryCountCommand(rest, out);
     else if (command === 'score-compare') scoreCompareCommand(rest, out);
     else if (command === 'seed-memory') await seedMemoryCommand(rest, env, out);
-    else throw new UsageError('usage: cli <replay|compare|import-history|backtest|score-noise|memory-count|score-compare|seed-memory> ...');
+    else throw new UsageError('usage: cli <replay|compare|import-history|import-aacr|backtest|score-noise|memory-count|score-compare|seed-memory> ...');
     return 0;
   } catch (error) {
     if (error instanceof UsageError) { out(error.message); return 2; }

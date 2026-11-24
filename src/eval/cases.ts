@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import type { Side } from '../forge/types.ts';
 
 export type LabelKind = 'valid' | 'invalid' | 'first' | 'late' | 'escaped';
-export interface Label { comment_id: string; path: string; line: number | null; side: Side; severity: string; label: LabelKind; tolerance?: number; first_head?: boolean; same_head?: boolean }
+export interface Label { comment_id: string; path: string; line: number | null; side: Side; severity: string; label: LabelKind; tolerance?: number; first_head?: boolean; same_head?: boolean; text?: string; start_line?: number }
 export interface EvalCase { repo: string; pr_number: number; head_sha: string; compare_base: string; title: string; body: string; branch: string; base_branch: string; author: string; labels: Label[]; review_round?: number }
 
 const KINDS: readonly string[] = ['valid', 'invalid', 'first', 'late', 'escaped'];
@@ -58,6 +58,8 @@ function parseLabel(raw: unknown): Label {
   if (o['tolerance'] !== undefined) label.tolerance = need(typeof o['tolerance'] === 'number' && Number.isFinite(o['tolerance']), o['tolerance'] as number);
   if (o['first_head'] !== undefined) label.first_head = need(typeof o['first_head'] === 'boolean', o['first_head'] as boolean);
   if (o['same_head'] !== undefined) label.same_head = need(typeof o['same_head'] === 'boolean', o['same_head'] as boolean);
+  if (o['text'] !== undefined) label.text = str(o, 'text');
+  if (o['start_line'] !== undefined) label.start_line = need(Number.isInteger(o['start_line']), o['start_line'] as number);
   return label;
 }
 

@@ -595,3 +595,46 @@ test('memory-count prints the number of cases shown a reverted line, not the num
     'acme/shop#10@head10000000: reverted lines 1',
   ]);
 });
+
+function aacrArgs(over: Record<string, string> = {}, drop: string[] = []): string[] {
+  const options: Record<string, string> = {
+    input: join(dir, 'aacr.json'), 'cases-out': join(dir, 'aacr-cases.jsonl'), 'history-out': join(dir, 'aacr-history.jsonl'), ...over,
+  };
+  for (const name of drop) delete options[name];
+  return ['import-aacr', ...Object.entries(options).flatMap(([k, v]) => [`--${k}`, v])];
+}
+
+test('import-aacr needs --input', async () => {
+  const [code, lines] = await run(aacrArgs({}, ['input']));
+  assert.equal(code, 2);
+  assert.deepEqual(lines, ['usage: import-aacr needs --input']);
+});
+
+test('import-aacr refuses a file inside the project folder', async () => {
+  for (const name of ['input', 'cases-out', 'history-out']) {
+    const [code, lines] = await run(aacrArgs({ [name]: join(projectRoot, 'x.json') }));
+    assert.equal(code, 2, name);
+    assert.deepEqual(lines, [`usage: --${name} must be outside the project folder`], name);
+  }
+});
+
+test('import-aacr needs GITHUB_TOKEN', async () => {
+  for (const env of [{}, { GITHUB_TOKEN: '' }]) {
+    const [code, lines] = await run(aacrArgs(), env);
+    assert.equal(code, 2);
+    assert.deepEqual(lines, ['usage: GITHUB_TOKEN is not set']);
+  }
+});
+
+test('import-aacr reports an input that is not a list, with a short code', async () => {
+  writeFileSync(join(dir, 'aacr-bad.json'), '{"a":1}');
+  const [code, lines] = await run(aacrArgs({ input: join(dir, 'aacr-bad.json') }));
+  assert.equal(code, 1);
+  assert.deepEqual(lines, ['bad_aacr_file']);
+});
+
+test('import-aacr reports an input that cannot be read', async () => {
+  const [code, lines] = await run(aacrArgs({ input: join(dir, 'aacr-missing.json') }));
+  assert.equal(code, 2);
+  assert.deepEqual(lines, ['usage: cannot read --input']);
+});
