@@ -256,3 +256,27 @@ test('every request was a GET', async () => {
   assert.equal(calls.length, 5);
   assert.deepEqual([...new Set(calls.map((c) => c.method))], ['GET']);
 });
+
+test('pullRequest returns the merged pull request', async () => {
+  queue(json(pull(7, '2026-01-02T00:00:00Z', '2026-01-03T00:00:00Z', { title: 'Add totals' })));
+  const out = await source().pullRequest(repo, 7);
+  assert.ok(out !== null);
+  assert.equal(out.title, 'Add totals');
+  assert.equal(out.mergedAt, '2026-01-02T00:00:00Z');
+  assert.ok(calls[0]?.url.endsWith('/repos/acme/shop/pulls/7'));
+});
+
+test('pullRequest returns null on 404', async () => {
+  queue(json({ message: 'Not Found' }, 404));
+  assert.equal(await source().pullRequest(repo, 7), null);
+});
+
+test('pullRequest returns null when not merged', async () => {
+  queue(json(pull(7, null, '2026-01-03T00:00:00Z')));
+  assert.equal(await source().pullRequest(repo, 7), null);
+});
+
+test('pullRequest rejects with github_500', async () => {
+  queue(new Response('', { status: 500 }), new Response('', { status: 500 })); // a 5xx is retried once
+  await assert.rejects(source().pullRequest(repo, 7), message('github_500'));
+});

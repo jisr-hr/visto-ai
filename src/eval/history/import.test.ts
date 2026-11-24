@@ -57,6 +57,7 @@ function stub(over: Partial<HistorySource> = {}): HistorySource {
     listReviews: async () => reviews,
     listInlineComments: async () => inline,
     listGeneralComments: async () => comments,
+    pullRequest: async () => null,
     compare: async (_repo, _base, head) => (head === 'c2'
       ? { mergeBase: 'mb1', files: [] }
       : { mergeBase: 'mb2', files: [{ path: 'src/cart.ts', previousPath: null, status: 'modified', additions: 1, deletions: 1, patch: '@@ -1 +1 @@\n-a\n+b' }] }),

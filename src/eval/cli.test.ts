@@ -595,3 +595,127 @@ test('memory-count prints the number of cases shown a reverted line, not the num
     'acme/shop#10@head10000000: reverted lines 1',
   ]);
 });
+
+function aacrArgs(over: Record<string, string> = {}, drop: string[] = []): string[] {
+  const options: Record<string, string> = {
+    input: join(dir, 'aacr.json'), 'cases-out': join(dir, 'aacr-cases.jsonl'), 'history-out': join(dir, 'aacr-history.jsonl'), ...over,
+  };
+  for (const name of drop) delete options[name];
+  return ['import-aacr', ...Object.entries(options).flatMap(([k, v]) => [`--${k}`, v])];
+}
+
+test('import-aacr needs --input', async () => {
+  const [code, lines] = await run(aacrArgs({}, ['input']));
+  assert.equal(code, 2);
+  assert.deepEqual(lines, ['usage: import-aacr needs --input']);
+});
+
+test('import-aacr refuses a file inside the project folder', async () => {
+  for (const name of ['input', 'cases-out', 'history-out']) {
+    const [code, lines] = await run(aacrArgs({ [name]: join(projectRoot, 'x.json') }));
+    assert.equal(code, 2, name);
+    assert.deepEqual(lines, [`usage: --${name} must be outside the project folder`], name);
+  }
+});
+
+test('import-aacr refuses two paths that are the same file, and keeps the input', async () => {
+  const input = join(dir, 'aacr-same.json');
+  writeFileSync(input, '[]');
+  const cases: Record<string, string>[] = [{ 'cases-out': input }, { 'history-out': input }, { 'history-out': join(dir, 'aacr-cases.jsonl') }];
+  for (const over of cases) {
+    const [code, lines] = await run(aacrArgs({ input, ...over }));
+    assert.equal(code, 2);
+    assert.equal(lines.length, 1);
+    assert.match(lines[0]!, /^usage: /);
+    assert.equal(readFileSync(input, 'utf8'), '[]');
+  }
+});
+
+test('import-aacr needs GITHUB_TOKEN', async () => {
+  for (const env of [{}, { GITHUB_TOKEN: '' }]) {
+    const [code, lines] = await run(aacrArgs(), env);
+    assert.equal(code, 2);
+    assert.deepEqual(lines, ['usage: GITHUB_TOKEN is not set']);
+  }
+});
+
+test('import-aacr reports an input that is not a list, with a short code', async () => {
+  writeFileSync(join(dir, 'aacr-bad.json'), '{"a":1}');
+  const [code, lines] = await run(aacrArgs({ input: join(dir, 'aacr-bad.json') }));
+  assert.equal(code, 1);
+  assert.deepEqual(lines, ['bad_aacr_file']);
+});
+
+test('import-aacr reports an input that cannot be read', async () => {
+  const [code, lines] = await run(aacrArgs({ input: join(dir, 'aacr-missing.json') }));
+  assert.equal(code, 2);
+  assert.deepEqual(lines, ['usage: cannot read --input']);
+});
+
+test('replay accepts --plain, and backtest does not', () => {
+  const folder = mkdtempSync(tmpdir() + '/');
+  const config = join(folder, 'config.yml');
+  writeFileSync(config, 'model:\n  apiKey: { env: MODEL_KEY }\n  model: vendor/model-a\n');
+  const env = { GITHUB_TOKEN: 't', MODEL_KEY: 'k' };
+  const argv = ['--cases', join(folder, 'cases.yml'), '--out', join(folder, 'out'), '--label', 'one', '--config', config];
+  assert.equal(prepareRun('replay', 'cases', argv, env, [], ['plain']).flags.has('plain'), false);
+  assert.equal(prepareRun('replay', 'cases', [...argv, '--plain'], env, [], ['plain']).flags.has('plain'), true);
+  assert.throws(() => prepareRun('replay', 'cases', [...argv, '--plain'], env), /unknown option --plain/);
+});
+
+function judgeArgs(over: Record<string, string> = {}, drop: string[] = []): string[] {
+  const options: Record<string, string> = { cases: join(dir, 'judge-cases.jsonl'), run: join(dir, 'judge-run'), config: join(dir, 'judge-config.yml'), ...over };
+  for (const name of drop) delete options[name];
+  return ['judge', ...Object.entries(options).flatMap(([k, v]) => [`--${k}`, v])];
+}
+
+test('judge needs --run', async () => {
+  const [code, lines] = await run(judgeArgs({}, ['run']), {});
+  assert.equal(code, 2);
+  assert.deepEqual(lines, ['usage: judge needs --run']);
+});
+
+test('judge refuses a run folder inside the project folder', async () => {
+  const [code, lines] = await run(judgeArgs({ run: join(projectRoot, 'run') }), {});
+  assert.equal(code, 2);
+  assert.deepEqual(lines, ['usage: --run must be outside the project folder']);
+});
+
+test('judge refuses a --with folder inside the project folder', async () => {
+  const [code, lines] = await run([...judgeArgs(), '--with', join(projectRoot, 'other')], {});
+  assert.equal(code, 2);
+  assert.deepEqual(lines, ['usage: --with must be outside the project folder']);
+});
+
+test('judge refuses a case file inside the project folder, and needs no GITHUB_TOKEN', async () => {
+  const [code, lines] = await run(judgeArgs({ cases: join(projectRoot, 'c.jsonl') }), {});
+  assert.equal(code, 2);
+  assert.deepEqual(lines, ['usage: --cases must be outside the project folder']);
+});
+
+test('judge prints judge_failed, and a stopped line when the cost cap ended it', async () => {
+  const c = { repo: 'acme/shop', pr_number: 1, head_sha: 'a'.repeat(12), compare_base: 'b', title: 't', body: '', branch: '', base_branch: '', author: '',
+    labels: [{ comment_id: 'c', path: 'a.ts', line: 5, side: 'RIGHT', severity: '', label: 'valid', text: 'ref', start_line: 4 }] };
+  const runFolder = join(dir, 'judge-run-printed');
+  mkdirSync(runFolder, { recursive: true });
+  const row = (n: number): object => ({
+    key: `acme/shop#${n}@${'a'.repeat(12)}`, status: 'ok', findings: [{ path: 'a.ts', line: 5, side: 'RIGHT', severity: 'minor', body: 'x' }],
+  });
+  const cases = [1, 2].map((n) => ({ ...c, pr_number: n }));
+  writeFileSync(join(dir, 'judge-cases-printed.jsonl'), cases.map((x) => JSON.stringify(x) + '\n').join(''));
+  writeFileSync(join(runFolder, 'results.jsonl'), [row(1), row(2)].map((r) => JSON.stringify(r) + '\n').join(''));
+  writeFileSync(join(runFolder, 'summary.json'), JSON.stringify({ summary: { label: 'r' }, plain: false }));
+  writeFileSync(join(dir, 'judge-config-printed.yml'), 'model:\n  apiKey: { env: MODEL_KEY }\n  model: vendor/model-a\n');
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async () => new Response(JSON.stringify({
+    choices: [{ message: { content: 'no tool call' } }], usage: { prompt_tokens: 1, completion_tokens: 1, cost: 1 },
+  }), { status: 200 })) as typeof fetch;
+  try {
+    const [code, lines] = await run(judgeArgs({ cases: join(dir, 'judge-cases-printed.jsonl'), run: runFolder, config: join(dir, 'judge-config-printed.yml'), 'max-cost': '1', concurrency: '1' }), { MODEL_KEY: 'k' });
+    assert.equal(code, 0);
+    assert.match(lines[0]!, /judge_failed 1,/);
+    assert.equal(lines[1], 'stopped: max_cost, cases not judged 1');
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});

@@ -76,3 +76,16 @@ test('loadCases returns the cases and the sha-256 of the file bytes', () => {
   assert.equal(loaded.sha256, createHash('sha256').update(Buffer.from(text)).digest('hex'));
   assert.match(loaded.sha256, /^[0-9a-f]{64}$/);
 });
+
+test('parseCases keeps text and start_line on a label', () => {
+  const label = { comment_id: 'k1', path: 'a.ts', line: 6, side: 'RIGHT', severity: '', label: 'valid', text: 'Check the total.', start_line: 4 };
+  const [c] = parseCases(JSON.stringify({ ...caseA, labels: [label] }));
+  assert.deepEqual(c!.labels, [label]);
+});
+
+test('parseCases refuses a start_line that is not an integer', () => {
+  for (const start_line of ['4', 4.5, null]) {
+    assert.equal(badLine(JSON.stringify({ ...caseA, labels: [{ path: 'a.ts', label: 'valid', start_line }] })), 'bad_case_line_1');
+  }
+  assert.equal(badLine(JSON.stringify({ ...caseA, labels: [{ path: 'a.ts', label: 'valid', text: 5 }] })), 'bad_case_line_1');
+});
