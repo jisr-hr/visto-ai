@@ -234,6 +234,15 @@ test("this review's fixed verdict on a changed file closes a thread under the st
   assert.equal(judged([], [answer]), 1);
   // An older review's fixed verdict on a changed file is not this review's: open.
   assert.equal(open('strict', { runs: [run(1, { verdicts: [verdict('fixed')] }), thisRun()] }), 1);
+  // Resolved by the app after an older answered: this review's fixed, stale by the author's later comment, is not the newest
+  // verdict an earlier run kept, so it closes nothing; judged after that comment, it closes the thread.
+  const resolvedByApp = (verdicts: unknown): number => {
+    const current = thisRun(verdicts);
+    const answeredBefore = run(1, { headSha: 'h0', verdicts: [verdict('answered')] });
+    return open('strict', { threads: [thread({ resolved: true, resolvedByApp: true, comments: [appComment('8001'), answer] })], run: current, runs: [answeredBefore, current] });
+  };
+  assert.equal(resolvedByApp([verdict('fixed', { replies: 0 })]), 1);
+  assert.equal(resolvedByApp([verdict('fixed', { replies: 1 })]), 0);
 });
 
 test('a thread this review kept open is open for approval under both rules, though a member replied and it is resolved', () => {
@@ -318,6 +327,11 @@ test("the gate rule counts what the gate would block with this review as the hea
   assert.deepEqual(blocked, { true: 2, false: 3 });
   // The strict rule on the same threads: the author's reply closes nothing.
   assert.equal(open('strict', { threads, stored: rows, runs: [older, current], run: current }), 3);
+  // This review is the head's review: its own fixed on a changed file closes an unresolved thread under both rules,
+  // and an older head's fixed, with no verdict of this review, closes it under neither.
+  const fixedNow = thisRun([verdict('fixed')]);
+  assert.deepEqual(both({ run: fixedNow, runs: [run(1), fixedNow] }), [0, 0]);
+  assert.deepEqual(both({ runs: [run(1, { headSha: 'h0', verdicts: [verdict('fixed')] }), thisRun()] }), [1, 1]);
 });
 
 test('a stored major whose comment was deleted holds approval back, under both rules', () => {
