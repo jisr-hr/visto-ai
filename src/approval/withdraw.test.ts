@@ -293,17 +293,68 @@ test('an approval at the live head and base stays; one at another base branch is
   const kept = await posted(h.db, '502');
   const job = await h.job(5);
   await h.run(job);
-  assert.deepEqual(h.calls, [['readPullRequest', REF, '99'], ['readReview', '501'], ['dismissReview', '501', dismissMessage('h1')]]);
+  // The one that stays is read too, and GitHub still holds it approved.
+  assert.deepEqual(h.calls, [
+    ['readPullRequest', REF, '99'], ['readReview', '502'], ['readReview', '501'], ['dismissReview', '501', dismissMessage('h1')],
+  ]);
   assert.deepEqual(await runRows(h.db), [row(other, { dismissed_at: new Date(at(5)), dismissed_by: 'app' }), row(kept)]);
   assert.deepEqual([lines(h)[0]!['standing'], lines(h)[0]!['targets'], lines(h)[0]!['dismissed']], [2, 1, 1]);
 
-  // Asked again: the one left is at the live head and base and is the newest review: nothing is read of it.
+  // Asked again: the one left is at the live head and base and is the newest review: it is read, and nothing is recorded.
   const again = await h.job(20);
   await h.run(again);
-  assert.equal(named(h, 'readReview').length, 1);
+  assert.deepEqual(named(h, 'readReview'), [['readReview', '502'], ['readReview', '501'], ['readReview', '502']]);
+  assert.equal(named(h, 'dismissReview').length, 1);
   assert.deepEqual(await statusOf(h, again), ['done', 'kept', at(20)]);
   assert.deepEqual(await runRows(h.db), [row(other, { dismissed_at: new Date(at(5)), dismissed_by: 'app' }), row(kept)]);
   assert.equal(h.queued(), 1);
+});
+
+test('a hand dismissal of the newest approval at the live head is recorded by the job its delivery asks for, and the gate is asked', async () => {
+  for (const [settings, answer] of [[SETTINGS, DISMISSED], [GATE_DISABLED, DISMISSED], [SETTINGS, { state: 'commented', commit: 'h1' }]] as const) {
+    const h = await harness({ settings, live: [liveOf()], reviews: { '501': [answer] } });
+    const id = await posted(h.db, '501');
+    // The `dismissed` delivery names the approval and asks for a job, with the event's installation.
+    const job = await h.job(5);
+    await h.run(job);
+    assert.deepEqual(h.calls, [['readPullRequest', REF, '99'], ['readReview', '501']]);
+    assert.deepEqual(await runRows(h.db), [row(id, { dismissed_at: new Date(at(5)), dismissed_by: 'git_service' })]);
+    assert.deepEqual(await statusOf(h, job), ['done', 'done', at(5)]);
+    assert.deepEqual(lines(h)[0], {
+      event: 'withdraw', job: job.id, repo: 'acme/shop', number: 7, state: 'open', standing: 1, targets: 0, dismissed: 0, by_git_service: 1,
+      failed: 0, code: null, outcome: 'done', requeued: null,
+    });
+    const gated = settings === SETTINGS;
+    assert.deepEqual(await gateJobs(h.db), gated ? [{ reason: 'sync', status: 'pending', installation: '99' }] : []);
+    assert.deepEqual([h.queued(), h.alerts], [gated ? 1 : 0, []]);
+  }
+});
+
+test('the newest approval at the live head that GitHub still holds approved is read and left as it is', async () => {
+  const h = await harness({ live: [liveOf()] });
+  const id = await posted(h.db, '501');
+  const job = await h.job(5);
+  await h.run(job);
+  assert.deepEqual(h.calls, [['readPullRequest', REF, '99'], ['readReview', '501']]);
+  assert.deepEqual(await runRows(h.db), [row(id)]);
+  assert.deepEqual(await statusOf(h, job), ['done', 'kept', at(5)]);
+  assert.deepEqual([lines(h)[0]!['targets'], lines(h)[0]!['by_git_service'], lines(h)[0]!['failed'], lines(h)[0]!['outcome']], [0, 0, 0, 'kept']);
+  assert.deepEqual([await gateJobs(h.db), h.queued(), h.alerts], [[], 0, []]);
+});
+
+test('a standing approval that is no target and whose read fails, or answers nothing or another state, is no failure', async () => {
+  for (const answer of [new Error('github_502'), null, { state: 'other', commit: 'h1' }] as ReviewAnswer[]) {
+    const h = await harness({ live: [liveOf()], reviews: { '501': [answer] } });
+    const id = await posted(h.db, '501');
+    const job = await h.job(5);
+    await h.run(job);
+    assert.deepEqual(h.calls, [['readPullRequest', REF, '99'], ['readReview', '501']]);
+    assert.deepEqual(await runRows(h.db), [row(id)]);
+    // Not put back, nothing recorded on it, nothing alerted or asked.
+    assert.deepEqual(await statusOf(h, job), ['done', 'kept', at(5)]);
+    assert.deepEqual([lines(h)[0]!['failed'], lines(h)[0]!['code'], lines(h)[0]!['requeued'], lines(h)[0]!['outcome']], [0, null, null, 'kept']);
+    assert.deepEqual([await gateJobs(h.db), h.queued(), h.alerts], [[], 0, []]);
+  }
 });
 
 test('a later review that does not approve withdraws the approval of the same head', async () => {

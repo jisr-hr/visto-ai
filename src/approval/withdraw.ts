@@ -29,10 +29,10 @@ type Entry = {
   event: 'withdraw'; job: number; repo: string; number: number;
   state: LivePullRequest['state'] | null;
   standing: number;              // the standing approvals read
-  targets: number;               // those the job read again on GitHub
+  targets: number;               // those the job withdraws, or reads at a merge
   dismissed: number;             // dismissed by this job, and recorded so by this record
   by_git_service: number;        // found dismissed, or no longer an approval, and recorded so by this record
-  failed: number;                // approvals left standing for a failure: targets, and those read for a recorded failure
+  failed: number;                // approvals left standing for a failure: targets, those read for a recorded failure, and records that rejected
   code: string | null;           // the first failure's code
   outcome: string | null; requeued: boolean | null;
 };
@@ -162,8 +162,18 @@ async function work(s: Steps): Promise<End> {
   // On an open pull request an approval kept with a recorded failure is read as well: the failure ends once a job
   // finds it dismissed or holding.
   const failed = live.state === 'open' ? found.standing.filter((a) => !targets.has(a) && a.failure !== null) : [];
-  if (targets.size === 0 && failed.length === 0) return { kind: 'finish', status: 'done', outcome: 'kept' };
+  // And every other one: a dismissal by GitHub's own rule or by hand is recorded (call 21).
+  const held = live.state === 'open' ? found.standing.filter((a) => !targets.has(a) && a.failure === null) : [];
+  if (targets.size === 0 && failed.length === 0 && held.length === 0) return { kind: 'finish', status: 'done', outcome: 'kept' };
 
+  for (const approval of held) {
+    try {
+      await hold(s, installation, approval);
+    } catch (error) {
+      // Only its record rejects: tried again, as any record that fails.
+      found.failures.push({ run: approval.run, code: codeOf(error) });
+    }
+  }
   for (const approval of found.standing) {
     if (!targets.has(approval) && !failed.includes(approval)) continue;
     try {
@@ -176,6 +186,8 @@ async function work(s: Steps): Promise<End> {
   }
   const first = found.failures[0];
   if (first !== undefined) return { kind: 'retry', code: first.code };
+  // No target, no recorded failure, and none of the others recorded dismissed: the approvals hold.
+  if (targets.size === 0 && failed.length === 0 && entry.by_git_service === 0) return { kind: 'finish', status: 'done', outcome: 'kept' };
   return { kind: 'finish', status: 'done', outcome: 'done' };
 }
 
@@ -234,6 +246,23 @@ async function recheck(s: Steps, installation: string, approval: Standing): Prom
   }
   if (state !== 'approved') throw new Error('review_state_other');
   if (await clearDismissFailure(s.deps.db, approval.run)) s.found.changed = true;
+}
+
+/**
+ * On an open pull request, a standing approval that is no target and carries no recorded failure: one GitHub no longer
+ * holds as an approval, dismissed by its own rule or by hand, is recorded dismissed by the git service. Any other answer,
+ * and a read that fails, changes nothing and is no failure: such an approval needs no withdrawal. Rejects only when the
+ * record does.
+ */
+async function hold(s: Steps, installation: string, approval: Standing): Promise<void> {
+  let answer: unknown;
+  try {
+    answer = await s.deps.approvals.readReview(s.job.ref, installation, approval.reviewId);
+  } catch {
+    return;
+  }
+  const state = stateOf(answer);
+  if (state === 'dismissed' || state === 'commented') await recordDismissed(s, approval, 'git_service');
 }
 
 /** At a merge: records an approval of another head that GitHub still holds, and one it no longer holds as dismissed. Rejects with the failure's code. */

@@ -2000,7 +2000,7 @@ test('a push on an approved pull request withdraws its approval in its own lane'
   const h = await harness({ dryRun: false, repositoriesYaml: APPROVAL_YAML, threads: [], result: approvable(), approvals: seen.approvals });
   h.live = liveAt('h1');
   await (await h.start()).settled;
-  // The review of h1 is posted as an approval; the withdraw job stored with it runs at once and finds nothing to withdraw.
+  // The review of h1 is posted as an approval; the withdraw job stored with it runs at once, reads it, and finds nothing to withdraw.
   await h.webhook(pr('opened'), 'd1');
   await h.until(async () => (await withdrawRows(h.db)).some((j) => j.status === 'done'));
   assert.deepEqual((await approvalRows(h.db)).map((r) => [r.approved, r.approval_code, r.dismissed_by]), [[true, 'approved', null]]);
@@ -2012,7 +2012,10 @@ test('a push on an approved pull request withdraws its approval in its own lane'
   assert.deepEqual(await h.webhook(pr('synchronize', { headSha: 'h2', updatedAt: at(5) }), 'd2'), { status: 202, body: 'accepted' });
   // A job's line is the last thing it writes.
   await h.until(() => h.logged.filter((e) => e.event === 'withdraw').length === 2);
-  assert.deepEqual(seen.calls, [['staleApprovals', '99', 'main'], ['readReview', '99', '501'], ['dismissReview', '99', '501', dismissMessage('h1')]]);
+  // The first job read the approval and kept it; the push's job read it again and dismissed it.
+  assert.deepEqual(seen.calls, [
+    ['staleApprovals', '99', 'main'], ['readReview', '99', '501'], ['readReview', '99', '501'], ['dismissReview', '99', '501', dismissMessage('h1')],
+  ]);
   assert.deepEqual((await approvalRows(h.db)).map((r) => [r.approved, r.dismissed_by]), [[true, 'app']]);
   assert.deepEqual((await withdrawRows(h.db)).map((j) => [j.status, j.outcome]), [['done', 'kept'], ['done', 'done']]);
   assert.deepEqual(h.logged.filter((e) => e.event === 'withdraw').map((e) => [e.outcome, e.dismissed]), [['kept', 0], ['done', 1]]);
