@@ -415,6 +415,8 @@ async function importAacr(argv: string[], env: Record<string, string | undefined
   for (const [name, path] of [['cases-out', casesOut], ['history-out', historyOut]] as const) {
     if (isDirectory(path)) throw new UsageError(`usage: --${name} must be a file`);
   }
+  // Each output is emptied before the first write: the same path twice would destroy the input or one output.
+  if (new Set([resolve(input), resolve(casesOut), resolve(historyOut)]).size < 3) throw new UsageError('usage: --input, --cases-out and --history-out must be three different files');
   const { records, skipped } = parseAacr(readable('input', () => readFileSync(input, 'utf8')));
   const source = createGithubHistorySource({ token: githubToken, fetch: globalThis.fetch });
   const result = await runAacrImport({ records, source, casesOut, historyOut });

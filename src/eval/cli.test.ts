@@ -618,6 +618,18 @@ test('import-aacr refuses a file inside the project folder', async () => {
   }
 });
 
+test('import-aacr refuses two paths that are the same file, and keeps the input', async () => {
+  const input = join(dir, 'aacr-same.json');
+  writeFileSync(input, '[]');
+  for (const over of [{ 'cases-out': input }, { 'history-out': input }, { 'history-out': join(dir, 'aacr-cases.jsonl') }]) {
+    const [code, lines] = await run(aacrArgs({ input, ...over }));
+    assert.equal(code, 2);
+    assert.equal(lines.length, 1);
+    assert.match(lines[0]!, /^usage: /);
+    assert.equal(readFileSync(input, 'utf8'), '[]');
+  }
+});
+
 test('import-aacr needs GITHUB_TOKEN', async () => {
   for (const env of [{}, { GITHUB_TOKEN: '' }]) {
     const [code, lines] = await run(aacrArgs(), env);
