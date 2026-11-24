@@ -262,7 +262,7 @@ async function hold(s: Steps, installation: string, approval: Standing): Promise
   if (state === 'dismissed' || state === 'commented') await recordDismissed(s, approval, 'git_service');
 }
 
-/** At a merge: records an approval of another head that GitHub still holds, and one it no longer holds as dismissed. Rejects with the failure's code. */
+/** At a merge: records a target approval (another head or base branch, or any when the newest approval does not stand) that GitHub still holds, and one it no longer holds as dismissed. Rejects with the failure's code. */
 async function atMerge(s: Steps, installation: string, target: Standing): Promise<void> {
   const answer = await s.deps.approvals.readReview(s.job.ref, installation, target.reviewId);
   if (answer === null) return;
