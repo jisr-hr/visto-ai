@@ -16,7 +16,7 @@ import { beat, readHeartbeat } from './db/heartbeat.ts';
 import { serviceConfig, parseConfig } from './config/load.ts';
 import type { AppIdentity, FeatureOff, ForgeApprovals, ForgeChecks, ForgeEvent, ForgeWriter, HookDelivery, LivePullRequest, OwnCheck, PostedComment, PullRequestAction, PullRequestFacts, ReviewThread, Source } from './forge/types.ts';
 import type { BlockScore, ModelRequest, ModelResponse, ReviewDeps, ReviewInput, ReviewResult } from './engine/types.ts';
-import { BEAT_MS, CLOSE_WAIT_MS, DRAIN_WAIT_MS, gateForge, startService, STOP_WAIT_MS, TICK_MS, UPKEEP_MS, WITHDRAW_CONCURRENCY } from './service.ts';
+import { approvalsFor, BEAT_MS, CLOSE_WAIT_MS, DRAIN_WAIT_MS, gateForge, startService, STOP_WAIT_MS, TICK_MS, UPKEEP_MS, WITHDRAW_CONCURRENCY } from './service.ts';
 import type { Listening } from './service.ts';
 import type { RequestLike, ResponseLike } from './shell/http.ts';
 import { checkText } from './gate/check.ts';
@@ -2109,4 +2109,69 @@ test('stop drains the withdraw runner too', async (t) => {
   t.mock.timers.tick(DRAIN_WAIT_MS);
   await ending;
   assert.deepEqual(stuck.logged.find((e) => e.event === 'drain_timeout'), { event: 'drain_timeout', running: 1 });
+});
+
+test('a withdraw job the runner drops, as too old or out of starts, records why on each standing approval, alerts once with its pull request, and asks the gate when it is on', async () => {
+  for (const [how, gate] of [['too_old', true], ['too_old', false], ['attempts_exhausted', true], ['attempts_exhausted', false]] as const) {
+    const label = `${how} ${gate ? 'gate' : 'no gate'}`;
+    const h = await harness(gate ? { gate: true, threads: [] } : { dryRun: false });
+    await migrate(h.db, loadMigrations(MIGRATIONS_DIR));
+    // No stored pull request: the sweeps at start ask for nothing.
+    await approvalOf(h.db, '501', 'h0');
+    await approvalOf(h.db, '502', 'h1');
+    const id = (await askWithdraw(h.db, REF, how === 'too_old' ? at(-90_000) : at(0), '99'))!;
+    if (how === 'attempts_exhausted') await h.db.query('update visto_ai.jobs set starts = 3 where id = $1', [id]);
+    await (await h.start()).settled;
+    await h.until(() => alertsOf(h, 'dismissal_failed').length > 0);
+    assert.deepEqual([(await jobOf(h.db, id)).status, (await jobOf(h.db, id)).outcome], ['dropped', how], label);
+    assert.deepEqual((await approvalRows(h.db)).map((r) => [r.dismissed_by, r.dismiss_failure]), [[null, how], [null, how]], label);
+    assert.deepEqual(alertsOf(h, 'dismissal_failed'), [{ event: 'alert', code: 'dismissal_failed', reason: how, repo: 'acme/shop', number: 7 }], label);
+    if (gate) {
+      // The check of the live head fails while the approvals stand.
+      await h.until(() => h.written().length > 0);
+      assert.deepEqual(h.written().map((c) => [c.commit, c.conclusion, c.title]), [['h1', 'failure', `Earlier approval not withdrawn (${how})`]], label);
+      assert.deepEqual((await pending(h.db, 'gate')).map((j) => j.reason), ['sync'], label);
+    } else {
+      await h.flush();
+      assert.deepEqual([await h.gateJobs(), h.checked], [[], []], label);
+    }
+    assert.equal(h.logged.some((e) => e.event === 'runner_failed'), false, label);
+  }
+  // A step that fails changes nothing else: the approvals cannot be read, and the alert is raised and the gate asked all the same.
+  const h = await harness({ gate: true, threads: [], failQuery: 'review_id is not null' });
+  await migrate(h.db, loadMigrations(MIGRATIONS_DIR));
+  await approvalOf(h.db, '501', 'h0');
+  await askWithdraw(h.db, REF, at(-90_000), '99');
+  await (await h.start()).settled;
+  await h.until(async () => (await h.gateJobs()).length === 1 && alertsOf(h, 'dismissal_failed').length === 1);
+  assert.deepEqual([(await approvalRows(h.db)).map((r) => r.dismiss_failure), h.logged.some((e) => e.event === 'runner_failed')], [[null], false]);
+});
+
+test('a withdraw sweep that cannot read the database fails the start', async () => {
+  const h = await harness({ dryRun: false, failQuery: 'dismiss_failure is not null' });
+  await assert.rejects(h.start(), /db_down/);
+  assert.equal(h.events.includes('listen'), false);
+});
+
+test('in dry run the approvals the service was given are never reached: the withdraw job and the review are given ones that refuse every call', async () => {
+  const seen = approvalsFake();
+  const h = await harness({ dryRun: true, repositoriesYaml: APPROVAL_YAML, threads: [], result: approvable(), approvals: seen.approvals });
+  await migrate(h.db, loadMigrations(MIGRATIONS_DIR));
+  await savePullRequest(h.db, facts({ headSha: 'h2' }));
+  await approvalOf(h.db, '501');
+  h.live = liveAt('h2');
+  const id = (await askWithdraw(h.db, REF, at(0), '99'))!;
+  await enqueueJob(h.db, manual());
+  await (await h.start()).settled;
+  await h.until(async () => (await jobOf(h.db, id)).status === 'dropped' && h.logged.some((e) => e.event === 'review'));
+  assert.deepEqual([(await jobOf(h.db, id)).outcome, seen.calls, h.writes], ['dry_run', [], []]);
+  // What each is given: in dry run, and with none given, approvals whose every call rejects; else the ones given.
+  for (const [dryRun, given] of [[true, seen.approvals], [true, undefined], [false, undefined]] as const) {
+    const refusing = approvalsFor(dryRun, given);
+    for (const call of [
+      () => refusing.staleApprovals(REF, '99', 'main'), () => refusing.readReview(REF, '99', '501'), () => refusing.dismissReview(REF, '99', '501', 'x'),
+    ]) await assert.rejects(call(), /dry_run/, `${dryRun} ${given === undefined ? 'none' : 'given'}`);
+  }
+  assert.equal(approvalsFor(false, seen.approvals), seen.approvals);
+  assert.deepEqual(seen.calls, []);
 });

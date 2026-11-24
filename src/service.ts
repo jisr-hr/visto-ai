@@ -1,5 +1,6 @@
 import { loadMigrations, MIGRATIONS_DIR, migrate } from './db/migrate.ts';
 import { beat, readHeartbeat } from './db/heartbeat.ts';
+import { markDismissFailed, standingApprovals } from './db/approvals.ts';
 import { askGate, deleteFinishedJobs } from './db/jobs.ts';
 import type { Job } from './db/jobs.ts';
 import { getPullRequest } from './db/pull-requests.ts';
@@ -114,6 +115,11 @@ export function gateForge(dryRun: boolean, checks: ForgeChecks, writer: ForgeWri
   return dryRun ? { checks: dryChecks(), writer: dryWriter() } : { checks, writer };
 }
 
+/** What the review job and the withdraw job are given to reach GitHub's approvals: in dry run, and when none was given, approvals whose every call rejects; else the ones given. */
+export function approvalsFor(dryRun: boolean, approvals: ForgeApprovals | undefined): ForgeApprovals {
+  return dryRun ? dryApprovals() : approvals ?? dryApprovals();
+}
+
 /**
  * Takes the lock, migrates, recovers, then listens; the work that follows listening is not waited for.
  * `settled` resolves when the work that follows listening has had its first try: the key check, the app check, with learning on the learning work's start and the judge's row (the first pass is not waited for, and no run of the judge starts), the redelivery attempt and, when that worked, the first beat.
@@ -146,7 +152,7 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps): Pr
   const learning = config.learning ? createLearning({ db, clock, log: say, alert }) : null;
   const memory = config.learning ? { memoryFor: (ref: PullRequestRef) => recordsMemory(db, ref), memoryHealth: createMemoryHealth(alert) } : null;
   // Nothing reaches GitHub's approvals in dry run, nor when the service was given none: each call rejects, and nothing is approved or dismissed.
-  const approvals = config.dryRun ? dryApprovals() : deps.approvals ?? dryApprovals();
+  const approvals = approvalsFor(config.dryRun, deps.approvals);
   const reviewDeps: ReviewJobDeps = {
     db, forge: deps.forge, clock, log: say, sleep: deps.sleep, settingsFor,
     limits: {
@@ -231,10 +237,41 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps): Pr
     db, kind: 'withdraw', concurrency: WITHDRAW_CONCURRENCY, clock, log: say,
     mayStart: async () => true,
     run: (job) => runWithdrawJob(job, withdrawDeps),
-    onLeft: async (_job, how) => {
-      if (how !== 'ended') alert('dismissal_failed', { reason: how });
-    },
+    onLeft: withdrawLeft,
   });
+  /**
+   * A withdraw job the runner dropped, as too old or out of starts, withdrew nothing: the reason is recorded as the failure
+   * of each standing approval of its pull request, raised once, and, out of dry run, the check of a repository whose gate
+   * is enabled is asked for. Each step is caught: one that fails changes nothing else.
+   */
+  async function withdrawLeft(job: Job, how: 'ended' | 'too_old' | 'attempts_exhausted'): Promise<void> {
+    if (how === 'ended') return;
+    const repo = `${job.ref.owner}/${job.ref.repo}`;
+    try {
+      for (const standing of await standingApprovals(db, job.ref)) {
+        try {
+          await markDismissFailed(db, standing.run, how);
+        } catch {
+          // left as it was: the next withdraw job of the pull request records it
+        }
+      }
+    } catch {
+      // the approvals could not be read: the next push, publication or start asks again
+    }
+    try {
+      alert('dismissal_failed', { reason: how, repo, number: job.ref.number });
+    } catch {
+      // an alert that throws changes nothing
+    }
+    if (config.dryRun) return;
+    try {
+      if (!settingsFor(repo).gate.enabled) return;
+      await askGate(db, job.ref, clock().toISOString(), undefined, { installation: job.installation });
+      void gateRunner.tick();
+    } catch {
+      // the request for the check is lost: the next event or start asks again
+    }
+  }
   /** Every runner looks at its due jobs. */
   function tickBoth(): void {
     void runner.tick();
