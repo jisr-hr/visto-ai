@@ -134,10 +134,13 @@ export function historyMemory(cases: HistoryCase[]): HistoryMemory {
           const live = held.filter((h) => liveAt(h, t)).sort((x, y) => y.created - x.created);
           return Promise.resolve(live.slice(0, RECORDS_READ + 1).map((h) => recordOf(h.signal)));
         },
-        // The shared code drops the case's own: as the pull request that made the revert, and as the one reverted.
+        // The case's own are left out first, as the pull request that made the revert and as the one reverted; then the
+        // newest REVERTS_READ + 1 at most: as the database is asked, so that its own take no place among those read.
         reverts(at) {
           const t = at.getTime();
-          const live = revertsFor(c).filter((h) => liveAt(h, t)).sort((x, y) => y.created - x.created);
+          const live = revertsFor(c)
+            .filter((h) => h.revert.number !== c.pr_number && h.revert.reverted !== c.pr_number && liveAt(h, t))
+            .sort((x, y) => y.created - x.created);
           return Promise.resolve(live.slice(0, REVERTS_READ + 1).map((h) => revertRecordOf(h.revert)));
         },
       }, c.pr_number);

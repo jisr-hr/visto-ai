@@ -387,3 +387,38 @@ test('with more reverts live at a case\'s date than are read, the newest are kep
   assert.deepEqual(blocks.pullRequest.filter((l) => l.reverted === true).map((l) => l.ref), [`106:reverts:6:${TAX}`]);
   assert.equal(blocks.cut.records, true);
 });
+
+test('a case\'s own records of reverts take no place among those read, as the service\'s read leaves them out first', async () => {
+  // The case under review made a revert of 150 files and was reverted itself: 300 records of its own, live at its date and the newest.
+  const own = [
+    mkCase(590, Array.from({ length: 150 }, (_, i) => `src/own/m${i}.ts`), '2026-03-01T12:00:00Z'),
+    revertCase(700, 600, '2026-03-08T18:00:00Z'),
+  ];
+  const x = mkCase(600, Array.from({ length: 150 }, (_, i) => `src/own/x${i}.ts`), '2026-03-08T12:00:00Z', [], {
+    body: 'Reverts acme/shop#590', review_at: '2026-03-09T12:00:00Z',
+  });
+  const files = [{ path: TAX, previousPath: null }, { path: 'src/cart/oldest.ts', previousPath: null }];
+  // Other reverts, oldest first: the oldest on src/cart/oldest.ts and the newest on TAX.
+  const others = (fifth: number): HistoryCase[] => {
+    const sizes = [1, 300, 300, 300, fifth, 1];
+    const cases: HistoryCase[] = [];
+    sizes.forEach((size, k) => {
+      const paths = k === 0 ? ['src/cart/oldest.ts'] : k === sizes.length - 1 ? [TAX] : Array.from({ length: size }, (_, i) => `src/r${k}/f${i}.ts`);
+      cases.push(mkCase(k + 1, paths, '2026-03-01T12:00:00Z'));
+      cases.push(revertCase(101 + k, k + 1, `2026-03-0${k + 2}T12:00:00Z`));
+    });
+    return cases;
+  };
+  // The oracle is the service's read: the case's own left out first, then the newest REVERTS_READ + 1, of which the shared code keeps REVERTS_READ.
+  // 1 + 300 + 300 + 300 + 98 + 1 = REVERTS_READ other records: every one is read, the oldest too, and nothing is cut.
+  const read = historyMemory([...others(98), ...own, x]);
+  assert.deepEqual(read.reverts(), { named: 8, held: 8 });
+  const all = await read.of(x).blocks(files, new Date(x.review_at), signal);
+  assert.deepEqual(all.pullRequest.map((l) => l.ref), [`106:reverts:6:${TAX}`, '101:reverts:1:src/cart/oldest.ts']);
+  assert.equal(all.cut.records, false);
+  // One more, REVERTS_READ + 1 other records: the read is cut, and the oldest is the one left out.
+  const cut = historyMemory([...others(99), ...own, x]);
+  const some = await cut.of(x).blocks(files, new Date(x.review_at), signal);
+  assert.deepEqual(some.pullRequest.map((l) => l.ref), [`106:reverts:6:${TAX}`]);
+  assert.equal(some.cut.records, true);
+});

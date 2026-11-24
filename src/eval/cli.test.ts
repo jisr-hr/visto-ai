@@ -579,3 +579,19 @@ test('memory-count prints the reverts the file names and those it holds each in 
     'acme/shop#8@head80000000: reverted lines 1',
   ]);
 });
+
+test('memory-count prints the number of cases shown a reverted line, not the number of reverts it holds', async () => {
+  const folder = mkdtempSync(tmpdir() + '/');
+  const history = join(folder, 'history.jsonl');
+  // One revert held, of the file 7 changed, which 8 and 10 change after it: two cases are shown its line.
+  const revert: HistoryCase = { ...historyCase(9, '2026-03-10T12:00:00Z'), body: 'Reverts acme/shop#7', final_files: [{ path: 'src/cart/undo.ts', previous_path: null, status: 'modified', patch: null }] };
+  const cases = [historyCase(7, '2026-03-05T12:00:00Z'), revert, historyCase(8, '2026-03-11T12:00:00Z'), historyCase(10, '2026-03-12T12:00:00Z')];
+  writeFileSync(history, cases.map(serializeCase).join('\n') + '\n');
+  const [code, lines] = await run(['memory-count', '--history', history, '--memory', history], {});
+  assert.equal(code, 0);
+  assert.deepEqual(lines.slice(-3), [
+    'reverts named 1, with their pull request in the file 1, cases shown a reverted line 2',
+    'acme/shop#8@head80000000: reverted lines 1',
+    'acme/shop#10@head10000000: reverted lines 1',
+  ]);
+});

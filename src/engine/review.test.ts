@@ -3578,6 +3578,110 @@ test('memory that fits neither way, or whose only lines are reverted, is not sho
   }
 });
 
+// A reverted line never changes how the files are packed: the paths of each call's files, in order.
+const filesSent = (d: ReturnType<typeof deps>): string[][] =>
+  d.model.requests.map((q) => [...q.messages.map((m) => m.content).join('\n').matchAll(/^## File \d+\/\d+: (.*)$/gm)].map((m) => m[1]!));
+const tenLines = (path: string): ChangedFile => ({
+  path, previousPath: null, status: 'modified', additions: 11, deletions: 0,
+  patch: `@@ -1,1 +1,11 @@\n head\n${bulk.split('\n').slice(0, 10).join('\n')}`,
+});
+const answerOnC = { overview: 'src/c.ts is fine.', findings: [], files: [] };
+const signalAndReverted = memoryAnswer([memoryLine(), revertedLine()], false);
+const signalOnly = memoryAnswer([memoryLine()], false);
+const SIGNAL_LINE = 'changed | `src/a.ts` | 2026-03-10 | business_rule | missed';
+const REVERTED_LINE = 'changed | `src/a.ts` | 2026-03-10 | - | reverted';
+
+test('memory whose reverted line would cost a review one more call is shown without it, in the one call, and the audit says so', async () => {
+  const unit = await unitOf(fileA, false);
+  assert.equal(await unitOf(fileB, false), unit);
+  // Without the reverted line both files share one call; with it each call holds one file.
+  const lim = limitsOf(fixedTokens(CONTRACT, own.pullRequest, false, undefined, undefined, contextOf(signalOnly)) + 2 * unit);
+  assert.ok(memoryTokens(signalAndReverted) > memoryTokens(signalOnly));
+  assert.ok(lim.limits.inputTokensPerCall - fixedTokens(CONTRACT, own.pullRequest, false, undefined, undefined, contextOf(signalAndReverted)) < 2 * unit);
+  const d = deps({ files: [fileA, fileB], answerFor: { 'src/a.ts': answerOnA, 'src/b.ts': answerOnB }, memory: memoryOf(signalAndReverted) });
+  const r = await review(lim, d);
+  assert.equal(d.model.requests.length, 1);
+  assert.deepEqual(filesSent(d), [['src/a.ts', 'src/b.ts']]);
+  const header = headerOf(d.model.requests[0]!);
+  assert.ok(header.endsWith(`\n${memoryParts(contextOf(signalOnly)).pullRequest}`));
+  assert.ok(header.includes(SIGNAL_LINE));
+  assert.equal(header.includes(' | reverted'), false);
+  assert.equal(header.includes(REVERTED_LINE_RULES), false);
+  assert.deepEqual(memoryEntries(r), [
+    { stage: 'context', action: 'memory_cut', subject: 'reverted', reason: 'changes_batches' },
+    { stage: 'context', action: 'memory_shown', subject: '8:file:src/a.ts', reason: 'changed' },
+  ]);
+  assert.deepEqual(r.dependencies.memory, { status: 'ok', code: 'ok', lines: 1 });
+  assert.deepEqual(r.coverage, { reviewed: ['src/a.ts', 'src/b.ts'], notReviewed: [] });
+});
+
+test('memory whose reverted line would group the files otherwise in as many calls is shown without it, and the audit says so', async () => {
+  const fileC = tenLines('src/c.ts');
+  const unit = await unitOf(fileA, false);
+  const small = await unitOf(tenLines('src/b.ts'), false);
+  assert.equal(await unitOf(fileC, false), small);
+  const extra = memoryTokens(signalAndReverted) - memoryTokens(signalOnly);
+  // With the reverted line a call holds src/a.ts alone, then the two small files; without it src/a.ts and src/b.ts, then src/c.ts.
+  assert.ok(unit >= 2 * small && extra >= small && extra < 2 * small);
+  const lim = limitsOf(fixedTokens(CONTRACT, own.pullRequest, false, undefined, undefined, contextOf(signalAndReverted)) + unit);
+  const d = deps({
+    files: [fileA, tenLines('src/b.ts'), fileC], answerFor: { 'src/a.ts': answerOnA, 'src/b.ts': answerOnB, 'src/c.ts': answerOnC }, memory: memoryOf(signalAndReverted),
+  });
+  const r = await review(lim, d);
+  assert.deepEqual(filesSent(d), [['src/a.ts', 'src/b.ts'], ['src/c.ts']]);
+  for (const q of d.model.requests) {
+    const header = headerOf(q);
+    assert.ok(header.endsWith(`\n${memoryParts(contextOf(signalOnly)).pullRequest}`));
+    assert.equal(header.includes(' | reverted'), false);
+    assert.equal(header.includes(REVERTED_LINE_RULES), false);
+  }
+  assert.deepEqual(memoryEntries(r), [
+    { stage: 'context', action: 'memory_cut', subject: 'reverted', reason: 'changes_batches' },
+    { stage: 'context', action: 'memory_shown', subject: '8:file:src/a.ts', reason: 'changed' },
+  ]);
+  assert.deepEqual(r.dependencies.memory, { status: 'ok', code: 'ok', lines: 1 });
+  assert.deepEqual(r.coverage, { reviewed: ['src/a.ts', 'src/b.ts', 'src/c.ts'], notReviewed: [] });
+});
+
+test('memory whose reverted line changes no batch is shown with it and its rule, as before', async () => {
+  const d = deps({ files: [fileA, fileB], answerFor: { 'src/a.ts': answerOnA, 'src/b.ts': answerOnB }, memory: memoryOf(signalAndReverted) });
+  const r = await review(own, d);
+  assert.deepEqual(filesSent(d), [['src/a.ts', 'src/b.ts']]);
+  const header = headerOf(d.model.requests[0]!);
+  assert.ok(header.endsWith(`\n${memoryParts(contextOf(signalAndReverted)).pullRequest}`));
+  assert.ok(header.includes(REVERTED_LINE_RULES));
+  assert.ok(header.endsWith(`\n${SIGNAL_LINE}\n${REVERTED_LINE}`));
+  assert.deepEqual(memoryEntries(r), [
+    { stage: 'context', action: 'memory_shown', subject: '8:file:src/a.ts', reason: 'changed' },
+    { stage: 'context', action: 'memory_shown', subject: '9:reverts:7:src/a.ts', reason: 'changed' },
+  ]);
+  assert.deepEqual(r.dependencies.memory, { status: 'ok', code: 'ok', lines: 2 });
+});
+
+test('memory whose signals regroup the files and whose reverted line regroups nothing more is shown whole', async () => {
+  const unit = await unitOf(fileA, false);
+  // With no memory both files share one call; with the signal's line, with or without the reverted line, each call holds one file.
+  const lim = limitsOf(fixedTokens(CONTRACT, own.pullRequest, false, undefined, undefined, contextOf(signalAndReverted)) + unit);
+  assert.ok(lim.limits.inputTokensPerCall - fixedTokens(CONTRACT, own.pullRequest) >= 2 * unit);
+  assert.ok(lim.limits.inputTokensPerCall - fixedTokens(CONTRACT, own.pullRequest, false, undefined, undefined, contextOf(signalOnly)) < 2 * unit);
+  const bare = deps({ files: [fileA, fileB], answerFor: { 'src/a.ts': answerOnA, 'src/b.ts': answerOnB } });
+  await review(lim, bare);
+  assert.deepEqual(filesSent(bare), [['src/a.ts', 'src/b.ts']]);
+  const d = deps({ files: [fileA, fileB], answerFor: { 'src/a.ts': answerOnA, 'src/b.ts': answerOnB }, memory: memoryOf(signalAndReverted) });
+  const r = await review(lim, d);
+  assert.deepEqual(filesSent(d), [['src/a.ts'], ['src/b.ts']]);
+  for (const q of d.model.requests) {
+    const header = headerOf(q);
+    assert.ok(header.includes(REVERTED_LINE_RULES));
+    assert.ok(header.endsWith(`\n${SIGNAL_LINE}\n${REVERTED_LINE}`));
+  }
+  assert.deepEqual(memoryEntries(r), [
+    { stage: 'context', action: 'memory_shown', subject: '8:file:src/a.ts', reason: 'changed' },
+    { stage: 'context', action: 'memory_shown', subject: '9:reverts:7:src/a.ts', reason: 'changed' },
+  ]);
+  assert.deepEqual(r.dependencies.memory, { status: 'ok', code: 'ok', lines: 2 });
+});
+
 test('with a second scorer a memory that would show a reverted line is not asked', async () => {
   const memory = memoryOf(memoryAnswer([...twoLines, revertedLine()]));
   const scorer = scorerStub(() => ({ blocks: { B1: refunds } }));
