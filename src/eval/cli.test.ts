@@ -287,11 +287,13 @@ test('memory-count needs its two files, outside the project, and no token', asyn
     'cases 2, with a line 2, with a labelled file that got a line 1',
     'acme/shop#2@head20000000: records 1, lines 1, changed 1, near 0, labelled files 0, labelled with a line 0',
     'acme/shop#3@head30000000: records 1, lines 1, changed 1, near 0, labelled files 1, labelled with a line 1',
+    'reverts named 0, with their pull request in the file 0, cases shown a reverted line 0',
   ]);
   const [, one] = await run([...args(), '--max-cases', '1'], {});
   assert.deepEqual(one, [
     'cases 1, with a line 1, with a labelled file that got a line 0',
     'acme/shop#2@head20000000: records 1, lines 1, changed 1, near 0, labelled files 0, labelled with a line 0',
+    'reverts named 0, with their pull request in the file 0, cases shown a reverted line 0',
   ]);
   assert.deepEqual(readdirSync(folder).sort(), before);
 });
@@ -536,8 +538,25 @@ test('memory-count reads no config: one that is not valid YAML in its working fo
     const [code, lines] = await run(['memory-count', '--history', history, '--memory', history], {});
     assert.equal(code, 0);
     assert.equal(lines[0], 'cases 2, with a line 0, with a labelled file that got a line 0');
-    assert.equal(lines.length, 3);
+    assert.equal(lines.length, 4);
   } finally {
     process.chdir(before);
   }
+});
+
+test('memory-count prints the reverts after its rows, and one line for each case shown a reverted line', async () => {
+  const folder = mkdtempSync(tmpdir() + '/');
+  const history = join(folder, 'history.jsonl');
+  const reverted = historyCase(7, '2026-03-05T12:00:00Z');
+  const revert: HistoryCase = { ...historyCase(9, '2026-03-10T12:00:00Z'), body: 'Reverts acme/shop#7', final_files: [{ path: 'src/cart/undo.ts', previous_path: null, status: 'modified', patch: null }] };
+  const after = historyCase(8, '2026-03-11T12:00:00Z');
+  writeFileSync(history, [reverted, revert, after].map(serializeCase).join('\n') + '\n');
+  const before = readdirSync(folder).sort();
+  const [code, lines] = await run(['memory-count', '--history', history, '--memory', history], {});
+  assert.equal(code, 0);
+  assert.deepEqual(lines.slice(-2), [
+    'reverts named 1, with their pull request in the file 1, cases shown a reverted line 1',
+    'acme/shop#8@head80000000: reverted lines 1',
+  ]);
+  assert.deepEqual(readdirSync(folder).sort(), before);
 });

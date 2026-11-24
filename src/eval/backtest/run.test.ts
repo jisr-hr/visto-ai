@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { GATE_OFF, type DeploymentConfig } from '../../config/load.ts';
+import { REVERTED_LINE_RULES } from '../../engine/context/memory.ts';
 import { SUBMIT_REVIEW } from '../../engine/model/submit-review.ts';
 import type { ChangedFile, ModelClient, ModelResponse, ReviewDeps, ScoreAnswer, Scorer, Source } from '../../engine/types.ts';
 import type { HistoryCase } from '../history/file.ts';
@@ -369,4 +370,24 @@ test('nothing a person wrote reaches the model through the memory of a backtest'
     assert.equal(r.includes('Octopus'), false);
     assert.equal(r.toLowerCase().includes('harbour'), false);
   }
+});
+
+test('a case after a revert is sent the reverted line and its rule, and no word of either description', async () => {
+  const a = mkCase(7, TAX, { merged_at: '2026-03-05T12:00:00Z', review_at: '2026-03-05T12:00:00Z', author: 'octo-dev', activity: [], title: 'Double the totals', body: 'Doubles the totals of March.' });
+  const b = mkCase(9, 'src/cart/undo.ts', {
+    merged_at: '2026-03-10T12:00:00Z', review_at: '2026-03-10T12:00:00Z', author: 'octo-dev', activity: [],
+    body: 'Reverts acme/shop#7\n\nThe totals were wrong for every customer.',
+  });
+  const c = memCase(8, TAX, '2026-03-11T12:00:00Z');
+  const requests: string[] = [];
+  const memory = historyMemory([a, b, c]);
+  const args = baseArgs({ cases: [c], deps: memoryDeps({ 8: TAX }, requests), memory: { of: memory.of, file: '/elsewhere/h.jsonl', sha256: 'd'.repeat(64) } });
+  await runBacktest(args);
+  assert.ok(requests.length > 0);
+  const all = requests.join('\n');
+  assert.ok(all.includes(JSON.stringify(REVERTED_LINE_RULES).slice(1, -1)));
+  assert.ok(all.includes(JSON.stringify('changed | `src/billing/tax.ts` | 2026-03-10 | - | reverted').slice(1, -1)));
+  for (const word of ['Double', 'Doubles', 'every customer']) assert.equal(all.includes(word), false, word);
+  const rows = lines(join(args.outDir, 'results.jsonl')) as { key: string; memory: unknown }[];
+  assert.deepEqual(rows.map((r) => r.memory), [{ status: 'ok', code: 'ok', lines: 1 }]);
 });

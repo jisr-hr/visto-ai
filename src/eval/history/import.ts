@@ -11,6 +11,7 @@ import type { HistoryActivity, HistoryCase } from './file.ts';
 export type ImportSkip = 'head_unreadable' | 'too_many_files' | 'too_many_pages';
 const SKIPS: ImportSkip[] = ['head_unreadable', 'too_many_files', 'too_many_pages'];
 const BODY_LIMIT = 2000;
+// A description is kept as it was sent, only cut, so that a revert's reference is read in a file as the service reads it (call 20).
 const DESCRIPTION_LIMIT = 4000;
 
 function clean(text: string, limit: number): string {
@@ -81,7 +82,7 @@ export async function importPullRequest(
     return {
       case: {
         version: 1,
-        repo: `${repo.owner}/${repo.repo}`, pr_number: pr.number, title: pr.title, body: clean(pr.description, DESCRIPTION_LIMIT),
+        repo: `${repo.owner}/${repo.repo}`, pr_number: pr.number, title: pr.title, body: pr.description.slice(0, DESCRIPTION_LIMIT),
         author: pr.author, branch: pr.headBranch, base_branch: pr.baseBranch, merged_at: pr.mergedAt,
         review_head: reviewed.head, review_base: atReview.mergeBase, review_at: reviewed.at, reviewed_by_person: reviewed.byPerson,
         final_head: pr.headSha, final_base: atFinal.mergeBase,
