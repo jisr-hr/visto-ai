@@ -204,6 +204,8 @@ For each file under review:
 - **The full file at the head**, numbered. A file over 1,200 lines is shown as excerpts: each changed range widened by 150 lines. Removed files and low-priority files (generated, vendored, lock files, images) get no full-file context.
 - **The paired test file**, when one is found by naming convention.
 
+A **secret file** gets none of this: nothing of it is fetched or sent to a model, only its path. A file is secret when its path, or the path it was renamed from, has a `.ssh` segment, or when its last segment is exactly `id_rsa`, `id_dsa`, `id_ecdsa`, `id_ed25519`, `.netrc`, `_netrc`, `.npmrc`, `.pypirc` or `.dockercfg`, or is `.env` or starts with `.env.` and is not `.env.example`, `.env.sample` or `.env.template`; segments are compared case-insensitively. Nothing else is: `config/environment.env`, `server.pem`, `server.key` and `.aws/credentials` are reviewed like any file. It is listed under `Coverage` as not reviewed (`secret_file`) and scores 100% (section 6.2). The list follows the one open-code-review publishes.
+
 For the pull request:
 
 - Title, description and branch names.
@@ -254,7 +256,13 @@ Deterministic, in this order. Each step adds audit entries.
 1. **Schema.** Arguments must match the schema. A finding without a severity is invalid.
 2. **Paths.** A finding or score for a file that is not in the pull request is dropped. So is a score for a block the batch did not contain.
 3. **Grounding.** The overview or a finding must refer to a file of this pull request. This is the last defence against derailed output.
-4. **Placement.** A finding on a commentable line is kept. One within 3 lines of such a line, on the same side, is moved onto it with a note after the severity tag. Anything further becomes "not placed on the diff": it is listed in the review body and does not block a merge. A `beyond_diff` item is not placed at all. It is a note about code the pull request did not change: it is listed under `Beyond the diff`, never gates, and never blocks automatic approval.
+4. **Placement.** The line decides first, then the quote, after open-code-review, which places comments by the code they quote. A quote is compared with a line's text with white space trimmed at both ends; a blank quote matches nothing.
+   - *As given.* A finding on a commentable line is kept, whatever its quote. In an incremental review and a re-check that line still decides whether the finding is on changed code.
+   - *Code outside the diff.* When the finding's line, on the new side, is not commentable and the full file shown to the model has the quote as that line's text, the finding is about code the diff does not show: neither its quote nor another file places it, and only the next step can.
+   - *By quote.* Otherwise, when commentable lines of the file have the quote as their text, the finding moves to the nearest of them on its own side, or else on the other side, the earlier on a tie. It moves with no note, since it is not "just outside the diff", and the audit records `placed_by_quote`.
+   - *By line.* Otherwise one within 3 lines of a commentable line, on the same side, is moved onto it with a note after the severity tag.
+   - *Re-filed.* A finding its own file cannot take by these rules, and that does not name code outside the diff, moves to another file of the batch that answered when exactly one commentable line of those files, on either side, has its quote as its text; with no note, and the audit records `refiled`. With none or several, it becomes "not placed on the diff": it is listed in the review body and does not block a merge.
+   - A `beyond_diff` item is not placed at all. It is a note about code the pull request did not change: it is listed under `Beyond the diff`, never gates, and never blocks automatic approval.
 5. **Thread verdicts.** A verdict is kept only for a thread that exists, was opened by the app, is major or blocker, is one this run was due to judge (section 5.2), and whose file was in the batch that judged it. Three more checks follow:
    - An `answered` verdict needs a reply in the thread from an account other than the app. With none there is nothing to accept, and the verdict is dropped.
    - A `fixed` verdict is dropped when the pull request's head is still the one the thread was opened on. Nothing can have been fixed.
@@ -345,7 +353,7 @@ Two kinds of file are scored by rule, without the model:
 
 A move to another directory with no content change is not scored by rule. The model scores it as a whole file from its two paths, because a move can change a public URL where a framework routes by file path, and can change what other code is able to reach.
 
-Any other file whose diff cannot be produced, such as an unrecognised binary or a text file too large to fit the budget, scores 100%. Path alone never earns a low score: a large file under a "vendored" or "generated" directory is still read by the model or sent to a human. The backtest will show how often this rule blocks an approval, and any exception is added only on that evidence.
+Any other file whose diff cannot be produced, such as an unrecognised binary or a text file too large to fit the budget, scores 100%. So does a secret file (section 5.3), whose diff is never shown. Path alone never earns a low score: a large file under a "vendored" or "generated" directory is still read by the model or sent to a human. The backtest will show how often this rule blocks an approval, and any exception is added only on that evidence.
 
 No learned record lowers a score (D8). Learned records are shown to the model as reasons a block may need a person (section 7.4). Records that would argue the opposite are not shown to it at all.
 

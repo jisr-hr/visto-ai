@@ -7,7 +7,7 @@ export type ScorePlan =
   | { kind: 'model_whole' }                                  // moved to another directory with no content change
   | { kind: 'rule'; score: 30; source: 'rule_rename' }
   | { kind: 'rule'; score: 10; source: 'rule_asset' }
-  | { kind: 'none'; reason: 'no_diff' | 'too_large' | 'unchanged' }; // nothing to show the model
+  | { kind: 'none'; reason: 'no_diff' | 'too_large' | 'unchanged' | 'secret_file' }; // nothing to show the model
 
 // Raster images and fonts: binary, so no diff exists and the content cannot carry logic.
 // svg is left out on purpose: it is text and can carry script.
@@ -19,9 +19,9 @@ export function isAsset(path: string): boolean {
   return ASSET_EXTENSIONS.has(posix.extname(path).slice(1).toLowerCase());
 }
 
-export function scorePlan(file: ChangedFile, skip: 'no_diff' | 'too_large' | 'unchanged' | null): ScorePlan {
+export function scorePlan(file: ChangedFile, skip: 'no_diff' | 'too_large' | 'unchanged' | 'secret_file' | null): ScorePlan {
   if (skip === null) return { kind: 'model' };
-  if (skip === 'too_large') return { kind: 'none', reason: 'too_large' };
+  if (skip === 'too_large' || skip === 'secret_file') return { kind: 'none', reason: skip };
   if (skip === 'no_diff') {
     return isAsset(file.path) ? { kind: 'rule', score: 10, source: 'rule_asset' } : { kind: 'none', reason: 'no_diff' };
   }

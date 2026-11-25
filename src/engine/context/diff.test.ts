@@ -4,6 +4,7 @@ import test from 'node:test';
 import {
   ANCHOR_LEGEND,
   commentableRanges,
+  lineTexts,
   parsePatch,
   patchFromContents,
   renderAnchoredDiff,
@@ -29,6 +30,12 @@ test('parsePatch numbers context, added and removed lines from the hunk header',
       ['ctx', 'ctx2', 12, 13],
     ],
   );
+});
+
+test('lineTexts holds the text of every commentable line, by side and line', () => {
+  const texts = lineTexts(parsePatch(patch));
+  assert.deepEqual([...texts.RIGHT], [[10, 'ctx1'], [11, 'new1'], [12, 'new2'], [13, 'ctx2']]);
+  assert.deepEqual([...texts.LEFT], [[11, 'old']]);
 });
 
 test('a header without a length means one line', () => {

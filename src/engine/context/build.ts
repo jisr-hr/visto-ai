@@ -10,6 +10,7 @@ import type { Changed } from './increment.ts';
 import { fullFileContext, numberLines } from './full-file.ts';
 import type { FullFile } from './full-file.ts';
 import { isLowPriority, orderByPriority } from './priority.ts';
+import { isSecretFile } from './secret.ts';
 import { testCandidates } from './test-pair.ts';
 import type { ShownThread } from './threads.ts';
 import { hasHidden, stripControl } from './untrusted.ts';
@@ -22,7 +23,7 @@ export interface FileContext {
   full: FullFile | null;
   test: { path: string; text: string } | null;
   // Why the file has nothing to send; null when it has a diff.
-  skip: 'no_diff' | 'too_large' | 'unchanged' | null;
+  skip: 'no_diff' | 'too_large' | 'unchanged' | 'secret_file' | null;
   blocks: Block[]; // one per hunk; the same objects are passed on, never copied
   plan: ScorePlan; // who scores the file: the model, a fixed rule, or nobody
   // An added or removed line held a character that was stripped before anyone saw it.
@@ -108,6 +109,14 @@ export async function buildFileContexts(
   };
 
   for (const file of orderByPriority(files)) {
+    if (isSecretFile(file)) {
+      // Checked before anything is fetched: no patch, content or paired test of it reaches a model.
+      contexts.push({
+        file, hunks: [], ranges: null, diffText: null, full: null, test: null, skip: 'secret_file',
+        blocks: [], plan: scorePlan(file, 'secret_file'), hidden: false,
+      });
+      continue;
+    }
     let removed = 0;
     let patch: string | null = null;
     let tooLarge = false;

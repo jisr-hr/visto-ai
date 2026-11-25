@@ -2,6 +2,7 @@
 // No context building, no batching, no placement, no scoring.
 import type { DeploymentConfig } from '../config/load.ts';
 import { estimateTokens } from '../engine/context/batches.ts';
+import { isSecretFile } from '../engine/context/secret.ts';
 import { cutText, wrapData } from '../engine/context/untrusted.ts';
 import { ProviderError } from '../engine/model/errors.ts';
 import { normalizePath } from '../engine/reconcile/placement.ts';
@@ -130,8 +131,8 @@ export async function plainCase(c: EvalCase, config: DeploymentConfig, deps: Rev
       return failed('source', error instanceof Error && SHORT_CODE.test(error.message) ? error.message : 'unexpected_error');
     }
     const token = deps.token();
-    const withPatch = files.filter((f) => f.patch !== null);
-    notReviewed = countBy(files.filter((f) => f.patch === null).map(() => 'no_diff'));
+    const withPatch = files.filter((f) => f.patch !== null && !isSecretFile(f));
+    notReviewed = countBy(files.filter((f) => !withPatch.includes(f)).map((f) => (isSecretFile(f) ? 'secret_file' : 'no_diff')));
     filesReviewed = withPatch.length;
     const user = [
       wrapData('title', input.pullRequest.title, token),
