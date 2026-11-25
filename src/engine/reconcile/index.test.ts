@@ -124,3 +124,55 @@ test('a finding moved by its quote is audited as placed_by_quote, not as moved',
   assert.deepEqual(out.findings.map((x) => [x.path, x.side, x.line, x.requestedLine]), [['src/q.ts', 'RIGHT', 12, null]]);
   assert.deepEqual(out.audit, [{ stage: 'reconcile', action: 'placed_by_quote', subject: 'src/q.ts:RIGHT:10', reason: 'to RIGHT:12' }]);
 });
+
+const aPatch = '@@ -10,3 +10,4 @@\n a = 0\n-old\n+x = 1\n+y = 2\n b = 1';
+const chargePatch = '@@ -10,2 +10,3 @@\n start()\n+charge(order)\n }';
+const logPatch = '@@ -1,1 +1,2 @@\n begin()\n+log(order)';
+const bracesPatch = '@@ -1,3 +1,4 @@\n }\n+}\n }\n }';
+const farOnA = raw('src/a.ts', 40, { quote: 'charge(order)' });
+const placedAt = (out: ReturnType<typeof reconcile>): string[][] => out.findings.map((x) => [x.path, x.side, String(x.line), String(x.requestedLine)]);
+const refiledEntries = (out: ReturnType<typeof reconcile>) => out.audit.filter((e) => e.action === 'refiled');
+
+test('a finding its own file cannot take is re-filed on the one line of its batch that its quote names', () => {
+  const contexts = [hunked('src/a.ts', aPatch), hunked('src/b.ts', chargePatch), hunked('src/c.ts', logPatch)];
+  const out = reconcile([answerIn(['src/a.ts', 'src/b.ts', 'src/c.ts'], 'o', farOnA)], contexts);
+  assert.deepEqual(placedAt(out), [['src/b.ts', 'RIGHT', '11', 'null']]);
+  assert.deepEqual(out.unplaced, []);
+  assert.deepEqual(out.audit, [{ stage: 'reconcile', action: 'refiled', subject: 'src/a.ts:40', reason: 'to src/b.ts:RIGHT:11' }]);
+});
+
+test('a quote on a line of two other files re-files nothing', () => {
+  const contexts = [hunked('src/a.ts', aPatch), hunked('src/b.ts', chargePatch), hunked('src/c.ts', chargePatch)];
+  const out = reconcile([answerIn(['src/a.ts', 'src/b.ts', 'src/c.ts'], 'o', farOnA)], contexts);
+  assert.deepEqual(out.findings, []);
+  assert.deepEqual(out.unplaced.map((u) => [u.path, u.reason]), [['src/a.ts', 'line_not_in_diff']]);
+  assert.deepEqual(refiledEntries(out), []);
+});
+
+test('a quote on several lines of one other file re-files nothing', () => {
+  const contexts = [hunked('src/a.ts', aPatch), hunked('src/b.ts', bracesPatch)];
+  const out = reconcile([answerIn(['src/a.ts', 'src/b.ts'], 'o', raw('src/a.ts', 40, { quote: '}' }))], contexts);
+  assert.deepEqual(out.unplaced.map((u) => u.reason), ['line_not_in_diff']);
+  assert.deepEqual(refiledEntries(out), []);
+});
+
+test('a match in a file outside the answering batch re-files nothing', () => {
+  const contexts = [hunked('src/a.ts', aPatch), hunked('src/b.ts', logPatch), hunked('src/c.ts', chargePatch)];
+  const out = reconcile([answerIn(['src/a.ts', 'src/b.ts'], 'o', farOnA)], contexts);
+  assert.deepEqual(out.unplaced.map((u) => u.reason), ['line_not_in_diff']);
+  assert.deepEqual(refiledEntries(out), []);
+});
+
+test('a finding on a file with no patch is re-filed by its quote', () => {
+  const contexts = [ctxWith('img/logo.bin', null), hunked('src/b.ts', chargePatch)];
+  const out = reconcile([answerIn(['img/logo.bin', 'src/b.ts'], 'o', raw('img/logo.bin', 3, { quote: 'charge(order)' }))], contexts);
+  assert.deepEqual(placedAt(out), [['src/b.ts', 'RIGHT', '11', 'null']]);
+  assert.deepEqual(out.audit, [{ stage: 'reconcile', action: 'refiled', subject: 'img/logo.bin:3', reason: 'to src/b.ts:RIGHT:11' }]);
+});
+
+test('a finding its own file can take by its line stays there, whatever another file holds', () => {
+  const contexts = [hunked('src/a.ts', aPatch), hunked('src/b.ts', chargePatch)];
+  const out = reconcile([answerIn(['src/a.ts', 'src/b.ts'], 'o', raw('src/a.ts', 12, { quote: 'charge(order)' }))], contexts);
+  assert.deepEqual(placedAt(out), [['src/a.ts', 'RIGHT', '12', 'null']]);
+  assert.deepEqual(refiledEntries(out), []);
+});

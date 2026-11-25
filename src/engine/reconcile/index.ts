@@ -2,8 +2,8 @@ import type { FileContext } from '../context/build.ts';
 import { lineTexts } from '../context/diff.ts';
 import type { LineTexts, Ranges } from '../context/diff.ts';
 import type { SubmitReviewArgs } from '../model/submit-review.ts';
-import type { AuditEntry, Finding, RawFinding, UnplacedFinding } from '../types.ts';
-import { normalizePath, place } from './placement.ts';
+import type { AuditEntry, Finding, RawFinding, Side, UnplacedFinding } from '../types.ts';
+import { normalizePath, place, quoteMatches } from './placement.ts';
 
 const MAX_OVERVIEW_CHARS = 4000;
 
@@ -14,6 +14,18 @@ function cutOverview(text: string, limit: number): string {
   const last = text.charCodeAt(end - 1);
   if (last >= 0xd800 && last <= 0xdbff) end -= 1;
   return `${text.slice(0, end)}\u2026`;
+}
+
+/** The one commentable line, in the other files of the batch, whose text is the quote; null for none or several. */
+function refileTarget(quote: string, own: string, batch: string[], textsByPath: ReadonlyMap<string, LineTexts | null>):
+  { path: string; side: Side; line: number } | null {
+  const hits: { path: string; side: Side; line: number }[] = [];
+  for (const other of new Set(batch)) {
+    const texts = other === own ? null : textsByPath.get(other) ?? null;
+    if (texts !== null) hits.push(...quoteMatches(quote, texts).map((m) => ({ path: other, ...m })));
+    if (hits.length > 1) return null;
+  }
+  return hits[0] ?? null;
 }
 
 /** `files` are the paths of the batch that produced the answer: a finding on any other file is dropped. */
@@ -48,7 +60,14 @@ export function reconcile(answers: { value: SubmitReviewArgs; files: string[] }[
       }
       const result = place({ ...raw, path }, rangesByPath.get(path) ?? null, textsByPath.get(path) ?? null);
       if ('unplaced' in result) {
-        unplaced.push(result.unplaced);
+        const target = refileTarget(raw.quote, path, answer.files, textsByPath);
+        if (target === null) {
+          unplaced.push(result.unplaced);
+          continue;
+        }
+        const u = result.unplaced;
+        findings.push({ severity: u.severity, body: u.body, quote: u.quote, ...target, requestedLine: null });
+        audit.push({ stage: 'reconcile', action: 'refiled', subject: `${path}:${raw.line}`, reason: `to ${target.path}:${target.side}:${target.line}` });
         continue;
       }
       findings.push(result.placed);
