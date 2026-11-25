@@ -166,8 +166,9 @@ repositories:
     # conversations someone must resolve each one; the app never does. It can be set for all repositories and for one.
     # It is false when not written.
     # autoApprove posts a review as an approval when every file is reviewed, nothing is at or above the threshold, no major or blocker
-    # finding is open, the pull request is no draft and not from a fork, and the base branch dismisses stale approvals (a ruleset's
-    # pull request rule, or branch protection). The app then needs Administration read. It is false when not written.
+    # finding is open, the pull request is no draft and not from a fork, the base branch dismisses stale approvals (a ruleset's
+    # pull request rule, or branch protection), and the pull request is not drawn for the audit sample (auditShare). The app then
+    # needs Administration read. It is false when not written.
     # approvalThreads: strict, a thread closes for approval when a review verified a fix in changed code, or when someone other than the
     # author, with access, replied and it is resolved; gate, as the merge gate's rule clears it. It is strict when not written.
     # auditShare: of the pull requests autoApprove would approve, the percentage (0 to 100) sent to a person anyway as an audit sample,
