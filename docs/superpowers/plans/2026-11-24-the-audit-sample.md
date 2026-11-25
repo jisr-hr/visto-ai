@@ -48,7 +48,7 @@
 10. **The text, and where it stands.** One sentence, after `**Not approved automatically:** ` like every other reason, the same under both thread rules, showing no code (Task 2). It is the last reason in the order the decision reads (call 3). Cost: the paragraph does not start with the word audit; it tells the author that the pull request would otherwise have been approved, which makes the accepted gap (a new pull request draws again) easy to see; and, beside that gap, once one head of a pull request is approved or audited, the author knows how every later head of it will draw until the share or the key changes (call 12).
 11. **The log.** Nothing new: the `review` line carries `approved: false` and `approval: 'audit_sample'` by the code as it is. `drawnForAudit` returns a boolean and nothing else, so no line, record, text, issue or alert holds the key, the digest or `u`; Task 3's leak check reads the lines, the posted drafts and the stored rows for each of them. Cost: the line does not carry the share.
 12. **Every head, and a change of the share.** A pull request drawn is drawn at every head at which every other condition holds (the identity has no head), until the share or the key changes. Draws are nested: one drawn at a share is drawn at every higher share, so raising the share only adds pull requests and lowering it only removes some. A change takes effect at each pull request's next publication; nothing is withdrawn or posted because of it alone. A rename or a transfer of the repository changes the owner or the name in the identity, so it draws each of its open pull requests again at their next publication. Cost: beside the accepted gap of a new pull request, once one head is approved or audited the author knows the outcome of the draw for every later head, until the share or the key changes; a rename or transfer is a new draw for every open pull request of the repository; an approval posted before a raise stands until its next push or review; a pull request the lower share no longer draws is approved at its next review, and a push that tells nothing new after an audited review still ends `nothing_new` (the newest review was no approval, call 12 of the plan before), so it waits for a push with something new or `/review`.
-13. **The withdraw job, the gate and receiving do nothing new.** An audited review is a review that does not approve: after its publication the job asks for a withdraw job when the pull request has a standing approval, which (calls 10 and 11 of the plan before) withdraws an earlier approval, possible only after a share or a key changed. The gate does not read `approval_code`; receiving does not read it. Cost: none known.
+13. **The withdraw job, the gate and receiving do nothing new.** An audited review is a review that does not approve: after its publication the job asks for a withdraw job when the pull request has a standing approval, which (calls 10 and 11 of the plan before) withdraws an earlier approval, possible only after a share or a key changed ((as built) or a rename or a transfer of the repository, which changes the identity, call 12). The gate does not read `approval_code`; receiving does not read it. Cost: none known.
 14. **What cannot be told is drawn.** In `drawnForAudit`: a share of 0 is not drawn; a share that is no number from 0 to 100, a key that is not a non-empty string, and an identity that cannot be made are drawn. In `decide`: an answer of the draw that is not `false`, or a throw, is `audit_sample`. Cost: a key missing at run time (only outside `parseConfig`, as in a test) sends every approvable pull request to a person, labelled as an audit.
 15. **What can be checked:** test vectors (an invented key, three identities, shares that bracket each one's number, 0 and 100), a count over 20,000 invented identities at three shares, nesting and independence, the order inside `decide`, the job and the service end to end with fakes, and a run under Docker (the refusals, a start that listens, the vectors computed inside the image). Against GitHub nothing can show an audited review on the private scratch repository ("For the owner", 3). Cost: an audited review posted through the service is shown only by the fakes.
 16. **The example config writes `auditShare: 5`,** the default, where the refusal made it write 0, and a commented `auditKey`. Cost: none known.
@@ -125,7 +125,7 @@ test('the identity is the pull request as the service stores it: JSON of the ser
 });
 test('the draw is pinned by three vectors', () => {
   /* under AUDIT_TEST_KEY: acme/shop 7 false at 18.88, true at 18.9; acme/shop 8 false at 4.5, true at 5; acme/other 7 false at 42.44, true at 42.45;
-     each false at 0 and true at 100; at 5 only acme/shop 8; Acme/Shop 8 drawn at 5 as acme/shop 8;
+     each false at 0 and true at 100; at 5 only acme/shop 8; Acme/Shop 8 drawn at 5 as acme/shop 8 ((as built) and not at 4.5);
      under AUDIT_TEST_KEY_CHANGED at 5 none of the three; under AUDIT_TEST_KEY at 37.5 acme/shop 7 and 8, not acme/other 7 */
 });
 test('at 0 nothing is drawn, and no key is needed', () => { /* (undefined, REF, 0), ('', REF, 0), (AUDIT_TEST_KEY, REF, -0), (undefined, REF, -0): false */ });
@@ -228,19 +228,23 @@ test('a review drawn for the audit sample is posted as a comment that ends with 
 });
 test('the draw is asked once, last, and only when every other condition held', async () => {
   /* a drawn that counts its calls: approvable: 1. Asked 0 times for runs null (record_unreadable), not covered, a draft, an open thread,
-     the rule 'kept', the rule rejecting github_403, a held review (unlisted), an adopted review */
+     the rule 'kept', the rule rejecting github_403, a held review (unlisted), an adopted review.
+     (as built) An approval GitHub refuses, posted again as a comment: asked once, not again; an adopted approval: asked 0 times */
 });
 test('a draw that throws or answers anything but false is an audit, never an approval', async () => {
-  /* drawn throws, answers undefined, 'false', 0, null: audit_sample, no event; answers false: approved, event approve */
+  /* drawn throws, answers undefined, 'false', 0, null ((as built) and true, a promise of false, and no function at all): audit_sample, no event;
+     answers false: approved, event approve */
 });
 test('when GitHub refuses the comment of an audited review it is posted as today, ending with the audit paragraph', async () => {
-  /* posts [REJECTED(), { id: '502' }]: the second draft is body only, with no comment and no event, and ends with para('audit_sample') */
+  /* posts [REJECTED(), { id: '502' }]: the second draft is body only, with no comment and no event, and ends with para('audit_sample').
+     (as built) With notes, posts [REJECTED(), REJECTED(), { id: '503' }]: every comment, then without the notes, then the body alone,
+     never an event; the draw asked once in each */
 });
 // review-job.test.ts
 test("with a share above 0 the job draws with the deployment's key: one drawn is posted with the audit paragraph and recorded as audit_sample, one not drawn is approved", async () => {
   /* settings { enabled: true, threads: 'strict', auditShare: 5 }, live LIVE_OK, approvable(), approving(h), h.deps.auditKey = AUDIT_TEST_KEY.
      Pull request 8: the draft has no event, its body ends with paragraphOf('audit_sample'); row [false, 'audit_sample']; the line approved false,
-     approval 'audit_sample'; staleApprovals was read. Pull request 7: event approve; row [true, 'approved'].
+     approval 'audit_sample'; staleApprovals was read; (as built) nothing stands, so no withdraw job is asked. Pull request 7: event approve; row [true, 'approved'].
      The leak check, for both pull requests: JSON.stringify of every logged entry, of every posted draft (h.drafts) and of every row of
      visto_ai.review_runs (select * of the pull request's runs) holds none of: AUDIT_TEST_KEY; the hex of either identity's digest under
      AUDIT_TEST_KEY (made in the test with createHmac), whole or its first 8 characters; either identity's u in decimal (811315780, 196284414) */
@@ -254,7 +258,8 @@ test('a lower share or another key can let a pull request drawn at 5 be approved
      (liveAt('h2')) with share 5 and AUDIT_TEST_KEY_CHANGED: approved ([true, 'approved'] at h2), and the approval of h1 asked to be withdrawn */
 });
 test('without a key a share above 0 draws every pull request, and a share of 0 draws none', async () => {
-  /* no auditKey, share 5, pull request 7: audit_sample; share 0 with no key and with AUDIT_TEST_KEY: approved */
+  /* no auditKey, share 5, pull request 7: audit_sample; share 0 with no key and with AUDIT_TEST_KEY: approved
+     ((as built) share 0 with AUDIT_TEST_KEY on pull request 8, which 5 draws, and with no key on pull request 9) */
 });
 ```
 
@@ -282,7 +287,7 @@ test('without a key a share above 0 draws every pull request, and a share of 0 d
 
 **Rules (6.5, 11.1, D10; calls 5, 8, 9):**
 
-1. **Removed:** `AUDIT_NOT_DRAWN`, `auditShareIssues` and its place in `repositoryIssues`. `APPROVAL_OFF`, the keys and their merge are unchanged.
+1. **Removed:** `AUDIT_NOT_DRAWN`, `auditShareIssues` and its place in `repositoryIssues`. `APPROVAL_OFF`, the keys and their merge are unchanged. (as built) In their place, `AUDIT_KEY_NEEDED` (the issue of rule 2) and `auditKeyNeeded(repositories)`, which answers only whether the key is needed, and which `parseConfig` asks only when no `auditKey` is written.
 2. **Needed:** the defaults, or an override merged as `repoSettingsFor` merges it (`{ ...APPROVAL_OFF, ...defaults, ...override }`), with `enabled` true and `auditShare > 0` (`-0` is 0). Needed with no `auditKey` written is one issue, whatever the number of repositories, exactly `auditKey: must be written while autoApprove is true with an auditShare above 0`, in the error that holds the gate's issues, after them. It holds in dry run too.
 3. **Written:** resolved after `database`, needed or not, each issue thrown alone as for the other secrets: the variable not set or set to `''` is `auditKey: environment variable <NAME> is not set`; a value whose `length` is below 32 is `auditKey: environment variable <NAME> must hold at least 32 characters`. The value is kept as it is, spaces included. No issue quotes it.
 4. **Loaded:** `auditKey` is a key of the loaded config only when written. `repoSettingsFor`, `approvalOf` and `approvalUseOf` are unchanged.
@@ -300,7 +305,8 @@ test('automatic approval with an audit share above 0 is refused without the audi
      defaults { autoApprove: true } with overrides acme/shop { autoApprove: true } and acme/off { auditShare: 7 }: still one issue.
      With the gate's bad branches too: [gate issue, KEY_NEEDED]. The same with dryRun true and false.
      Accepted with no key: { autoApprove: false, auditShare: 5 }, { auditShare: 0 }, { approvalThreads: gate }, { autoApprove: true, auditShare: 0 },
-     { autoApprove: true, auditShare: -0 }, each for the defaults and for an override */
+     { autoApprove: true, auditShare: -0 }, each for the defaults and for an override.
+     (as built) Each case refused without the key is accepted with 'auditKey: { env: AUDIT }' written; the -0 case is read as -0 */
 });
 test('the audit key is read from its variable, and refused when unset, empty or shorter than 32 characters, by name and with no value', () => {
   /* 'auditKey: { env: AUDIT }' with defaults { autoApprove: true }: c.auditKey === ENV.AUDIT; AUDIT absent and '' : exactly
@@ -319,7 +325,9 @@ test('the service hands the review job the audit key the config names', async ()
      'auditKey: { env: V }\nrepositories:\n  defaults: { score: { autoApprove: true, auditShare: 18.88 } }\n': pull request 7 opened, approved
      ([true, 'approved']); with auditShare 18.9: [false, 'audit_sample'] and no approval posted. The rows are read by a query of the test's own,
      'select approved, approval_code from visto_ai.review_runs where number = 7 and published order by id', not by the file's approvalRows,
-     whose 'where approved' cannot see an audited row; approvalRows is not changed */
+     whose 'where approved' cannot see an audited row; approvalRows is not changed.
+     (as built) Each posted once; the approval is read back by its withdraw job, which ends kept; the audited review asks for no withdraw job;
+     no logged line holds V's value */
 });
 ```
 
@@ -351,6 +359,7 @@ where owner = 'acme' and repo = 'shop' and published and approval_code = 'audit_
 ```
 
    - `## Configuration`: a sentence on the top-level `auditKey`. `## Repository layout`: `src/approval` names `audit.ts`, the draw.
+   - (as built) Kept sentences of the parts touched that the draw made untrue or short, each brought to the code: the paragraph under `## Status` names the draw among the conditions; "The base branch's rule" is read last of what is read, before the draw alone, where it said last; "GitHub is read in the same order" gains the draw, made only when step 9 held; in "What it costs" the notifier's bullet names an audited review beside an approval; "Not tried" names an audited review posted by the service beside an approval. The line `audit_sample:` stands after `rule_off:` and before `refused:`, in the order the decision reads. "What was tried" says the audit sample was not tried against GitHub and why ("For the owner", 3); the run under Docker is written in by the controller after the run (rule 5).
 2. **`config.example.yml`.** The line `    # auditShare must be written as 0 while autoApprove is true: this release does not draw the audit sample yet.` becomes the first three lines below, and `    #   auditShare: 0` becomes `    #   auditShare: 5`. The last block below, with a blank line after it, stands after the blank line that ends the commented `# app:` group, before `# Optional extension modules`:
 
 ```yaml
@@ -364,7 +373,7 @@ where owner = 'acme' and repo = 'shop' and published and approval_code = 'audit_
 # auditKey: { env: AUDIT_KEY }
 ```
 
-   **Tests.** `the example with its score block switched on reads approval as written: off, strict, share 0` becomes `... off, strict, share 5`: its two objects' `auditShare: 0` (the defaults' approval, and each repository's in the loop) become `auditShare: 5`, and the string `'auditShare: 0'` in its list of lines becomes `'auditShare: 5'`; nothing else of it changes. New: `the example with its audit key and its score block switched on, and autoApprove true, reads the key from its variable`: `uncomment` of `# auditKey: { env: AUDIT_KEY }` and of `    # score:`, `      autoApprove: false` replaced by `      autoApprove: true`; with `AUDIT_KEY: 'k'.repeat(64)`: the key read, approval `{ enabled: true, threads: 'strict', auditShare: 5 }`; without the variable: `auditKey: environment variable AUDIT_KEY is not set`; without the key uncommented: `KEY_NEEDED`; the shipped example holds the line `# auditKey: { env: AUDIT_KEY }` followed by an empty line.
+   **Tests.** `the example with its score block switched on reads approval as written: off, strict, share 0` becomes `... off, strict, share 5`: its two objects' `auditShare: 0` (the defaults' approval, and each repository's in the loop) become `auditShare: 5`, and the string `'auditShare: 0'` in its list of lines becomes `'auditShare: 5'`; nothing else of it changes. New: `the example with its audit key and its score block switched on, and autoApprove true, reads the key from its variable`: `uncomment` of `# auditKey: { env: AUDIT_KEY }` and of `    # score:`, `      autoApprove: false` replaced by `      autoApprove: true`; with `AUDIT_KEY: 'k'.repeat(64)`: the key read, approval `{ enabled: true, threads: 'strict', auditShare: 5 }`; without the variable: `auditKey: environment variable AUDIT_KEY is not set`; without the key uncommented: `KEY_NEEDED`; the shipped example holds the line `# auditKey: { env: AUDIT_KEY }` followed by an empty line. (as built) It also reads approval for `acme/shop` and `acme/other` through `approvalOf(repoSettingsFor(...))`, and checks that the replacement of `autoApprove` took place.
 3. **`env.example`,** after the scorer's lines:
 
 ```text
@@ -374,7 +383,7 @@ where owner = 'acme' and repo = 'shop' and published and approval_code = 'audit_
 # AUDIT_KEY=change-me-audit-key
 ```
 
-   **Test** (new): `the audit key env.example shows is refused as too short, so it cannot be used as it is`: `env.example` is read as the example is; its one line that starts with `# AUDIT_KEY=` gives the value after `=`, which is `change-me-audit-key` (19 characters); a config with `auditKey: { env: AUDIT_KEY }` and defaults `{ autoApprove: true }`, with `AUDIT_KEY` set to that value, is refused with exactly `['auditKey: environment variable AUDIT_KEY must hold at least 32 characters']`, which does not hold the value.
+   **Test** (new): `the audit key env.example shows is refused as too short, so it cannot be used as it is`: `env.example` is read as the example is; its one line that starts with `# AUDIT_KEY=` gives the value after `=`, which is `change-me-audit-key` (19 characters); a config with `auditKey: { env: AUDIT_KEY }` and defaults `{ autoApprove: true }`, with `AUDIT_KEY` set to that value, is refused with exactly `['auditKey: environment variable AUDIT_KEY must hold at least 32 characters']`, which does not hold the value. (as built) The config is the file's `minimal` with those two lines, and the environment `KEY` with `AUDIT_KEY`.
 
 4. **The design is amended,** in the same commit, one sentence for each place this plan reads it narrowly, adds to it or departs from it:
 

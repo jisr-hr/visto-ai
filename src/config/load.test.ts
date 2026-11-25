@@ -973,14 +973,56 @@ test('an approval key of the wrong kind is refused by name, and the issue quotes
   assert.ok(unknown.length === 1 && unknown[0]!.startsWith('repositories.defaults.score') && unknown[0]!.includes('autoApproval'), unknown.join());
 });
 
-test('the example with its score block switched on reads approval as written: off, strict, share 0', () => {
+test('the example with its score block switched on reads approval as written: off, strict, share 5', () => {
   const c = parseConfig(uncomment(example(), '    # score:'), exampleEnv);
-  assert.deepEqual(c.repositories.defaults.approval, { enabled: false, threads: 'strict', auditShare: 0 });
+  assert.deepEqual(c.repositories.defaults.approval, { enabled: false, threads: 'strict', auditShare: 5 });
   for (const name of ['acme/shop', 'acme/other']) {
-    assert.deepEqual(approvalOf(repoSettingsFor(c, name)), { enabled: false, threads: 'strict', auditShare: 0 }, name);
+    assert.deepEqual(approvalOf(repoSettingsFor(c, name)), { enabled: false, threads: 'strict', auditShare: 5 }, name);
   }
   assert.equal(approvalUseOf(c), false);
-  for (const line of ['autoApprove: false', 'approvalThreads: strict', 'auditShare: 0']) {
+  for (const line of ['autoApprove: false', 'approvalThreads: strict', 'auditShare: 5']) {
     assert.match(example(), new RegExp(`^ {4}# {3}${line}$`, 'm'), line);
   }
+});
+
+test('the example with its audit key and its score block switched on, and autoApprove true, reads the key from its variable', () => {
+  const approving = uncomment(example(), '    # score:').replace('      autoApprove: false', '      autoApprove: true');
+  assert.notEqual(approving, uncomment(example(), '    # score:'));
+  const text = uncomment(approving, '# auditKey: { env: AUDIT_KEY }');
+  const c = parseConfig(text, { ...exampleEnv, AUDIT_KEY: 'k'.repeat(64) });
+  assert.equal(c.auditKey, 'k'.repeat(64));
+  assert.deepEqual(c.repositories.defaults.approval, { enabled: true, threads: 'strict', auditShare: 5 });
+  for (const name of ['acme/shop', 'acme/other']) {
+    assert.deepEqual(approvalOf(repoSettingsFor(c, name)), { enabled: true, threads: 'strict', auditShare: 5 }, name);
+  }
+  const issuesWith = (yaml: string, env: Record<string, string | undefined>): string[] => {
+    try {
+      parseConfig(yaml, env);
+    } catch (e) {
+      if (e instanceof ConfigError) return e.issues;
+      throw e;
+    }
+    return [];
+  };
+  assert.deepEqual(issuesWith(text, exampleEnv), ['auditKey: environment variable AUDIT_KEY is not set']);
+  assert.deepEqual(issuesWith(approving, { ...exampleEnv, AUDIT_KEY: 'k'.repeat(64) }), [KEY_NEEDED]);
+  // The key's line stands alone: the empty line after it ends what uncomment switches on.
+  assert.match(example(), /^# auditKey: \{ env: AUDIT_KEY \}\n\n/m);
+});
+
+test('the audit key env.example shows is refused as too short, so it cannot be used as it is', () => {
+  const lines = readFileSync(new URL('../../env.example', import.meta.url), 'utf8').split('\n').filter((line) => line.startsWith('# AUDIT_KEY='));
+  assert.equal(lines.length, 1, lines.join('\n'));
+  const placeholder = lines[0]!.slice(lines[0]!.indexOf('=') + 1);
+  assert.equal(placeholder, 'change-me-audit-key');
+  assert.equal(placeholder.length, 19);
+  const yaml = `${minimal}auditKey: { env: AUDIT_KEY }\nrepositories:\n  defaults: { score: { autoApprove: true } }\n`;
+  let issues: string[] = [];
+  assert.throws(() => parseConfig(yaml, { ...KEY, AUDIT_KEY: placeholder }), (e: unknown) => {
+    if (!(e instanceof ConfigError)) return false;
+    issues = e.issues;
+    return true;
+  });
+  assert.deepEqual(issues, ['auditKey: environment variable AUDIT_KEY must hold at least 32 characters']);
+  assert.equal(issues.join('\n').includes(placeholder), false);
 });
