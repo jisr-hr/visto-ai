@@ -57,22 +57,21 @@ function nearestLine(lines: number[], to: number): number {
 export type Placement = { placed: Finding; how: 'as_given' | 'quote' | 'line' } | { unplaced: UnplacedFinding };
 
 /**
- * The quote decides first: a given line whose text is the quote is kept; otherwise the nearest line of the
- * file whose text is the quote, on the finding's side and then on the other. Only then the line rules.
+ * A given line that can take a comment keeps the finding. Otherwise the quote decides: the nearest line of the
+ * file whose text is the quote, on the finding's side and then on the other. Only then a move of up to 3 lines.
  */
 export function place(f: RawFinding, ranges: Ranges | null, texts: LineTexts | null = null): Placement {
   const rest = { path: f.path, side: f.side, line: f.line, severity: f.severity, body: f.body, quote: f.quote };
   if (ranges === null) return { unplaced: { ...rest, reason: 'file_has_no_patch' } };
-  if (texts !== null && f.quote.trim() !== '') {
-    if (texts[f.side].get(f.line)?.trim() === f.quote.trim()) return { placed: { ...rest, requestedLine: null }, how: 'as_given' };
+  const own = ranges[f.side];
+  if (inRanges(own, f.line)) return { placed: { ...rest, requestedLine: null }, how: 'as_given' };
+  if (texts !== null) {
     const matches = quoteMatches(f.quote, texts);
     for (const side of [f.side, OTHER_SIDE[f.side]]) {
       const lines = matches.filter((m) => m.side === side).map((m) => m.line);
       if (lines.length > 0) return { placed: { ...rest, side, line: nearestLine(lines, f.line), requestedLine: null }, how: 'quote' };
     }
   }
-  const own = ranges[f.side];
-  if (inRanges(own, f.line)) return { placed: { ...rest, requestedLine: null }, how: 'line' };
   const edge = nearestEdge(own, f.line);
   if (edge === null) return { unplaced: { ...rest, reason: 'line_not_in_diff' } };
   return { placed: { ...rest, line: edge, requestedLine: f.line }, how: 'line' };

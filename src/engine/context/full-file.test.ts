@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { parsePatch } from './diff.ts';
-import { fullFileContext, numberLines } from './full-file.ts';
+import { fullFileContext, fullFileLines, numberLines } from './full-file.ts';
 
 const lines = (n: number): string => Array.from({ length: n }, (_, i) => `l${i + 1}`).join('\n');
 
@@ -44,4 +44,16 @@ test('touching excerpts merge', () => {
 
 test('a long file with no hunks has no context', () => {
   assert.equal(fullFileContext(Array(1300).fill('x').join('\n'), []), null);
+});
+
+test('fullFileLines reads back the numbered lines of a full file and of its excerpts', () => {
+  const full = fullFileContext('a\n  b|c\nd\n', [])!;
+  assert.deepEqual([...fullFileLines(full)], [[1, 'a'], [2, '  b|c'], [3, 'd']]);
+  const excerpt = fullFileContext(lines(1300), [{ header: '', oldStart: 600, newStart: 600, newLength: 1, lines: [] }])!;
+  const read = fullFileLines(excerpt);
+  assert.equal(excerpt.kind, 'excerpt');
+  assert.equal(read.get(450), 'l450');
+  assert.equal(read.get(750), 'l750');
+  assert.equal(read.has(449), false);
+  assert.equal(read.has(751), false);
 });

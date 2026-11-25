@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { FileContext } from '../context/build.ts';
 import { commentableRanges, parsePatch } from '../context/diff.ts';
+import { numberLines } from '../context/full-file.ts';
 import type { Ranges } from '../context/diff.ts';
 import type { SubmitReviewArgs } from '../model/submit-review.ts';
 import type { RawFinding } from '../types.ts';
@@ -120,9 +121,9 @@ const qPatch = '@@ -10,3 +10,4 @@\n a = 0\n-old\n+total = a + b\n+return total\n
 
 test('a finding moved by its quote is audited as placed_by_quote, not as moved', () => {
   const contexts = [hunked('src/q.ts', qPatch)];
-  const out = reconcile([answerIn(['src/q.ts'], 'o', raw('src/q.ts', 10, { quote: 'return total' }))], contexts);
+  const out = reconcile([answerIn(['src/q.ts'], 'o', raw('src/q.ts', 30, { quote: 'return total' }))], contexts);
   assert.deepEqual(out.findings.map((x) => [x.path, x.side, x.line, x.requestedLine]), [['src/q.ts', 'RIGHT', 12, null]]);
-  assert.deepEqual(out.audit, [{ stage: 'reconcile', action: 'placed_by_quote', subject: 'src/q.ts:RIGHT:10', reason: 'to RIGHT:12' }]);
+  assert.deepEqual(out.audit, [{ stage: 'reconcile', action: 'placed_by_quote', subject: 'src/q.ts:RIGHT:30', reason: 'to RIGHT:12' }]);
 });
 
 const aPatch = '@@ -10,3 +10,4 @@\n a = 0\n-old\n+x = 1\n+y = 2\n b = 1';
@@ -175,4 +176,21 @@ test('a finding its own file can take by its line stays there, whatever another 
   const out = reconcile([answerIn(['src/a.ts', 'src/b.ts'], 'o', raw('src/a.ts', 12, { quote: 'charge(order)' }))], contexts);
   assert.deepEqual(placedAt(out), [['src/a.ts', 'RIGHT', '12', 'null']]);
   assert.deepEqual(refiledEntries(out), []);
+});
+
+test('a finding whose given line outside the diff holds its quote in the full file is neither moved by its quote nor re-filed', () => {
+  const head = Array.from({ length: 30 }, (_, i) => (i === 29 ? '  return total' : `line ${i + 1}`)).join('\n');
+  const q = { ...hunked('src/q.ts', qPatch), full: { kind: 'full' as const, totalLines: 30, text: numberLines(head) } };
+  const contexts = [q, hunked('src/b.ts', '@@ -1,1 +1,2 @@\n begin()\n+return total')];
+  const out = reconcile([answerIn(['src/q.ts', 'src/b.ts'], 'o', raw('src/q.ts', 30, { quote: 'return total' }))], contexts);
+  assert.deepEqual(out.findings, []);
+  assert.deepEqual(out.unplaced.map((u) => [u.path, u.line, u.reason]), [['src/q.ts', 30, 'line_not_in_diff']]);
+  assert.deepEqual(out.audit, []);
+});
+
+test('a full file that shows other code on the given line leaves the quote to decide', () => {
+  const head = Array.from({ length: 30 }, (_, i) => `line ${i + 1}`).join('\n');
+  const q = { ...hunked('src/q.ts', qPatch), full: { kind: 'full' as const, totalLines: 30, text: numberLines(head) } };
+  const out = reconcile([answerIn(['src/q.ts'], 'o', raw('src/q.ts', 30, { quote: 'return total' }))], [q]);
+  assert.deepEqual(out.findings.map((x) => [x.path, x.line]), [['src/q.ts', 12]]);
 });

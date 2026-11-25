@@ -1,5 +1,6 @@
 import type { FileContext } from '../context/build.ts';
 import { lineTexts } from '../context/diff.ts';
+import { fullFileLines } from '../context/full-file.ts';
 import type { LineTexts, Ranges } from '../context/diff.ts';
 import type { SubmitReviewArgs } from '../model/submit-review.ts';
 import type { AuditEntry, Finding, RawFinding, Side, UnplacedFinding } from '../types.ts';
@@ -33,6 +34,16 @@ export function reconcile(answers: { value: SubmitReviewArgs; files: string[] }[
   { overview: string; findings: Finding[]; unplaced: UnplacedFinding[]; beyondDiff: RawFinding[]; audit: AuditEntry[] } {
   const rangesByPath = new Map<string, Ranges | null>(contexts.map((c) => [c.file.path, c.ranges]));
   const textsByPath = new Map<string, LineTexts | null>(contexts.map((c) => [c.file.path, c.ranges === null ? null : lineTexts(c.hunks)]));
+  const fullByPath = new Map(contexts.map((c) => [c.file.path, c.full]));
+  const headLines = new Map<string, Map<number, string>>();
+  // The model named a line of the head outside the diff, and that line holds its quote: the finding is about
+  // code the diff does not show, and neither its quote nor another file decides where it goes.
+  const namesCodeOutsideDiff = (f: RawFinding): boolean => {
+    const full = fullByPath.get(f.path) ?? null;
+    if (f.side !== 'RIGHT' || full === null || f.quote.trim() === '') return false;
+    if (!headLines.has(f.path)) headLines.set(f.path, fullFileLines(full));
+    return headLines.get(f.path)!.get(f.line)?.trim() === f.quote.trim();
+  };
   const known: ReadonlySet<string> = new Set(rangesByPath.keys());
   const findings: Finding[] = [];
   const unplaced: UnplacedFinding[] = [];
@@ -58,9 +69,10 @@ export function reconcile(answers: { value: SubmitReviewArgs; files: string[] }[
         beyondDiff.push({ ...raw, path });
         continue;
       }
-      const result = place({ ...raw, path }, rangesByPath.get(path) ?? null, textsByPath.get(path) ?? null);
+      const outside = namesCodeOutsideDiff({ ...raw, path });
+      const result = place({ ...raw, path }, rangesByPath.get(path) ?? null, outside ? null : textsByPath.get(path) ?? null);
       if ('unplaced' in result) {
-        const target = refileTarget(raw.quote, path, answer.files, textsByPath);
+        const target = outside ? null : refileTarget(raw.quote, path, answer.files, textsByPath);
         if (target === null) {
           unplaced.push(result.unplaced);
           continue;

@@ -28,6 +28,18 @@ function excerptRanges(hunks: Hunk[], total: number): Array<[number, number]> {
   return merged;
 }
 
+const NUMBERED_ROW = /^ *(\d+)\| ([^\n]*)$/;
+
+/** The lines a full file or its excerpts show, by line number, read back from the numbered text. */
+export function fullFileLines(full: FullFile): Map<number, string> {
+  const lines = new Map<number, string>();
+  for (const row of full.text.split('\n')) {
+    const match = NUMBERED_ROW.exec(row);
+    if (match !== null) lines.set(Number(match[1]), match[2]!);
+  }
+  return lines;
+}
+
 export function fullFileContext(content: string, hunks: Hunk[]): FullFile | null {
   const lines = content.replace(/\n$/, '').split('\n');
   const totalLines = lines.length;

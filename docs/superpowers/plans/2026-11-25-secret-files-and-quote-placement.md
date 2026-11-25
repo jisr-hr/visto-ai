@@ -27,6 +27,8 @@
 4. **By line.** Otherwise the existing rules: a commentable line is kept; one within 3 lines is moved with its note; anything else is not placed.
 5. **Re-filed.** A finding that step 4 would leave unplaced (`line_not_in_diff` or `file_has_no_patch`) is matched against the commentable lines, on both sides, of the other files of the batch that answered. When exactly one line in all of them matches, the finding moves to that file, side and line, with no note, and an audit entry `refiled`, subject `path:line`, reason `to path:side:line`. Zero or several matches leave it unplaced, as before.
 
+**As built, after the final review.** Steps 2 and 3 were changed: a finding on a commentable line is kept whatever its quote (in incremental mode and a re-check, the line the model named decides whether the finding is on changed code, and a quote move would lose it), so the quote only places a finding whose line cannot take a comment. And when the full file shown to the model has the quote on exactly the line the finding names (new side, outside the diff), the finding is about code the diff does not show: neither the quote nor re-filing places it (a short quote such as `});` would otherwise carry it onto unrelated code, where it gates). Design section 5.6 states the rules as built.
+
 `beyond_diff` findings are not placed, as before. A finding on a file outside the pull request or the batch is dropped before placement, as before.
 
 ## Global Constraints

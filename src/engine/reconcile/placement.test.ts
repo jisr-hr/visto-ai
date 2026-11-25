@@ -16,7 +16,7 @@ function landing(r: ReturnType<typeof place>): string {
 }
 
 test('inside a range', () =>
-  assert.deepEqual(place(f('RIGHT', 12), ranges), { placed: { ...base, side: 'RIGHT', line: 12, requestedLine: null }, how: 'line' }));
+  assert.deepEqual(place(f('RIGHT', 12), ranges), { placed: { ...base, side: 'RIGHT', line: 12, requestedLine: null }, how: 'as_given' }));
 
 test('two lines below the hunk moves up and remembers the line', () => {
   const r = place(f('RIGHT', 15), ranges);
@@ -129,13 +129,20 @@ test('a quote that is the text of the given line keeps it as given', () => {
   assert.equal(how(place(q('RIGHT', 12, 'return total'), ranges, texts)), 'RIGHT:12:null:as_given');
 });
 
-test('a quote on another line of the file moves the finding there, with no note', () => {
-  assert.equal(how(place(q('RIGHT', 10, 'return total'), ranges, texts)), 'RIGHT:12:null:quote');
+test('a given line that can take a comment keeps the finding, whatever its quote, so the line the model named still decides the mode', () => {
+  assert.equal(how(place(q('RIGHT', 10, 'return total'), ranges, texts)), 'RIGHT:10:null:as_given');
 });
 
+test('a given line that cannot take a comment gives way to the line its quote names, with no note', () => {
+  assert.equal(how(place(q('RIGHT', 30, 'return total'), ranges, texts)), 'RIGHT:12:null:quote');
+  assert.equal(how(place(q('RIGHT', 15, 'reset()'), ranges, texts)), 'RIGHT:10:null:quote');
+});
+
+const tieTexts: LineTexts = { RIGHT: new Map([[1, 'a'], [2, 'dup'], [3, 'b'], [40, 'c'], [41, 'd'], [42, 'dup']]), LEFT: new Map() };
 test('of several lines the quote names, the nearest wins and a tie goes to the earlier', () => {
-  assert.equal(how(place(q('RIGHT', 12, 'total = a + b'), ranges, texts)), 'RIGHT:11:null:quote');
   assert.equal(how(place(q('RIGHT', 30, 'total = a + b'), ranges, texts)), 'RIGHT:13:null:quote');
+  assert.equal(how(place(q('RIGHT', 5, 'total = a + b'), ranges, texts)), 'RIGHT:11:null:quote');
+  assert.equal(how(place(q('RIGHT', 22, 'dup'), multi, tieTexts)), 'RIGHT:2:null:quote');
 });
 
 test('a quote matches after white space at both ends is trimmed, a carriage return too', () => {
@@ -157,10 +164,11 @@ test('an empty or blank quote leaves the line rules', () => {
 });
 
 test('a quote that matches nothing leaves the line rules', () => {
-  assert.equal(how(place(q('RIGHT', 12, 'nowhere()'), ranges, texts)), 'RIGHT:12:null:line');
+  assert.equal(how(place(q('RIGHT', 12, 'nowhere()'), ranges, texts)), 'RIGHT:12:null:as_given');
   assert.equal(how(place(q('RIGHT', 30, 'nowhere()'), ranges, texts)), 'unplaced:line_not_in_diff');
 });
 
 test('no texts keeps the line rules', () => {
-  assert.equal(how(place(q('RIGHT', 10, 'return total'), ranges, null)), 'RIGHT:10:null:line');
+  assert.equal(how(place(q('RIGHT', 10, 'return total'), ranges, null)), 'RIGHT:10:null:as_given');
+  assert.equal(how(place(q('RIGHT', 30, 'return total'), ranges, null)), 'unplaced:line_not_in_diff');
 });
