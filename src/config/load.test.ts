@@ -5,6 +5,7 @@ import { generateKeyPairSync } from 'node:crypto';
 import {
   APPROVAL_OFF, ConfigError, GATE_OFF, approvalOf, approvalUseOf, contractFile, gateUseOf, parseConfig, repoConfigFor, repoSettingsFor, serviceConfig,
 } from './load.ts';
+import type { DeploymentConfig, RepoSettings } from './load.ts';
 
 const minimal = 'model:\n  apiKey: { env: MODEL_KEY }\n  model: vendor/model-a\n';
 
@@ -338,7 +339,7 @@ app: { id: 12345, privateKey: { env: APP_KEY }, webhookSecret: { env: HOOK } }
 database: { url: { env: DB } }
 dryRun: true
 `;
-const ENV = { MODEL_KEY: 'k', APP_KEY: PEM, HOOK: 's', DB: 'postgres://u:p@db:5432/visto' };
+const ENV = { MODEL_KEY: 'k', APP_KEY: PEM, HOOK: 's', DB: 'postgres://u:p@db:5432/visto', AUDIT: 'audit-key-for-tests-only-0123456789' };
 
 test('the app block carries the id as text, the key and the secret', () => {
   assert.deepEqual(parseConfig(SERVICE_YAML, ENV).app, { id: '12345', privateKey: PEM, webhookSecret: 's' });
@@ -810,9 +811,6 @@ test('learning is not a key of a repository', () => {
   assert.ok(override[0]!.startsWith('repositories.overrides.acme/shop'), override.join());
 });
 
-const AUDIT_ISSUE = 'must be written as 0 while autoApprove is true: this release does not draw the audit sample yet';
-const DEFAULTS_AUDIT = `repositories.defaults.score.auditShare: ${AUDIT_ISSUE}`;
-const SHOP_AUDIT = `repositories.overrides.acme/shop.score.auditShare: ${AUDIT_ISSUE}`;
 const repos = (body: string): string => `${SERVICE_YAML}repositories:\n${body}`;
 
 test('approval is off unless the config writes it, and a config that writes none gives the settings it gave', () => {
@@ -859,35 +857,97 @@ test('the three keys are read for all repositories and for one, and an override 
   assert.equal(approvalUseOf(idle), false);
 });
 
-test('automatic approval is refused while the audit share is not written as 0, for the defaults and for one repository', () => {
-  for (const score of ['{ autoApprove: true }', '{ autoApprove: true, auditShare: 5 }', '{ autoApprove: true, auditShare: 37.5, approvalThreads: gate }']) {
-    assert.deepEqual(issuesOf(repos(`  defaults: { score: ${score} }\n`)), [DEFAULTS_AUDIT], score);
-  }
-  assert.deepEqual(issuesOf(repos('  overrides:\n    acme/shop: { score: { autoApprove: true } }\n')), [SHOP_AUDIT]);
-  assert.deepEqual(issuesOf(repos('  defaults: { score: { autoApprove: true, auditShare: 0 } }\n  overrides:\n    acme/shop: { score: { auditShare: 5 } }\n')), [SHOP_AUDIT]);
-  // Bad defaults are reported once for an override that writes neither autoApprove nor auditShare.
-  for (const override of ['{ score: { inlineNotes: true } }', '{ score: { approvalThreads: gate } }', '{ newHead: full }']) {
-    assert.deepEqual(issuesOf(repos(`  defaults: { score: { autoApprove: true } }\n  overrides:\n    acme/shop: ${override}\n`)), [DEFAULTS_AUDIT], override);
-  }
-  // One that writes either key is judged on its own.
-  for (const fixed of ['{ autoApprove: false }', '{ auditShare: 0 }']) {
-    assert.deepEqual(issuesOf(repos(`  defaults: { score: { autoApprove: true } }\n  overrides:\n    acme/shop: { score: ${fixed} }\n`)), [DEFAULTS_AUDIT], fixed);
-  }
-  for (const own of ['{ autoApprove: true }', '{ auditShare: 5 }']) {
-    assert.deepEqual(issuesOf(repos(`  defaults: { score: { autoApprove: true } }\n  overrides:\n    acme/shop: { score: ${own} }\n`)), [DEFAULTS_AUDIT, SHOP_AUDIT], own);
-  }
-  assert.deepEqual(
-    issuesOf(repos('  defaults: { gate: { enabled: true }, score: { autoApprove: true } }\n')),
-    [`repositories.defaults.gate.branches: ${GATE_ISSUE}`, DEFAULTS_AUDIT],
-  );
+const KEY_NEEDED = 'auditKey: must be written while autoApprove is true with an auditShare above 0';
+const AUDIT_KEY_YAML = 'auditKey: { env: AUDIT }\n';
+
+test('automatic approval with an audit share above 0 is refused without the audit key, once, for the defaults and for one repository', () => {
   for (const dryRun of ['true', 'false']) {
-    const at = (body: string): string => repos(body).replace('dryRun: true', `dryRun: ${dryRun}`);
-    for (const score of ['{ autoApprove: false, auditShare: 5 }', '{ auditShare: 0 }', '{ approvalThreads: gate }', '{ autoApprove: true, auditShare: 0 }']) {
+    const at = (body: string, key = ''): string => `${SERVICE_YAML.replace('dryRun: true', `dryRun: ${dryRun}`)}${key}repositories:\n${body}`;
+    const needed = [
+      ...['{ autoApprove: true }', '{ autoApprove: true, auditShare: 5 }', '{ autoApprove: true, auditShare: 37.5, approvalThreads: gate }'].map((s) => `  defaults: { score: ${s} }\n`),
+      '  overrides:\n    acme/shop: { score: { autoApprove: true } }\n',
+      '  defaults: { score: { autoApprove: true, auditShare: 0 } }\n  overrides:\n    acme/shop: { score: { auditShare: 5 } }\n',
+      // Many repositories that need it: still one issue.
+      '  defaults: { score: { autoApprove: true } }\n  overrides:\n    acme/shop: { score: { autoApprove: true } }\n    acme/off: { score: { auditShare: 7 } }\n',
+    ];
+    for (const body of needed) {
+      assert.deepEqual(issuesOf(at(body)), [KEY_NEEDED], `${dryRun} ${body}`);
+      // With the key written it is accepted.
+      assert.deepEqual(issuesOf(at(body, AUDIT_KEY_YAML)), [], `${dryRun} ${body}`);
+    }
+    // In the error that holds the gate's issues, after them.
+    assert.deepEqual(
+      issuesOf(at('  defaults: { gate: { enabled: true }, score: { autoApprove: true } }\n')),
+      [`repositories.defaults.gate.branches: ${GATE_ISSUE}`, KEY_NEEDED],
+      dryRun,
+    );
+    for (const score of ['{ autoApprove: false, auditShare: 5 }', '{ auditShare: 0 }', '{ approvalThreads: gate }', '{ autoApprove: true, auditShare: 0 }', '{ autoApprove: true, auditShare: -0 }']) {
       assert.deepEqual(issuesOf(at(`  defaults: { score: ${score} }\n`)), [], `${dryRun} ${score}`);
       assert.deepEqual(issuesOf(at(`  overrides:\n    acme/shop: { score: ${score} }\n`)), [], `${dryRun} ${score}`);
     }
-    assert.deepEqual(issuesOf(at('  defaults: { score: { autoApprove: true } }\n')), [DEFAULTS_AUDIT], dryRun);
-    assert.deepEqual(issuesOf(at('  overrides:\n    acme/shop: { score: { autoApprove: true, auditShare: 5 } }\n')), [SHOP_AUDIT], dryRun);
+    // The -0 above is read as -0, so the case is not a plain 0.
+    assert.ok(Object.is(approvalOf(repoSettingsFor(parseConfig(at('  defaults: { score: { autoApprove: true, auditShare: -0 } }\n'), ENV), 'acme/shop')).auditShare, -0));
+  }
+});
+
+test('the audit key is read from its variable, and refused when unset, empty or shorter than 32 characters, by name and with no value', () => {
+  const NOT_SET = ['auditKey: environment variable AUDIT is not set'];
+  const SHORT = ['auditKey: environment variable AUDIT must hold at least 32 characters'];
+  const issuesWith = (yaml: string, env: Record<string, string | undefined>): string[] => {
+    try {
+      parseConfig(yaml, env);
+    } catch (e) {
+      if (e instanceof ConfigError) return e.issues;
+      throw e;
+    }
+    return [];
+  };
+  for (const dryRun of ['true', 'false']) {
+    const base = SERVICE_YAML.replace('dryRun: true', `dryRun: ${dryRun}`);
+    // Needed, with approval off, and with no repositories block.
+    const configs = [
+      `${base}${AUDIT_KEY_YAML}repositories:\n  defaults: { score: { autoApprove: true } }\n`,
+      `${base}${AUDIT_KEY_YAML}repositories:\n  defaults: { score: { autoApprove: false, auditShare: 5 } }\n`,
+      `${base}${AUDIT_KEY_YAML}`,
+    ];
+    for (const yaml of configs) {
+      const label = `${dryRun} ${yaml.slice(base.length)}`;
+      assert.equal(parseConfig(yaml, ENV).auditKey, ENV.AUDIT, label);
+      assert.deepEqual(issuesWith(yaml, { ...ENV, AUDIT: undefined }), NOT_SET, label);
+      assert.deepEqual(issuesWith(yaml, { ...ENV, AUDIT: '' }), NOT_SET, label);
+      const short = issuesWith(yaml, { ...ENV, AUDIT: 'k'.repeat(31) });
+      assert.deepEqual(short, SHORT, label);
+      assert.ok(!/kk/.test(short.join('\n')), label);
+      assert.equal(parseConfig(yaml, { ...ENV, AUDIT: 'k'.repeat(32) }).auditKey, 'k'.repeat(32), label);
+      assert.equal(parseConfig(yaml, { ...ENV, AUDIT: ` ${'k'.repeat(32)} ` }).auditKey, ` ${'k'.repeat(32)} `, label);
+    }
+    // Written inline, naming no variable, or beside another key: refused by name, and no issue holds what was written.
+    for (const key of ['auditKey: inline-audit-key-written-in-the-file-0123\n', 'auditKey: { env: "" }\n', 'auditKey: { env: AUDIT, x: 1 }\n']) {
+      for (const yaml of [`${base}${key}`, `${base}${key}repositories:\n  defaults: { score: { autoApprove: true } }\n`]) {
+        const issues = issuesWith(yaml, ENV);
+        assert.ok(issues.length > 0, `${dryRun} ${key}`);
+        for (const issue of issues) {
+          assert.ok(issue.startsWith('auditKey'), issue);
+          for (const written of ['inline-audit-key', 'written-in-the-file', '0123']) assert.ok(!issue.includes(written), issue);
+        }
+      }
+    }
+  }
+});
+
+test('a config that writes no audit key has none, and gives the settings it gave', () => {
+  const plain: RepoSettings = {
+    primaryBranches: ['main', 'master'], scoreThreshold: 70, ignoredAuthors: ['dependabot[bot]'], baseBranches: [], newHead: null, inlineNotes: false, gate: GATE_OFF,
+  };
+  // The example's one override, for acme/shop.
+  const exampleShop: RepoSettings = { ...plain, primaryBranches: ['trunk'], baseBranches: ['trunk'], scoreThreshold: 60 };
+  const cases: Array<[DeploymentConfig, RepoSettings]> = [
+    [parseConfig(minimal, KEY), plain], [parseConfig(SERVICE_YAML, ENV), plain], [parseConfig(example(), exampleEnv), exampleShop],
+  ];
+  for (const [c, shop] of cases) {
+    assert.equal('auditKey' in c, false);
+    assert.deepEqual([repoSettingsFor(c, 'acme/shop'), repoSettingsFor(c, 'acme/other')], [shop, plain]);
+    assert.equal(approvalUseOf(c), false);
   }
 });
 
@@ -913,14 +973,56 @@ test('an approval key of the wrong kind is refused by name, and the issue quotes
   assert.ok(unknown.length === 1 && unknown[0]!.startsWith('repositories.defaults.score') && unknown[0]!.includes('autoApproval'), unknown.join());
 });
 
-test('the example with its score block switched on reads approval as written: off, strict, share 0', () => {
+test('the example with its score block switched on reads approval as written: off, strict, share 5', () => {
   const c = parseConfig(uncomment(example(), '    # score:'), exampleEnv);
-  assert.deepEqual(c.repositories.defaults.approval, { enabled: false, threads: 'strict', auditShare: 0 });
+  assert.deepEqual(c.repositories.defaults.approval, { enabled: false, threads: 'strict', auditShare: 5 });
   for (const name of ['acme/shop', 'acme/other']) {
-    assert.deepEqual(approvalOf(repoSettingsFor(c, name)), { enabled: false, threads: 'strict', auditShare: 0 }, name);
+    assert.deepEqual(approvalOf(repoSettingsFor(c, name)), { enabled: false, threads: 'strict', auditShare: 5 }, name);
   }
   assert.equal(approvalUseOf(c), false);
-  for (const line of ['autoApprove: false', 'approvalThreads: strict', 'auditShare: 0']) {
+  for (const line of ['autoApprove: false', 'approvalThreads: strict', 'auditShare: 5']) {
     assert.match(example(), new RegExp(`^ {4}# {3}${line}$`, 'm'), line);
   }
+});
+
+test('the example with its audit key and its score block switched on, and autoApprove true, reads the key from its variable', () => {
+  const approving = uncomment(example(), '    # score:').replace('      autoApprove: false', '      autoApprove: true');
+  assert.notEqual(approving, uncomment(example(), '    # score:'));
+  const text = uncomment(approving, '# auditKey: { env: AUDIT_KEY }');
+  const c = parseConfig(text, { ...exampleEnv, AUDIT_KEY: 'k'.repeat(64) });
+  assert.equal(c.auditKey, 'k'.repeat(64));
+  assert.deepEqual(c.repositories.defaults.approval, { enabled: true, threads: 'strict', auditShare: 5 });
+  for (const name of ['acme/shop', 'acme/other']) {
+    assert.deepEqual(approvalOf(repoSettingsFor(c, name)), { enabled: true, threads: 'strict', auditShare: 5 }, name);
+  }
+  const issuesWith = (yaml: string, env: Record<string, string | undefined>): string[] => {
+    try {
+      parseConfig(yaml, env);
+    } catch (e) {
+      if (e instanceof ConfigError) return e.issues;
+      throw e;
+    }
+    return [];
+  };
+  assert.deepEqual(issuesWith(text, exampleEnv), ['auditKey: environment variable AUDIT_KEY is not set']);
+  assert.deepEqual(issuesWith(approving, { ...exampleEnv, AUDIT_KEY: 'k'.repeat(64) }), [KEY_NEEDED]);
+  // The key's line stands alone: the empty line after it ends what uncomment switches on.
+  assert.match(example(), /^# auditKey: \{ env: AUDIT_KEY \}\n\n/m);
+});
+
+test('the audit key env.example shows is refused as too short, so it cannot be used as it is', () => {
+  const lines = readFileSync(new URL('../../env.example', import.meta.url), 'utf8').split('\n').filter((line) => line.startsWith('# AUDIT_KEY='));
+  assert.equal(lines.length, 1, lines.join('\n'));
+  const placeholder = lines[0]!.slice(lines[0]!.indexOf('=') + 1);
+  assert.equal(placeholder, 'change-me-audit-key');
+  assert.equal(placeholder.length, 19);
+  const yaml = `${minimal}auditKey: { env: AUDIT_KEY }\nrepositories:\n  defaults: { score: { autoApprove: true } }\n`;
+  let issues: string[] = [];
+  assert.throws(() => parseConfig(yaml, { ...KEY, AUDIT_KEY: placeholder }), (e: unknown) => {
+    if (!(e instanceof ConfigError)) return false;
+    issues = e.issues;
+    return true;
+  });
+  assert.deepEqual(issues, ['auditKey: environment variable AUDIT_KEY must hold at least 32 characters']);
+  assert.equal(issues.join('\n').includes(placeholder), false);
 });

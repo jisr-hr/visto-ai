@@ -1,5 +1,6 @@
 import test, { afterEach, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
+import { createHmac } from 'node:crypto';
 import { testDb } from '../db/testing.ts';
 import type { Db } from '../db/types.ts';
 import { enqueueJob, claimJob, finishJob, getJob, requeueJob, unfinishedJobs } from '../db/jobs.ts';
@@ -2967,5 +2968,89 @@ test('in dry run nothing of approval runs: no read for it, no withdraw job, noth
     const line = reviewLine(h);
     assert.deepEqual([line.dry_run, line.published, 'approved' in line, 'approval' in line], [true, false, false, false], String(number));
     assert.deepEqual((await approvalRows(number)).map((r) => [r.head_sha, r.approved, r.approval_code]), [['h0', true, 'approved'], ['h1', false, null]], String(number));
+  }
+});
+
+// The audit sample. Under AUDIT_TEST_KEY acme/shop 7 is drawn above 18.8899, acme/shop 8 above 4.5701; under AUDIT_TEST_KEY_CHANGED acme/shop 8 above 6.8261.
+const AUDIT_TEST_KEY = 'audit-key-for-tests-only-0123456789';
+const AUDIT_TEST_KEY_CHANGED = 'audit-key-for-tests-only-0123456788';
+/** Approval on under the strict rule, with the audit share `share`. */
+const auditing = (share: number): RepoSettings => ({ ...SETTINGS, approval: { enabled: true, threads: 'strict', auditShare: share } });
+/** The decision of each run of a pull request, lowest id first, as [head, approved, code]. */
+const decisions = async (number: number): Promise<unknown[][]> => (await approvalRows(number)).map((r) => [r.head_sha, r.approved, r.approval_code]);
+/** One review of an approvable result of pull request `number` at `head`, approval on with the share `share`, the deployment's key `key`. */
+async function auditedJob(number: number, share: number, key: string | undefined, more: Options = {}): Promise<{ h: Harness; seen: ReturnType<typeof approving> }> {
+  const h = await live({ pullRequest: number, settings: auditing(share), live: LIVE_OK, result: approvable(), ...more });
+  const seen = approving(h);
+  if (key !== undefined) h.deps.auditKey = key;
+  await runReviewJob(h.job, h.deps);
+  return { h, seen };
+}
+
+test("with a share above 0 the job draws with the deployment's key: one drawn is posted with the audit paragraph and recorded as audit_sample, one not drawn is approved", async () => {
+  // Pull request 8, drawn at 5: a comment that ends with the audit paragraph, after the branch's rule was read.
+  const drawn = await auditedJob(8, 5, AUDIT_TEST_KEY);
+  assert.deepEqual([(await getJob(db, drawn.h.job.id))?.outcome, drawn.h.drafts.length, 'event' in drawn.h.drafts[0]!, drawn.seen.calls], ['published', 1, false, [['staleApprovals', 'main']]]);
+  assert.ok(drawn.h.drafts[0]!.body.endsWith(`\n\n${paragraphOf('audit_sample')}`));
+  assert.deepEqual((await approvalRows(8)).map((r) => [r.approved, r.approval_code]), [[false, 'audit_sample']]);
+  assert.deepEqual([reviewLine(drawn.h).approved, reviewLine(drawn.h).approval], [false, 'audit_sample']);
+  // Nothing stands: no withdraw job.
+  assert.deepEqual([await withdrawJobs(8), drawn.seen.woken()], [[], 0]);
+  // Pull request 7, not drawn at 5: approved.
+  const approved = await auditedJob(7, 5, AUDIT_TEST_KEY);
+  assert.deepEqual([approved.h.drafts.length, approved.h.drafts[0]!.event], [1, 'approve']);
+  assert.ok(approved.h.drafts[0]!.body.endsWith(`\n\n${paragraphOf('approved')}`));
+  assert.deepEqual((await approvalRows(7)).map((r) => [r.approved, r.approval_code]), [[true, 'approved']]);
+  assert.deepEqual([reviewLine(approved.h).approved, reviewLine(approved.h).approval], [true, 'approved']);
+
+  // Nothing of the draw leaves it: not the key, nor the digest of either identity (whole or its first 8 characters), nor its number.
+  const digests = [7, 8].map((n) => createHmac('sha256', AUDIT_TEST_KEY).update(JSON.stringify(['github', 'acme', 'shop', n]), 'utf8').digest());
+  assert.deepEqual(digests.map((d) => d.readUInt32BE(0)), [811315780, 196284414]);
+  const secrets = [AUDIT_TEST_KEY, ...digests.flatMap((d) => [d.toString('hex'), d.toString('hex').slice(0, 8)]), '811315780', '196284414'];
+  const json = (x: unknown): string => JSON.stringify(x, (_key, v: unknown) => (typeof v === 'bigint' ? String(v) : v));
+  for (const [number, h] of [[8, drawn.h], [7, approved.h]] as const) {
+    const rows = await db.query('select * from visto_ai.review_runs where number = $1 order by id', [number]);
+    assert.equal(rows.length, 1, String(number));
+    const texts = [...h.logged.map(json), ...h.drafts.map(json), ...rows.map(json)];
+    for (const secret of secrets) assert.equal(texts.some((t) => t.includes(secret)), false, `${number}: ${secret.length}`);
+  }
+});
+
+test('a pull request drawn at one head is drawn at the next', async () => {
+  const first = await auditedJob(8, 5, AUDIT_TEST_KEY);
+  assert.equal('event' in first.h.drafts[0]!, false);
+  assert.deepEqual(await decisions(8), [['h1', false, 'audit_sample']]);
+  // A push to h2: drawn again, whatever the head.
+  const push = await auditedJob(8, 5, AUDIT_TEST_KEY, { head: 'h2', live: liveAt('h2'), own: ownReviews({ id: '501', commit: 'h1' }), posts: [{ id: '502' }] });
+  assert.deepEqual([(await getJob(db, push.h.job.id))?.outcome, push.h.drafts.length, 'event' in push.h.drafts[0]!, push.seen.calls], ['published', 1, false, [['staleApprovals', 'main']]]);
+  assert.ok(push.h.drafts[0]!.body.endsWith(`\n\n${paragraphOf('audit_sample', 'h2')}`));
+  assert.deepEqual(await decisions(8), [['h1', false, 'audit_sample'], ['h2', false, 'audit_sample']]);
+  assert.deepEqual([reviewLine(push.h).approved, reviewLine(push.h).approval], [false, 'audit_sample']);
+});
+
+test('a lower share or another key can let a pull request drawn at 5 be approved', async () => {
+  // At 4.5, below its number under AUDIT_TEST_KEY: approved.
+  const lower = await auditedJob(8, 4.5, AUDIT_TEST_KEY);
+  assert.equal(lower.h.drafts[0]!.event, 'approve');
+  assert.deepEqual(await decisions(8), [['h1', true, 'approved']]);
+  await withdrawRan();
+  // A push to h2 at 5 under another key: approved, and the approval of h1, which still stands, is asked to be withdrawn.
+  const changed = await auditedJob(8, 5, AUDIT_TEST_KEY_CHANGED, { head: 'h2', live: liveAt('h2'), own: ownReviews({ id: '501', commit: 'h1', state: 'approved' }), posts: [{ id: '502' }] });
+  assert.deepEqual([(await getJob(db, changed.h.job.id))?.outcome, changed.h.drafts[0]!.event], ['published', 'approve']);
+  assert.ok(changed.h.drafts[0]!.body.endsWith(`\n\n${paragraphOf('approved', 'h2')}`));
+  assert.deepEqual(await decisions(8), [['h1', true, 'approved'], ['h2', true, 'approved']]);
+  assert.deepEqual([(await withdrawJobs(8)).map((j) => j.status), changed.seen.woken()], [['done', 'pending'], 1]);
+});
+
+test('without a key a share above 0 draws every pull request, and a share of 0 draws none', async () => {
+  // Pull request 7 is not drawn at 5 under AUDIT_TEST_KEY; without a key it is. Pull request 8 is drawn at 5 under AUDIT_TEST_KEY; at 0 it is not.
+  const cases: Array<[number, number, string | undefined, ApprovalCode]> = [[7, 5, undefined, 'audit_sample'], [8, 0, AUDIT_TEST_KEY, 'approved'], [9, 0, undefined, 'approved']];
+  for (const [number, share, key, code] of cases) {
+    const { h, seen } = await auditedJob(number, share, key);
+    const name = `${number} at ${share}`;
+    assert.deepEqual([h.drafts.length, h.drafts[0]!.event, seen.calls], [1, code === 'approved' ? 'approve' : undefined, [['staleApprovals', 'main']]], name);
+    assert.ok(h.drafts[0]!.body.endsWith(`\n\n${paragraphOf(code)}`), name);
+    assert.deepEqual(await decisions(number), [['h1', code === 'approved', code]], name);
+    assert.deepEqual([reviewLine(h).approved, reviewLine(h).approval], [code === 'approved', code], name);
   }
 });

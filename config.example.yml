@@ -100,6 +100,12 @@ learning: false
 #   # The environment variable that holds the URL (http or https) that gets the alerts: model_error, model_ok, spend_80, spend_limit, cost_unknown, redelivery_failed, feature_off, gate_check_failed, gate_bypass, extension_error, extension_ok, mcp_error, mcp_ok, memory_error, memory_ok, learning_stale, lessons_stale, dismissal_failed and stale_approval_merged.
 #   webhook: { env: ALERT_WEBHOOK_URL }
 
+# The audit sample's key (see auditShare under repositories), named by reference: the secret its draw is keyed with, so that
+# nobody without it can tell beforehand which pull request will be drawn. At least 32 characters, for example the output of
+# openssl rand -hex 32. Required while autoApprove is true with an auditShare above 0; a key written must be set. A new key draws
+# every pull request again.
+# auditKey: { env: AUDIT_KEY }
+
 # Optional extension modules: code of your own that the service loads once, at start. A module can give the reviewer
 # context about a pull request (a ticket's text, acceptance criteria), be told when a review is published and when an
 # alert is raised, and answer HTTP requests under /extensions/<name>/, for example to collect a thumbs up or down.
@@ -160,17 +166,20 @@ repositories:
     # conversations someone must resolve each one; the app never does. It can be set for all repositories and for one.
     # It is false when not written.
     # autoApprove posts a review as an approval when every file is reviewed, nothing is at or above the threshold, no major or blocker
-    # finding is open, the pull request is no draft and not from a fork, and the base branch dismisses stale approvals (a ruleset's
-    # pull request rule, or branch protection). The app then needs Administration read. It is false when not written.
+    # finding is open, the pull request is no draft and not from a fork, the base branch dismisses stale approvals (a ruleset's
+    # pull request rule, or branch protection), and the pull request is not drawn for the audit sample (auditShare). The app then
+    # needs Administration read. It is false when not written.
     # approvalThreads: strict, a thread closes for approval when a review verified a fix in changed code, or when someone other than the
     # author, with access, replied and it is resolved; gate, as the merge gate's rule clears it. It is strict when not written.
-    # auditShare must be written as 0 while autoApprove is true: this release does not draw the audit sample yet.
+    # auditShare: of the pull requests autoApprove would approve, the percentage (0 to 100) sent to a person anyway as an audit sample,
+    # drawn by a keyed hash of the pull request, so that pushing again does not draw it again; its review says it was drawn. It is 5 when
+    # not written, and 0 switches the sample off. Above 0, with autoApprove true, the top-level auditKey must be written.
     # score:
     #   threshold: 70
     #   inlineNotes: false
     #   autoApprove: false
     #   approvalThreads: strict
-    #   auditShare: 0
+    #   auditShare: 5
 
     # The merge gate. A pull request is gated when its repository has the gate enabled and its base branch is listed in branches
     # (compared exactly, case and all). A gated pull request is not reviewed when someone pushes; it is reviewed when someone

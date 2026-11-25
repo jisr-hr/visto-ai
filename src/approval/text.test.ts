@@ -75,3 +75,34 @@ test('the texts are ASCII and hold no mention, link, tag or heading', () => {
     assert.equal(/^\s*(?:[-=]{3,}|>)/.test(text), false, text);
   }
 });
+
+const AUDIT_SENTENCE = '**Not approved automatically:** this pull request was drawn for the audit sample. Every other condition for an automatic approval holds, and a share of the pull requests this reviewer would approve is sent to a person anyway, so that people keep checking what it approves. A person should review it.';
+
+test('a review drawn for the audit sample says so, pinned whole, under both rules, and shows no code', () => {
+  assert.equal(approvalParagraph('audit_sample', META), AUDIT_SENTENCE);
+  assert.equal(approvalParagraph('audit_sample', { ...META, rule: 'gate' }), AUDIT_SENTENCE);
+  assert.equal(approvalParagraph('audit_sample', { ...META, threshold: 40 }), AUDIT_SENTENCE);
+  assert.equal(approvalParagraph('audit_sample', { head: META.head, threshold: 70, rule: 'strict' }), AUDIT_SENTENCE);
+  const withCode = approvalParagraph('audit_sample', { ...META, code: 'github_403' });
+  assert.equal(withCode, AUDIT_SENTENCE);
+  assert.equal(withCode.includes('github_403'), false);
+  const hostile = { head: '@octo-lead <b>#12 https://example.test/x', threshold: 70, code: '@octo-lead <b>' };
+  assert.equal(approvalParagraph('audit_sample', { ...hostile, rule: 'strict' }), AUDIT_SENTENCE);
+  assert.equal(approvalParagraph('audit_sample', { ...hostile, rule: 'gate' }), AUDIT_SENTENCE);
+});
+
+test('the audit sentence is ASCII and holds no mention, link, tag or heading', () => {
+  const hostile = { head: '@octo-lead <b>#12 https://example.test/x', threshold: 70, code: '@octo-lead <b>' };
+  const texts: string[] = [];
+  for (const rule of ['strict', 'gate'] as const) {
+    texts.push(approvalParagraph('audit_sample', { ...META, rule }), approvalParagraph('audit_sample', { ...hostile, rule }));
+  }
+  for (const text of texts) {
+    assert.match(text, /^[\x20-\x7e]+$/, text);
+    assert.equal(text.includes('@'), false, text);
+    assert.equal(/<|>|&/.test(text), false, text);
+    assert.equal(/\[|\]|\(http|https?:|www\./i.test(text), false, text);
+    assert.equal(text.includes('#'), false, text);
+    assert.equal(/^\s*(?:[-=]{3,}|>)/.test(text), false, text);
+  }
+});

@@ -4,7 +4,7 @@ import type { PullRequestInfo } from '../forge/types.ts';
 /** The decision a publication ends with: `approved`, or the first condition of 6.4 that did not hold. */
 export type ApprovalCode =
   | 'approved' | 'record_unreadable' | 'not_covered' | 'needs_human' | 'blocking_finding' | 'finding_without_thread'
-  | 'draft' | 'from_fork' | 'origin_unknown' | 'threads_unreadable' | 'open_thread' | 'rule_unreadable' | 'rule_off' | 'refused';
+  | 'draft' | 'from_fork' | 'origin_unknown' | 'threads_unreadable' | 'open_thread' | 'rule_unreadable' | 'rule_off' | 'refused' | 'audit_sample';
 
 const isObject = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
 // The engine's severities. A word that is none of them cannot be told a minor, so it cannot be read.

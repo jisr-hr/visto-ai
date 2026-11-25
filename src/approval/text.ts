@@ -28,6 +28,7 @@ const REASONS: Record<Exclude<ApprovalCode, 'approved'>, (meta: Meta) => string>
   rule_unreadable: (m) => `the reviewer could not read whether the base branch dismisses an approval when new commits are pushed (\`${shown(m.code)}\`).`,
   rule_off: () => 'the base branch does not dismiss an approval when new commits are pushed. The reviewer approves only where a ruleset or the branch protection of the base branch dismisses stale approvals.',
   refused: (m) => `GitHub refused this review as an approval (\`${shown(m.code)}\`), so it was posted as a comment.`,
+  audit_sample: () => 'this pull request was drawn for the audit sample. Every other condition for an automatic approval holds, and a share of the pull requests this reviewer would approve is sent to a person anyway, so that people keep checking what it approves. A person should review it.',
 };
 
 /** The paragraph a review ends with when approval is on: it was approved, or the one reason it was not. One line of ASCII. */
