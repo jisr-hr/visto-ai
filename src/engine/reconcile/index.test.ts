@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { FileContext } from '../context/build.ts';
+import { commentableRanges, parsePatch } from '../context/diff.ts';
 import type { Ranges } from '../context/diff.ts';
 import type { SubmitReviewArgs } from '../model/submit-review.ts';
 import type { RawFinding } from '../types.ts';
@@ -108,4 +109,18 @@ test('a path named like an object property is dropped, not looked up', () => {
   const out = reconcile([answer('o', raw('toString', 1))], ctxs);
   assert.equal(out.findings.length, 0);
   assert.equal(out.audit[0]!.reason, 'path_not_in_pull_request');
+});
+
+// A file with real hunks: RIGHT 10-13 and LEFT 11, as `ranges`.
+const hunked = (path: string, patch: string): FileContext => {
+  const hunks = parsePatch(patch);
+  return { ...ctxWith(path, commentableRanges(hunks)), hunks };
+};
+const qPatch = '@@ -10,3 +10,4 @@\n a = 0\n-old\n+total = a + b\n+return total\n b = 1';
+
+test('a finding moved by its quote is audited as placed_by_quote, not as moved', () => {
+  const contexts = [hunked('src/q.ts', qPatch)];
+  const out = reconcile([answerIn(['src/q.ts'], 'o', raw('src/q.ts', 10, { quote: 'return total' }))], contexts);
+  assert.deepEqual(out.findings.map((x) => [x.path, x.side, x.line, x.requestedLine]), [['src/q.ts', 'RIGHT', 12, null]]);
+  assert.deepEqual(out.audit, [{ stage: 'reconcile', action: 'placed_by_quote', subject: 'src/q.ts:RIGHT:10', reason: 'to RIGHT:12' }]);
 });

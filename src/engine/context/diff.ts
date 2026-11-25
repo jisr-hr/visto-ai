@@ -108,6 +108,20 @@ export function commentableRanges(hunks: Hunk[]): Ranges {
   return { RIGHT: toRanges(right), LEFT: toRanges(left) };
 }
 
+export interface LineTexts { RIGHT: Map<number, string>; LEFT: Map<number, string> }
+
+/** The text of each line `commentableRanges` counts, by side and line number, as the hunk holds it. */
+export function lineTexts(hunks: Hunk[]): LineTexts {
+  const texts: LineTexts = { RIGHT: new Map(), LEFT: new Map() };
+  for (const hunk of hunks) {
+    for (const line of hunk.lines) {
+      if (line.kind === 'add' || line.kind === 'ctx') texts.RIGHT.set(line.newLine!, line.text);
+      else if (line.kind === 'del') texts.LEFT.set(line.oldLine!, line.text);
+    }
+  }
+  return texts;
+}
+
 // Beyond this many edits the diff library gives up: two large, fully different
 // contents would otherwise block the process for a long time.
 const MAX_EDIT_LENGTH = 8000;

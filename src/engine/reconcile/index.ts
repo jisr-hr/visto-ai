@@ -1,5 +1,6 @@
 import type { FileContext } from '../context/build.ts';
-import type { Ranges } from '../context/diff.ts';
+import { lineTexts } from '../context/diff.ts';
+import type { LineTexts, Ranges } from '../context/diff.ts';
 import type { SubmitReviewArgs } from '../model/submit-review.ts';
 import type { AuditEntry, Finding, RawFinding, UnplacedFinding } from '../types.ts';
 import { normalizePath, place } from './placement.ts';
@@ -19,6 +20,7 @@ function cutOverview(text: string, limit: number): string {
 export function reconcile(answers: { value: SubmitReviewArgs; files: string[] }[], contexts: FileContext[]):
   { overview: string; findings: Finding[]; unplaced: UnplacedFinding[]; beyondDiff: RawFinding[]; audit: AuditEntry[] } {
   const rangesByPath = new Map<string, Ranges | null>(contexts.map((c) => [c.file.path, c.ranges]));
+  const textsByPath = new Map<string, LineTexts | null>(contexts.map((c) => [c.file.path, c.ranges === null ? null : lineTexts(c.hunks)]));
   const known: ReadonlySet<string> = new Set(rangesByPath.keys());
   const findings: Finding[] = [];
   const unplaced: UnplacedFinding[] = [];
@@ -44,13 +46,15 @@ export function reconcile(answers: { value: SubmitReviewArgs; files: string[] }[
         beyondDiff.push({ ...raw, path });
         continue;
       }
-      const result = place({ ...raw, path }, rangesByPath.get(path) ?? null);
+      const result = place({ ...raw, path }, rangesByPath.get(path) ?? null, textsByPath.get(path) ?? null);
       if ('unplaced' in result) {
         unplaced.push(result.unplaced);
         continue;
       }
       findings.push(result.placed);
-      if (result.placed.requestedLine !== null) {
+      if (result.how === 'quote') {
+        audit.push({ stage: 'reconcile', action: 'placed_by_quote', subject: `${path}:${raw.side}:${raw.line}`, reason: `to ${result.placed.side}:${result.placed.line}` });
+      } else if (result.placed.requestedLine !== null) {
         audit.push({ stage: 'reconcile', action: 'moved', subject: `${path}:${result.placed.requestedLine}`, reason: `to ${result.placed.line}` });
       }
     }
