@@ -192,6 +192,25 @@ test('an image with no text diff is scored by rule and not listed as not reviewe
   assert.deepEqual(audit, [{ stage: 'context', action: 'scored_by_rule', subject: 'img/logo.png', reason: 'rule_asset' }]);
 });
 
+test('a secret file: nothing of it is fetched or sent, it is not reviewed and it scores 100', async () => {
+  const source = stub(allPresent);
+  const secret = file('app/.env.production', { patch: '@@ -1 +1 @@\n-KEY=old\n+KEY=new' });
+  const { contexts } = await buildFileContexts(pr, [secret, file('src/a.ts')], source);
+  const c = contexts.find((one) => one.file.path === 'app/.env.production')!;
+  assert.deepEqual(
+    { skip: c.skip, hunks: c.hunks, ranges: c.ranges, diffText: c.diffText, full: c.full, test: c.test, blocks: c.blocks, plan: c.plan },
+    { skip: 'secret_file', hunks: [], ranges: null, diffText: null, full: null, test: null, blocks: [], plan: { kind: 'none', reason: 'secret_file' } },
+  );
+  assert.ok(!source.calls.some((k) => k.includes('.env')), source.calls.join(', '));
+  const packed = packBatches(contexts, 100000, 6);
+  assert.deepEqual(packed.notReviewed, [{ path: 'app/.env.production', reason: 'secret_file' }]);
+  assert.deepEqual(packed.batches.flatMap((b) => b.files.map((f) => f.file.path)), ['src/a.ts']);
+  const value = { overview: 'o', findings: [], files: [] };
+  const scores = reconcileScores([{ value, files: ['src/a.ts'] }], contexts, new Set(), parseRepoFile(null)).scores;
+  const s = scores.find((one) => one.path === 'app/.env.production')!;
+  assert.deepEqual([s.finalScore, s.covered], [100, false]);
+});
+
 test('hunksOf strips the patch, counts what it removed, and marks a hidden character on a changed line', () => {
   const out = hunksOf('@@ -1 +1 @@\n-a\n+a\u200b');
   assert.equal(out.text, '@@ -1 +1 @@\n-a\n+a');

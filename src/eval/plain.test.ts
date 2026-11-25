@@ -72,6 +72,17 @@ test('plainCase sends one call with the patch between markers and returns its fi
   assert.deepEqual([r.highest_score, r.needs_human, r.calls, r.total_cost, r.total_tokens, r.models], [null, null, 1, 0.01, 110, ['m']]);
 });
 
+test('plainCase leaves a secret file out and counts it as not reviewed', async () => {
+  const npmrc: ChangedFile = { path: '.npmrc', previousPath: null, status: 'modified', additions: 1, deletions: 1, patch: '@@ -1 +1 @@\n-token=old-value\n+token=new-value' };
+  const { deps, requests } = setup([answer([])], [cart, npmrc]);
+  const r = await plainCase(theCase, config, deps);
+  const user = requests[0]!.messages[1]!.content;
+  assert.equal(user.includes('new-value'), false);
+  assert.equal(user.includes('.npmrc'), false);
+  assert.equal(r.files_reviewed, 1);
+  assert.deepEqual(r.not_reviewed, { secret_file: 1 });
+});
+
 test('plainCase normalises a finding path as the engine does, and keeps one outside the pull request as written', async () => {
   const { deps } = setup([answer([
     { ...oneFinding, path: './src/cart.ts' }, { ...oneFinding, path: 'b/src/cart.ts' }, { ...oneFinding, path: 'src/other.ts' },

@@ -173,7 +173,7 @@ export interface RawFinding { path: string; side: Side; line: number; severity: 
 export interface Finding { path: string; side: Side; line: number; severity: Severity; body: string; quote: string; requestedLine: number | null }
 export type UnplacedReason = 'file_has_no_patch' | 'line_not_in_diff';
 export interface UnplacedFinding { path: string; side: Side; line: number; severity: Severity; body: string; quote: string; reason: UnplacedReason }
-export type NotReviewedReason = 'no_diff' | 'too_large' | 'over_batch_limit' | 'batch_failed';
+export type NotReviewedReason = 'no_diff' | 'too_large' | 'over_batch_limit' | 'batch_failed' | 'secret_file';
 export interface NotReviewed { path: string; reason: NotReviewedReason }
 
 export interface ReviewResult {

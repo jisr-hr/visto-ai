@@ -204,6 +204,8 @@ For each file under review:
 - **The full file at the head**, numbered. A file over 1,200 lines is shown as excerpts: each changed range widened by 150 lines. Removed files and low-priority files (generated, vendored, lock files, images) get no full-file context.
 - **The paired test file**, when one is found by naming convention.
 
+A **secret file** gets none of this: nothing of it is fetched or sent to a model, only its path. A file is secret when its path, or the path it was renamed from, has a `.ssh` segment, ends in `id_rsa`, `id_dsa`, `id_ecdsa`, `id_ed25519`, `.netrc`, `_netrc`, `.npmrc`, `.pypirc` or `.dockercfg`, or ends in `.env` or a name starting with `.env.` other than `.env.example`, `.env.sample` and `.env.template`; segments are compared case-insensitively. It is listed under `Coverage` as not reviewed (`secret_file`) and scores 100% (section 6.2). The list follows the one open-code-review publishes.
+
 For the pull request:
 
 - Title, description and branch names.
@@ -345,7 +347,7 @@ Two kinds of file are scored by rule, without the model:
 
 A move to another directory with no content change is not scored by rule. The model scores it as a whole file from its two paths, because a move can change a public URL where a framework routes by file path, and can change what other code is able to reach.
 
-Any other file whose diff cannot be produced, such as an unrecognised binary or a text file too large to fit the budget, scores 100%. Path alone never earns a low score: a large file under a "vendored" or "generated" directory is still read by the model or sent to a human. The backtest will show how often this rule blocks an approval, and any exception is added only on that evidence.
+Any other file whose diff cannot be produced, such as an unrecognised binary or a text file too large to fit the budget, scores 100%. So does a secret file (section 5.3), whose diff is never shown. Path alone never earns a low score: a large file under a "vendored" or "generated" directory is still read by the model or sent to a human. The backtest will show how often this rule blocks an approval, and any exception is added only on that evidence.
 
 No learned record lowers a score (D8). Learned records are shown to the model as reasons a block may need a person (section 7.4). Records that would argue the opposite are not shown to it at all.
 
