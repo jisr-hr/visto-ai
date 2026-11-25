@@ -57,7 +57,7 @@
 
 1. **Nothing here cannot be undone:** no migration. Going back to the previous release needs the config changed back: it refuses `auditKey` as an unknown key, and `autoApprove` with a share above 0.
 2. **Before approval goes on with a share above 0,** a key of at least 32 characters is set and kept like the webhook secret; the placeholder in `env.example` is refused on purpose. A new key draws every open pull request again, and so does a rename or a transfer of a repository for its own pull requests (call 12).
-3. **Nothing against GitHub can show an audited review on the private scratch repository.** The draw is asked last, and there both reads of the branch's rule answer 403, so every review there ends `rule_unreadable` before the draw. It needs what item 2 of the plan before's "For the owner" names: a repository whose rules dismiss stale approvals. The default: not made.
+3. **Nothing against GitHub can show an audited review on the private scratch repository.** The draw is asked last, and there both reads of the branch's rule answer 403, so no review there gets past `rule_unreadable`, so none reaches the draw. It needs what item 2 of the plan before's "For the owner" names: a repository whose rules dismiss stale approvals. The default: not made.
 4. **Rulings he may want to change,** each a small change: the draw read last (call 3); the label as the review's text alone (call 4); the key's 32 characters and its refusal in dry run (call 5); the paragraph telling the author the pull request would otherwise have been approved (call 10).
 
 ## Global Constraints
