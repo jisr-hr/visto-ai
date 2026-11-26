@@ -1026,3 +1026,125 @@ test('the audit key env.example shows is refused as too short, so it cannot be u
   assert.deepEqual(issues, ['auditKey: environment variable AUDIT_KEY must hold at least 32 characters']);
   assert.equal(issues.join('\n').includes(placeholder), false);
 });
+
+const UI_NEEDS = 'must be written when ui names accounts or a team';
+const UI_ISSUES = [`ui.publicUrl: ${UI_NEEDS}`, `app.clientId: ${UI_NEEDS}`, `app.clientSecret: ${UI_NEEDS}`];
+const APP_THREE = { id: '12345', privateKey: PEM, webhookSecret: 's' };
+const withAppKeys = (keys: string): string => SERVICE_YAML.replace('webhookSecret: { env: HOOK } }', `webhookSecret: { env: HOOK }, ${keys} }`);
+const UI_APP = withAppKeys('clientId: Iv1.0123456789abcdef, clientSecret: { env: APP_CLIENT_SECRET }');
+const UI_ENV = { ...ENV, APP_CLIENT_SECRET: 'client-secret-for-tests-only' };
+const refusalOf = (yaml: string, env: Record<string, string | undefined>): ConfigError | null => {
+  try {
+    parseConfig(yaml, env);
+  } catch (e) {
+    if (e instanceof ConfigError) return e;
+    throw e;
+  }
+  return null;
+};
+const uiIssuesOf = (yaml: string, env: Record<string, string | undefined>): string[] => refusalOf(yaml, env)?.issues ?? [];
+
+test('the UI is off unless ui names accounts or a team, and a config that writes no ui gives the config it gave', () => {
+  const cases: Array<[DeploymentConfig, DeploymentConfig['app']]> = [
+    [parseConfig(minimal, KEY), null], [parseConfig(SERVICE_YAML, ENV), APP_THREE], [parseConfig(example(), exampleEnv), null],
+  ];
+  for (const [c, app] of cases) {
+    assert.equal('ui' in c, false);
+    assert.deepEqual(c.app, app);
+  }
+  for (const yaml of [`${SERVICE_YAML}ui: { accounts: [] }\n`, `${SERVICE_YAML}ui: { publicUrl: https://visto.example.test }\n`, `${SERVICE_YAML}ui: {}\n`]) {
+    assert.deepEqual(uiIssuesOf(yaml, ENV), [], yaml);
+    const c = parseConfig(yaml, ENV);
+    assert.equal('ui' in c, false, yaml);
+    assert.deepEqual(c.app, APP_THREE, yaml);
+  }
+});
+
+test('ui with accounts or a team is read with the client id, the client secret from its variable and the public address as an origin', () => {
+  const sign = { clientId: 'Iv1.0123456789abcdef', clientSecret: 'client-secret-for-tests-only' };
+  const named = parseConfig(`${UI_APP}ui: { accounts: [octo-lead], publicUrl: 'https://visto.example.test/' }\n`, UI_ENV);
+  assert.deepEqual(named.ui, { accounts: ['octo-lead'], team: null, publicUrl: 'https://visto.example.test', ...sign });
+  assert.deepEqual(named.app, APP_THREE);
+  assert.equal(Object.keys(named.app!).length, 3);
+  const team = parseConfig(`${UI_APP}ui: { team: acme/reviewers, publicUrl: http://localhost:8080 }\n`, UI_ENV);
+  assert.deepEqual(team.ui, { accounts: [], team: 'acme/reviewers', publicUrl: 'http://localhost:8080', ...sign });
+  assert.equal(Object.keys(team.app!).length, 3);
+  for (const [written, origin] of [['http://127.0.0.1', 'http://127.0.0.1'], ['https://visto.example.test:8443', 'https://visto.example.test:8443']] as const) {
+    const c = parseConfig(`${UI_APP}ui: { accounts: [octo-lead], team: acme/reviewers, publicUrl: '${written}' }\n`, UI_ENV);
+    assert.deepEqual(c.ui, { accounts: ['octo-lead'], team: 'acme/reviewers', publicUrl: origin, ...sign }, written);
+  }
+});
+
+test('ui that names who may open it but lacks the address, the client id or the client secret is refused with each issue, in dry run too, and quotes no value', () => {
+  for (const dryRun of ['true', 'false']) {
+    const mode = (yaml: string): string => yaml.replace('dryRun: true', `dryRun: ${dryRun}`);
+    const refusals: ConfigError[] = [];
+    const expect = (yaml: string, issues: string[]): void => {
+      const e = refusalOf(mode(yaml), UI_ENV);
+      assert.deepEqual(e?.issues, issues, `${dryRun} ${yaml}`);
+      refusals.push(e!);
+    };
+    expect(`${SERVICE_YAML}ui: { accounts: [octo-lead] }\n`, UI_ISSUES);
+    expect(`${SERVICE_YAML}ui: { team: acme/reviewers }\n`, UI_ISSUES);
+    expect(`${minimal}ui: { accounts: [octo-lead] }\n`, UI_ISSUES);
+    expect(`${UI_APP}ui: { accounts: [octo-lead] }\n`, [UI_ISSUES[0]!]);
+    expect(`${withAppKeys('clientSecret: { env: APP_CLIENT_SECRET }')}ui: { accounts: [octo-lead], publicUrl: https://visto.example.test }\n`, [UI_ISSUES[1]!]);
+    expect(`${withAppKeys('clientId: Iv1.0123456789abcdef')}ui: { accounts: [octo-lead], publicUrl: https://visto.example.test }\n`, [UI_ISSUES[2]!]);
+    // In the error that holds the gate's issues, after them.
+    expect(`${SERVICE_YAML}ui: { accounts: [octo-lead] }\nrepositories:\n  defaults: { gate: { enabled: true } }\n`, [`repositories.defaults.gate.branches: ${GATE_ISSUE}`, ...UI_ISSUES]);
+    for (const e of refusals) {
+      for (const value of ['octo-lead', 'acme/reviewers', 'client-secret-for-tests-only', 'Iv1.0123456789abcdef', 'visto.example.test']) {
+        assert.ok(!e.message.includes(value), `${value} in ${e.message}`);
+      }
+    }
+  }
+});
+
+test('a public address with a path, a query, a user, or plain http to another host is refused by name', () => {
+  const ISSUE = 'ui.publicUrl: must be an https URL with no path, query or user, or http://localhost or http://127.0.0.1';
+  const bad = [
+    'https://visto.example.test/ui', 'https://visto.example.test/?a=1', 'https://u:p@visto.example.test', 'http://visto.example.test', 'ftp://x.test',
+    'https://u@visto.example.test', 'https://visto.example.test/#top', ' https://visto.example.test', 'http://localhost.example.test', 'visto.example.test', '',
+  ];
+  for (const written of bad) {
+    const issues = uiIssuesOf(`${UI_APP}ui: { accounts: [octo-lead], publicUrl: '${written}' }\n`, UI_ENV);
+    assert.deepEqual(issues, [ISSUE], written);
+    for (const issue of issues) {
+      assert.ok(issue.startsWith('ui.publicUrl:'), issue);
+      for (const part of ['example.test', 'x.test', 'u:p', 'u@']) assert.ok(!issue.includes(part), issue);
+    }
+  }
+});
+
+test('an account that is not a login, and a team that is not org/slug, are refused by name', () => {
+  const logins = (n: number): string => Array.from({ length: n }, (_, i) => `octo-${i}`).join(', ');
+  const bad: Array<[string, string]> = [
+    ['accounts: [octo_lead]', 'ui.accounts'], ["accounts: ['']", 'ui.accounts'], [`accounts: [${logins(101)}]`, 'ui.accounts'],
+    [`accounts: [${'a'.repeat(40)}]`, 'ui.accounts'], ['team: acme', 'ui.team'], ["team: 'acme/re viewers'", 'ui.team'],
+  ];
+  for (const [body, where] of bad) {
+    const issues = uiIssuesOf(`${UI_APP}ui: { ${body}, publicUrl: https://visto.example.test }\n`, UI_ENV);
+    assert.ok(issues.length > 0, body);
+    for (const issue of issues) {
+      assert.ok(issue.startsWith(where), issue);
+      for (const value of ['octo_lead', 'acme', 're viewers', 'aaaa']) assert.ok(!issue.includes(value), issue);
+    }
+  }
+  assert.equal(uiIssuesOf(`${UI_APP}ui: { accounts: [${logins(100)}, ${'a'.repeat(39)}], publicUrl: https://visto.example.test }\n`, UI_ENV).length, 1);
+  assert.equal(parseConfig(`${UI_APP}ui: { accounts: [${logins(99)}, ${'a'.repeat(39)}], publicUrl: https://visto.example.test }\n`, UI_ENV).ui?.accounts.length, 100);
+});
+
+test('a client secret written is resolved whatever ui says, and refused when its variable is not set', () => {
+  const NOT_SET = ['app.clientSecret: environment variable APP_CLIENT_SECRET is not set'];
+  const secretOnly = withAppKeys('clientSecret: { env: APP_CLIENT_SECRET }');
+  for (const env of [ENV, { ...ENV, APP_CLIENT_SECRET: '' }]) {
+    assert.deepEqual(uiIssuesOf(secretOnly, env), NOT_SET);
+    assert.deepEqual(uiIssuesOf(`${secretOnly}ui: { accounts: [] }\n`, env), NOT_SET);
+    assert.deepEqual(uiIssuesOf(`${UI_APP}ui: { accounts: [octo-lead], publicUrl: https://visto.example.test }\n`, env), NOT_SET);
+  }
+  for (const yaml of [secretOnly, `${secretOnly}ui: { accounts: [] }\n`]) {
+    const c = parseConfig(yaml, UI_ENV);
+    assert.equal('ui' in c, false);
+    assert.deepEqual(c.app, APP_THREE);
+  }
+});

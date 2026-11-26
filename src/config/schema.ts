@@ -48,7 +48,35 @@ const scorer = z
   })
   .strict();
 
-const app = z.object({ id: z.number().int().min(1), privateKey: secretRef, webhookSecret: secretRef }).strict();
+const app = z
+  .object({
+    id: z.number().int().min(1),
+    privateKey: secretRef,
+    webhookSecret: secretRef,
+    clientId: z.string().regex(/^[A-Za-z0-9._-]{1,100}$/, { message: 'must be 1 to 100 letters, digits, dots, hyphens or underscores' }).optional(),
+    clientSecret: secretRef.optional(),
+  })
+  .strict();
+
+/** Where people open the service: https with no path, query or user; or plain http on this machine only. */
+function isPublicUrl(value: string): boolean {
+  if (!/^[\x21-\x7E]+$/.test(value) || !URL.canParse(value)) return false;
+  const { protocol, hostname, username, password, search, hash, pathname } = new URL(value);
+  if (username !== '' || password !== '' || search !== '' || hash !== '' || pathname !== '/') return false;
+  return protocol === 'https:' || (protocol === 'http:' && (hostname === 'localhost' || hostname === '127.0.0.1'));
+}
+
+/** Who may open the UI, read from the file only (section 4.1). */
+const ui = z
+  .object({
+    accounts: z.array(z.string().regex(/^[A-Za-z0-9-]{1,39}$/, { message: 'must be a GitHub login' })).max(100).default([]),
+    team: z.string().regex(/^[A-Za-z0-9-]{1,39}\/[A-Za-z0-9._-]{1,100}$/, { message: 'must be <org>/<team-slug>' }).optional(),
+    publicUrl: z
+      .string()
+      .refine(isPublicUrl, { message: 'must be an https URL with no path, query or user, or http://localhost or http://127.0.0.1' })
+      .optional(),
+  })
+  .strict();
 
 const alerts = z.object({ webhook: secretRef }).strict();
 
@@ -245,6 +273,7 @@ export const configSchema = z
     database: database.optional(),
     auditKey: secretRef.optional(),
     server: server.prefault({}),
+    ui: ui.optional(),
     dryRun: z.boolean().default(true),
     learning: z.boolean().default(false),
     alerts: alerts.optional(),
