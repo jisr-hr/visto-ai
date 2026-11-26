@@ -1,7 +1,8 @@
 // The application (Task 10, rules 3, 4 and 8; the password design 4.7): who is signed in is read once; signed out, the sign-in
 // page, which reads it again once a sign-in made a session; signed in, the layout around the page of the path. Any read of the
 // pages answered 401 shows the sign-in page; one answered 403 forbidden reads who is signed in again, the page kept on screen,
-// so a role changed meanwhile shows at the next request to an admin route (call 25).
+// so a role changed meanwhile shows at the next request to an admin route (call 25). Each answer applies only while the session
+// that asked is still the one signed in.
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { RequestFailed } from './api.ts';
 import type { Api } from './api.ts';
@@ -72,13 +73,15 @@ export function App({ api }: { api: Api }) {
     };
   }, [api, tries]);
 
-  // The session signed in at the last render, by its token for changes: a read again belongs to the one that asked it.
+  // The session signed in at the last render, by its token for changes: a read, and a read again, belong to the one that asked.
   const session = useRef<string | null>(null);
   session.current = state.kind === 'signed_in' ? state.me.csrf : null;
 
   // The API the pages read: one of its reads answered 401 signs the person out here; one answered 403 forbidden reads who is
   // signed in again.
   const watched = useMemo<Api>(() => {
+    /** Whether `last` is still signed in as the session that asked, by its token; nobody signed in at the asking (null) never is. */
+    const still = (last: State, asked: string | null): boolean => last.kind === 'signed_in' && last.me.csrf === asked;
     /**
      * Who is signed in, read again with the raw API (so a refusal of this read reads nothing again) while the page stays: its
      * answer replaces who was signed in and a 401 signs out, each only while the session that asked is still the one signed in
@@ -86,20 +89,22 @@ export function App({ api }: { api: Api }) {
      */
     const readAgain = (): void => {
       const asked = session.current;
-      const still = (last: State): boolean => last.kind === 'signed_in' && last.me.csrf === asked;
       api.me().then(
-        (me) => setState((last) => (still(last) ? { kind: 'signed_in', me } : last)),
+        (me) => setState((last) => (still(last, asked) ? { kind: 'signed_in', me } : last)),
         (error: unknown) => {
-          if (isSignedOut(error)) setState((last) => (still(last) ? { kind: 'signed_out' } : last));
+          if (isSignedOut(error)) setState((last) => (still(last, asked) ? { kind: 'signed_out' } : last));
         },
       );
     };
-    const watch = <T,>(read: Promise<T>): Promise<T> =>
-      read.catch((error: unknown) => {
-        if (isSignedOut(error)) setState({ kind: 'signed_out' });
+    /** A read of the pages: its 401 signs out only while the session that asked it is still the one signed in, as above. */
+    const watch = <T,>(read: Promise<T>): Promise<T> => {
+      const asked = session.current;
+      return read.catch((error: unknown) => {
+        if (isSignedOut(error)) setState((last) => (still(last, asked) ? { kind: 'signed_out' } : last));
         else if (isForbidden(error)) readAgain();
         throw error;
       });
+    };
     return {
       me: () => watch(api.me()),
       activity: () => watch(api.activity()),

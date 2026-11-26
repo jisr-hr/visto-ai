@@ -1,8 +1,8 @@
 // Settings, which opens on Accounts (the password design 4.2, 4.3 and 4.7; calls 9, 12 and 25): the table of the accounts, New
 // account, and per row its role changed, its password reset and its removal, asked in the row first. A one-time password is
 // shown once, kept in this page's state only, until Done or the page is left: it is never written to storage, the address or
-// the console. After each change (or a not_found) the list is read again; it is not polled. Every role is the API's to check:
-// a refusal 403 forbidden makes the app read who is signed in again.
+// the console. After each change (or a not_found, or a make that may have made its account all the same) the list is read again;
+// it is not polled. Every role is the API's to check: a refusal 403 forbidden makes the app read who is signed in again.
 import { useEffect, useRef, useState } from 'react';
 import type { FormEvent, ReactNode } from 'react';
 import { RequestFailed } from '../api.ts';
@@ -55,6 +55,13 @@ function refusalOf(error: unknown): string {
   return FAILED;
 }
 const isNotFound = (error: unknown): boolean => error instanceof RequestFailed && error.code === 'not_found';
+/** A make whose account may be there all the same: one of that name exists already, or its answer was lost (none, a 5xx, unreadable). */
+const mayBeMade = (error: unknown): boolean =>
+  error instanceof RequestFailed && (error.code === 'name_taken' || error.code === 'unreadable' || error.status === 0 || error.status >= 500);
+
+// The ids of a row's name, which describes each of its buttons, and of its Reset password, where Done puts focus back.
+const nameId = (id: number): string => `account-${id}-name`;
+const resetId = (id: number): string => `account-${id}-reset`;
 
 /** The lines under a password account's way in: no password chosen yet, an expired one-time password, a wait. */
 function linesOf(account: Account): string[] {
@@ -93,8 +100,11 @@ function Field({ id, label, children }: { id: string; label: string; children: R
   );
 }
 
-/** A one-time password on screen, for whom, until when, and whether Copy worked. */
-interface Shown { name: string; password: string; expiresAt: string; copy: 'not_yet' | 'copied' | 'refused' }
+/**
+ * A one-time password on screen, for whom, until when, whether Copy worked, and what opened it: New account for a make, the id
+ * of the account whose Reset password it was.
+ */
+interface Shown { name: string; password: string; expiresAt: string; copy: 'not_yet' | 'copied' | 'refused'; from: 'new' | number }
 
 /** What a row's buttons do. */
 interface RowChanges { role: (role: Role) => void; reset: () => void; ask: () => void; remove: () => void; cancel: () => void }
@@ -102,11 +112,15 @@ interface RowChanges { role: (role: Role) => void; reset: () => void; ask: () =>
 function AccountLine({ account, now, asking, sending, change }: { account: Account; now: string; asking: boolean; sending: boolean; change: RowChanges }) {
   const admin = account.role === 'admin';
   const by = madeByOf(account.madeBy);
+  // Each button of the row is described by the row's name, so that a button read alone says whose it is.
+  const name = nameId(account.id);
   return (
     <TableRow hover>
       <TableCell>
         <div className="flex flex-wrap items-center gap-2">
-          <span className="font-medium">{account.name}</span>
+          <span id={name} className="font-medium">
+            {account.name}
+          </span>
           {account.kind === 'github' ? <Badge tone="muted">GitHub</Badge> : null}
           {account.you ? <Badge tone="accent">You</Badge> : null}
         </div>
@@ -134,28 +148,30 @@ function AccountLine({ account, now, asking, sending, change }: { account: Accou
         </div>
       </TableCell>
       <TableCell>
+        {/* The question's Cancel stands where the row's Remove stands, so React keeps one button for both, unkeyed: focus goes
+            from Remove to Cancel and back with it. */}
         {asking ? (
           <div className="flex flex-wrap items-center gap-2">
             <span className="text-[13px]">{`Remove ${account.name}? Their sessions end at once.`}</span>
-            <Button type="button" variant="primary" disabled={sending} onClick={change.remove}>
+            <Button type="button" variant="primary" aria-describedby={name} disabled={sending} onClick={change.remove}>
               Remove
             </Button>
-            <Button type="button" onClick={change.cancel}>
+            <Button type="button" aria-describedby={name} onClick={change.cancel}>
               Cancel
             </Button>
           </div>
         ) : (
           <div className="flex flex-wrap gap-2">
-            <Button type="button" disabled={sending} onClick={() => change.role(admin ? 'viewer' : 'admin')}>
+            <Button type="button" aria-describedby={name} disabled={sending} onClick={() => change.role(admin ? 'viewer' : 'admin')}>
               {admin ? 'Make viewer' : 'Make admin'}
             </Button>
             {/* The API refuses an admin's reset of their own account (call 9), and a GitHub account has no password. */}
             {account.kind === 'password' && account.you === false ? (
-              <Button type="button" disabled={sending} onClick={change.reset}>
+              <Button type="button" id={resetId(account.id)} aria-describedby={name} disabled={sending} onClick={change.reset}>
                 Reset password
               </Button>
             ) : null}
-            <Button type="button" onClick={change.ask}>
+            <Button type="button" aria-describedby={name} onClick={change.ask}>
               Remove
             </Button>
           </div>
@@ -181,6 +197,15 @@ export function AccountsPage() {
   const [shown, setShown] = useState<Shown | null>(null);
   // The id of the account whose removal is asked in its row.
   const [asking, setAsking] = useState<number | null>(null);
+  const newAccount = useRef<HTMLButtonElement>(null);
+  // The control focus goes to once the page is drawn again, when the one that had it is gone: none when null.
+  const focusNext = useRef<(() => HTMLElement | null) | null>(null);
+
+  useEffect(() => {
+    const next = focusNext.current;
+    focusNext.current = null;
+    next?.()?.focus();
+  });
 
   useEffect(() => {
     let live = true;
@@ -199,7 +224,10 @@ export function AccountsPage() {
 
   const readAgain = (): void => setReads((n) => n + 1);
 
-  /** A change sent: its answer applied and the list read again; a refusal said, and the list read again after a not_found. */
+  /**
+   * A change sent: its answer applied and the list read again; a refusal said, and the list read again after a not_found, and
+   * after a make that may have made its account all the same (`name_taken`, or an answer lost).
+   */
   async function send<T>(which: 'make' | 'row', change: () => Promise<T>, done: (answer: T) => void): Promise<void> {
     if (inFlight.current) return;
     inFlight.current = true;
@@ -212,15 +240,22 @@ export function AccountsPage() {
     } catch (error) {
       // A 401 has signed the person out already (the app's watched API); the page is gone with it.
       setAlert(refusalOf(error));
-      if (isNotFound(error)) readAgain();
+      if (isNotFound(error) || (which === 'make' && mayBeMade(error))) readAgain();
     } finally {
       inFlight.current = false;
       setSending(null);
     }
   }
 
-  /** The one-time password of an account made or reset, in place of any shown before. */
-  const show = (made: OneTime): void => setShown({ name: made.account.name, password: made.oneTimePassword, expiresAt: made.expiresAt, copy: 'not_yet' });
+  /** The one-time password of an account made or reset, in place of any shown before; `from` is what opened it. */
+  const show = (made: OneTime, from: Shown['from']): void =>
+    setShown({ name: made.account.name, password: made.oneTimePassword, expiresAt: made.expiresAt, copy: 'not_yet', from });
+
+  /** Done: the one-time password forgotten, and focus back on what opened it, New account or the row's Reset password. */
+  function done(from: Shown['from']): void {
+    setShown(null);
+    focusNext.current = () => (from === 'new' ? newAccount.current : document.getElementById(resetId(from)));
+  }
 
   function closeForm(): void {
     setMaking(false);
@@ -237,7 +272,7 @@ export function AccountsPage() {
       return;
     }
     void send('make', () => api.makeAccount(me.csrf, name, role), (made) => {
-      show(made);
+      show(made, 'new');
       closeForm();
     });
   }
@@ -255,7 +290,7 @@ export function AccountsPage() {
 
   const changesOf = (account: Account): RowChanges => ({
     role: (to) => void send('row', () => api.setRole(me.csrf, account.id, to), () => {}),
-    reset: () => void send('row', () => api.resetPassword(me.csrf, account.id), show),
+    reset: () => void send('row', () => api.resetPassword(me.csrf, account.id), (made) => show(made, account.id)),
     ask: () => setAsking(account.id),
     remove: () => void send('row', () => api.removeAccount(me.csrf, account.id), () => {}),
     cancel: () => setAsking(null),
@@ -274,7 +309,7 @@ export function AccountsPage() {
             {data === null ? null : <Badge tone="muted">{plural(data.accounts.length, 'account', 'accounts')}</Badge>}
           </div>
           {making ? null : (
-            <Button type="button" variant="primary" onClick={() => setMaking(true)}>
+            <Button ref={newAccount} type="button" variant="primary" onClick={() => setMaking(true)}>
               New account
             </Button>
           )}
@@ -282,7 +317,16 @@ export function AccountsPage() {
         {making ? (
           <form aria-label="New account" className="flex flex-wrap items-end gap-3 border-t border-border px-5 py-4" onSubmit={make}>
             <Field id="account-name" label="Name">
-              <Input id="account-name" autoComplete="off" autoCapitalize="none" value={name} onChange={(event) => setName(event.target.value)} />
+              {/* Opened by New account, which is gone with it: focus comes here. */}
+              <Input
+                id="account-name"
+                autoComplete="off"
+                autoCapitalize="none"
+                autoFocus
+                aria-describedby="account-name-help"
+                value={name}
+                onChange={(event) => setName(event.target.value)}
+              />
             </Field>
             <Field id="account-role" label="Role">
               <Select id="account-role" value={role} onChange={(event) => setRole(event.target.value === 'admin' ? 'admin' : 'viewer')}>
@@ -298,11 +342,14 @@ export function AccountsPage() {
               onClick={() => {
                 closeForm();
                 setAlert(null);
+                focusNext.current = () => newAccount.current;
               }}
             >
               Cancel
             </Button>
-            <p className="w-full text-[13px] text-muted">{HELP}</p>
+            <p id="account-name-help" className="w-full text-[13px] text-muted">
+              {HELP}
+            </p>
           </form>
         ) : null}
         {shown === null ? null : (
@@ -316,7 +363,7 @@ export function AccountsPage() {
               <Button type="button" onClick={() => void copy(shown.password)}>
                 {shown.copy === 'copied' ? 'Copied' : 'Copy'}
               </Button>
-              <Button type="button" onClick={() => setShown(null)}>
+              <Button type="button" onClick={() => done(shown.from)}>
                 Done
               </Button>
             </div>

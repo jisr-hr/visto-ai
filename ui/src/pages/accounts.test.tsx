@@ -458,21 +458,21 @@ test('a new account shows its one-time password once, with Copy, until Done', as
 
 test('a name of another shape is refused before sending, and each refusal of the server reads as pinned', async () => {
   visit('/ui/settings');
-  // Each refusal, by its code, then its status; the last one read again after it.
+  // Each refusal, by its code, then its status; whether the list is read again after it.
   const refusals: [unknown, string, boolean][] = [
     [new RequestFailed(409, 'last_admin'), LAST_ADMIN, false],
     [new RequestFailed(409, 'own_account'), OWN_ACCOUNT, false],
     [new RequestFailed(404, 'not_found'), NOT_FOUND, true],
-    [new RequestFailed(409, 'name_taken'), NAME_TAKEN, false],
+    [new RequestFailed(409, 'name_taken'), NAME_TAKEN, true],
     [new RequestFailed(400, 'bad_name'), BAD_NAME, false],
     [new RequestFailed(409, 'full'), FULL, false],
-    [new RequestFailed(503, 'unknown'), BUSY, false],
-    [new RequestFailed(500, 'internal_error'), FAILED, false],
+    [new RequestFailed(503, 'unknown'), BUSY, true],
+    [new RequestFailed(500, 'internal_error'), FAILED, true],
     [new RequestFailed(409, 'github_account'), FAILED, false],
     [new RequestFailed(400, 'bad_request'), FAILED, false],
     [new RequestFailed(403, 'csrf'), FAILED, false],
     [new RequestFailed(403, 'forbidden'), FAILED, false],
-    [new RequestFailed(0, 'network'), UNREACHABLE, false],
+    [new RequestFailed(0, 'network'), UNREACHABLE, true],
     [new RequestFailed(400, '__proto__'), FAILED, false],
     [new TypeError('Failed to fetch'), FAILED, false],
   ];
@@ -510,7 +510,7 @@ test('a name of another shape is refused before sending, and each refusal of the
   for (const shape of shapes) expect(await said(shape)).toBe(BAD_NAME);
   expect(sent('makeAccount')).toEqual([]);
 
-  // Sent: each refusal of the service, the name kept; the list read again after a not_found only.
+  // Sent: each refusal of the service, the name kept; the list read again after a not_found, a name_taken and a lost answer.
   const names = ['octo-viewer', 'x'.repeat(39), '7', 'octo.new_2-b'];
   const texts: string[] = [];
   const reads: number[] = [];
@@ -520,7 +520,8 @@ test('a name of another shape is refused before sending, and each refusal of the
     reads.push(sent('accounts').length);
   }
   expect(texts).toEqual(refusals.map(([, text]) => text));
-  expect(reads).toEqual(refusals.map((_, index) => (index >= 2 ? 2 : 1)));
+  let read = 1;
+  expect(reads).toEqual(refusals.map(([, , again]) => (read += again ? 1 : 0)));
   expect(sent('makeAccount')).toEqual(refusals.map((_, index) => ['makeAccount', ME.csrf, names[index % names.length], 'admin']));
   // Still here, the form open.
   expect(screen.getByRole('form', { name: 'New account' })).toBe(form);
@@ -703,4 +704,245 @@ test('reading, a failed read and Try again', async () => {
   // It is not polled.
   await act(() => vi.advanceTimersByTimeAsync(60_000));
   expect(reads()).toBe(2);
+});
+
+test('a one-time password shown is in neither the address nor the history, after a make and after a reset', async () => {
+  visit('/ui/settings');
+  const reset: OneTime = { account: VIEWER, oneTimePassword: 'p3n8w2x7k4r9t5b6m2qz', expiresAt: '2026-03-04T10:05:00.000Z' };
+  const { api } = fakeApi({ accounts: () => Promise.resolve(LIST), makeAccount: () => Promise.resolve(ONE_TIME), resetPassword: () => Promise.resolve(reset) });
+  const user = userEvent.setup();
+  render(<App api={api} />);
+  expect(await screen.findByText('5 accounts')).toBeInTheDocument();
+  const entries = window.history.length;
+  /** Right after a box shows: the address is the page's, the history has no entry more, and its entry holds no password. */
+  const clean = (secret: string): void => {
+    expect(window.location.href).toBe('http://localhost:3000/ui/settings');
+    expect(window.history.length).toBe(entries);
+    expect(JSON.stringify(window.history.state ?? null)).not.toContain(secret);
+  };
+
+  await user.click(screen.getByRole('button', { name: 'New account' }));
+  await user.type(screen.getByLabelText('Name'), 'octo-viewer');
+  await user.click(screen.getByRole('button', { name: 'Make the account' }));
+  expect(within(screen.getByRole('status')).getByText(PASSWORD)).toBeInTheDocument();
+  clean(PASSWORD);
+  await user.click(within(screen.getByRole('status')).getByRole('button', { name: 'Done' }));
+
+  await user.click(within(actionsOf('octo-viewer')).getByRole('button', { name: 'Reset password' }));
+  expect(within(screen.getByRole('status')).getByText('p3n8w2x7k4r9t5b6m2qz')).toBeInTheDocument();
+  clean('p3n8w2x7k4r9t5b6m2qz');
+});
+
+test('one change at a time: a double click sends once, and so do two clicks before the page is drawn again', async () => {
+  visit('/ui/settings');
+  const first = later<AccountAnswer>();
+  const answers: (() => Promise<AccountAnswer>)[] = [() => first.promise, () => new Promise<AccountAnswer>(() => {})];
+  const { api, sent } = fakeApi({ accounts: () => Promise.resolve(LIST), setRole: () => answers.shift()!() });
+  const user = userEvent.setup();
+  render(<App api={api} />);
+  expect(await screen.findByText('5 accounts')).toBeInTheDocument();
+
+  await user.dblClick(within(actionsOf('octo-viewer')).getByRole('button', { name: 'Make admin' }));
+  expect(sent('setRole')).toEqual([['setRole', ME.csrf, 3, 'admin']]);
+  await act(async () => first.resolve({ account: { ...VIEWER, role: 'admin' } }));
+
+  // Two clicks in one go, before the page is drawn again with its buttons disabled: the second sends nothing.
+  const dev = within(actionsOf('octo-dev')).getByRole('button', { name: 'Make admin' });
+  expect(dev).toBeEnabled();
+  act(() => {
+    dev.click();
+    dev.click();
+  });
+  expect(sent('setRole')).toEqual([['setRole', ME.csrf, 3, 'admin'], ['setRole', ME.csrf, 5, 'admin']]);
+});
+
+test('a change sent closes the removal asked, whether it is that removal or a change in another row', async () => {
+  visit('/ui/settings');
+  const { api, sent } = fakeApi({
+    accounts: () => Promise.resolve(LIST),
+    setRole: () => Promise.resolve({ account: { ...VIEWER, role: 'admin' } }),
+    removeAccount: () => Promise.reject(new RequestFailed(500, 'internal_error')),
+  });
+  const user = userEvent.setup();
+  render(<App api={api} />);
+  expect(await screen.findByText('5 accounts')).toBeInTheDocument();
+
+  // Asked in octo-dev's row, then a change sent in octo-viewer's: the question is gone.
+  await user.click(within(actionsOf('octo-dev')).getByRole('button', { name: 'Remove' }));
+  expect(textsOf(actionsOf('octo-dev'))).toEqual(['Remove octo-dev? Their sessions end at once.', 'Remove', 'Cancel']);
+  await user.click(within(actionsOf('octo-viewer')).getByRole('button', { name: 'Make admin' }));
+  expect(sent('setRole')).toEqual([['setRole', ME.csrf, 3, 'admin']]);
+  expect(textsOf(actionsOf('octo-dev'))).toEqual(['Make admin', 'Remove']);
+
+  // The removal itself, sent and refused: the question is gone too, the refusal said.
+  await user.click(within(actionsOf('octo-new')).getByRole('button', { name: 'Remove' }));
+  await user.click(within(actionsOf('octo-new')).getByRole('button', { name: 'Remove' }));
+  expect(sent('removeAccount')).toEqual([['removeAccount', ME.csrf, 4]]);
+  expect(await screen.findByRole('alert')).toHaveTextContent(FAILED);
+  expect(textsOf(actionsOf('octo-new'))).toEqual(['Make admin', 'Reset password', 'Remove']);
+});
+
+test('the form\'s Cancel takes the alert away with it', async () => {
+  visit('/ui/settings');
+  const { api, sent } = fakeApi({ accounts: () => Promise.resolve(LIST) });
+  const user = userEvent.setup();
+  render(<App api={api} />);
+  expect(await screen.findByText('5 accounts')).toBeInTheDocument();
+  await user.click(screen.getByRole('button', { name: 'New account' }));
+  await user.type(screen.getByLabelText('Name'), 'Octo-Viewer');
+  await user.click(screen.getByRole('button', { name: 'Make the account' }));
+  expect(screen.getByRole('alert')).toHaveTextContent(BAD_NAME);
+
+  await user.click(within(screen.getByRole('form', { name: 'New account' })).getByRole('button', { name: 'Cancel' }));
+  expect(screen.queryByRole('form', { name: 'New account' })).toBeNull();
+  expect(screen.queryByRole('alert')).toBeNull();
+  expect(sent('makeAccount')).toEqual([]);
+});
+
+test('a read again that fails after a change drops the table it would have replaced', async () => {
+  visit('/ui/settings');
+  const answers: (() => Promise<Accounts>)[] = [() => Promise.resolve(LIST), () => Promise.reject(new RequestFailed(500, 'internal_error'))];
+  const { api, sent } = fakeApi({ accounts: () => answers.shift()!(), setRole: () => Promise.resolve({ account: { ...VIEWER, role: 'admin' } }) });
+  const user = userEvent.setup();
+  render(<App api={api} />);
+  expect(await screen.findByText('5 accounts')).toBeInTheDocument();
+
+  await user.click(within(actionsOf('octo-viewer')).getByRole('button', { name: 'Make admin' }));
+  expect(await screen.findByText('The accounts could not be read.')).toBeInTheDocument();
+  expect(sent('accounts')).toHaveLength(2);
+  expect(within(section()).queryByRole('table')).toBeNull();
+  expect(within(section()).queryByText('octo-viewer')).toBeNull();
+  expect(section().querySelector('[data-slot="badge"]')).toBeNull();
+  expect(within(section()).getByRole('button', { name: 'Try again' })).toBeInTheDocument();
+});
+
+test('a copy that ends after another one-time password replaced its own marks nothing', async () => {
+  visit('/ui/settings');
+  const user = userEvent.setup();
+  const reset: OneTime = { account: NEW, oneTimePassword: 'p3n8w2x7k4r9t5b6m2qz', expiresAt: '2026-03-04T10:05:00.000Z' };
+  const { api } = fakeApi({ accounts: () => Promise.resolve(LIST), makeAccount: () => Promise.resolve(ONE_TIME), resetPassword: () => Promise.resolve(reset) });
+  render(<App api={api} />);
+  expect(await screen.findByText('5 accounts')).toBeInTheDocument();
+  await user.click(screen.getByRole('button', { name: 'New account' }));
+  await user.type(screen.getByLabelText('Name'), 'octo-viewer');
+  await user.click(screen.getByRole('button', { name: 'Make the account' }));
+  expect(within(screen.getByRole('status')).getByText(PASSWORD)).toBeInTheDocument();
+
+  // Copy is pressed for octo-viewer's, and ends once octo-new's reset has replaced it on screen.
+  const copied = later<void>();
+  const write = vi.spyOn(navigator.clipboard, 'writeText').mockImplementationOnce(() => copied.promise);
+  await user.click(within(screen.getByRole('status')).getByRole('button', { name: 'Copy' }));
+  expect(write).toHaveBeenCalledWith(PASSWORD);
+  await user.click(within(actionsOf('octo-new')).getByRole('button', { name: 'Reset password' }));
+  const box = screen.getByRole('status');
+  expect(within(box).getByText('One-time password for octo-new')).toBeInTheDocument();
+  await act(async () => copied.resolve());
+  expect(within(box).getAllByRole('button').map((each) => each.textContent)).toEqual(['Copy', 'Done']);
+  expect(within(box).queryByText(REFUSED_COPY)).toBeNull();
+
+  // Its own Copy still marks it.
+  await user.click(within(box).getByRole('button', { name: 'Copy' }));
+  expect(await within(box).findByRole('button', { name: 'Copied' })).toBeInTheDocument();
+});
+
+test('every row\'s buttons are described by the row\'s name, and the help line describes the name to type', async () => {
+  visit('/ui/settings');
+  const { api } = fakeApi({ accounts: () => Promise.resolve(LIST) });
+  const user = userEvent.setup();
+  render(<App api={api} />);
+  expect(await screen.findByText('5 accounts')).toBeInTheDocument();
+
+  /** Each button of the row of `name` is described by the row's name, held in that row. */
+  const described = (name: string): void => {
+    const buttons = within(actionsOf(name)).getAllByRole('button');
+    expect(buttons.length).toBeGreaterThan(0);
+    for (const button of buttons) {
+      expect(button).toHaveAccessibleDescription(name);
+      const by = document.getElementById(button.getAttribute('aria-describedby') ?? '');
+      expect(by?.textContent).toBe(name);
+      expect(rowOf(name).contains(by)).toBe(true);
+    }
+  };
+  for (const { name } of LIST.accounts) described(name);
+  // The question's buttons too.
+  await user.click(within(actionsOf('octo-dev')).getByRole('button', { name: 'Remove' }));
+  expect(within(actionsOf('octo-dev')).getAllByRole('button').map((each) => each.textContent)).toEqual(['Remove', 'Cancel']);
+  described('octo-dev');
+
+  await user.click(screen.getByRole('button', { name: 'New account' }));
+  const name = screen.getByLabelText('Name');
+  expect(name).toHaveAccessibleDescription(HELP);
+  expect(document.getElementById(name.getAttribute('aria-describedby') ?? '')?.tagName).toBe('P');
+});
+
+test('focus goes where the control that had it went: New account to the name, Done and Cancel back to their button', async () => {
+  visit('/ui/settings');
+  const reset: OneTime = { account: VIEWER, oneTimePassword: 'p3n8w2x7k4r9t5b6m2qz', expiresAt: '2026-03-04T10:05:00.000Z' };
+  const { api } = fakeApi({ accounts: () => Promise.resolve(LIST), makeAccount: () => Promise.resolve(ONE_TIME), resetPassword: () => Promise.resolve(reset) });
+  const user = userEvent.setup();
+  render(<App api={api} />);
+  expect(await screen.findByText('5 accounts')).toBeInTheDocument();
+
+  // New account opens the form on its Name; Cancel goes back to New account.
+  await user.click(screen.getByRole('button', { name: 'New account' }));
+  expect(screen.getByLabelText('Name')).toHaveFocus();
+  await user.click(within(screen.getByRole('form', { name: 'New account' })).getByRole('button', { name: 'Cancel' }));
+  expect(screen.getByRole('button', { name: 'New account' })).toHaveFocus();
+
+  // A make's one-time password: Done goes back to New account.
+  await user.click(screen.getByRole('button', { name: 'New account' }));
+  await user.type(screen.getByLabelText('Name'), 'octo-viewer');
+  await user.click(screen.getByRole('button', { name: 'Make the account' }));
+  await user.click(within(screen.getByRole('status')).getByRole('button', { name: 'Done' }));
+  expect(screen.queryByRole('status')).toBeNull();
+  expect(screen.getByRole('button', { name: 'New account' })).toHaveFocus();
+
+  // A reset's: Done goes back to the row's Reset password.
+  await user.click(within(actionsOf('octo-viewer')).getByRole('button', { name: 'Reset password' }));
+  expect(await within(screen.getByRole('status')).findByText('p3n8w2x7k4r9t5b6m2qz')).toBeInTheDocument();
+  await user.click(within(screen.getByRole('status')).getByRole('button', { name: 'Done' }));
+  expect(within(actionsOf('octo-viewer')).getByRole('button', { name: 'Reset password' })).toHaveFocus();
+
+  // A removal asked: on its Cancel; then Cancel: back to the row's Remove.
+  await user.click(within(actionsOf('octo-dev')).getByRole('button', { name: 'Remove' }));
+  expect(within(actionsOf('octo-dev')).getByRole('button', { name: 'Cancel' })).toHaveFocus();
+  await user.click(within(actionsOf('octo-dev')).getByRole('button', { name: 'Cancel' }));
+  expect(within(actionsOf('octo-dev')).getByRole('button', { name: 'Remove' })).toHaveFocus();
+});
+
+test('after name_taken, or a make whose answer was lost, the list is read again', async () => {
+  visit('/ui/settings');
+  // Each refusal of a make, and whether the account may have been made: read again after it.
+  const refusals: [RequestFailed | TypeError, boolean][] = [
+    [new RequestFailed(409, 'name_taken'), true],
+    [new RequestFailed(0, 'network'), true],
+    [new RequestFailed(500, 'internal_error'), true],
+    [new RequestFailed(502, 'unknown'), true],
+    [new RequestFailed(503, 'unknown'), true],
+    [new RequestFailed(201, 'unreadable'), true],
+    [new RequestFailed(400, 'bad_name'), false],
+    [new RequestFailed(409, 'full'), false],
+    [new RequestFailed(400, 'bad_request'), false],
+    [new RequestFailed(403, 'csrf'), false],
+    [new TypeError('Failed to fetch'), false],
+  ];
+  const answers = refusals.map(([error]) => () => Promise.reject(error));
+  const { api, sent } = fakeApi({ accounts: () => Promise.resolve(LIST), makeAccount: () => answers.shift()!() });
+  const user = userEvent.setup();
+  render(<App api={api} />);
+  expect(await screen.findByText('5 accounts')).toBeInTheDocument();
+  await user.click(screen.getByRole('button', { name: 'New account' }));
+
+  for (const [error, again] of refusals) {
+    const before = sent('accounts').length;
+    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'octo-viewer' } });
+    await user.click(screen.getByRole('button', { name: 'Make the account' }));
+    expect(await screen.findByRole('alert')).toBeInTheDocument();
+    await act(async () => {});
+    expect([String(error), sent('accounts').length - before]).toEqual([String(error), again ? 1 : 0]);
+  }
+  expect(sent('makeAccount')).toHaveLength(refusals.length);
+  // The table read again stays, the form open.
+  expect(screen.getByText('5 accounts')).toBeInTheDocument();
+  expect(screen.getByRole('form', { name: 'New account' })).toBeInTheDocument();
 });

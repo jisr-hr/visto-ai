@@ -1,5 +1,14 @@
-import { expect, test } from 'vitest';
+import { afterAll, beforeAll, expect, test, vi } from 'vitest';
 import { ago, initials, left, money, plural, took, utc } from './format.ts';
+
+// Every test here runs in a zone half an hour off UTC (UTC+05:30), so that a time read in the zone
+// of the machine, where UTC's is meant, fails whatever zone the tests run in.
+beforeAll(() => {
+  vi.stubEnv('TZ', 'Asia/Kolkata');
+});
+afterAll(() => {
+  vi.unstubAllEnvs();
+});
 
 const NOW = '2026-03-01T10:00:00.000Z';
 /** The time the given seconds before NOW; a negative count is after it. */
@@ -57,4 +66,16 @@ test('a time is written in UTC to the minute', () => {
   expect(utc('2026-12-31T23:59:00.000-01:00')).toBe('2027-01-01 00:59 UTC');
   expect(utc('x')).toBe('');
   expect(utc('')).toBe('');
+});
+
+test('a time is written in UTC whatever the zone the page runs in, here half an hour off it', () => {
+  // The zone is in force: 10:00 UTC is 15:30 here, and 20:00 UTC on 2026-12-31 is in 2027 here.
+  const ten = new Date('2026-03-04T10:00:00.000Z');
+  expect([ten.getTimezoneOffset(), ten.getHours(), ten.getMinutes()]).toEqual([-330, 15, 30]);
+  expect(new Date('2026-12-31T20:00:00.000Z').getFullYear()).toBe(2027);
+
+  // Each part of the time is UTC's: the year, the month, the day, the hour and the minute.
+  expect(utc('2026-12-31T20:00:00.000Z')).toBe('2026-12-31 20:00 UTC');
+  expect(utc('2026-03-31T19:45:00.000Z')).toBe('2026-03-31 19:45 UTC');
+  expect(utc('2026-03-04T10:00:00.000Z')).toBe('2026-03-04 10:00 UTC');
 });

@@ -572,6 +572,56 @@ test('the choice holds the name it is for, read-only, hidden and out of the tab 
   expect(reached).not.toContain(held);
 });
 
+test('the choice cannot be typed into while it is sent, and can again once it is refused', async () => {
+  const answer = later<SignInStep>();
+  const { api, sent } = fakeApi({ passwordSignIn: () => Promise.resolve({ next: 'choose_password' }), firstPassword: () => answer.promise });
+  const user = userEvent.setup();
+  render(<SignIn api={api} error={null} onSignedIn={() => {}} />);
+  await user.type(screen.getByLabelText('Name'), 'octo-new');
+  await user.type(screen.getByLabelText('Password'), ONE_TIME);
+  await user.click(screen.getByRole('button', { name: 'Sign in' }));
+  await screen.findByRole('heading', { level: 1, name: 'Choose your password' });
+  const first = screen.getByLabelText('New password');
+  const again = screen.getByLabelText('New password again');
+  expect(first).toBeEnabled();
+  expect(again).toBeEnabled();
+  await user.type(first, 'a long password of mine');
+  await user.type(again, 'a long password of mine');
+  await user.click(screen.getByRole('button', { name: 'Choose and sign in' }));
+
+  // While it is sent: neither of the two new passwords takes what is typed.
+  expect(first).toBeDisabled();
+  expect(again).toBeDisabled();
+  await user.type(first, ' more');
+  await user.type(again, ' more');
+  expect(chosenValues()).toEqual(['a long password of mine', 'a long password of mine']);
+  expect(sent('firstPassword')).toEqual([['firstPassword', 'octo-new', ONE_TIME, 'a long password of mine']]);
+
+  // A refusal that keeps the choice: both are emptied and take what is typed again.
+  await act(async () => answer.resolve({ next: 'choose_password' }));
+  expect(screen.getByRole('alert')).toHaveTextContent(FAILED);
+  expect(screen.getByLabelText('New password')).toBeEnabled();
+  expect(screen.getByLabelText('New password again')).toBeEnabled();
+  await user.type(screen.getByLabelText('New password'), 'another long password');
+  expect(chosenValues()).toEqual(['another long password', '']);
+});
+
+test('the name the choice holds for a password manager is hidden from assistive technology too', async () => {
+  const { api } = fakeApi({ passwordSignIn: () => Promise.resolve({ next: 'choose_password' }) });
+  const user = userEvent.setup();
+  render(<SignIn api={api} error={null} onSignedIn={() => {}} />);
+  await user.type(screen.getByLabelText('Name'), 'octo-new');
+  await user.type(screen.getByLabelText('Password'), ONE_TIME);
+  await user.click(screen.getByRole('button', { name: 'Sign in' }));
+  const form = await screen.findByRole('form', { name: 'Choose your password' });
+
+  const held = form.querySelector('input[autocomplete="username"]');
+  expect(held).toHaveValue('octo-new');
+  expect(held).toHaveAttribute('aria-hidden', 'true');
+  // So no text field of the choice is in the accessibility tree.
+  expect(within(form).queryAllByRole('textbox')).toEqual([]);
+});
+
 test('neither form lets its submit reload the page, also while it is sent', async () => {
   const first = later<SignInStep>();
   const chosen = later<SignInStep>();

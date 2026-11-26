@@ -91,7 +91,7 @@ Table and column names, the migration, the routes' paths and shapes, the command
 
 ## 6. Not in this change
 
-The Settings screens and the settings in the database (the next plans); the review page (the UI's plan 1b); email of any kind; a lockout per address; changing a password account's name; an audit screen of account changes (the log lines carry them).
+The Settings screens and the settings in the database (the next plans); the review page (the UI's plan 1b); email of any kind; a lockout per address; changing a password account's name; an audit screen of account changes (the record of account changes in the database carries them, 4.8; the log lines do not).
 
 ## 7. Changes to the UI's design
 

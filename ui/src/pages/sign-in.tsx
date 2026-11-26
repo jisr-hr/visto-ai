@@ -212,14 +212,16 @@ export function SignIn({ api, error, onSignedIn }: { api: Api; error: string | n
             <p className="text-sm text-muted">This was a one-time password. Choose the password you will sign in with: 12 to 128 characters.</p>
             {alertLine}
             <form aria-label="Choose your password" className="flex flex-col gap-3" onSubmit={choose}>
-              {/* The name the new password is for, so a password manager keeps it under that name: hidden, never tabbed to. */}
-              <input type="text" className="sr-only" autoComplete="username" readOnly tabIndex={-1} value={choice.name} />
+              {/* The name the new password is for, so a password manager keeps it under that name: hidden, also from assistive
+                  technology, never tabbed to. */}
+              <input type="text" className="sr-only" aria-hidden="true" autoComplete="username" readOnly tabIndex={-1} value={choice.name} />
               <Field id="signin-new" label="New password">
                 <Input
                   id="signin-new"
                   type="password"
                   autoComplete="new-password"
                   autoFocus
+                  disabled={sending}
                   value={chosen}
                   onChange={(event) => setChosen(event.target.value)}
                 />
@@ -229,6 +231,7 @@ export function SignIn({ api, error, onSignedIn }: { api: Api; error: string | n
                   id="signin-again"
                   type="password"
                   autoComplete="new-password"
+                  disabled={sending}
                   value={again}
                   onChange={(event) => setAgain(event.target.value)}
                 />
