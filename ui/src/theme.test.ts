@@ -37,6 +37,19 @@ function stylesheet(): string {
   return process.getBuiltinModule('node:fs').readFileSync(here.slice(0, here.lastIndexOf('/') + 1) + 'index.css', 'utf8');
 }
 
+/** The text of a file of this package, given by its path from the folder of this file, read as the stylesheet is. */
+function packageFile(path: string): string {
+  const { process } = globalThis as unknown as {
+    process: { getBuiltinModule(id: 'node:fs'): { readFileSync(path: string, encoding: 'utf8'): string } };
+  };
+  const here = decodeURIComponent(new URL(import.meta.url).pathname);
+  return process.getBuiltinModule('node:fs').readFileSync(here.slice(0, here.lastIndexOf('/') + 1) + path, 'utf8');
+}
+/** Runs public/theme.js as the page's head runs it, before any module. */
+const runThemeScript = (): void => {
+  new Function(packageFile('../public/theme.js'))();
+};
+
 /** The text inside the first block that opens after `from`. */
 function blockAt(text: string, from: number): string {
   const open = text.indexOf('{', from);
@@ -110,6 +123,48 @@ test('while no choice is stored the page follows the system as it changes, and a
 
   stop();
   expect(media.listeners).toEqual([]);
+});
+
+test('the head\'s theme script applies a stored choice before the page paints, only its own class, and a storage that throws changes nothing', () => {
+  system(true);
+  document.documentElement.className = 'dark';
+  localStorage.setItem('visto-theme', 'light');
+  runThemeScript();
+  expect(document.documentElement.className).toBe('light');
+  localStorage.setItem('visto-theme', 'dark');
+  runThemeScript();
+  expect(document.documentElement.className).toBe('dark');
+
+  // No choice, or one it does not know: the page keeps what it has, and the CSS follows the system.
+  for (const stored of [null, 'purple']) {
+    document.documentElement.className = '';
+    if (stored === null) localStorage.removeItem('visto-theme');
+    else localStorage.setItem('visto-theme', stored);
+    runThemeScript();
+    expect(document.documentElement.className).toBe('');
+  }
+
+  localStorage.setItem('visto-theme', 'dark');
+  vi.spyOn(window.Storage.prototype, 'getItem').mockImplementation(() => {
+    throw new Error('The storage is refused.');
+  });
+  expect(runThemeScript).not.toThrow();
+  expect(document.documentElement.className).toBe('');
+});
+
+test('the page loads the theme script in its head, before the module, and holds no inline script or style', () => {
+  const page = packageFile('../index.html');
+  const head = page.slice(page.indexOf('<head>'), page.indexOf('</head>'));
+  expect(head).toContain('<script src="/ui/theme.js"></script>');
+  expect(page.indexOf('<script src="/ui/theme.js"></script>')).toBeLessThan(page.indexOf('<script type="module"'));
+  expect(page.match(/<script\b[^>]*>/g)).toEqual(['<script src="/ui/theme.js">', '<script type="module" src="/src/main.tsx">']);
+  expect(page).not.toMatch(/<style\b|\sstyle=/);
+});
+
+test("the page's start applies the theme stored, before the first render", async () => {
+  localStorage.setItem('visto-theme', 'dark');
+  await import('./main.tsx');
+  expect(document.documentElement.className).toBe('dark');
 });
 
 test('before any script, the CSS follows the system', () => {

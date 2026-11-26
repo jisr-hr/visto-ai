@@ -1,6 +1,6 @@
 import { render, screen } from '@testing-library/react';
 import { userEvent } from '@testing-library/user-event';
-import { expect, test, vi } from 'vitest';
+import { expect, onTestFinished, test, vi } from 'vitest';
 import { NetworkBlockedError } from '../../test/setup.ts';
 import { Segmented } from '../segmented.tsx';
 import { Badge } from './badge.tsx';
@@ -159,7 +159,12 @@ test("the page's storage is jsdom's, cleared after each test", () => {
   document.documentElement.className = 'dark';
 });
 
-test('the next test reads the storage and the page class cleared', () => {
-  expect(localStorage.getItem('k')).toBeNull();
-  expect(document.documentElement.className).toBe('');
+test('the storage and the page class a test leaves are cleared once it ends', () => {
+  // Written here, and read once every afterEach of this test has run, the setup's included: no other test needs to run first.
+  localStorage.setItem('k', 'v');
+  document.documentElement.className = 'dark';
+  onTestFinished(() => {
+    expect(localStorage.getItem('k')).toBeNull();
+    expect(document.documentElement.className).toBe('');
+  });
 });

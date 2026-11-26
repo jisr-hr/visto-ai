@@ -42,3 +42,9 @@ test('initials, ages, durations, time left, money and plurals read as pinned', (
   expect(plural(4, 'repository', 'repositories')).toBe('4 repositories');
   expect(plural(0, 'repository', 'repositories')).toBe('0 repositories');
 });
+
+test('a duration is rounded to the nearest second, a half up', () => {
+  expect(took(1500)).toBe('2 s');
+  expect(took(1499)).toBe('1 s');
+  expect(took(59_500)).toBe('1 min');
+});

@@ -266,3 +266,34 @@ test('a poll keeps its last answer when a read fails and says so until one works
   expect(said()).toBe('three again working no error');
   expect(reads.filter((name) => name === 'three')).toHaveLength(1);
 });
+
+test('a read in flight is not asked again when the page is hidden and shown again', async () => {
+  let visibility: DocumentVisibilityState = 'visible';
+  vi.spyOn(document, 'visibilityState', 'get').mockImplementation(() => visibility);
+  const turn = (next: DocumentVisibilityState): void => {
+    visibility = next;
+    act(() => {
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+  };
+  let reads = 0;
+  let answer: (value: string) => void = () => {};
+  function Probe() {
+    const { data } = usePoll(() => {
+      reads += 1;
+      return new Promise<string>((resolve) => { answer = resolve; });
+    }, 5000, 'one');
+    return <p>{data ?? 'none'}</p>;
+  }
+
+  render(<Probe />);
+  expect(reads).toBe(1);
+  turn('hidden');
+  turn('visible');
+  turn('hidden');
+  turn('visible');
+  expect(reads).toBe(1);
+  await act(async () => answer('first'));
+  expect(screen.getByRole('paragraph').textContent).toBe('first');
+  expect(reads).toBe(1);
+});
