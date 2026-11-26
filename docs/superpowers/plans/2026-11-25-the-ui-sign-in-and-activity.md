@@ -871,7 +871,7 @@ test('the activity reads running review jobs first, then the pending by when the
   /* a running job (title stored), two pending at at(60) and at(0), a gate job and a finished review job: order running, at(0), at(60); no gate, no finished;
      created_at as stored */
 });
-test('the withdrawals waiting are the pending withdraw jobs with a start, with their code', async () => {
+test('the withdrawals waiting are the pending withdraw jobs with a start and the code of a failed try', async () => {   // (as built: renamed)
   /* a pending withdraw job with starts 0: not listed; put back with 'github_403': listed with it; (as built) one with a start and no code: not listed */
 });
 test('each run reads as its outcome, the first that holds', async () => {
