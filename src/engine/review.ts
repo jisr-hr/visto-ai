@@ -195,7 +195,8 @@ async function oneCall(run: Run, files: FileContext[], firstFileNumber: number, 
 }
 
 // Never rejects: an unexpected error is recorded in `ctl`, which stops every worker from starting more work.
-async function runBatch(run: Run, ctl: Control, batch: Batch, firstFileNumber: number, batchIndex: number): Promise<BatchOutcome> {
+// `onEnd` is called once the batch has ended, answered or given up, just before its outcome is returned, with no wait added; it must not throw.
+async function runBatch(run: Run, ctl: Control, batch: Batch, firstFileNumber: number, batchIndex: number, onEnd?: () => void): Promise<BatchOutcome> {
   const out: BatchOutcome = { answers: [], reviewed: [], failedFiles: [], failedCodes: [], usage: zeroUsage(), models: [], providers: [], audit: [] };
   try {
     await attempt(run, ctl, out, batch, firstFileNumber, batchIndex);
@@ -206,6 +207,7 @@ async function runBatch(run: Run, ctl: Control, batch: Batch, firstFileNumber: n
     }
     ctl.stopped = true;
   }
+  onEnd?.();
   return out;
 }
 
@@ -707,15 +709,12 @@ async function reviewOnce(input: ReviewInput, deps: ReviewDeps, asked: Asked): P
     let endedCount = 0;
     const dueLeft = (): number => dueIn.reduce((n, due, i) => (ended[i] === true ? n : n + due), 0);
     tell(deps, { batches, ended: 0, threadsDue: dueLeft() });
-    const settled = await inPool(batches, CONCURRENCY, ctl, async (i) => {
-      try {
-        return await runBatch(run, ctl, packed.batches[i]!, firsts[i]!, i);
-      } finally {
-        ended[i] = true;
-        endedCount += 1;
-        tell(deps, { batches, ended: endedCount, threadsDue: dueLeft() });
-      }
-    });
+    // Told from inside the batch as it ends: no wait is added between a batch's end and its worker taking the next one.
+    const settled = await inPool(batches, CONCURRENCY, ctl, (i) => runBatch(run, ctl, packed.batches[i]!, firsts[i]!, i, () => {
+      ended[i] = true;
+      endedCount += 1;
+      tell(deps, { batches, ended: endedCount, threadsDue: dueLeft() });
+    }));
     const outcomes = settled.filter((o): o is BatchOutcome => o !== undefined);
 
     for (const o of outcomes) {
