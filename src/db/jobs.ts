@@ -140,14 +140,33 @@ export async function askWithdraw(db: Db, ref: PullRequestRef, now: string, inst
   return rows[0]?.id ?? null;
 }
 
-/** pending and due -> running, counting a start. null when the job is not pending any more or its time is after `now`. */
+/** pending and due -> running, counting a start, with no stage. null when the job is not pending any more or its time is after `now`. */
 export async function claimJob(db: Db, id: number, now: string): Promise<Job | null> {
   const rows = await db.query<Row>(
-    `update visto_ai.jobs set status = 'running', starts = starts + 1, started_at = $2::timestamptz
+    `update visto_ai.jobs set status = 'running', starts = starts + 1, started_at = $2::timestamptz,
+            stage = null, stage_at = null, batch = null, batches = null, threads_due = null
      where id = $1 and status = 'pending' and run_at <= $2::timestamptz
      returning ${COLUMNS}`,
     [id, now]);
   return rows[0] === undefined ? null : toJob(rows[0]);
+}
+
+/** Where a running review stands: `batch` is the batches ended plus one, at most `batches`; `threadsDue` the threads owed a verdict in the batches not ended. */
+export type ReviewStage =
+  | { stage: 'preparing' } | { stage: 'publishing' }
+  | { stage: 'reviewing'; batch: number; batches: number }
+  | { stage: 'judging_threads'; batch: number; batches: number; threadsDue: number };
+
+/** Writes a running job's stage and when it was reached; false when the job is not running. */
+export async function markStage(db: Db, id: number, stage: ReviewStage, at: string): Promise<boolean> {
+  const counted = stage.stage === 'reviewing' || stage.stage === 'judging_threads';
+  const rows = await db.query(
+    `update visto_ai.jobs set stage = $2, stage_at = $3::timestamptz, batch = $4, batches = $5, threads_due = $6
+     where id = $1 and status = 'running'
+     returning id`,
+    [id, stage.stage, at, counted ? stage.batch : null, counted ? stage.batches : null,
+      stage.stage === 'judging_threads' ? stage.threadsDue : null]);
+  return rows.length === 1;
 }
 
 /** pending or running -> done or dropped, with its outcome. false when it was already finished. */
@@ -171,25 +190,28 @@ export async function dropJobIfUnchanged(db: Db, job: Pick<Job, 'id' | 'starts' 
 }
 
 /**
- * running -> pending, due at `runAt`; with `giveBackStart` its count of starts goes down by one. When the pull request
- * already has a pending job of the same kind, this one is dropped with outcome `superseded` instead, finished at `now`,
+ * running -> pending, due at `runAt`, with `code` as its retry code (none when not given); with `giveBackStart` its
+ * count of starts goes down by one. When the pull request already has a pending job of the same kind, this one is
+ * dropped with outcome `superseded` instead, finished at `now`,
  * with two exceptions for the gate's lane: a command (a manual gate job) takes the place of a waiting sync, which is
  * dropped as `superseded`; and a sync that is superseded by a waiting sync hands it its count of starts when that is
  * higher. A withdraw job superseded by a waiting withdraw job hands it its starts the same way. A job of another kind
  * never supersedes.
  * It runs its statements outside any transaction, so it is the one place that may catch a statement's error.
  */
-export async function requeueJob(db: Db, id: number, runAt: string, now: string, giveBackStart: boolean): Promise<'requeued' | 'superseded'> {
+export async function requeueJob(
+  db: Db, id: number, runAt: string, now: string, giveBackStart: boolean, code?: string,
+): Promise<'requeued' | 'superseded'> {
   const back = giveBackStart ? 1 : 0;
   const putBack = async (): Promise<boolean> => {
     try {
       const rows = await db.query(
-        `update visto_ai.jobs j set status = 'pending', run_at = $2::timestamptz, starts = starts - $3
+        `update visto_ai.jobs j set status = 'pending', run_at = $2::timestamptz, starts = starts - $3, retry_code = $4
          where j.id = $1 and j.status = 'running'
            and not exists (select 1 from visto_ai.jobs p where p.status = 'pending' and p.kind = j.kind
                            and p.service = j.service and p.owner = j.owner and p.repo = j.repo and p.number = j.number)
          returning id`,
-        [id, runAt, back]);
+        [id, runAt, back, storableOrNull(code ?? null)]);
       return rows.length === 1;
     } catch (error) {
       if ((error as { code?: unknown }).code !== '23505') throw error;

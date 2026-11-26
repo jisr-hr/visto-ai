@@ -209,3 +209,21 @@ test('a pull request that is not merged, or names none, reverts nothing', async 
     await db.close();
   }
 });
+
+const at = (seconds: number): string => new Date(Date.parse('2026-03-01T10:00:00.000Z') + seconds * 1000).toISOString();
+test('the title is stored with the facts, kept when an event carries none, and replaced only by a newer event\'s', async () => {
+  const db = await testDb();
+  const title = async (): Promise<string | null | undefined> =>
+    (await db.query<{ title: string | null }>('select title from visto_ai.pull_requests where number = 7'))[0]?.title;
+  assert.equal(await savePullRequest(db, facts({ title: 'Round prices before tax', updatedAt: at(0) })), true);
+  assert.equal(await title(), 'Round prices before tax');
+  assert.equal(await savePullRequest(db, facts({ headSha: 'bbb222', updatedAt: at(10) })), true);
+  assert.equal(await title(), 'Round prices before tax');
+  assert.equal(await savePullRequest(db, facts({ title: 'Round prices', updatedAt: at(5) })), false);
+  assert.equal(await title(), 'Round prices before tax');
+  assert.equal(await savePullRequest(db, facts({ title: 'Round all prices', updatedAt: at(20) })), true);
+  assert.equal(await title(), 'Round all prices');
+  const stored = await getPullRequest(db, ref);
+  assert.equal(stored === null ? null : 'title' in stored, false);
+  await db.close();
+});

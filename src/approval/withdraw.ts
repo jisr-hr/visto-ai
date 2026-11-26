@@ -110,7 +110,7 @@ export async function runWithdrawJob(job: Job, deps: WithdrawJobDeps): Promise<v
     } else {
       const at = clock();
       const wait = WITHDRAW_RETRY_WAITS_MS[job.starts <= 1 ? 0 : 1]!;
-      const answer = await requeueJob(deps.db, job.id, new Date(at.getTime() + wait).toISOString(), at.toISOString(), false);
+      const answer = await requeueJob(deps.db, job.id, new Date(at.getTime() + wait).toISOString(), at.toISOString(), false, end.code);
       entry.requeued = answer === 'requeued';
       entry.outcome = answer === 'requeued' ? 'put_back' : 'superseded';
     }
