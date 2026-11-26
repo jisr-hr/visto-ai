@@ -10,6 +10,8 @@ An open-source, self-hosted AI reviewer for pull requests. It looks for the prob
 
 The pages are published at https://visto-ai.com/docs once the site is live. Until then, the links below go to the pages in [docs/guide](docs/guide).
 
+The website is rebuilt from `main` when a release changes `docs/guide/`.
+
 Code used to be written by people and reviewed by people. Now AI writes much of it, and people hand the review to AI as well. Nobody is left deciding which changes still need a person.
 
 ### Start here

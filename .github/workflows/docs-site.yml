@@ -1,0 +1,24 @@
+name: docs-site
+on:
+  push:
+    branches: [main]
+    paths: ['docs/guide/**']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    env:
+      # A secret cannot be read in an `if:`, so the job copies it here and tests the copy.
+      TOKEN_SET: ${{ secrets.WEBSITE_DISPATCH_TOKEN != '' }}
+    steps:
+      - name: Check for the dispatch token
+        if: env.TOKEN_SET != 'true'
+        run: echo "::notice::WEBSITE_DISPATCH_TOKEN is not set, so the website was not told to rebuild."
+      - name: Tell the website to rebuild
+        if: env.TOKEN_SET == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.WEBSITE_DISPATCH_TOKEN }}
+          SHA: ${{ github.sha }}
+        run: gh api repos/visto-ai/website/dispatches -f event_type=docs-changed -f "client_payload[ref]=$SHA"
