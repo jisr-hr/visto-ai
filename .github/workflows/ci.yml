@@ -9,6 +9,9 @@ jobs:
     runs-on: ubuntu-latest
     container: node:26-bookworm-slim
     steps:
+      # The slim image has no git: without it checkout downloads the files
+      # with no .git folder, and the guide check lists tracked files with git.
+      - run: apt-get update && apt-get install -y --no-install-recommends git ca-certificates
       - uses: actions/checkout@v4
       - run: npm ci
       - run: npm ci --prefix ui
