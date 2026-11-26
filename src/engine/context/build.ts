@@ -10,6 +10,7 @@ import type { Changed } from './increment.ts';
 import { fullFileContext, numberLines } from './full-file.ts';
 import type { FullFile } from './full-file.ts';
 import { isLowPriority, orderByPriority } from './priority.ts';
+import { takesFindings } from './focus.ts';
 import { isSecretFile } from './secret.ts';
 import { testCandidates } from './test-pair.ts';
 import type { ShownThread } from './threads.ts';
@@ -28,6 +29,8 @@ export interface FileContext {
   plan: ScorePlan; // who scores the file: the model, a fixed rule, or nobody
   // An added or removed line held a character that was stripped before anyone saw it.
   hidden: boolean;
+  // Whether the review asks for findings in this file (takesFindings): a test, documentation, generated, vendored or lock file takes none.
+  findings: boolean;
   // The earlier threads on this file, when a later review shows them; absent in a first review.
   threads?: ShownThread[];
   // What the pull request's earlier runs, or other pull requests, already settle for this file; absent when nothing does.
@@ -113,7 +116,7 @@ export async function buildFileContexts(
       // Checked before anything is fetched: no patch, content or paired test of it reaches a model.
       contexts.push({
         file, hunks: [], ranges: null, diffText: null, full: null, test: null, skip: 'secret_file',
-        blocks: [], plan: scorePlan(file, 'secret_file'), hidden: false,
+        blocks: [], plan: scorePlan(file, 'secret_file'), hidden: false, findings: false,
       });
       continue;
     }
@@ -186,7 +189,7 @@ export async function buildFileContexts(
       }
     }
     audit.push(...stripped(removed, file.path));
-    contexts.push({ file, hunks, ranges, diffText, full, test, skip, blocks: blocksOf(hunks), plan: scorePlan(file, skip), hidden });
+    contexts.push({ file, hunks, ranges, diffText, full, test, skip, blocks: blocksOf(hunks), plan: scorePlan(file, skip), hidden, findings: takesFindings(file.path) });
   }
   return { contexts, audit, content: fetchContent };
 }

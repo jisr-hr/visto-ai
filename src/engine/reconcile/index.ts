@@ -35,6 +35,8 @@ export function reconcile(answers: { value: SubmitReviewArgs; files: string[] }[
   const rangesByPath = new Map<string, Ranges | null>(contexts.map((c) => [c.file.path, c.ranges]));
   const textsByPath = new Map<string, LineTexts | null>(contexts.map((c) => [c.file.path, c.ranges === null ? null : lineTexts(c.hunks)]));
   const fullByPath = new Map(contexts.map((c) => [c.file.path, c.full]));
+  // A file that takes no findings (a test, documentation, generated, vendored or lock file): a finding on it is dropped.
+  const noFindings: ReadonlySet<string> = new Set(contexts.filter((c) => c.findings === false).map((c) => c.file.path));
   const headLines = new Map<string, Map<number, string>>();
   // The model named a line of the head outside the diff, and that line holds its quote: the finding is about
   // code the diff does not show, and neither its quote nor another file decides where it goes.
@@ -65,6 +67,10 @@ export function reconcile(answers: { value: SubmitReviewArgs; files: string[] }[
         dropped(raw, 'path_not_in_batch');
         continue;
       }
+      if (noFindings.has(path)) {
+        audit.push({ stage: 'reconcile', action: 'dropped', subject: path, reason: 'findings_not_asked' });
+        continue;
+      }
       if (raw.beyond_diff) {
         beyondDiff.push({ ...raw, path });
         continue;
@@ -72,7 +78,7 @@ export function reconcile(answers: { value: SubmitReviewArgs; files: string[] }[
       const outside = namesCodeOutsideDiff({ ...raw, path });
       const result = place({ ...raw, path }, rangesByPath.get(path) ?? null, outside ? null : textsByPath.get(path) ?? null);
       if ('unplaced' in result) {
-        const target = outside ? null : refileTarget(raw.quote, path, answer.files, textsByPath);
+        const target = outside ? null : refileTarget(raw.quote, path, answer.files.filter((p) => !noFindings.has(p)), textsByPath);
         if (target === null) {
           unplaced.push(result.unplaced);
           continue;

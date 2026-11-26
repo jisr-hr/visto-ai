@@ -22,12 +22,12 @@ function ctx(path: string, patch: string, previousPath: string | null = null): F
   for (const b of blocks) if (!seen.has(b.hash)) seen.set(b.hash, b.around);
   return {
     file, hunks, ranges: null, diffText: renderAnchoredDiff(hunks), full: null, test: null, skip: null,
-    blocks, plan: scorePlan(file, null), hidden: false,
+    blocks, plan: scorePlan(file, null), hidden: false, findings: true,
   };
 }
 function moved(path: string, previousPath: string): FileContext {
   const file: ChangedFile = { path, previousPath, status: 'renamed', additions: 0, deletions: 0, patch: null };
-  return { file, hunks: [], ranges: null, diffText: null, full: null, test: null, skip: 'unchanged', blocks: [], plan: scorePlan(file, 'unchanged'), hidden: false };
+  return { file, hunks: [], ranges: null, diffText: null, full: null, test: null, skip: 'unchanged', blocks: [], plan: scorePlan(file, 'unchanged'), hidden: false, findings: true };
 }
 const entry = (score: number): ScoreEntry => ({ score, category: 'fix', reason: '' });
 // `around`: the surroundings a score was stored among for the hash; null for none, a list for several.
@@ -251,7 +251,7 @@ test('a file with no history and no reused score, or one scored by rule, keeps n
   assert.equal(keptScores(c, null, []), null);
   assert.equal(keptScores(c, H([hist({ path: 'src/other.ts', blocks: [stored(c.blocks[0]!.hash, 70)] })]), []), null);
   const asset: ChangedFile = { path: 'src/a.png', previousPath: null, status: 'modified', additions: 0, deletions: 0, patch: null };
-  const rule: FileContext = { file: asset, hunks: [], ranges: null, diffText: null, full: null, test: null, skip: 'no_diff', blocks: [], plan: scorePlan(asset, 'no_diff'), hidden: false };
+  const rule: FileContext = { file: asset, hunks: [], ranges: null, diffText: null, full: null, test: null, skip: 'no_diff', blocks: [], plan: scorePlan(asset, 'no_diff'), hidden: false, findings: true };
   assert.equal(keptScores(rule, H([hist({ path: 'src/a.png', wholeFile: entry(40) })]), [reuse(GONE, 40)]), null);
 });
 
@@ -260,7 +260,7 @@ test('the lookup asks only for blocks the history does not settle', () => {
   const b = ctx('src/b.ts', hunkAt(10, 'other'));
   const c = ctx('src/c.ts', hunkAt(10, 'third'));
   const asset: ChangedFile = { path: 'logo.png', previousPath: null, status: 'modified', additions: 0, deletions: 0, patch: null };
-  const rule: FileContext = { file: asset, hunks: [], ranges: null, diffText: null, full: null, test: null, skip: 'no_diff', blocks: [], plan: scorePlan(asset, 'no_diff'), hidden: false };
+  const rule: FileContext = { file: asset, hunks: [], ranges: null, diffText: null, full: null, test: null, skip: 'no_diff', blocks: [], plan: scorePlan(asset, 'no_diff'), hidden: false, findings: true };
   const history = H([
     hist({ path: 'src/a.ts', blocks: [stored(a.blocks[0]!.hash, 70)] }),
     hist({ path: 'src/c.ts', stoodFor: [pair(c.blocks[0]!.hash)], wholeFile: entry(30) }),

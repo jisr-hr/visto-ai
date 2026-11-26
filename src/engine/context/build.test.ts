@@ -312,3 +312,12 @@ test('a computed diff of two contents equal apart from LF against CRLF is unchan
   assert.equal(contexts[0]!.skip, 'unchanged');
   assert.equal(contexts[0]!.hidden, false);
 });
+
+test('a test or documentation file takes no findings and its section says so; a source file does', async () => {
+  const { contexts } = await buildFileContexts(pr, [file('src/a.ts'), file('src/a.test.ts'), file('docs/setup.md'), file('.env')], stub({}));
+  const byPath = new Map(contexts.map((c) => [c.file.path, c]));
+  assert.deepEqual(['src/a.ts', 'src/a.test.ts', 'docs/setup.md', '.env'].map((p) => byPath.get(p)!.findings), [true, false, false, false]);
+  const line = 'findings: not asked. Score this file; report no finding in it.';
+  assert.ok(fileSection(byPath.get('src/a.test.ts')!, 1, 2, 'tok').includes(`\n${line}\n`));
+  assert.ok(!fileSection(byPath.get('src/a.ts')!, 1, 2, 'tok').includes(line));
+});

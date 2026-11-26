@@ -22,7 +22,7 @@ function ctx(path: string, text: string | null, extra: Partial<ChangedFile> = {}
   const file: ChangedFile = { path, previousPath: null, status: 'modified', additions: 3, deletions: 1, patch: text, ...extra };
   const hunks = text === null ? [] : parsePatch(text);
   const skip = text !== null ? null : file.status === 'renamed' && file.previousPath !== null ? 'unchanged' : 'no_diff';
-  return { file, hunks, ranges: null, diffText: null, full: null, test: null, skip, blocks: blocksOf(hunks), plan: scorePlan(file, skip), hidden: false };
+  return { file, hunks, ranges: null, diffText: null, full: null, test: null, skip, blocks: blocksOf(hunks), plan: scorePlan(file, skip), hidden: false, findings: true };
 }
 
 const b = (id: string, score: number, category = 'fix', reason?: string): RawBlock =>

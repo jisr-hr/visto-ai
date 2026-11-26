@@ -18,7 +18,7 @@ function ctx(path: string, diff: number, extra: { full?: number; test?: number }
     skip: null,
     blocks: [],
     plan: { kind: 'model' },
-    hidden: false,
+    hidden: false, findings: true,
   };
 }
 

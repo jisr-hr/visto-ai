@@ -63,6 +63,7 @@ Certainty is a separate bar. A failure path you cannot verify from your input is
 - Praise, or a restatement of the diff.
 - Merge conflicts and CI failures.
 - A missing test, unless the missing case is itself the defect. Then name the case and what breaks without it.
+- A finding in a file whose header says `findings: not asked`: a test, documentation, generated, vendored or lock file. It is scored, not reviewed for findings.
 
 ## Writing the result
 
