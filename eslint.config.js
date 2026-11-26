@@ -25,7 +25,7 @@ const evalSeed = ['src/eval/history/seed.ts', 'src/eval/history/seed.test.ts'];
 
 // Flat config does not merge a rule's options across blocks: each block carries every restriction for its files.
 export default tseslint.config(
-  { ignores: ['node_modules/', 'runs/', '.superpowers/'] },
+  { ignores: ['node_modules/', 'runs/', '.superpowers/', 'ui/'] },
   ...tseslint.configs.recommended,
   {
     files: ['src/**/*.ts'],

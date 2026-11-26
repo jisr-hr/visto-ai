@@ -1,0 +1,119 @@
+@import "tailwindcss";
+@import "@fontsource/inter/400.css";
+@import "@fontsource/inter/500.css";
+@import "@fontsource/inter/600.css";
+@import "@fontsource/inter/700.css";
+@import "@fontsource/jetbrains-mono/400.css";
+@import "@fontsource/jetbrains-mono/500.css";
+
+/* The mockup's tokens (Activity.dc.html, .app and .app.dark), value for value. */
+:root {
+  --bg: #F6F7F9;
+  --card: #FFFFFF;
+  --border: #E4E7EC;
+  --text: #101828;
+  --muted: #5B6474;
+  --subtle: #F1F3F6;
+  --accent: #4F46E5;
+  --accent-soft: #EEF0FF;
+  --accent-text: #3730A3;
+  --on-accent: #FFFFFF;
+  --ok: #067647;
+  --ok-bg: #ECFDF3;
+  --warn: #B54708;
+  --warn-bg: #FFFAEB;
+  --bad: #B42318;
+  --bad-bg: #FEF3F2;
+  --info: #175CD3;
+  --info-bg: #EFF8FF;
+  --shadow: 0 1px 2px rgba(16,24,40,.06);
+}
+
+/* A page with neither class follows the system before any script runs (call 18). */
+@media (prefers-color-scheme: dark) {
+  :root:not(.light) {
+    --bg: #0F1218;
+    --card: #171B23;
+    --border: #272E39;
+    --text: #E7EBF1;
+    --muted: #9BA5B4;
+    --subtle: #1E242E;
+    --accent: #818CF8;
+    --accent-soft: rgba(129,140,248,.15);
+    --accent-text: #B4BCFC;
+    --on-accent: #0F1218;
+    --ok: #4ADE80;
+    --ok-bg: rgba(74,222,128,.12);
+    --warn: #FBBF24;
+    --warn-bg: rgba(251,191,36,.12);
+    --bad: #F87171;
+    --bad-bg: rgba(248,113,113,.13);
+    --info: #60A5FA;
+    --info-bg: rgba(96,165,250,.13);
+    --shadow: none;
+  }
+}
+
+/* A stored choice of dark wins on any system. */
+:root.dark {
+  --bg: #0F1218;
+  --card: #171B23;
+  --border: #272E39;
+  --text: #E7EBF1;
+  --muted: #9BA5B4;
+  --subtle: #1E242E;
+  --accent: #818CF8;
+  --accent-soft: rgba(129,140,248,.15);
+  --accent-text: #B4BCFC;
+  --on-accent: #0F1218;
+  --ok: #4ADE80;
+  --ok-bg: rgba(74,222,128,.12);
+  --warn: #FBBF24;
+  --warn-bg: rgba(251,191,36,.12);
+  --bad: #F87171;
+  --bad-bg: rgba(248,113,113,.13);
+  --info: #60A5FA;
+  --info-bg: rgba(96,165,250,.13);
+  --shadow: none;
+}
+
+@theme inline {
+  --color-bg: var(--bg);
+  --color-card: var(--card);
+  --color-border: var(--border);
+  --color-text: var(--text);
+  --color-muted: var(--muted);
+  --color-subtle: var(--subtle);
+  --color-accent: var(--accent);
+  --color-accent-soft: var(--accent-soft);
+  --color-accent-text: var(--accent-text);
+  --color-on-accent: var(--on-accent);
+  --color-ok: var(--ok);
+  --color-ok-bg: var(--ok-bg);
+  --color-warn: var(--warn);
+  --color-warn-bg: var(--warn-bg);
+  --color-bad: var(--bad);
+  --color-bad-bg: var(--bad-bg);
+  --color-info: var(--info);
+  --color-info-bg: var(--info-bg);
+  --shadow-card: var(--shadow);
+  --font-sans: Inter, system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, monospace;
+}
+
+@layer base {
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font-sans);
+  }
+
+  a {
+    color: var(--accent-text);
+  }
+
+  a:hover {
+    color: var(--accent);
+  }
+}

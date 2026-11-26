@@ -9,6 +9,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: npm ci
+      - run: npm ci --prefix ui
       - run: npm run lint
       - run: npm run typecheck
       - run: npm test
+      - run: npm --prefix ui run lint
+      - run: npm --prefix ui run typecheck
+      - run: npm --prefix ui test
+      - run: npm --prefix ui run build

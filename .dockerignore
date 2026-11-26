@@ -9,3 +9,5 @@ config.local.yml
 **/*.jsonl
 **/.env*
 **/config.local.yml
+**/node_modules
+ui/dist
