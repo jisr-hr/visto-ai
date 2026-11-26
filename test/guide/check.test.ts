@@ -178,3 +178,7 @@ test('slugs trim and use only the text of a link', () => {
   assert.equal(slugify('  Spaced out  '), 'spaced-out');
   assert.equal(slugify('See [Status](#status)'), 'see-status');
 });
+
+test("the repository's guide is valid", () => {
+  assert.deepEqual(checkGuide('docs/guide', '.'), []);
+});
