@@ -221,6 +221,32 @@ test('In review now shows each stage with its words, who asked, when it started 
   expect(classes(within(cellsOf('Pull request 25')[2]!).getByText('edited'))).toEqual(words(mono));
 });
 
+test('the title of what runs links only to an https address', async () => {
+  const jobs = [
+    job({ job: 1, stage: 'queued' }),
+    job({ job: 2, stage: 'queued', number: 128, title: 'Round the prices', url: 'javascript:alert(1)' }),
+    job({ job: 3, stage: 'queued', repository: 'acme/web', number: 204, title: 'Move the tax picker', url: 'http://github.example.test/acme/web/pull/204' }),
+  ];
+  open(fakeApi({ activity: () => Promise.resolve({ ...ACTIVITY, jobs }) }).api);
+  const link = await screen.findByRole('link', { name: 'Cache the tax table per region' });
+  expect(link).toHaveAttribute('href', 'https://github.example.test/acme/shop/pull/131');
+  expect(link).toHaveAttribute('rel', 'noreferrer');
+  const table = within(region('In review now')).getByRole('table');
+  expect(within(table).getAllByRole('link').map((one) => one.textContent)).toEqual(['Cache the tax table per region']);
+  expect(document.querySelector('[href^="javascript:"]')).toBeNull();
+
+  // Any other address: the same text in its place, with no link.
+  const unlinked = [['Round the prices', 'acme/shop #128 a41c09e2b7d3'], ['Move the tax picker', 'acme/web #204 a41c09e2b7d3']] as const;
+  for (const [title, sub] of unlinked) {
+    const text = within(table).getByText(title);
+    expect(text.tagName).toBe('SPAN');
+    expect(text.closest('tr')?.querySelector('a')).toBeNull();
+    expect(classes(text)).toEqual(words('font-medium text-text'));
+    expect(classes(text.parentElement)).toEqual(words(titleBox));
+    expect(text.nextElementSibling?.textContent).toBe(sub);
+  }
+});
+
 test('the counts say running and queued as the overview counts them, and the places', async () => {
   const jobs = [
     job({ job: 1, stage: 'reviewing', number: 1, title: 'One', batch: 1, batches: 2, startedAt: at(-10) }),
@@ -351,6 +377,39 @@ test('nothing running reads as such, and the live badge says when updates fail',
   await settle();
   expect(screen.getByText('Not updating')).toBeInTheDocument();
   expect(screen.getByText('Nothing is running or queued.')).toBeInTheDocument();
+});
+
+test('a filter that hides every job says so, and the counts stay over all jobs', async () => {
+  const jobs = [job({ job: 1, stage: 'reviewing', batch: 1, batches: 2, startedAt: at(-10) })];
+  open(fakeApi({ activity: () => Promise.resolve({ ...ACTIVITY, jobs }) }).api);
+  await screen.findByRole('link', { name: 'Cache the tax table per region' });
+  const now = region('In review now');
+  const user = userEvent.setup();
+
+  // The repository hides it.
+  await user.selectOptions(screen.getByLabelText('Repository'), 'acme/web');
+  const nothing = await within(now).findByText('Nothing running or queued matches.');
+  expect(nothing.tagName).toBe('TD');
+  expect(nothing).toHaveAttribute('colspan', '5');
+  expect(classes(nothing)).toEqual(words(cell, 'text-muted'));
+  expect(within(now).getAllByRole('cell')).toHaveLength(1);
+  expect(within(now).queryByText('Nothing is running or queued.')).toBeNull();
+  // The counts are over all jobs, as the sidebar's are.
+  expect(within(now).getByText('1 running, 0 queued')).toBeInTheDocument();
+  expect(within(screen.getByRole('navigation', { name: 'Main' })).getByRole('link', { name: /^Activity\s*1$/ })).toBeInTheDocument();
+
+  // The search hides it too.
+  await user.selectOptions(screen.getByLabelText('Repository'), '');
+  expect(await within(now).findByRole('link', { name: 'Cache the tax table per region' })).toBeInTheDocument();
+  await user.type(screen.getByLabelText('Search pull requests'), 'refund');
+  expect(await within(now).findByText('Nothing running or queued matches.')).toBeInTheDocument();
+  expect(within(now).queryByRole('link')).toBeNull();
+  expect(within(now).getByText('1 running, 0 queued')).toBeInTheDocument();
+});
+
+test('the search takes at most 100 characters, as the server does', async () => {
+  open(fakeApi().api);
+  expect(await screen.findByLabelText('Search pull requests')).toHaveAttribute('maxlength', '100');
 });
 
 test('recent reviews show each outcome, score, findings, mode, cost, time taken and age', async () => {
@@ -540,6 +599,29 @@ test('the outcome, the repository and the search are sent to the server, and pag
   const before = queries().length;
   await press(within(outcome).getByRole('button', { name: 'Failed' }));
   expect(queries()).toHaveLength(before);
+});
+
+test('a space typed after the search on a later page reads nothing and keeps the page', async () => {
+  vi.useFakeTimers();
+  const { api, queries } = fakeApi({
+    reviews: (query) => Promise.resolve({ ...REVIEWS, total: 30, reviews: [review({ run: query.before === undefined ? 9001 : 8976 })], next: query.before === undefined ? 8977 : null }),
+  });
+  open(api);
+  await settle();
+  const search = () => screen.getByLabelText('Search pull requests');
+  fireEvent.change(search(), { target: { value: 'tax' } });
+  await act(() => vi.advanceTimersByTimeAsync(300));
+  fireEvent.click(screen.getByRole('button', { name: 'Next' }));
+  await settle();
+  expect(queries()).toEqual([{}, { q: 'tax' }, { q: 'tax', before: 8977 }]);
+  expect(screen.getByRole('button', { name: 'Previous' })).toBeEnabled();
+
+  fireEvent.change(search(), { target: { value: 'tax ' } });
+  await act(() => vi.advanceTimersByTimeAsync(1000));
+  expect(search()).toHaveValue('tax ');
+  expect(queries()).toHaveLength(3);
+  expect(screen.getByRole('button', { name: 'Previous' })).toBeEnabled();
+  expect(screen.getByRole('button', { name: 'Next' })).toBeDisabled();
 });
 
 test('the list says when nothing matches, and when it cannot be read', async () => {

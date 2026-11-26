@@ -1163,7 +1163,7 @@ test('the activity is read every five seconds, and not while the page is hidden'
 | Asked by | `synchronize` `A push`; `opened` `Opened`; `reopened` `Reopened`; `ready_for_review` `Marked ready for review`; `retargeted` `Retargeted`; `command`, `command_retry` mono `/review` then ` by <login>` when there is one; `done`, `done_retry` mono `/done` then ` by <login>`; `rerun`, `rerun_retry` `A re-run of the check`; any other the reason in mono |
 | Started | `ago(startedAt, now)` when running, else `Not yet`; `text-muted` |
 | Progress | percent: `preparing` 5, `reviewing` and `judging_threads` `10 + round(80 * (batch - 1) / batches)`, `publishing` 95, else 0; `aria-label` `About <p> percent` for a running stage, `Waiting` for `waiting` and `retrying`, `Queued`, `Stopped` (call 33: not the mockup's sample values) |
-| No job | one cell spanning the columns: `Nothing is running or queued.` (`text-muted`) |
+| No job | one cell spanning the columns: `Nothing is running or queued.` (`text-muted`); (as built) when the repository or the search hides every job, `Nothing running or queued matches.`, the counts staying over all jobs |
 | Withdrawal | Badge warn `Withdrawal`; `<repository> #<number>: dismissing an earlier approval failed (<code in mono>), tried again in <took(max(0, runAt - now))>.`, or without ` (<code>)` when there is none; a time already past reads `0 s` |
 | Card 2 | `Recent reviews`; the control `aria-label="Outcome"`: `All`, `Approved`, `Needs a person`, `Failed` |
 | Columns | `Pull request`, `Outcome`, `Highest score`, `Findings`, `Mode`, `Cost`, `Took`, `When` |

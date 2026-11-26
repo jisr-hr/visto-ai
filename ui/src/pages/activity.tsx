@@ -23,6 +23,8 @@ import { Link } from '../router.tsx';
 export const REVIEWS_MS = 15000;
 /** How long the search waits after the last key before it is sent. */
 export const SEARCH_MS = 300;
+/** The longest search the API takes (a trimmed `q` over it is `bad_request`). */
+const SEARCH_MAX = 100;
 
 // The mockup's .card with its overflow, as a section of its own (the Card component is a div).
 const CARD = 'overflow-hidden rounded-[12px] border border-border bg-card shadow-card';
@@ -30,6 +32,7 @@ const CARD_HEADER = 'flex flex-wrap items-center justify-between gap-3 px-5 pb-3
 const CARD_TITLE = 'm-0 text-base font-semibold';
 const TITLE_BOX = 'flex min-w-[220px] flex-col gap-0.5';
 const TITLE_LINK = 'font-medium text-text no-underline hover:text-accent-text hover:underline';
+const TITLE_TEXT = 'font-medium text-text';
 const SUB_LINE = 'text-[13px] text-muted';
 const DETAIL = 'text-[13px] text-muted';
 const MONO = 'font-mono text-[12.5px]';
@@ -190,9 +193,14 @@ function JobLine({ job, now, paused }: { job: ActivityJob; now: string; paused: 
     <TableRow hover>
       <TableCell>
         <div className={TITLE_BOX}>
-          <a href={job.url} rel="noreferrer" className={TITLE_LINK}>
-            {job.title ?? name}
-          </a>
+          {/* Linked only to an https address; the service always builds one, so any other is shown as text. */}
+          {job.url.startsWith('https://') ? (
+            <a href={job.url} rel="noreferrer" className={TITLE_LINK}>
+              {job.title ?? name}
+            </a>
+          ) : (
+            <span className={TITLE_TEXT}>{job.title ?? name}</span>
+          )}
           <span className={SUB_LINE}>
             {name}
             {job.head === null ? null : (
@@ -364,6 +372,7 @@ export function ActivityPage() {
             type="search"
             placeholder="Search pull requests"
             className="w-[240px]"
+            maxLength={SEARCH_MAX}
             value={search}
             onChange={(event) => setSearch(event.target.value)}
           />
@@ -419,7 +428,8 @@ export function ActivityPage() {
             </TableHeader>
             <TableBody aria-busy={activity === null && !activityFailed ? true : undefined}>
               {activity === null ? null : jobs.length === 0 ? (
-                <Said columns={5}>Nothing is running or queued.</Said>
+                // The counts stay over all jobs (call 19); the row says whether the filters hid them.
+                <Said columns={5}>{activity.jobs.length === 0 ? 'Nothing is running or queued.' : 'Nothing running or queued matches.'}</Said>
               ) : (
                 jobs.map((job) => <JobLine key={job.job} job={job} now={activity.now} paused={activity.paused !== null} />)
               )}
