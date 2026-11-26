@@ -20,7 +20,7 @@ function ctx(path: string, over: Partial<FileContext> = {}): FileContext {
   return {
     file: { path, previousPath: null, status: 'modified', additions: 1, deletions: 0, patch: '' },
     hunks: [], ranges: { RIGHT: [], LEFT: [] }, diffText: 'R1 +x', full: null, test: null, skip: null, blocks: [],
-    plan: { kind: 'model' }, hidden: false, ...over,
+    plan: { kind: 'model' }, hidden: false, findings: true, ...over,
   };
 }
 

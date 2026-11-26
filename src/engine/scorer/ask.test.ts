@@ -26,11 +26,11 @@ function ctx(path: string, text: string | null = oneHunk): FileContext {
   const file: ChangedFile = { path, previousPath: null, status: 'modified', additions: 1, deletions: 1, patch: text };
   const hunks = text === null ? [] : parsePatch(text);
   const skip = text === null ? 'no_diff' : null;
-  return { file, hunks, ranges: null, diffText: text, full: null, test: null, skip, blocks: blocksOf(hunks), plan: scorePlan(file, skip), hidden: false };
+  return { file, hunks, ranges: null, diffText: text, full: null, test: null, skip, blocks: blocksOf(hunks), plan: scorePlan(file, skip), hidden: false, findings: true };
 }
 function moved(path: string, previousPath: string): FileContext {
   const file: ChangedFile = { path, previousPath, status: 'renamed', additions: 0, deletions: 0, patch: null };
-  return { file, hunks: [], ranges: null, diffText: null, full: null, test: null, skip: 'unchanged', blocks: [], plan: scorePlan(file, 'unchanged'), hidden: false };
+  return { file, hunks: [], ranges: null, diffText: null, full: null, test: null, skip: 'unchanged', blocks: [], plan: scorePlan(file, 'unchanged'), hidden: false, findings: true };
 }
 
 const usage = (calls = 1): Usage => ({ calls, inputTokens: 10, outputTokens: 2, cachedTokens: 0, cost: 0.1 * calls });

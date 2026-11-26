@@ -15,7 +15,7 @@ const raw = (path: string, line: number, extra: Partial<RawFinding> = {}): RawFi
 const ctxWith = (path: string, r: Ranges | null): FileContext => ({
   file: { path, previousPath: null, status: 'modified', additions: 1, deletions: 0, patch: r ? 'p' : null },
   hunks: [], ranges: r, diffText: null, full: null, test: null, skip: r ? null : 'no_diff',
-  blocks: [], plan: r ? { kind: 'model' } : { kind: 'none', reason: 'no_diff' }, hidden: false,
+  blocks: [], plan: r ? { kind: 'model' } : { kind: 'none', reason: 'no_diff' }, hidden: false, findings: true,
 }) as FileContext;
 const ctxs = [ctxWith('src/a.ts', ranges), ctxWith('src/b.ts', ranges), ctxWith('img/logo.bin', null)];
 const allFiles = ctxs.map((c) => c.file.path);
@@ -193,4 +193,24 @@ test('a full file that shows other code on the given line leaves the quote to de
   const q = { ...hunked('src/q.ts', qPatch), full: { kind: 'full' as const, totalLines: 30, text: numberLines(head) } };
   const out = reconcile([answerIn(['src/q.ts'], 'o', raw('src/q.ts', 30, { quote: 'return total' }))], [q]);
   assert.deepEqual(out.findings.map((x) => [x.path, x.line]), [['src/q.ts', 12]]);
+});
+
+test('a finding on a file that takes no findings is dropped and audited, placed, unplaced or beyond the diff', () => {
+  const testFile = { ...hunked('src/a.test.ts', aPatch), findings: false };
+  const contexts = [hunked('src/b.ts', chargePatch), testFile];
+  const batch = ['src/b.ts', 'src/a.test.ts'];
+  const out = reconcile([answerIn(batch, 'o',
+    raw('src/a.test.ts', 11, { quote: 'x = 1' }),
+    raw('src/a.test.ts', 400, { quote: 'charge(order)' }),   // its quote is a line of src/b.ts: still dropped, never re-filed
+    raw('src/a.test.ts', 11, { beyond_diff: true }),
+  )], contexts);
+  assert.deepEqual([out.findings, out.unplaced, out.beyondDiff], [[], [], []]);
+  assert.deepEqual(out.audit, [0, 1, 2].map(() => ({ stage: 'reconcile', action: 'dropped', subject: 'src/a.test.ts', reason: 'findings_not_asked' })));
+});
+
+test('re-filing by quote never moves a finding onto a file that takes no findings', () => {
+  const contexts = [hunked('src/a.ts', aPatch), { ...hunked('src/b.test.ts', chargePatch), findings: false }];
+  const out = reconcile([answerIn(['src/a.ts', 'src/b.test.ts'], 'o', farOnA)], contexts);
+  assert.deepEqual(out.findings, []);
+  assert.deepEqual(out.unplaced.map((u) => [u.path, u.reason]), [['src/a.ts', 'line_not_in_diff']]);
 });

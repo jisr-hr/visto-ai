@@ -41,7 +41,7 @@ function ctx(path: string, extra: Partial<FileContext> = {}): FileContext {
     skip: null,
     blocks: [],
     plan: { kind: 'model' },
-    hidden: false,
+    hidden: false, findings: true,
     ...extra,
   };
 }

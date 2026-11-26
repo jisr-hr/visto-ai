@@ -37,7 +37,7 @@ export function storedRefusal(run: StoredRun, runs: StoredRun[], threshold: numb
   const files = scores as Array<Record<string, unknown>>;
   if (verdict['needsHuman'] !== false || !below(verdict['highest'], threshold) || !files.every((s) => below(s['finalScore'], threshold))) return 'needs_human';
 
-  // (d) Condition 4, this review. Beyond the diff is never read (5.6, step 4).
+  // (d) Condition 4, this review. Beyond the diff is never read (5.6, step 5).
   const unchanged = optionalList(result, 'unchanged');
   if (unchanged === null) return 'record_unreadable';
   const own = [...findings, ...unplaced, ...unchanged];
