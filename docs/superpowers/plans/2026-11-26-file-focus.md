@@ -8,7 +8,7 @@
 
 **Tech Stack:** TypeScript on Node, `node:test`.
 
-**Spec:** this plan carries its design, agreed in conversation on 2026-11-26 ("Adopt the file focus"), from the AACR-Bench runs in `docs/benchmarks/2026-11-26-the-finding-contract.md` and the lab run with open-code-review's default file filter (precision 0.42 to 0.45 at the same recall).
+**Spec:** this plan carries its design (as built: after the final review, `takesFindings` got rules of its own instead of reusing `isLowPriority` and `isTestPath`, which marked production code under `docs`, `build`, `vendor`, `spec` and similar directories; see `src/engine/context/focus.ts`), agreed in conversation on 2026-11-26 ("Adopt the file focus"), from the AACR-Bench runs in `docs/benchmarks/2026-11-26-the-finding-contract.md` and the lab run with open-code-review's default file filter (precision 0.42 to 0.45 at the same recall).
 
 ## Design
 
@@ -17,7 +17,7 @@
   - `isTestPath(path)` as it is today (`spec`, `specs`, `test`, `tests`, `__tests__` directories; `.test.`/`.spec.`/`_test.`/`_spec.` names);
   - and, case-insensitively: a `node_modules`, `third_party`, `testdata`, `__mocks__` or `__snapshots__` segment; a name ending `Test.java`, `Tests.java`, `Test.kt`, `Tests.kt`, `Test.cs`, `Tests.cs` (with the capital `T`), or starting `test_` and ending `.py`; a name ending `.pb.go`, `_pb2.py`, `.min.css`, `.mdx` or `.rst`, or containing `.generated.`.
 - **The context.** `FileContext.findings: boolean`. A secret file is `false` too (it is never sent).
-- **The section.** A file with `findings: false` gets the header line `findings: not asked. Score this file; report no finding in it.`
+- **The section.** A file with `findings: false` gets the header line `findings: not asked. Report no finding in this file.`
 - **The contract** (both files), under "What you do not report": `- A finding in a file whose header says \`findings: not asked\`: a test, documentation, generated, vendored or lock file. It is scored, not reviewed for findings.`
 - **Reconcile.** A finding (placed, not placed, or beyond the diff) on a file with `findings: false` is dropped with the audit entry `{ stage: 'reconcile', action: 'dropped', subject: <path>, reason: 'findings_not_asked' }`; re-filing by quote never picks such a file.
 - **Unchanged:** scoring of such files, threads already open on them, incremental reviews, the gate and approval rules.

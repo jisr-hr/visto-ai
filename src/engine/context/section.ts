@@ -26,7 +26,7 @@ export function fileSection(c: FileContext, k: number, fileCount: number, token:
   } else if (c.plan.kind === 'model_whole') {
     lines.push('whole-file score: required. The file moved to another directory and its content did not change. Score the move itself.');
   }
-  if (c.findings === false) lines.push('findings: not asked. Score this file; report no finding in it.');
+  if (c.findings === false) lines.push('findings: not asked. Report no finding in this file.');
   if (c.changed !== undefined) {
     lines.push(`lines changed since this file was last reviewed: ${changedText(c.changed)}`);
   }

@@ -85,7 +85,7 @@ test('a major or a blocker of this review, placed, unplaced or on unchanged code
   assert.equal(decide(current(approvable({ unchanged: [finding('major')] }))), 'blocking_finding');
   assert.equal(decide(current(approvable({ unchanged: [finding('blocker')] }))), 'blocking_finding');
   assert.equal(decide(current(approvable({ unplaced: [unplacedOf('minor')], unchanged: [finding('minor')] }))), null);
-  // Beyond the diff is never read (5.6, step 4), whatever it holds.
+  // Beyond the diff is never read (5.6, step 5), whatever it holds.
   assert.equal(decide(current(approvable({ beyondDiff: [{ ...finding('blocker'), beyond_diff: true }] }))), null);
   assert.equal(decide(current(approvable({ beyondDiff: 'x' }))), null);
   assert.equal(decide(current(approvable({ beyondDiff: undefined }))), null);

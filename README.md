@@ -33,7 +33,7 @@ The scored unit is a block: one hunk of the diff. A file with ten changes, of wh
 
 ## What it is designed to do
 
-- **Findings**, tagged `[blocker]`, `[major]` or `[minor]`; only a blocker or major one, which must be demonstrated, can hold a merge.
+- **Findings**, tagged `[blocker]`, `[major]` or `[minor]`; only a blocker or major one, which must be demonstrated, can hold a merge. None is asked for, or kept, in a test, documentation, generated, vendored or lock file; such files are still scored. Which files these are is decided by path ([src/engine/context/focus.ts](src/engine/context/focus.ts)): a test helper with no test name outside a test directory, such as `src/testing/helpers.ts`, still takes findings.
 - **A human-review score** for every changed block, with a reason for each block that needs a person.
 - **Optional automatic approval**, per repository, off by default: the review is posted as an approval only when every file is reviewed, nothing is at or above the threshold, no major or blocker finding is open, the pull request is no draft and not from a fork, and the base branch's own rules dismiss stale approvals; a new commit withdraws it. A share of the pull requests it would approve, 5% unless the config says otherwise, is drawn for an audit sample and sent to a person anyway. Built; neither an approval nor an audit decided and posted by the service was tried against GitHub (see [Automatic approval](#automatic-approval-optional)).
 - **Optional merge gate**: a required check that blocks a merge while a major or blocker finding is unanswered. Built; tried once against a real GitHub App, in part (see [The merge gate](#the-merge-gate-optional)).

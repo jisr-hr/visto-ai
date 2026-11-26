@@ -317,7 +317,7 @@ test('a test or documentation file takes no findings and its section says so; a 
   const { contexts } = await buildFileContexts(pr, [file('src/a.ts'), file('src/a.test.ts'), file('docs/setup.md'), file('.env')], stub({}));
   const byPath = new Map(contexts.map((c) => [c.file.path, c]));
   assert.deepEqual(['src/a.ts', 'src/a.test.ts', 'docs/setup.md', '.env'].map((p) => byPath.get(p)!.findings), [true, false, false, false]);
-  const line = 'findings: not asked. Score this file; report no finding in it.';
+  const line = 'findings: not asked. Report no finding in this file.';
   assert.ok(fileSection(byPath.get('src/a.test.ts')!, 1, 2, 'tok').includes(`\n${line}\n`));
   assert.ok(!fileSection(byPath.get('src/a.ts')!, 1, 2, 'tok').includes(line));
 });

@@ -201,7 +201,7 @@ test('a finding on a file that takes no findings is dropped and audited, placed,
   const batch = ['src/b.ts', 'src/a.test.ts'];
   const out = reconcile([answerIn(batch, 'o',
     raw('src/a.test.ts', 11, { quote: 'x = 1' }),
-    raw('src/a.test.ts', 400, { quote: 'nowhere' }),
+    raw('src/a.test.ts', 400, { quote: 'charge(order)' }),   // its quote is a line of src/b.ts: still dropped, never re-filed
     raw('src/a.test.ts', 11, { beyond_diff: true }),
   )], contexts);
   assert.deepEqual([out.findings, out.unplaced, out.beyondDiff], [[], [], []]);
