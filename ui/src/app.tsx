@@ -4,8 +4,9 @@ import { useEffect, useMemo, useState } from 'react';
 import { RequestFailed } from './api.ts';
 import type { Api } from './api.ts';
 import type { Me } from './api-types.ts';
-import { Layout, PageHeader, REVIEW_PATH } from './components/layout.tsx';
+import { Layout, REVIEW_PATH } from './components/layout.tsx';
 import { Button } from './components/ui/button.tsx';
+import { ActivityPage } from './pages/activity.tsx';
 import { Later } from './pages/later.tsx';
 import { NotFound } from './pages/not-found.tsx';
 import { SignIn } from './pages/sign-in.tsx';
@@ -28,7 +29,7 @@ function Page({ path }: { path: string }) {
     case '/ui/':
       return <Later title="Overview" />;
     case '/ui/activity':
-      return <PageHeader title="Activity" />;
+      return <ActivityPage />;
     case '/ui/repositories':
       return <Later title="Repositories" />;
     case '/ui/memory':
