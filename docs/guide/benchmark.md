@@ -38,7 +38,7 @@ npm run eval:backtest -- --history ../aacr/history.jsonl --out ../runs/score --l
 
 A failed replay case is left out of all three and counted. A finding whose judge call failed twice counts as unmatched, and is counted. As with `replay`, when the provider reports no cost and the configuration has no prices, `--max-cost` stops nothing. With `--with`, both runs are restricted to the cases that are ok in both, so the control and the reviewer are rated on the same cases; without it, a case one run failed counts for the other. A judge stopped by `--max-cost` rates only the first cases of the case file, in the file's order, and prints how many it did not judge.
 
-**The score.** The backtest on the history file reports Safety, Benefit and Focus as above, with these differences:
+**The score.** The backtest on the history file reports Safety, Benefit and Focus as in [Backtest](backtest.md), with these differences:
 
 - Read only the loose Safety. The history file has no later commits, so strict Safety is meaningless here; and do not use `--memory` with it.
 - Every pull request in the data has at least one expert comment, so Benefit is the share of pull requests the score would have approved with nothing shown to a person despite a known problem. Lower is better.
