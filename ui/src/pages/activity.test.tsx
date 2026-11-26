@@ -10,7 +10,7 @@ const NOW = '2026-03-01T10:00:00.000Z';
 /** The time `seconds` after 10:00:00 on the first of March 2026, before it when negative. */
 const at = (seconds: number): string => new Date(Date.parse(NOW) + seconds * 1000).toISOString();
 
-const ME: Me = { login: 'octo-lead', csrf: 'csrf-token-for-tests', mode: 'live', repositories: ['acme/billing', 'acme/infra', 'acme/shop', 'acme/web'] };
+const ME: Me = { name: 'octo-lead', kind: 'github', role: 'admin', csrf: 'csrf-token-for-tests', mode: 'live', repositories: ['acme/billing', 'acme/infra', 'acme/shop', 'acme/web'] };
 const ACTIVITY: Activity = { now: NOW, places: { reviews: 2, withdrawals: 2 }, paused: null, jobs: [], withdrawals: [] };
 const REVIEWS: Reviews = { now: NOW, windowDays: 30, total: 0, reviews: [], next: null };
 

@@ -5,7 +5,7 @@ import { askGate, askWithdraw, deleteFinishedJobs } from './db/jobs.ts';
 import type { Job } from './db/jobs.ts';
 import { getPullRequest } from './db/pull-requests.ts';
 import type { Db, InstanceLock } from './db/types.ts';
-import { approvalUseOf, gateUseOf, repoSettingsFor } from './config/load.ts';
+import { approvalUseOf, gateUseOf, githubSignInOn, repoSettingsFor } from './config/load.ts';
 import type { ServiceConfig } from './config/load.ts';
 import type { ModelClient, ReviewDeps, ReviewInput, ReviewResult } from './engine/types.ts';
 import { alertSinksOf, notifiersOf } from './extensions/load.ts';
@@ -40,8 +40,11 @@ import { runReviewJob } from './shell/review-job.ts';
 import type { ReviewJobDeps } from './shell/review-job.ts';
 import { createRunner } from './shell/runner.ts';
 import { createSpendGuard } from './shell/spend.ts';
+import { createAccountChanges } from './ui/accounts.ts';
 import { createAuth } from './ui/auth.ts';
 import type { UiFiles } from './ui/files.ts';
+import { createPasswordAuth } from './ui/password-auth.ts';
+import type { PasswordCost } from './ui/passwords.ts';
 import { createUiRoute } from './ui/route.ts';
 
 export interface Listening { close(): Promise<void> }
@@ -76,8 +79,11 @@ export interface ServiceDeps {
   model: ModelClient;
   /** Fresh random text for data markers. Read only with learning on. */
   token: () => string;
-  /** Sign-in at the git service and the built files; absent: the UI is off whatever the config says. */
-  ui?: { signIn: ForgeSignIn; files: UiFiles };
+  /**
+   * Sign-in at the git service, the built files, and the cost of every password hash (absent: the production cost); absent: the
+   * UI is off whatever the config says. `signIn` null: no GitHub sign-in whatever the file says.
+   */
+  ui?: { signIn: ForgeSignIn | null; files: UiFiles; passwordCost?: PasswordCost };
 }
 export const STOP_WAIT_MS = 10_000;
 export const CLOSE_WAIT_MS = 5_000;
@@ -314,19 +320,23 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps): Pr
     await askGate(db, job.ref, clock().toISOString(), undefined, { installation: job.installation });
     void gateRunner.tick();
   }
-  // The UI is on with both the file's `ui` and the service's; with either absent nothing of it is made or read (call 31).
+  // The UI is on with both the file's `ui` and the service's; with either absent nothing of it is made or read (call 31). GitHub
+  // sign-in is on when the file names an account or a team and the service was given a sign-in, which is read only then.
   const ui = config.ui === undefined || deps.ui === undefined ? null : {
     // Who may open it and the address only: the client secret stays with the adapter.
     access: { accounts: config.ui.accounts, team: config.ui.team, publicUrl: config.ui.publicUrl },
-    signIn: deps.ui.signIn, files: deps.ui.files,
+    signIn: githubSignInOn(config.ui) ? deps.ui.signIn : null, files: deps.ui.files,
+    cost: deps.ui.passwordCost,
   };
   const uiRoute = ui === null ? null : createUiRoute({
     auth: createAuth({ db, ui: ui.access, signIn: ui.signIn, checks: deps.checks, clock, log: say }),
+    passwords: createPasswordAuth({ db, clock, log: say, ...(ui.cost === undefined ? {} : { cost: ui.cost }) }),
+    accounts: createAccountChanges({ db, clock, log: say, ...(ui.cost === undefined ? {} : { cost: ui.cost }) }),
     api: {
       db, clock, dryRun: config.dryRun, reviewPlaces: config.limits.queueConcurrency, withdrawPlaces: WITHDRAW_CONCURRENCY,
       holds: (ref) => runner.holds(ref), paused: pauseCode, pullRequestUrl: deps.pullRequestUrl,
     },
-    files: ui.files, log: say,
+    files: ui.files, ui: { publicUrl: ui.access.publicUrl, github: ui.signIn !== null }, log: say,
   });
   const { listener, idle } = createListener({
     webhook: (headers, body) => receive({
@@ -424,8 +434,8 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps): Pr
 
   async function appCheck(): Promise<void> {
     if (ending) return;
-    // With the UI on and a team named, the UI reads its members (call 27); with the UI off nothing of it is asked for.
-    const lacking = await deps.appInfo.lacks(config.dryRun, gateUseOf(config), approvalUseOf(config), ui !== null && ui.access.team !== null);
+    // With GitHub sign-in on and a team named, the UI reads its members (call 27); else nothing of it is asked for.
+    const lacking = await deps.appInfo.lacks(config.dryRun, gateUseOf(config), approvalUseOf(config), ui !== null && ui.signIn !== null && ui.access.team !== null);
     if (ending) return;
     if (lacking.length === 0) say({ event: 'app_check', missing: 0 });
     for (const { feature, missing } of lacking) {

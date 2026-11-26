@@ -133,10 +133,10 @@ export function Layout({ api, me, onSignedOut, children }: { api: Api; me: Me; o
             <Mode me={me} />
             <div className="flex items-center gap-2.5 px-1.5">
               <div aria-hidden="true" className="flex size-[30px] items-center justify-center rounded-full bg-subtle text-xs font-semibold">
-                {initials(me.login)}
+                {initials(me.name)}
               </div>
               <div className="flex min-w-0 flex-col">
-                <span className="text-[13px] font-medium">{me.login}</span>
+                <span className="text-[13px] font-medium">{me.name}</span>
                 <span className="text-xs text-muted">Signed in with GitHub</span>
               </div>
               <Button

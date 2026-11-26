@@ -62,7 +62,7 @@ test('me holds the login, the token, the mode and the repositories seen', async 
   await savePullRequest(db, facts(pr(8)));
   await savePullRequest(db, facts({ service: 'github', owner: 'Acme', repo: 'Billing', number: 3 }));
   assert.deepEqual(await me(deps(db, { dryRun: true }), SESSION), {
-    login: 'octo-lead', csrf: 'q7Jv0bW2m3n4o5p6q7r8s9t0u1v2w3x4y5z6A7B8C9D', mode: 'dry_run', repositories: ['acme/billing', 'acme/shop'],
+    name: 'octo-lead', kind: 'github', role: 'viewer', csrf: 'q7Jv0bW2m3n4o5p6q7r8s9t0u1v2w3x4y5z6A7B8C9D', mode: 'dry_run', repositories: ['acme/billing', 'acme/shop'],
   });
   assert.equal((await me(deps(db), SESSION)).mode, 'live');
   await db.close();
@@ -314,7 +314,7 @@ test('a page is 25 runs, next is the 25th when a 26th came, and a run reads as t
 });
 
 // The keys of each answer, held to api-types.ts by the type check: a key missing or added there fails to compile here.
-const ME: Record<keyof Me, true> = { login: true, csrf: true, mode: true, repositories: true };
+const ME: Record<keyof Me, true> = { name: true, kind: true, role: true, csrf: true, mode: true, repositories: true };
 const ACTIVITY: Record<keyof Activity, true> = { now: true, places: true, paused: true, jobs: true, withdrawals: true };
 const PLACES: Record<keyof Activity['places'], true> = { reviews: true, withdrawals: true };
 const JOB: Record<keyof ActivityJob, true> = {

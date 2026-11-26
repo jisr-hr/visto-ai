@@ -3,9 +3,12 @@
 export interface ApiError { error: string }
 /** The answer of a password sign-in and of a first password (the password design 4.3; call 13). */
 export interface SignInStep { next: 'signed_in' | 'choose_password' }
-export interface Me { login: string; csrf: string; mode: 'live' | 'dry_run'; repositories: string[] }
 export type AccountKind = 'password' | 'github';
 export type Role = 'admin' | 'viewer';
+/** Who is signed in (the password design 4.5; call 19): the account's name, kind and role as they are at this request. */
+export interface Me { name: string; kind: AccountKind; role: Role; csrf: string; mode: 'live' | 'dry_run'; repositories: string[] }
+/** The ways of signing in the page offers besides a password (call 25). */
+export interface Ways { github: boolean }
 /** An account as the API shows it (the password design 4.2 and 4.8): never its hash. */
 export interface Account {
   id: number; kind: AccountKind; name: string; role: Role;
