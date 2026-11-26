@@ -13,7 +13,7 @@ const PATCH_B = '@@ -10,3 +10,5 @@\n const a = 1;\n const b = 2;\n+const total =
 const fileOf = (patch: string): ChangedFile => ({ path: 'src/a.ts', previousPath: null, status: 'modified', additions: 1, deletions: 0, patch });
 const ctxOf = (patch: string): FileContext => ({
   file: fileOf(patch), hunks: hunksOf(patch).hunks, ranges: null, diffText: null, full: null, test: null, skip: null,
-  blocks: [], plan: { kind: 'model' }, hidden: false,
+  blocks: [], plan: { kind: 'model' }, hidden: false, findings: true,
 }) as FileContext;
 const ctxA = ctxOf(PATCH_A);
 const ctxB = ctxOf(PATCH_B);

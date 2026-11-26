@@ -62,6 +62,8 @@ test('the review goes through every file, with the three checks, and asks what i
   has(/ask what you saw and did not report/);
 });
 test('style, naming and formatting stay out', () => has(/- Style, naming and formatting\./));
+test('a file whose header says findings: not asked gets no finding', () =>
+  has(/- A finding in a file whose header says `findings: not asked`: a test, documentation, generated, vendored or lock file\. It is scored, not reviewed for findings\./));
 test('answers with three arguments', () => { has(/`files`/); has(/`change_summary`/); });
 test('the score is need for judgement, not bug likelihood', () => { has(/not a probability/i); has(/judgement/i); });
 test('names the five bands', () => { for (const b of ['0 to 19', '20 to 39', '40 to 69', '70 to 89', '90 to 100']) has(new RegExp(b)); });

@@ -36,10 +36,10 @@ Quoted or restated from the conversation of 2026-11-25:
 
 ### 3.2 Sign-in and access
 
-- **Who may open it.** The deployment config names `ui.team` (one `org/team`) or `ui.accounts` (GitHub logins), or both. With neither, the UI is off: `/ui/` and `/api/` answer 404, as design 18 item 10 says. Access is read from the file only (section 4.1), so nobody can lock everyone out from inside the UI.
+- **Who may open it.** The UI is on when `ui.publicUrl` is written; password accounts are made in the UI and by a command; `ui.accounts` and `ui.team` decide who may sign in through GitHub. GitHub access is read from the file; password accounts and every role live in the database, and the last admin cannot be removed.
 - **How.** Sign-in goes through the GitHub App's own user authorization (OAuth for GitHub Apps): the app's client id in the config, its client secret by reference (`APP_CLIENT_SECRET`), the callback `<public URL>/api/auth/callback`. The service asks GitHub for the signed-in user's login, then checks it: listed in `ui.accounts`, or an active member of `ui.team`, read with the existing team-membership read (`GET orgs/{org}/teams/{team}/memberships/{login}`, Members read) through the installation of that organisation. Anything that cannot be read refuses the sign-in.
-- **Sessions** are rows of a table (`ui_sessions`): a random id stored hashed, the login, the times it was made and last used, and an expiry 12 hours after it was made. The cookie holds the id only: `HttpOnly`, `Secure`, `SameSite=Strict`, path `/`. Membership is checked again at each sign-in, not on every request; signing out deletes the row. The OAuth `state` is a random value stored with a 10-minute expiry and used once. The way back's state and a PKCE verifier are also set in a cookie of their own, `__Host-`, `SameSite=Lax`, 10 minutes, cleared on the way back, because a `Strict` cookie is not sent when GitHub sends the browser back; the cookies carry the `__Host-` prefix; a session's last use is written when the stored one is 60 seconds old or more; a session keeps the way it was let in (a named account, or the team) and ends when that way no longer holds; expired rows are deleted at most once a minute, at most 1,000 states are live, and the sign-in routes have 2 places of their own and the rest of the API 4.
-- **Who may change settings.** Everyone who may open the UI. Every change is recorded with who made it and when (section 4.4).
+- **Sessions** are rows of a table (`ui_sessions`): a random id stored hashed, the login, the times it was made and last used, and an expiry 12 hours after it was made. The cookie holds the id only: `HttpOnly`, `Secure`, `SameSite=Strict`, path `/`. Membership is checked again at each sign-in, not on every request; signing out deletes the row. The OAuth `state` is a random value stored with a 10-minute expiry and used once. The way back's state and a PKCE verifier are also set in a cookie of their own, `__Host-`, `SameSite=Lax`, 10 minutes, cleared on the way back, because a `Strict` cookie is not sent when GitHub sends the browser back; the cookies carry the `__Host-` prefix; a session's last use is written when the stored one is 60 seconds old or more; a session keeps the way it was let in (a named account, or the team) and ends when that way no longer holds; expired rows are deleted at most once a minute, at most 1,000 states are live, and the sign-in routes have 2 places of their own and the rest of the API 4. A session belongs to an account, whose role is read at each request; a password sign-in makes the same session.
+- **Who may change settings.** Admins only; viewers see everything but Settings, and the API refuses them its admin routes. Every change is recorded with who made it and when (section 4.4).
 - **Requests that change something** (`POST`, `PUT`, `DELETE`) carry a per-session token in a header the API checks; a read never changes anything. The token is derived from the session's id and given by `GET /api/me`.
 - **Headers.** A content security policy that allows only the service's own origin (no inline script, no third-party origin; the fonts are bundled), `X-Content-Type-Options: nosniff`, `Referrer-Policy: same-origin`, `X-Frame-Options: DENY`, and `Cache-Control: no-store` on every API answer.
 
@@ -104,6 +104,7 @@ A review already running keeps the settings it started with.
 All under `/api/`, all answers JSON, all behind a session but the sign-in routes:
 
 - `GET /api/auth/start`, `GET /api/auth/callback`, `POST /api/auth/signout`, `GET /api/me`.
+- `GET /api/auth/ways`, `POST /api/auth/password`, `POST /api/auth/first-password`, `POST /api/me/password`, `GET /api/accounts`, `POST /api/accounts/new`, `/role`, `/reset`, `/remove`.
 - `GET /api/overview?days=`, `GET /api/activity` (running and queued), `GET /api/reviews?repo=&outcome=&q=&before=` (paged), `GET /api/reviews/{run}`, `GET /api/pulls/{owner}/{repo}/{number}/reviews`.
 - `GET /api/repositories`, `GET /api/repositories/{owner}/{repo}/quality?days=`.
 - `GET /api/memory?kind=&repo=&q=`, `PUT /api/memory/{id}` (on or off).
@@ -130,7 +131,6 @@ Each plan is reviewed before it is built, built task by task with a review of ea
 
 - Re-running a review from the UI: a `/review` comment does it.
 - Editing secrets, `app`, `database`, `server`, extensions or MCP servers from the UI.
-- Roles: everyone who may open the UI may change settings.
 - Anything the mockups do not show.
 
 ## 9. Changes to the main design

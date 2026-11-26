@@ -23,7 +23,8 @@
     "eval:seed-memory": "node src/eval/cli.ts seed-memory",
     "start": "node src/main.ts",
     "dev:send-webhook": "node src/forge/github/send-sample.ts",
-    "app:create": "node src/forge/github/create-app.ts"
+    "app:create": "node src/forge/github/create-app.ts",
+    "accounts": "node src/ui/accounts-cli.ts"
   },
   "dependencies": {
     "diff": "^9.0.0",

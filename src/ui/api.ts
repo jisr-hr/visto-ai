@@ -40,7 +40,7 @@ const RUNNING_STAGES: ReadonlySet<string> = new Set(['preparing', 'reviewing', '
 
 export async function me(deps: ApiDeps, session: Session): Promise<Me> {
   return {
-    login: session.login, csrf: session.csrf, mode: deps.dryRun ? 'dry_run' : 'live',
+    name: session.login, kind: session.kind, role: session.role, csrf: session.csrf, mode: deps.dryRun ? 'dry_run' : 'live',
     repositories: await knownRepositories(deps.db, REPOSITORIES_SHOWN),
   };
 }

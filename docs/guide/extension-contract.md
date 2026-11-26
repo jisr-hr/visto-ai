@@ -1,8 +1,11 @@
-# Extension modules
+---
+title: The extension contract
+description: An extension module is code of your own that the service loads once, at start.
+---
 
 An extension module is code of your own that the service loads once, at start. A module can give the reviewer context about a pull request (a ticket's text, acceptance criteria), be told when a review is published and when an alert is raised, and answer HTTP requests under `/extensions/<name>/`, for example to collect a thumbs up or down on a review.
 
-The service ships no module and knows no ticket system or chat tool. [examples/extension-example.ts](../examples/extension-example.ts) is a short module that works; everything in it is invented. The types below are in [src/extensions/types.ts](../src/extensions/types.ts): import them with `import type`.
+The service ships no module and knows no ticket system or chat tool. [examples/extension-example.ts](../../examples/extension-example.ts) is a short module that works; everything in it is invented. The types below are in [src/extensions/types.ts](../../src/extensions/types.ts): import them with `import type`.
 
 **Trust.** A module runs inside the service, in the same process. It can read the service's environment, its secrets included, reach the network, and do whatever the service's own code can. The service does not sandbox it. Name only code you trust.
 

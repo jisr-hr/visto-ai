@@ -10,7 +10,7 @@ const NOW = '2026-03-01T10:00:00.000Z';
 /** The time `seconds` after 10:00:00 on the first of March 2026, before it when negative. */
 const at = (seconds: number): string => new Date(Date.parse(NOW) + seconds * 1000).toISOString();
 
-const ME: Me = { login: 'octo-lead', csrf: 'csrf-token-for-tests', mode: 'live', repositories: ['acme/billing', 'acme/infra', 'acme/shop', 'acme/web'] };
+const ME: Me = { name: 'octo-lead', kind: 'github', role: 'admin', csrf: 'csrf-token-for-tests', mode: 'live', repositories: ['acme/billing', 'acme/infra', 'acme/shop', 'acme/web'] };
 const ACTIVITY: Activity = { now: NOW, places: { reviews: 2, withdrawals: 2 }, paused: null, jobs: [], withdrawals: [] };
 const REVIEWS: Reviews = { now: NOW, windowDays: 30, total: 0, reviews: [], next: null };
 
@@ -33,6 +33,42 @@ function fakeApi(over: Partial<Api> = {}) {
     signOut: (csrf) => {
       calls.push(['signOut', csrf]);
       return over.signOut ? over.signOut(csrf) : Promise.resolve();
+    },
+    ways: () => {
+      calls.push(['ways']);
+      return over.ways ? over.ways() : Promise.resolve({ github: true });
+    },
+    accounts: () => {
+      calls.push(['accounts']);
+      return over.accounts ? over.accounts() : Promise.resolve({ now: NOW, accounts: [] });
+    },
+    passwordSignIn: (name, password) => {
+      calls.push(['passwordSignIn', name, password]);
+      return over.passwordSignIn ? over.passwordSignIn(name, password) : Promise.reject(new RequestFailed(500, 'not_expected'));
+    },
+    firstPassword: (name, oneTimePassword, password) => {
+      calls.push(['firstPassword', name, oneTimePassword, password]);
+      return over.firstPassword ? over.firstPassword(name, oneTimePassword, password) : Promise.reject(new RequestFailed(500, 'not_expected'));
+    },
+    changePassword: (csrf, current, password) => {
+      calls.push(['changePassword', csrf, current, password]);
+      return over.changePassword ? over.changePassword(csrf, current, password) : Promise.reject(new RequestFailed(500, 'not_expected'));
+    },
+    makeAccount: (csrf, name, role) => {
+      calls.push(['makeAccount', csrf, name, role]);
+      return over.makeAccount ? over.makeAccount(csrf, name, role) : Promise.reject(new RequestFailed(500, 'not_expected'));
+    },
+    setRole: (csrf, id, role) => {
+      calls.push(['setRole', csrf, id, role]);
+      return over.setRole ? over.setRole(csrf, id, role) : Promise.reject(new RequestFailed(500, 'not_expected'));
+    },
+    resetPassword: (csrf, id) => {
+      calls.push(['resetPassword', csrf, id]);
+      return over.resetPassword ? over.resetPassword(csrf, id) : Promise.reject(new RequestFailed(500, 'not_expected'));
+    },
+    removeAccount: (csrf, id) => {
+      calls.push(['removeAccount', csrf, id]);
+      return over.removeAccount ? over.removeAccount(csrf, id) : Promise.reject(new RequestFailed(500, 'not_expected'));
     },
   };
   const queries = (): unknown[] => calls.filter(([name]) => name === 'reviews').map(([, query]) => query);

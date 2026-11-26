@@ -8,8 +8,8 @@ export const EXTENSION_BODY_BYTES = 1024 * 1024;
 export const EXTENSION_IN_FLIGHT = 10;        // the places of one module
 export const UI_BODY_BYTES = 64 * 1024;
 export const UI_FILES_IN_FLIGHT = 16;    // '/', '/ui', '/ui/...'
-export const UI_SIGNIN_IN_FLIGHT = 2;    // '/api/auth/start', '/api/auth/callback'
-export const UI_API_IN_FLIGHT = 4;       // every other '/api' path
+export const UI_SIGNIN_IN_FLIGHT = 2;    // '/api/auth/start', '/api/auth/callback', '/api/auth/password', '/api/auth/first-password'
+export const UI_API_IN_FLIGHT = 4;       // every other '/api' path, '/api/auth/ways' among them
 export interface CheckedAnswer { status: number; headers: Record<string, string>; body: string }
 /** A request of the UI's route group. `path` is the URL before '?', `query` what follows the first '?'; neither is decoded. */
 export interface UiRequest { method: string; path: string; query: string; headers: Record<string, string | undefined>; body: Buffer }
@@ -42,11 +42,15 @@ const PREFIX = '/extensions/';
 const MODULE_FAILED: CheckedAnswer = { status: 500, headers: {}, body: 'internal_error' };
 const INTERNAL_ERROR = 'internal_error';
 
-/** The three parts of the UI's group, each with places of its own (call 17). */
+/**
+ * The three parts of the UI's group, each with places of its own (call 17; the password design's call 22): the four routes that
+ * sign in share theirs, so a flood of password tries holds sign-in off and never the rest of the API.
+ */
 type UiPart = 'files' | 'signIn' | 'api';
+const SIGN_IN_PATHS: ReadonlySet<string> = new Set(['/api/auth/start', '/api/auth/callback', '/api/auth/password', '/api/auth/first-password']);
 function uiPart(path: string): UiPart | null {
   if (path === '/' || path === '/ui' || path.startsWith('/ui/')) return 'files';
-  if (path === '/api/auth/start' || path === '/api/auth/callback') return 'signIn';
+  if (SIGN_IN_PATHS.has(path)) return 'signIn';
   if (path === '/api' || path.startsWith('/api/')) return 'api';
   return null;
 }

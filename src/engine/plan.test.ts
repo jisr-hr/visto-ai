@@ -28,7 +28,7 @@ function ctx(path: string, opts: { covered?: boolean; due?: boolean; plan?: keyo
   const plan = PLANS[opts.plan ?? 'model'];
   return {
     file: { path, previousPath: null, status: 'modified', additions: 1, deletions: 1, patch: '' },
-    hunks: [], ranges: null, diffText: null, full: null, test: null, skip: null, blocks: [], plan, hidden: false,
+    hunks: [], ranges: null, diffText: null, full: null, test: null, skip: null, blocks: [], plan, hidden: false, findings: true,
     ...(opts.covered === undefined ? {} : { kept: keptWith(opts.covered) }),
     ...(plan.kind === 'model' && opts.thread !== false ? { threads: [threadOn(path, opts.due === true)] } : {}),
   };

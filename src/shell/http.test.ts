@@ -743,6 +743,62 @@ test('the files, the sign-in routes and the rest of the API have places of their
   for (const url of others) assert.equal((await one(request('GET', url, []))).written?.status, 200, url);
 });
 
+test('the password sign-in and the first password count against the sign-in places, and the ways against the API\'s', async () => {
+  const ui = uiRoute();
+  const { listener, idle } = createListener({ webhook: async () => ok, ui: ui.route });
+  const at = (method: string, url: string) => { const { res, out } = response(); listener(request(method, url, []), res); return out; };
+  const unread: Array<() => number> = [];
+  const refused = (method: string, url: string) => {
+    const { req, asked } = untouched(method, url, { 'content-length': '0' });
+    const { res, out } = response();
+    listener(req, res);
+    assert.deepEqual(out.written, BUSY, `${method} ${url}`);
+    unread.push(asked);
+  };
+  const answered = (outs: Array<{ written: Written | null }>) => until(() => outs.every((o) => o.written !== null));
+  const release = () => { for (const h of ui.held.splice(0)) h.answer(UI_OK); };
+
+  // The two password steps hold both sign-in places.
+  ui.holding.add('/api/auth/password');
+  ui.holding.add('/api/auth/first-password');
+  const signIns = [at('POST', '/api/auth/password'), at('POST', '/api/auth/first-password')];
+  await until(() => ui.held.length === 2);
+  refused('GET', '/api/auth/start');
+  refused('GET', '/api/auth/callback?code=code-1&state=s');
+  refused('POST', '/api/auth/password');
+  refused('POST', '/api/auth/first-password');
+  const besideSignIn = [at('GET', '/api/auth/ways'), at('GET', '/api/me'), at('POST', '/api/accounts/new')];
+  await answered(besideSignIn);
+  assert.deepEqual(besideSignIn.map((o) => o.written?.status), [200, 200, 200]);
+  release();
+  await answered(signIns);
+  assert.deepEqual(signIns.map((o) => o.written?.status), [200, 200]);
+  ui.holding.clear();
+
+  // Four of the accounts and the ways hold the API's places; a password sign-in is served beside them.
+  ui.holding.add('/api/accounts');
+  ui.holding.add('/api/auth/ways');
+  const reads = [at('GET', '/api/accounts'), at('GET', '/api/accounts'), at('GET', '/api/accounts'), at('GET', '/api/auth/ways')];
+  await until(() => ui.held.length === 4);
+  refused('GET', '/api/auth/ways');
+  refused('GET', '/api/me');
+  refused('POST', '/api/me/password');
+  refused('POST', '/api/accounts/role');
+  const besideApi = [at('POST', '/api/auth/password'), at('POST', '/api/auth/first-password')];
+  await answered(besideApi);
+  assert.deepEqual(besideApi.map((o) => o.written?.status), [200, 200]);
+  release();
+  await answered(reads);
+  assert.deepEqual(reads.map((o) => o.written?.status), [200, 200, 200, 200]);
+  await idle();
+  assert.deepEqual(unread.map((asked) => asked()), new Array(unread.length).fill(0));
+  // Only the requests that had a place reached the route.
+  assert.deepEqual(ui.seen.map((s) => `${s.method} ${s.path}`).sort(), [
+    'POST /api/auth/password', 'POST /api/auth/first-password', 'GET /api/auth/ways', 'GET /api/me', 'POST /api/accounts/new',
+    'GET /api/accounts', 'GET /api/accounts', 'GET /api/accounts', 'GET /api/auth/ways', 'POST /api/auth/password', 'POST /api/auth/first-password',
+  ].sort());
+});
+
 test('an answer with several values of one header is written with each', async () => {
   const cookies = ['a=1', 'b=2'];
   const answer: UiAnswer = { status: 302, headers: { location: '/ui/', 'set-cookie': cookies }, body: '' };
