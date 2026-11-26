@@ -86,8 +86,8 @@ export function setOneTime(db: Db, id: number, hash: string, until: string): Pro
 }
 
 /**
- * Sets a password chosen by its account, only over the hash that was verified and while the account does not wait at `now` (the
- * service's clock); false when the row's hash is another now, or a wait began after the verify, and nothing is written.
+ * Sets a password chosen by its account, only over the hash that was verified and while the account does not wait at `now`, the
+ * service's clock; false when the row's hash is another now or it waits.
  */
 export async function setOwnPassword(db: Db, id: number, hash: string, verified: string, now: string): Promise<boolean> {
   const rows = await db.query(
@@ -113,8 +113,8 @@ export async function wrongTry(db: Db, id: number, waitUntil: string): Promise<v
 }
 
 /**
- * Clears the count and the wait only while the row's hash is still `verified` and the account does not wait at `now` (call 17; the
- * service's clock); false when it is another now, or a wait began after the verify, and nothing is written.
+ * Clears the count and the wait only while the row's hash is still `verified` and the account does not wait at `now`, the service's
+ * clock (call 17); false when it is another now or it waits, and nothing is written.
  */
 export async function rightTry(db: Db, id: number, verified: string, now: string): Promise<boolean> {
   const rows = await db.query(

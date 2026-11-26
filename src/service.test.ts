@@ -2506,3 +2506,32 @@ test('a password sign-in through the service logs no name and no password', asyn
     { event: 'ui_signin', way: 'password', outcome: 'refused', reason: null },
   ]);
 });
+
+test('with a team named and no sign-in through GitHub given, the app check asks for no members permission', async () => {
+  const given = passwordOnly();
+  const h = await harness({ uiYaml: TEAM_YAML, ui: given.ui });
+  await (await h.start()).settled;
+  assert.deepEqual(h.uiTeamCalls, [false]);
+  // The file names a team, so the sign-in given is read: it is none.
+  assert.deepEqual(given.reads, ['signIn']);
+  const ways = await h.request('GET', '/api/auth/ways');
+  assert.deepEqual([ways.status, ways.body], [200, '{"github":false}']);
+});
+
+test('the service hashes at the cost it is given: an account made through the API, and a first password', async () => {
+  const h = await harness({ uiYaml: ADDRESS_YAML, ui: passwordOnly().ui });
+  await (await h.start()).settled;
+  await passwordAccountOf(h.db, 'octo-admin', 'admin');
+  await passwordAccountOf(h.db, 'octo-new', 'viewer', ONE_TIME);
+  const signed = await h.request('POST', '/api/auth/password', Buffer.from(JSON.stringify({ name: 'octo-admin', password: PASSWORD })), FROM_THE_PAGE);
+  const cookie = cookieOf(signed.headers['set-cookie']);
+  const { csrf } = JSON.parse((await h.request('GET', '/api/me', Buffer.from(''), { cookie })).body) as Me;
+  const made = await h.request('POST', '/api/accounts/new', Buffer.from(JSON.stringify({ name: 'octo-viewer', role: 'viewer' })),
+    { cookie, 'x-visto-csrf': csrf, 'content-type': 'application/json' });
+  assert.equal(made.status, 201);
+  const chosen = await h.request('POST', '/api/auth/first-password', Buffer.from(JSON.stringify({ name: 'octo-new', oneTimePassword: ONE_TIME, password: OTHER_PASSWORD })), FROM_THE_PAGE);
+  assert.deepEqual([chosen.status, chosen.body], [200, '{"next":"signed_in"}']);
+  const rows = await h.db.query<{ name: string; password_hash: string }>(
+    "select name, password_hash from visto_ai.ui_accounts where name in ('octo-new', 'octo-viewer') order by name");
+  assert.deepEqual(rows.map((r) => [r.name, r.password_hash.slice(0, 'scrypt$4$1$1$'.length)]), [['octo-new', 'scrypt$4$1$1$'], ['octo-viewer', 'scrypt$4$1$1$']]);
+});

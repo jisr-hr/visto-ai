@@ -127,17 +127,24 @@ export function createUiRoute(deps: {
   }
 
   /** The body's checks, in order: a type of JSON (not_json), then a plain object (bad_request); then the work. */
-  async function withBody(request: UiRequest, work: (body: Body) => Promise<UiAnswer>): Promise<UiAnswer> {
-    if (!isJson(request.headers['content-type'])) return refused(415, 'not_json');
+  async function withBody(request: UiRequest, work: (body: Body) => Promise<UiAnswer>, refuse = refused): Promise<UiAnswer> {
+    if (!isJson(request.headers['content-type'])) return refuse(415, 'not_json');
     const body = objectOf(request.body);
-    if (body === null) return refused(400, 'bad_request');
+    if (body === null) return refuse(400, 'bad_request');
     return work(body);
   }
 
-  /** The two routes that change something without a session (call 21): the origin, exactly the UI's, before anything else. */
+  /**
+   * The two routes that change something without a session (call 21): the origin, exactly the UI's, before anything else. Each
+   * refusal of their own is logged as a password sign-in refused as `bad_request`, its code the reason, with no name.
+   */
   async function fromThePage(request: UiRequest, work: (body: Body) => Promise<UiAnswer>): Promise<UiAnswer> {
-    if (request.headers.origin !== deps.ui.publicUrl) return refused(403, 'origin');
-    return withBody(request, work);
+    const refuse = (status: number, code: string): UiAnswer => {
+      deps.log({ event: 'ui_signin', way: 'password', outcome: 'bad_request', reason: code });
+      return refused(status, code);
+    };
+    if (request.headers.origin !== deps.ui.publicUrl) return refuse(403, 'origin');
+    return withBody(request, work, refuse);
   }
 
   /** The actor of a change: the session sessionOf read, read again under the lock by the work. */

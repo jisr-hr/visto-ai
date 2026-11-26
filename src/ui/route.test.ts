@@ -11,6 +11,7 @@ import type { AccountRow, Role } from '../db/ui-accounts.ts';
 import type { ForgeChecks, ForgeSignIn, PullRequestRef } from '../forge/types.ts';
 import type { UiAnswer } from '../shell/http.ts';
 import { createAccountChanges } from './accounts.ts';
+import type { AccountChanges, Refusal } from './accounts.ts';
 import { activity, reviews } from './api.ts';
 import type { ApiDeps } from './api.ts';
 import { createAuth } from './auth.ts';
@@ -56,8 +57,8 @@ interface Harness {
   signIn(): Promise<{ started: UiAnswer; back: UiAnswer; cookie: string }>;
 }
 
-/** `github` false: a route with GitHub sign-in off, and auth given no sign-in. */
-async function harness(github = true): Promise<Harness> {
+/** `github` false: a route with GitHub sign-in off, and auth given no sign-in. `changesOf`: the account changes the route is given, from the real ones. */
+async function harness(github = true, changesOf: (real: AccountChanges) => AccountChanges = (real) => real): Promise<Harness> {
   const real = await testDb();
   const logs: Array<Record<string, unknown>> = [];
   const statements: string[] = [];
@@ -90,7 +91,7 @@ async function harness(github = true): Promise<Harness> {
     pullRequestUrl: (ref) => `https://github.example.test/${ref.owner}/${ref.repo}/pull/${ref.number}`,
   };
   const route = createUiRoute({
-    auth, passwords: createPasswordAuth({ db, clock, log, cost: COST }), accounts: createAccountChanges({ db, clock, log, cost: COST }), api, files: FILES,
+    auth, passwords: createPasswordAuth({ db, clock, log, cost: COST }), accounts: changesOf(createAccountChanges({ db, clock, log, cost: COST })), api, files: FILES,
     ui: { publicUrl: 'https://visto.example.test', github }, log,
   });
   const send: Harness['send'] = (method, path, sent = {}) => route({
@@ -419,7 +420,11 @@ test('the password sign-in and the first password need the public origin and JSO
     }
   }
   assert.deepEqual(h.statements, []);
-  assert.deepEqual(h.logs.slice(before), []);
+  // (as built, the fix wave) Each refusal is logged as a password sign-in refused as bad_request, its code the reason.
+  const line = (reason: string): Record<string, unknown> => ({ event: 'ui_signin', way: 'password', outcome: 'bad_request', reason });
+  assert.deepEqual(h.logs.slice(before), bodies.flatMap(() => [
+    ...Array.from({ length: 7 }, () => line('origin')), ...Array.from({ length: 6 }, () => line('not_json')), ...Array.from({ length: 7 }, () => line('bad_request')),
+  ]));
 
   // With a charset, and in capitals, the body is read.
   const read = await h.send('POST', '/api/auth/password', { origin: ORIGIN, type: 'application/json; charset=utf-8', body: bodies[0]![1] });
@@ -427,6 +432,79 @@ test('the password sign-in and the first password need the public origin and JSO
   const capitals = await h.send('POST', '/api/auth/first-password', { origin: ORIGIN, type: 'Application/JSON', body: bodies[1]![1] });
   assert.deepEqual(capitals, error(409, 'already_chosen'));
   assert.notDeepEqual(h.statements, []);
+  await h.db.close();
+});
+
+test("the open routes log each refusal of their own as a sign-in refused as bad_request, its code the reason and no name, and no other route's does", async () => {
+  const h = await harness();
+  await account(h, 'octo-admin', 'admin');
+  const named = JSON.stringify({ name: 'octo-admin', password: PASSWORD });
+  const line = (reason: string): Record<string, unknown> => ({ event: 'ui_signin', way: 'password', outcome: 'bad_request', reason });
+  for (const path of ['/api/auth/password', '/api/auth/first-password']) {
+    for (const [sent, status, code] of [
+      [{ origin: 'https://other.example.test', type: JSON_TYPE, body: named }, 403, 'origin'],
+      [{ type: JSON_TYPE, body: named }, 403, 'origin'],
+      [{ origin: ORIGIN, type: 'text/plain', body: named }, 415, 'not_json'],
+      [{ origin: ORIGIN, type: JSON_TYPE, body: `[${named}]` }, 400, 'bad_request'],
+    ] as Array<[Sent, number, string]>) {
+      const mark = h.logs.length;
+      assert.deepEqual(await h.send('POST', path, sent), error(status, code), `${path} ${code}`);
+      assert.deepEqual(h.logs.slice(mark), [line(code)], `${path} ${code}`);
+    }
+  }
+  // The same refusals of a route behind a session are no sign-in, and log nothing.
+  const a = await passwordSignIn(h, 'octo-admin');
+  const mark = h.logs.length;
+  assert.deepEqual(await h.send('POST', '/api/me/password', { cookie: a.cookie, csrf: tokenOf(a.id), type: 'text/plain', body: '{}' }), error(415, 'not_json'));
+  assert.deepEqual(await h.send('POST', '/api/accounts/new', { cookie: a.cookie, csrf: tokenOf(a.id), type: JSON_TYPE, body: '[]' }), error(400, 'bad_request'));
+  assert.deepEqual(h.logs.slice(mark), []);
+  assert.ok(!JSON.stringify(h.logs).includes('octo'));
+  await h.db.close();
+});
+
+test("the work's own refusals reach each account route with their status and code", async () => {
+  const given: { refusal: Refusal } = { refusal: 'full' };
+  const h = await harness(true, (real) => ({
+    ...real, make: async () => given.refusal, setRole: async () => given.refusal, reset: async () => given.refusal, remove: async () => given.refusal,
+  }));
+  await account(h, 'octo-admin', 'admin');
+  const target = await account(h, 'octo-viewer', 'viewer');
+  const a = await passwordSignIn(h, 'octo-admin');
+  const routes: Array<[string, unknown]> = [
+    ['/api/accounts/new', { name: 'octo-new', role: 'viewer' }], ['/api/accounts/role', { id: target.id, role: 'admin' }],
+    ['/api/accounts/reset', { id: target.id }], ['/api/accounts/remove', { id: target.id }],
+  ];
+  for (const [refusal, status] of [['full', 409], ['signed_out', 401], ['forbidden', 403]] as const) {
+    given.refusal = refusal;
+    for (const [path, body] of routes) {
+      assert.deepEqual(await h.send('POST', path, { cookie: a.cookie, csrf: tokenOf(a.id), type: JSON_TYPE, body: JSON.stringify(body) }),
+        error(status, refusal), `${refusal} ${path}`);
+    }
+  }
+  await h.db.close();
+});
+
+test("a change made through a route is recorded as made by the session's account, of either kind", async () => {
+  const h = await harness();
+  await account(h, 'octo-admin', 'admin');
+  const viewer = await account(h, 'octo-viewer', 'viewer');
+  const other = await account(h, 'octo-new', 'viewer');
+  const post = (cookie: string, id: string, path: string, body: unknown): Promise<UiAnswer> =>
+    h.send('POST', path, { cookie, csrf: tokenOf(id), type: JSON_TYPE, body: JSON.stringify(body) });
+  const a = await passwordSignIn(h, 'octo-admin');
+  assert.equal((await post(a.cookie, a.id, '/api/accounts/role', { id: viewer.id, role: 'admin' })).status, 200);
+  assert.deepEqual(await post(a.cookie, a.id, '/api/accounts/remove', { id: other.id }), NO_CONTENT);
+  // octo-lead's row is made at its first sign-in, then made an admin by a statement.
+  const { cookie } = await h.signIn();
+  const g = SESSION_ID_OF.exec(cookie)?.[1] ?? '';
+  await h.db.query("update visto_ai.ui_accounts set role = 'admin' where kind = 'github' and name = 'octo-lead'");
+  assert.equal((await post(cookie, g, '/api/accounts/role', { id: viewer.id, role: 'viewer' })).status, 200);
+  assert.deepEqual(await h.db.query('select by_kind, by_name, change, account_kind, account_name, role from visto_ai.ui_account_changes order by id'), [
+    { by_kind: 'password', by_name: 'octo-admin', change: 'role', account_kind: 'password', account_name: 'octo-viewer', role: 'admin' },
+    { by_kind: 'password', by_name: 'octo-admin', change: 'removed', account_kind: 'password', account_name: 'octo-new', role: null },
+    { by_kind: 'sign_in', by_name: null, change: 'made', account_kind: 'github', account_name: 'octo-lead', role: 'viewer' },
+    { by_kind: 'github', by_name: 'octo-lead', change: 'role', account_kind: 'password', account_name: 'octo-viewer', role: 'viewer' },
+  ]);
   await h.db.close();
 });
 

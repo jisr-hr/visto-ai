@@ -62,17 +62,30 @@ const badRequest = (code: string): Ending => ending(json(400, { error: code }), 
 const signedIn = (id: string): Ending => ending(json(200, step('signed_in'), { 'set-cookie': sessionCookie(id) }), 'ok');
 const wrongPassword = (): UiAnswer => json(400, { error: 'wrong_password' });
 
-/** One for the service: it makes the hash made at start once, and keeps when it last deleted expired rows. */
+/** One for the service: it makes the hash made at start, again when its last attempt rejected, and keeps when it last deleted expired rows. */
 export function createPasswordAuth(deps: PasswordAuthDeps): PasswordAuth {
   const random = deps.random ?? ((): string => randomBytes(32).toString('base64url'));
   const cost = deps.cost ?? PASSWORD_COST;
   const verify = deps.verify ?? verifyPassword;
-  // Rule 1: begun once, here; a rejection is caught so that it is never unhandled, and every request that needs it then fails
-  // with it, as a database step that rejects.
-  const atStart = hashPassword(randomBytes(32).toString('base64url'), cost);
+  const madeAtStart = (): Promise<string> => hashPassword(randomBytes(32).toString('base64url'), cost);
+  // Rule 1: begun here, its rejection caught so that it is never unhandled. A request that needs it meets the last attempt; one
+  // that rejected fails that request, as a database step that rejects, and the next request makes it again.
+  let atStart: Promise<string> | null = madeAtStart();
   atStart.catch(() => undefined);
   // One time of the last sweep for the sign-in and the first password.
   let sweptAt: number | null = null;
+
+  /** The hash made at start; an attempt that rejected rejects this request with it, and is made again by the next. */
+  async function startHash(): Promise<string> {
+    atStart ??= madeAtStart();
+    const attempt = atStart;
+    try {
+      return await attempt;
+    } catch (error) {
+      if (atStart === attempt) atStart = null;
+      throw error;
+    }
+  }
 
   async function sweep(now: number): Promise<void> {
     if (sweptAt !== null && now - sweptAt < SWEEP_MS) return;
@@ -90,8 +103,8 @@ export function createPasswordAuth(deps: PasswordAuthDeps): PasswordAuth {
   }
 
   /** A refusal that costs one verify, against the hash made at start. */
-  async function refuseAlike(password: string): Promise<Ending> {
-    await verify(password, await atStart);
+  async function refuseAlike(password: string, start: string): Promise<Ending> {
+    await verify(password, start);
     return refused();
   }
 
@@ -107,11 +120,13 @@ export function createPasswordAuth(deps: PasswordAuthDeps): PasswordAuth {
     const given = fieldsOf(body, ['name', 'password']);
     if (given === null) return badRequest('bad_request');
     try {
+      // First the hash made at start: while it cannot be made, every name fails alike, before anything is read.
+      const start = await startHash();
       const now = deps.clock().getTime();
       iso(now);
       await sweep(now);
       const found = await accountOf(given.name, now);
-      if (found === null) return await refuseAlike(given.password);
+      if (found === null) return await refuseAlike(given.password, start);
       const { row, name, hash } = found;
       if (!(await verify(given.password, hash))) {
         await wrongTry(deps.db, row.id, iso(now + WAIT_MS));
@@ -139,11 +154,13 @@ export function createPasswordAuth(deps: PasswordAuthDeps): PasswordAuth {
     if (!passwordLengthOk(given.password)) return badRequest('password_length');
     if (given.password === given.oneTimePassword) return badRequest('same_password');
     try {
+      // First the hash made at start, as at the sign-in.
+      const start = await startHash();
       const now = deps.clock().getTime();
       iso(now);
       await sweep(now);
       const found = await accountOf(given.name, now);
-      if (found === null) return await refuseAlike(given.oneTimePassword);
+      if (found === null) return await refuseAlike(given.oneTimePassword, start);
       const { row, name, hash } = found;
       if (!(await verify(given.oneTimePassword, hash))) {
         await wrongTry(deps.db, row.id, iso(now + WAIT_MS));
@@ -192,7 +209,7 @@ export function createPasswordAuth(deps: PasswordAuthDeps): PasswordAuth {
       if (row === null || row.kind !== 'password' || row.password_hash === null) return json(401, { error: 'signed_out' });
       const hash = row.password_hash;
       if (waits(row, now)) {
-        await verify(given.current, await atStart);
+        await verify(given.current, await startHash());
         return wrongPassword();
       }
       if (!(await verify(given.current, hash))) {

@@ -399,7 +399,9 @@ export function parseConfig(yamlText: string, env: Record<string, string | undef
     seen.set(name.toLowerCase(), name);
   }
   const { approval: defaultsApproval } = approvalWritten(defaults.score);
-  // With the UI on, the issues above have made each of these written.
+  // The UI is on with its address written (with accounts or a team and no address, the issues above have refused the file).
+  // The client id and secret are carried only with GitHub sign-in on, which the issues above have made write both; with the
+  // address alone either may be absent, and neither is carried.
   const publicUrl = raw.ui?.publicUrl;
   const clientId = raw.app?.clientId;
   let ui: UiConfig | undefined;

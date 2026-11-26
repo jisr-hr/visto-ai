@@ -98,6 +98,88 @@ test('a GitHub sign-in makes its account a viewer once, by sign_in, then keeps i
   await db.close();
 });
 
+test("a GitHub sign-in of a password account's name makes a GitHub viewer of its own, and a name only a GitHub row has is no password account", async () => {
+  const db = await testDb();
+  const admin = await made(db, 'password', 'octo-admin', 'admin', await hashOf('a long password of mine'));
+  const before = await accountById(db, admin.id);
+  const first = await githubSignIn(db, 'octo-admin', at(5), MAX_ACCOUNTS);
+  assert.ok(first !== 'full');
+  assert.deepEqual([first.made, first.account.kind, first.account.name, first.account.role], [true, 'github', 'octo-admin', 'viewer']);
+  assert.notEqual(first.account.id, admin.id);
+  assert.deepEqual(await accountById(db, admin.id), before);
+  // Its next sign-in, in another letter case, finds the GitHub row, never the password one.
+  const again = await githubSignIn(db, 'Octo-Admin', at(9), MAX_ACCOUNTS);
+  assert.ok(again !== 'full');
+  assert.deepEqual([again.made, again.account.id, again.account.name], [false, first.account.id, 'Octo-Admin']);
+  assert.deepEqual(await accountById(db, admin.id), before);
+  assert.equal(await countAccounts(db), 2);
+
+  await made(db, 'github', 'octo-dev', 'admin', null);
+  assert.equal(await passwordAccount(db, 'octo-dev'), null);
+  assert.equal((await passwordAccount(db, 'octo-admin'))?.id, admin.id);
+  await db.close();
+});
+
+test('a GitHub sign-in whose row another sign-in made while it waited for the lock takes that row, and makes none', async () => {
+  const db = await testDb();
+  const seen: string[] = [];
+  // The other sign-in commits its row just before this one's transaction begins, as when this one waited for the lock.
+  const spy = (inner: Db): Db => ({
+    query: (text, params) => { seen.push(text); return inner.query(text, params); },
+    script: (sql) => inner.script(sql),
+    close: () => inner.close(),
+    transaction: async (work) => {
+      assert.ok(await make(db, 'github', 'octo-lead', 'viewer', null) !== null);
+      return inner.transaction((tx) => work(spy(tx)));
+    },
+  });
+  const signedIn = await githubSignIn(spy(db), 'Octo-Lead', at(5), MAX_ACCOUNTS);
+  assert.ok(signedIn !== 'full');
+  const other = await githubAccount(db, 'octo-lead');
+  assert.ok(other !== null);
+  assert.deepEqual(
+    [signedIn.made, signedIn.account.id, signedIn.account.name, iso(signedIn.account.last_sign_in_at), signedIn.account.made_by_kind],
+    [false, other.id, 'Octo-Lead', at(5), 'command']);
+  // The look-up, the lock, the look-up again; no count, no row and no record.
+  const UPDATE = 'update visto_ai.ui_accounts set name = $1';
+  const LOCK = 'lock table visto_ai.ui_accounts in share row exclusive mode';
+  assert.deepEqual(seen.map((text) => [UPDATE, LOCK].find((p) => text.startsWith(p)) ?? text), [UPDATE, LOCK, UPDATE]);
+  assert.equal(await countAccounts(db), 1);
+  assert.deepEqual(await changes(db), []);
+  await db.close();
+});
+
+test("the migration's checks refuse a GitHub row with a one-time password's end or a wrong try, and a role or a maker outside their values", async () => {
+  const db = await testDb();
+  const hash = await hashOf('a long password of mine');
+  const insert = (kind: string, role: string, madeBy: string, oneTimeUntil: string | null, failedTries: number): Promise<unknown> => db.query(
+    `insert into visto_ai.ui_accounts (kind, name, role, password_hash, one_time_until, failed_tries, made_at, made_by_kind)
+     values ($1, 'octo-dev', $2, $3, $4::timestamptz, $5, $6::timestamptz, $7)`,
+    [kind, role, kind === 'password' ? hash : null, oneTimeUntil, failedTries, at(0), madeBy]);
+  const CHECK = /violates check constraint/;
+  await assert.rejects(insert('github', 'viewer', 'sign_in', at(259200), 0), CHECK);
+  await assert.rejects(insert('github', 'viewer', 'sign_in', null, 1), CHECK);
+  await assert.rejects(insert('password', 'owner', 'command', null, 0), CHECK);
+  await assert.rejects(insert('github', 'owner', 'sign_in', null, 0), CHECK);
+  await assert.rejects(insert('password', 'viewer', 'someone', null, 0), CHECK);
+  await assert.rejects(insert('github', 'viewer', 'someone', null, 0), CHECK);
+  assert.equal(await countAccounts(db), 0);
+  // Within their values they are taken: a password account may hold an end and a wrong try, a GitHub account neither.
+  await insert('password', 'viewer', 'command', at(259200), 1);
+  await insert('github', 'admin', 'sign_in', null, 0);
+  assert.equal(await countAccounts(db), 2);
+
+  // A record of a change: a role and a maker outside their values are refused too.
+  const record = (by: string, role: string | null): Promise<unknown> => db.query(
+    `insert into visto_ai.ui_account_changes (at, by_kind, by_name, change, account_kind, account_name, role)
+     values ($1::timestamptz, $2, null, 'role', 'password', 'octo-dev', $3)`, [at(0), by, role]);
+  await assert.rejects(record('command', 'owner'), CHECK);
+  await assert.rejects(record('someone', 'admin'), CHECK);
+  await record('command', 'admin');
+  assert.equal((await changes(db)).length, 1);
+  await db.close();
+});
+
 test('a GitHub sign-in with 1,000 accounts and none of its own is full, and one that has its row still signs in', async () => {
   assert.equal(MAX_ACCOUNTS, 1000);
   const db = await testDb();

@@ -463,6 +463,22 @@ test('a right password whose verify began before the wait makes no session, and 
   // After the right one's verify, only its guarded right try ran, inside the transaction, and it wrote nothing.
   assert.deepEqual(h.statements.slice(h.verified.at(-1)).map(guarded), [[RIGHT_TRY, true]]);
   assert.deepEqual(h.logs, Array.from({ length: 6 }, () => signin('refused')));
+
+  // A one-time password's account the same way: the right one-time password asks for nothing once the fifth wrong one, verified
+  // while it verified, started the wait.
+  const fresh = await account(h.db, 'octo-new', 'viewer', ONE_TIME, iso(259200));
+  for (let i = 0; i < 4; i += 1) assert.deepEqual(await h.auth.signIn({ name: 'octo-new', password: WRONG }), REFUSED);
+  h.verifies.length = 0;
+  let fifthOneTime: UiAnswer | null = null;
+  h.during = async () => { fifthOneTime = await h.auth.signIn({ name: 'octo-new', password: WRONG }); };
+  assert.deepEqual(await h.auth.signIn({ name: 'octo-new', password: ONE_TIME }), REFUSED);
+  assert.deepEqual(fifthOneTime, REFUSED);
+  assert.deepEqual(h.verifies, [[ONE_TIME, fresh.hash], [WRONG, fresh.hash]]);
+  const waiting = await rowOf(h.db, fresh.id);
+  assert.deepEqual([waiting.password_hash, waiting.one_time_until, waiting.failed_tries, waiting.wait_until], [fresh.hash, iso(259200), 0, iso(900)]);
+  assert.deepEqual(h.statements.slice(h.verified.at(-1)).map(guarded), [[RIGHT_TRY, false]]);
+  assert.deepEqual([await sessions(h.db), await changesOf(h.db)], [[], []]);
+  assert.deepEqual(h.logs, Array.from({ length: 12 }, () => signin('refused')));
   await h.db.close();
 });
 
@@ -736,6 +752,58 @@ test('a database step that fails answers internal_error, logs failed with its co
   assert.equal(h.statements.length, statements);
   assert.deepEqual(h.logs.at(-1), signin('failed', 'internal_error'));
   assert.deepEqual(await before(), kept);
+  await h.db.close();
+});
+
+test('a hash made at start that rejected is made again by the next request, and until it is made every name is answered alike, before anything is read', async () => {
+  const h = await harness();
+  await account(h.db, 'octo-admin', 'admin', MINE);
+  await account(h.db, 'octo-new', 'viewer', ONE_TIME, iso(259200));
+  const viewer = await account(h.db, 'octo-viewer', 'viewer', ANOTHER);
+  await h.db.query('update visto_ai.ui_accounts set wait_until = $2::timestamptz where id = $1', [viewer.id, iso(900)]);
+  const lead = await insertAccount(h.db, {
+    kind: 'github', name: 'octo-lead', role: 'admin', passwordHash: null, oneTimeUntil: null, at: iso(0), by: 'command', byName: null, signedInAt: null,
+  });
+  assert.ok(lead !== null);
+  /** A cost read out of bounds once, by the hash made at start, and as COST after: that hash rejects bad_cost once. */
+  const rejectingOnce = (): PasswordCost => {
+    let reads = 0;
+    return { get log2N() { reads += 1; return reads === 1 ? 3 : COST.log2N; }, r: COST.r, p: COST.p };
+  };
+  type Way = (auth: PasswordAuth) => Promise<UiAnswer>;
+  // Each way, and its answer once the hash made at start is made.
+  const ways: Array<[string, Way, UiAnswer]> = [
+    ['a known name with a wrong password', (auth) => auth.signIn({ name: 'octo-admin', password: WRONG }), REFUSED],
+    ['a known name with its password', (auth) => auth.signIn({ name: 'octo-admin', password: MINE }), signedIn(A)],
+    ['a name that does not exist', (auth) => auth.signIn({ name: 'octo-nobody', password: MINE }), REFUSED],
+    ['a name of another shape', (auth) => auth.signIn({ name: 'octo admin!', password: MINE }), REFUSED],
+    ['a GitHub login', (auth) => auth.signIn({ name: 'octo-lead', password: MINE }), REFUSED],
+    ['an account that waits', (auth) => auth.signIn({ name: 'octo-viewer', password: ANOTHER }), REFUSED],
+    ['a first password of a known name', (auth) => auth.firstPassword({ name: 'octo-new', oneTimePassword: ONE_TIME_2, password: MINE }), REFUSED],
+    ['a first password of a name that does not exist', (auth) => auth.firstPassword({ name: 'octo-nobody', oneTimePassword: ONE_TIME, password: MINE }), REFUSED],
+  ];
+  /** The answer of `way` on `auth`, and the statements, verifies and log lines it made. */
+  const made = async (way: Way, auth: PasswordAuth): Promise<[UiAnswer, unknown[], unknown[], unknown[]]> => {
+    const [statements, verifies, logs] = [h.statements.length, h.verifies.length, h.logs.length];
+    const answered = await way(auth);
+    return [answered, h.statements.slice(statements), h.verifies.slice(verifies), h.logs.slice(logs)];
+  };
+
+  // The first request meets the attempt that rejected: 500 whatever the name, nothing read or verified; the next ones answer as usual.
+  for (const [what, way, usual] of ways) {
+    const auth = h.another(rejectingOnce());
+    assert.deepEqual(await made(way, auth), [INTERNAL, [], [], [signin('failed', 'bad_cost')]], what);
+    const [again] = await made(way, auth);
+    assert.deepEqual(again, usual, what);
+    assert.deepEqual(await auth.signIn({ name: 'octo-nobody', password: MINE }), REFUSED, what);
+    assert.ok(h.verifies.at(-1)![1].startsWith('scrypt$4$1$1$'), what);
+  }
+
+  // A hash made at start that always rejects: made again at each request, and every name answered 500 before anything is read.
+  const never = h.another({ log2N: 3, r: 1, p: 1 });
+  for (const [what, way] of ways) {
+    for (let i = 0; i < 2; i += 1) assert.deepEqual(await made(way, never), [INTERNAL, [], [], [signin('failed', 'bad_cost')]], `${what} ${i}`);
+  }
   await h.db.close();
 });
 

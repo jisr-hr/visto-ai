@@ -1,4 +1,4 @@
-import test from 'node:test';
+import nodeTest from 'node:test';
 import assert from 'node:assert/strict';
 import { testDb } from '../db/testing.ts';
 import type { Db } from '../db/types.ts';
@@ -12,6 +12,10 @@ import { ONE_TIME_MS, accountOf, createAccountChanges } from './accounts.ts';
 import type { AccountChanges, AccountsDeps, Actor, Refusal } from './accounts.ts';
 import { hashPassword, verifyPassword } from './passwords.ts';
 import type { PasswordCost } from './passwords.ts';
+
+// Every test of this file has a bound: PGlite runs one transaction at a time, so a statement run on the database while a change
+// holds its transaction waits for it, and a read made outside the transaction it belongs to fails here instead of hanging.
+const test = (name: string, fn: () => Promise<void>): Promise<void> => nodeTest(name, { timeout: 30_000 }, fn);
 
 const at = (seconds: number): Date => new Date(Date.parse('2026-03-01T10:00:00.000Z') + seconds * 1000);
 const iso = (seconds: number): string => at(seconds).toISOString();
@@ -457,6 +461,42 @@ test("the command makes and resets by name and sets a GitHub login's role, makin
   assert.deepEqual((await h.changes.list()).map((r) => [r.kind, r.name, r.role]),
     [['password', 'octo-admin', 'admin'], ['github', 'octo-dev', 'admin'], ['github', 'octo-lead', 'admin']]);
   assert.deepEqual(h.statements.map((s) => [s.tx, labelOf(s.text), s.params]), [[0, 'list', [MAX_ACCOUNTS]]]);
+  await h.db.close();
+});
+
+test('at a cap of its own a GitHub login with no row is full and nothing is written, and the list still reads up to 1,000', async () => {
+  const h = await harness();
+  await account(h.db, 'octo-admin', 'admin');
+  await github(h.db, 'octo-lead', 'viewer');
+  const capped = h.another({ max: 2 });
+  const before = await everything(h.db);
+  assert.equal(await capped.setRole(COMMAND, { github: 'octo-dev' }, 'viewer'), 'full');
+  assert.deepEqual(taken(h), ['lock', 'by_login', 'count']);
+  assert.equal(await everything(h.db), before);
+  assert.deepEqual(h.logs, []);
+  // A login that has its row is not counted: its role is set at the cap.
+  assert.equal(ok(await capped.setRole(COMMAND, { github: 'Octo-Lead' }, 'admin')).changed, true);
+  assert.deepEqual(taken(h), ['lock', 'by_login', 'set_role', 'record']);
+
+  assert.deepEqual((await capped.list()).map((r) => [r.kind, r.name]), [['password', 'octo-admin'], ['github', 'octo-lead']]);
+  assert.deepEqual(h.statements.map((s) => [s.tx, labelOf(s.text), s.params]), [[0, 'list', [MAX_ACCOUNTS]]]);
+  await h.db.close();
+});
+
+test("a GitHub admin's change is recorded with its kind and its login, and a GitHub account removed with its own", async () => {
+  const h = await harness();
+  const lead = await github(h.db, 'octo-lead', 'admin');
+  const l = await signedIn(h.db, lead, 'h-lead');
+  const viewer = await account(h.db, 'octo-viewer', 'viewer');
+  const dev = await github(h.db, 'octo-dev', 'viewer');
+  h.clock.now = at(20);
+  assert.equal(ok(await h.changes.setRole(l, { id: viewer.id }, 'admin')).changed, true);
+  assert.deepEqual(await h.changes.remove(l, dev.id), dev);
+  assert.deepEqual(await records(h.db), [
+    record(20, ['github', 'octo-lead'], 'role', ['password', 'octo-viewer'], 'admin'),
+    record(20, ['github', 'octo-lead'], 'removed', ['github', 'octo-dev'], null),
+  ]);
+  assert.deepEqual(h.logs, [logged('role', 'admin'), logged('removed', null)]);
   await h.db.close();
 });
 

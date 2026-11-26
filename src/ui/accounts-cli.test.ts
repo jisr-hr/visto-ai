@@ -10,7 +10,7 @@ import { testDb } from '../db/testing.ts';
 import type { Db } from '../db/types.ts';
 import { countAccounts, MAX_ACCOUNTS, passwordAccount } from '../db/ui-accounts.ts';
 import { createSession } from '../db/ui-sessions.ts';
-import { main, parseArgs, runCommand } from './accounts-cli.ts';
+import { main, nameChecked, parseArgs, runCommand } from './accounts-cli.ts';
 import { verifyPassword } from './passwords.ts';
 import type { PasswordCost } from './passwords.ts';
 
@@ -300,6 +300,78 @@ test('a database step that fails prints its short code or internal_error, and no
   const row = await passwordAccount(db, 'octo-admin');
   assert.ok(row !== null && row.password_hash !== null);
   assert.equal(await verifyPassword(first, row.password_hash), true);
+  await db.close();
+});
+
+/** main, its stdout's lines and its stderr's apart. */
+async function runMainApart(argv: string[], env: Record<string, string | undefined> = {}): Promise<[number, string[], string[]]> {
+  const lines: string[] = [];
+  const errors: string[] = [];
+  const code = await watched(() => main(argv, env, (line) => lines.push(line), (line) => errors.push(line)));
+  printedLines.push(...lines, ...errors);
+  return [code, lines, errors];
+}
+
+// The bound: a command that went on would open the pool, which waits for a connection the suite never gives.
+test('github is refused while the config has GitHub sign-in off, on stderr with exit 1, before the database is opened', { timeout: 30_000 }, async () => {
+  const folder = mkdtempSync(join(tmpdir(), 'visto-ai-accounts-'));
+  try {
+    const env = { MODEL_KEY: 'model-secret-value', DB_URL: 'postgres://user:db-password-value@db.invalid/visto' };
+    const model = 'model:\n  apiKey: { env: MODEL_KEY }\n  model: vendor/model-a\n';
+    const offs: Array<[string, string]> = [
+      ['no ui block', ''],
+      ['the address alone', 'ui:\n  publicUrl: https://visto.example.test\n'],
+      ['no account and no team beside the address', 'ui:\n  accounts: []\n  publicUrl: https://visto.example.test\n'],
+    ];
+    for (const [what, ui] of offs) {
+      for (const database of ['', 'database:\n  url: { env: DB_URL }\n']) {
+        const text = `${model}${database}${ui}`;
+        const file = join(folder, 'off.yml');
+        writeFileSync(file, text);
+        const config = parseConfig(text, env);
+        assert.ok(config.ui === undefined || (config.ui.accounts.length === 0 && config.ui.team === null), what);
+        const label = `${what}, ${database === '' ? 'no database' : 'a database'}`;
+        assert.deepEqual(await runMainApart(['github', '--config', file, '--login', 'octo-lead', '--role', 'admin'], env), [1, [], ['github sign-in is off']], label);
+        assert.deepEqual(await runMainApart(['github', '--role', 'viewer', '--login', 'octo-dev', '--config', file], env), [1, [], ['github sign-in is off']], label);
+      }
+    }
+  } finally {
+    rmSync(folder, { recursive: true, force: true });
+  }
+});
+
+test('make and reset lower-case the name and check its shape before the config is read, and a name of another shape is a usage error', async () => {
+  const missing = join(tmpdir(), 'visto-ai-no-such-dir', 'missing.yml');
+  for (const name of ['octo admin', 'octo-admin!', '-octo', '', ' octo-admin', 'a'.repeat(40)]) {
+    for (const argv of [['make', '--config', missing, '--name', name, '--role', 'admin'], ['reset', '--config', missing, '--name', name]]) {
+      assert.deepEqual(await runMain(argv), [2, [USAGE]], `${argv[0]} '${name}'`);
+    }
+  }
+  // A name in capitals holds: what main meets next is the config it cannot read.
+  assert.deepEqual(await runMain(['reset', '--config', missing, '--name', 'Octo-Admin']), [2, ['usage: cannot read --config']]);
+  assert.deepEqual(await runMain(['make', '--config', missing, '--name', 'OCTO-NEW', '--role', 'viewer']), [2, ['usage: cannot read --config']]);
+
+  // The command main runs: reset --name Octo-Admin resets octo-admin, make --name Octo-New makes octo-new; a login is left as written.
+  assert.deepEqual(nameChecked(parseArgs(reset('Octo-Admin'))), { kind: 'reset', config: CONFIG, name: 'octo-admin' });
+  assert.deepEqual(nameChecked(parseArgs(make('Octo-New', 'viewer'))), { kind: 'make', config: CONFIG, name: 'octo-new', role: 'viewer' });
+  assert.deepEqual(nameChecked(parseArgs(github('Octo-Lead', 'admin'))), { kind: 'github', config: CONFIG, login: 'Octo-Lead', role: 'admin' });
+  const db = await testDb();
+  const checked = async (argv: string[], now: Date): Promise<[number, string[]]> => {
+    const lines: string[] = [];
+    const code = await watched(() => runCommand(nameChecked(parseArgs(argv)), { db, clock: () => now, out: (line) => lines.push(line), cost: COST }));
+    printedLines.push(...lines);
+    return [code, lines];
+  };
+  const [madeCode, madeLines] = await checked(make('Octo-Admin', 'admin'), at(0));
+  assert.deepEqual([madeCode, madeLines[0]], [0, 'made octo-admin (admin)']);
+  const first = oneTimeOf(madeLines);
+  const [code, lines] = await checked(reset('Octo-Admin'), at(10));
+  assert.deepEqual([code, lines[0]], [0, 'reset octo-admin']);
+  const row = await passwordAccount(db, 'octo-admin');
+  assert.ok(row !== null && row.password_hash !== null);
+  assert.equal(await verifyPassword(oneTimeOf(lines), row.password_hash), true);
+  assert.equal(await verifyPassword(first, row.password_hash), false);
+  assert.deepEqual((await records(db)).map((r) => (r as { account_name: string }).account_name), ['octo-admin', 'octo-admin']);
   await db.close();
 });
 
