@@ -385,7 +385,7 @@ test('a viewer at /ui/settings and a GitHub account at /ui/password see Not foun
       expect(screen.getByText('No page at this address.')).toBeInTheDocument();
       expect(screen.queryByRole('form')).toBeNull();
     }
-    if (heading === 'Settings') expect(screen.getByText('Coming in a later plan.')).toBeInTheDocument();
+    if (heading === 'Settings') expect(screen.getByRole('region', { name: 'Accounts' })).toBeInTheDocument();
     expect(window.location.pathname).toBe(path);
     unmount();
   }

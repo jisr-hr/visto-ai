@@ -8,6 +8,7 @@ import type { Api } from './api.ts';
 import type { Me } from './api-types.ts';
 import { Layout, REVIEW_PATH } from './components/layout.tsx';
 import { Button } from './components/ui/button.tsx';
+import { AccountsPage } from './pages/accounts.tsx';
 import { ActivityPage } from './pages/activity.tsx';
 import { Later } from './pages/later.tsx';
 import { NotFound } from './pages/not-found.tsx';
@@ -41,7 +42,7 @@ function Page({ path, me }: { path: string; me: Me }) {
     case '/ui/memory':
       return <Later title="Memory" />;
     case '/ui/settings':
-      return me.role === 'admin' ? <Later title="Settings" /> : <NotFound />;
+      return me.role === 'admin' ? <AccountsPage /> : <NotFound />;
     case '/ui/password':
       return me.kind === 'password' ? <PasswordPage /> : <NotFound />;
     case '/ui/signin':

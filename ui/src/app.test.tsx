@@ -152,7 +152,6 @@ test('each sidebar entry leads to its page, the coming ones say so, and an unkno
   const pages = [
     ['Overview', '/ui/', 'Overview'],
     ['Memory', '/ui/memory', 'Memory'],
-    ['Settings', '/ui/settings', 'Settings'],
     ['Repositories', '/ui/repositories', 'Repositories'],
   ] as const;
   for (const [entry, path, heading] of pages) {
