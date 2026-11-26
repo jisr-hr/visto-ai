@@ -153,6 +153,13 @@ export interface LessonsStatus { status: MemoryState; code: string; shown: numbe
 // lessons: absent when the memory has no `lessons`, and when the review ended before they were asked.
 export interface MemoryStatus { status: MemoryState; code: string; lines: number; lessons?: LessonsStatus }   // code: a short code; lines: the lines shown
 
+/** How far a review's model calls have got. */
+export interface ReviewProgress {
+  batches: number;    // the batches the review sends
+  ended: number;      // the batches that have ended, answered or given up
+  threadsDue: number; // threads owed a verdict in the batches that have not ended
+}
+
 export interface ReviewDeps {
   source: Source;
   model: ModelClient;
@@ -167,6 +174,7 @@ export interface ReviewDeps {
   toolChoice?: 'forced' | 'auto';       // how the model is made to call submit_review; absent reads as 'forced'
   mcpServers?: McpServer[];             // opened once for each review; absent reads as none
   memory?: Memory;                      // where people stepped in before; absent: the review has no memory, and is what it was
+  progress?: (progress: ReviewProgress) => void;   // told before the first batch is sent and as each batch ends; absent: nobody is told
 }
 
 export interface RawFinding { path: string; side: Side; line: number; severity: Severity; body: string; quote: string; beyond_diff: boolean }

@@ -75,6 +75,8 @@ function factsOf(p: Record<string, unknown>): PullRequestFacts {
     state: merged ? 'merged' : (pr.state as 'open' | 'closed'),
     mergedAt: isoOrNull(pr.merged_at), closedAt: isoOrNull(pr.closed_at), mergeCommit,
     installation, updatedAt: iso(pr.updated_at),
+    // The title as written, an empty one included; with none that is text, no key, and what is stored stays.
+    ...(typeof pr.title === 'string' ? { title: pr.title } : {}),
   };
 }
 

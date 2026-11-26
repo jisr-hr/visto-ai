@@ -37,8 +37,8 @@ import { shownOf } from './score/shown.ts';
 import type { ScoredBy, ScoreEntry, ScoreHistory } from './score/types.ts';
 import { askScorer, summariesOf } from './scorer/ask.ts';
 import type {
-  AcceptanceRow, AuditEntry, ChangedFile, Discussed, EarlierThread, Effort, ExtensionStatus, Finding, LessonsStatus, Memory, MemoryStatus, NotReviewed, PullRequestInfo, RepoConfig, ReviewDeps, ReviewInput, ReviewResult,
-  Severity, Side, Source, ToolDefinition, Usage,
+  AcceptanceRow, AuditEntry, ChangedFile, Discussed, EarlierThread, Effort, ExtensionStatus, Finding, LessonsStatus, Memory, MemoryStatus, NotReviewed, PullRequestInfo, RepoConfig, ReviewDeps, ReviewInput,
+  ReviewProgress, ReviewResult, Severity, Side, Source, ToolDefinition, Usage,
 } from './types.ts';
 
 const CONCURRENCY = 2;
@@ -147,6 +147,16 @@ interface Offered {
 function safeLog(deps: ReviewDeps, entry: Record<string, unknown>): void {
   try {
     deps.log(entry);
+  } catch {
+    // ignored on purpose
+  }
+}
+
+// A progress that throws, or answers a promise that rejects, changes nothing; with none, nobody is told.
+function tell(deps: ReviewDeps, progress: ReviewProgress): void {
+  try {
+    const out: unknown = deps.progress?.(progress);
+    if (out instanceof Promise) out.catch(() => {});
   } catch {
     // ignored on purpose
   }
@@ -690,7 +700,22 @@ async function reviewOnce(input: ReviewInput, deps: ReviewDeps, asked: Asked): P
       seen += b.files.length;
     }
     const ctl: Control = { stopped: false, error: null, failed: false };
-    const settled = await inPool(packed.batches.length, CONCURRENCY, ctl, (i) => runBatch(run, ctl, packed.batches[i]!, firsts[i]!, i));
+    // The progress: before the first batch is sent, then as each batch ends, with the threads owed a verdict in the batches not ended.
+    const batches = packed.batches.length;
+    const dueIn = packed.batches.map((b) => b.files.reduce((n, f) => n + (f.threads ?? []).filter((t) => t.due).length, 0));
+    const ended = dueIn.map(() => false);
+    let endedCount = 0;
+    const dueLeft = (): number => dueIn.reduce((n, due, i) => (ended[i] === true ? n : n + due), 0);
+    tell(deps, { batches, ended: 0, threadsDue: dueLeft() });
+    const settled = await inPool(batches, CONCURRENCY, ctl, async (i) => {
+      try {
+        return await runBatch(run, ctl, packed.batches[i]!, firsts[i]!, i);
+      } finally {
+        ended[i] = true;
+        endedCount += 1;
+        tell(deps, { batches, ended: endedCount, threadsDue: dueLeft() });
+      }
+    });
     const outcomes = settled.filter((o): o is BatchOutcome => o !== undefined);
 
     for (const o of outcomes) {

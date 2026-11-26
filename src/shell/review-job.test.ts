@@ -22,7 +22,7 @@ import { renderNotes } from '../engine/render/notes.ts';
 import { shownOf } from '../engine/score/shown.ts';
 import type { BlockScore } from '../engine/score/types.ts';
 import { SUBMIT_REVIEW } from '../engine/model/submit-review.ts';
-import type { Memory, MemoryStatus, ModelClient, ModelResponse, ReviewDeps, ReviewInput, ReviewResult, ThreadVerdict } from '../engine/types.ts';
+import type { Memory, MemoryStatus, ModelClient, ModelResponse, ReviewDeps, ReviewInput, ReviewProgress, ReviewResult, ThreadVerdict } from '../engine/types.ts';
 import { runReviewJob } from './review-job.ts';
 import type { ReviewJobDeps } from './review-job.ts';
 import type { Notifier } from './notify.ts';
@@ -3052,5 +3052,120 @@ test('without a key a share above 0 draws every pull request, and a share of 0 d
     assert.ok(h.drafts[0]!.body.endsWith(`\n\n${paragraphOf(code)}`), name);
     assert.deepEqual(await decisions(number), [['h1', code === 'approved', code]], name);
     assert.deepEqual([reviewLine(h).approved, reviewLine(h).approval], [code === 'approved', code], name);
+  }
+});
+
+// The stage of a running review, on its job.
+/** What the engine of these tests tells, in turn: batch 1 of 2 holding a due thread, then each batch ended. */
+const PROGRESS: ReviewProgress[] = [{ batches: 2, ended: 0, threadsDue: 1 }, { batches: 2, ended: 1, threadsDue: 0 }, { batches: 2, ended: 2, threadsDue: 0 }];
+/** The review of `h` tells the engine's progress as `told` says, then answers as the harness's does. */
+const telling = (h: Harness, told: ReviewProgress[]): void => {
+  h.deps.review = (input, engine) => {
+    h.inputs.push(input);
+    h.engines.push(engine);
+    for (const p of told) engine.progress?.(p);
+    return Promise.resolve(okResult({ mode: input.mode ?? 'full' }));
+  };
+};
+const STAGE_WRITE = 'set stage = $2';
+/**
+ * Watches the statements of a job's database, inside transactions too: the text of each, and the params of each that writes the stage, in order.
+ * With `fail`, every statement that writes the stage rejects; with `delayMs`, each of them waits that long first.
+ */
+function watchStages(deps: ReviewJobDeps, options: { fail?: boolean; delayMs?: number } = {}): { texts: string[]; params: unknown[][] } {
+  const texts: string[] = [];
+  const params: unknown[][] = [];
+  const before = async (text: string, values: unknown[] | undefined): Promise<void> => {
+    texts.push(text);
+    if (!text.includes(STAGE_WRITE)) return;
+    params.push(values ?? []);
+    if (options.delayMs !== undefined) await new Promise((resolve) => { setTimeout(resolve, options.delayMs); });
+    if (options.fail === true) throw new Error('db_down');
+  };
+  const inner = deps.db;
+  deps.db = {
+    query: async (text, values) => { await before(text, values); return inner.query(text, values); },
+    script: (sql) => inner.script(sql),
+    close: () => inner.close(),
+    transaction: (work) => inner.transaction((tx) => work({
+      query: async (text, values) => { await before(text, values); return tx.query(text, values); },
+      script: (sql) => tx.script(sql),
+      close: () => tx.close(),
+      transaction: (nested) => tx.transaction(nested),
+    })),
+  };
+  return { texts, params };
+}
+
+test('with stages on, the job writes preparing, each stage the engine tells, then publishing, in that order', async () => {
+  const h = await live();
+  h.deps.stages = true;
+  telling(h, PROGRESS);
+  // Each write waits a little: the job still waits for the engine's before it records the review.
+  const seen = watchStages(h.deps, { delayMs: 5 });
+  await runReviewJob(h.job, h.deps);
+  const id = h.job.id;
+  assert.deepEqual(seen.params, [
+    [id, 'preparing', at(0), null, null, null],
+    [id, 'judging_threads', at(0), 1, 2, 1],
+    [id, 'reviewing', at(0), 2, 2, null],
+    [id, 'reviewing', at(0), 2, 2, null],
+    [id, 'publishing', at(0), null, null, null],
+  ]);
+  const writes = seen.texts.flatMap((t, i) => (t.includes(STAGE_WRITE) ? [i] : []));
+  const recordAt = seen.texts.findIndex((t) => t.includes('insert into visto_ai.review_runs'));
+  assert.ok(recordAt > writes[3]! && recordAt < writes[4]!);
+  assert.equal(typeof h.engines[0]!.progress, 'function');
+  assert.equal((await getJob(db, id))?.outcome, 'published');
+  // Written on its running row: the last stage stays.
+  assert.deepEqual(await db.query('select stage, stage_at, batch, batches, threads_due from visto_ai.jobs where id = $1', [id]),
+    [{ stage: 'publishing', stage_at: new Date(at(0)), batch: null, batches: null, threads_due: null }]);
+});
+
+test('in dry run the job writes no publishing stage', async () => {
+  const h = await harness();
+  h.deps.stages = true;
+  // A progress whose counts are not whole numbers at or above 0 is not written.
+  const odd: ReviewProgress[] = [{ batches: -1, ended: 0, threadsDue: 0 }, { batches: 2, ended: 0.5, threadsDue: 0 }, { batches: 2, ended: 0, threadsDue: Number.NaN }];
+  telling(h, [...odd, ...PROGRESS]);
+  const seen = watchStages(h.deps);
+  await runReviewJob(h.job, h.deps);
+  assert.deepEqual(seen.params.map((p) => p.slice(1)), [
+    ['preparing', at(0), null, null, null], ['judging_threads', at(0), 1, 2, 1], ['reviewing', at(0), 2, 2, null], ['reviewing', at(0), 2, 2, null],
+  ]);
+  assert.equal((await getJob(db, h.job.id))?.outcome, 'reviewed');
+});
+
+test('a stage that cannot be written changes nothing and is not logged', async () => {
+  const plain = await live({ pullRequest: 7 });
+  telling(plain, PROGRESS);
+  await runReviewJob(plain.job, plain.deps);
+  const failing = await live({ pullRequest: 8 });
+  failing.deps.stages = true;
+  telling(failing, PROGRESS);
+  const seen = watchStages(failing.deps, { fail: true });
+  await runReviewJob(failing.job, failing.deps);
+  assert.equal(seen.params.length, 5);
+  const same = (x: Harness): Record<string, unknown> => ({ ...reviewLine(x), job: 0, number: 0, duration_ms: 0 });
+  assert.deepEqual(same(failing), same(plain));
+  assert.deepEqual(failing.drafts, plain.drafts);
+  const runOf = async (number: number): Promise<Record<string, unknown>> => {
+    const [run] = await listRuns(db, { ...REF, number });
+    return { ...run!, id: 0, job: 0, ref: { ...run!.ref, number: 0 } };
+  };
+  assert.deepEqual(await runOf(8), await runOf(7));
+  assert.deepEqual(failing.logged.map((e) => e.event), plain.logged.map((e) => e.event));
+  assert.deepEqual([(await getJob(db, failing.job.id))?.outcome, (await getJob(db, plain.job.id))?.outcome], ['published', 'published']);
+});
+
+test('with stages off the engine is given no progress and no stage is written', async () => {
+  for (const [number, dryRun] of [[7, true], [8, false]] as const) {
+    const h = await harness({ pullRequest: number, dryRun });
+    const seen = watchStages(h.deps);
+    await runReviewJob(h.job, h.deps);
+    assert.equal(h.engines.length, 1, String(number));
+    assert.equal('progress' in h.engines[0]!, false, String(number));
+    assert.ok(seen.texts.length > 0, String(number));
+    assert.equal(seen.texts.some((t) => t.includes('set stage')), false, String(number));
   }
 });
