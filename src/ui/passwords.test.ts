@@ -76,6 +76,9 @@ test('a stored value that is not a hash of ours, or names a cost out of bounds, 
     'log2N 04': withField(good, 1, '04'),
     'salt spelled otherwise': withField(good, 4, lastBitsChanged(fieldOf(good, 4))),
     'key spelled otherwise': withField(good, 5, lastBitsChanged(key)),
+    // The whole text is the form, from its first character to its last.
+    'a character after': good + 'A',
+    'a character before': 'x' + good,
   };
   for (const [what, stored] of Object.entries(refused)) {
     assert.notEqual(stored, good, what);
@@ -104,7 +107,7 @@ test('a one-time password is 20 characters of an alphabet with no look-alike, dr
   assert.doesNotMatch(ONE_TIME_ALPHABET, /[A-Z]/);
   assert.equal(ONE_TIME_LENGTH, 20);
   const counts = new Map<string, number>([...ONE_TIME_ALPHABET].map((letter) => [letter, 0]));
-  for (let draw = 0; draw < 1000; draw += 1) {
+  for (let draw = 0; draw < 100_000; draw += 1) {
     const password = oneTimePassword();
     assert.equal(password.length, 20);
     for (const letter of password) {
@@ -113,8 +116,10 @@ test('a one-time password is 20 characters of an alphabet with no look-alike, dr
       counts.set(letter, count + 1);
     }
   }
-  // 20,000 characters over 31: 645 each expected.
-  for (const [letter, count] of counts) assert.ok(count >= 400 && count <= 900, `${letter} ${count}`);
+  // 2,000,000 characters over 31: 64,516 each expected, and 3% of it is near 7.7 standard deviations, so an even draw stays
+  // inside; a draw of a byte modulo 31 gives each of the first 8 letters 9/256 (9% too many) and the rest 8/256.
+  const expected = (100_000 * 20) / 31;
+  for (const [letter, count] of counts) assert.ok(Math.abs(count - expected) <= 0.03 * expected, `${letter} ${count}`);
 });
 
 test('a password has 12 to 128 characters, counted as a person sees them', () => {
@@ -125,6 +130,46 @@ test('a password has 12 to 128 characters, counted as a person sees them', () =>
   assert.equal(passwordLengthOk('\u{1F511}'.repeat(12)), true);
   assert.equal(passwordLengthOk('\u{1F511}'.repeat(129)), false);
   assert.equal(passwordLengthOk(('e' + String.fromCharCode(0x301)).repeat(6)), true);
+  // Code points, not UTF-16 units nor UTF-8 bytes: 6 keys are 12 units and 24 bytes, 65 keys 130 units and 260 bytes.
+  assert.equal(passwordLengthOk('\u{1F511}'.repeat(6)), false);
+  assert.equal(passwordLengthOk('\u{1F511}'.repeat(65)), true);
+});
+
+test('a new password that is not well formed or holds a NUL is refused, since its hash would match another', async () => {
+  // scrypt pads a short password with zero bytes, and every lone surrogate is written as U+FFFD: both would be one password with another.
+  assert.equal(await verifyPassword('', await hashPassword('\0'.repeat(12), COST)), true);
+  assert.equal(await verifyPassword('\uDFFF'.repeat(12), await hashPassword('\uD800'.repeat(12), COST)), true);
+  for (const password of ['\0'.repeat(12), 'abcdefghijk\0', '\uD800'.repeat(12), '\uDFFF'.repeat(12)]) {
+    assert.equal(passwordLengthOk(password), false, JSON.stringify(password));
+  }
+  assert.equal(passwordLengthOk('\u{1F511}'.repeat(12)), true);
+  assert.equal(passwordLengthOk('a long\tpassword of mine \u{1F511}'), true);
+});
+
+test('a password is hashed as its UTF-8 bytes', async () => {
+  const password = 'p\u00E4ssw\u00F6rd-\u20AC\u{1F511}';
+  const utf8 = Buffer.from(password, 'utf8');
+  assert.ok(!utf8.equals(Buffer.from(password, 'latin1')));
+  const keyAt = (salt: Buffer): string => scryptSync(utf8, salt, 32, { N: 16, r: 1, p: 1 }).toString('base64url');
+  // A hash made by hashPassword, with the salt it names.
+  const hash = await hashPassword(password, COST);
+  assert.equal(fieldOf(hash, 5), keyAt(Buffer.from(fieldOf(hash, 4), 'base64url')));
+  assert.equal(await verifyPassword(password, hash), true);
+  // A stored value made by hand with a fixed salt, which verifyPassword computes alike.
+  const salt = Buffer.from('000102030405060708090a0b0c0d0e0f', 'hex');
+  assert.equal(await verifyPassword(password, `scrypt$4$1$1$${salt.toString('base64url')}$${keyAt(salt)}`), true);
+});
+
+test('a scrypt failure rejects with its short code alone', async () => {
+  const good = await hashPassword(PASSWORD, COST);
+  const onlyItsCode = (error: unknown): boolean => {
+    assert.ok(error instanceof Error);
+    assert.equal(error.message, 'scrypt_failed');
+    assert.equal('cause' in error, false);
+    return true;
+  };
+  await assert.rejects(verifyPassword(1 as unknown as string, good), onlyItsCode);
+  await assert.rejects(hashPassword(1 as unknown as string, COST), onlyItsCode);
 });
 
 test('a name is 1 to 39 lower-case letters, digits, dots, underscores and hyphens, starting with a letter or a digit', () => {

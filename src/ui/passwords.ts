@@ -50,8 +50,12 @@ function parse(stored: string): { cost: PasswordCost; salt: Buffer; key: Buffer 
   return { cost, salt, key };
 }
 
-/** 12 to 128 code points. */
+/**
+ * A new password: 12 to 128 code points, well formed and with no U+0000. scrypt pads a key shorter than 64 bytes with zero
+ * bytes, and every lone surrogate is written as U+FFFD, so either would make two passwords one. A verify takes any string.
+ */
 export function passwordLengthOk(password: string): boolean {
+  if (!password.isWellFormed() || password.includes('\0')) return false;
   const length = [...password].length;
   return length >= 12 && length <= 128;
 }

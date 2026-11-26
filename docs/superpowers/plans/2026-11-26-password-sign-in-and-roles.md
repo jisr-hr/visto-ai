@@ -208,7 +208,7 @@ export function verifyPassword(password: string, stored: string): Promise<boolea
 2. **`hashPassword`:** a salt of `randomBytes(16)`; `scrypt(Buffer.from(password, 'utf8'), salt, 32, { N: 2 ** log2N, r, p, maxmem: 256 * 2 ** log2N * r })` through `promisify`; the text `scrypt$${log2N}$${r}$${p}$${salt.toString('base64url')}$${key.toString('base64url')}`. A scrypt failure rejects `scrypt_failed`.
 3. **`verifyPassword`:** `stored` must match `^scrypt\$(\d{1,2})\$(\d)\$(\d)\$([A-Za-z0-9_-]{22})\$([A-Za-z0-9_-]{43})$` with its numbers in the bounds, else false with no scrypt; the key is computed with the stored parameters and salt and compared with `timingSafeEqual` (32 bytes each). A scrypt failure rejects `scrypt_failed`; nothing else rejects.
 4. **`oneTimePassword`:** `Array.from({ length: 20 }, () => ONE_TIME_ALPHABET[randomInt(ONE_TIME_ALPHABET.length)]).join('')`.
-5. **`passwordLengthOk`:** `[...password].length` from 12 to 128.
+5. **`passwordLengthOk`:** `[...password].length` from 12 to 128. (as built) It also refuses a new password that is not `isWellFormed()` (a lone surrogate) or that holds U+0000 (NUL): scrypt pads a key shorter than 64 bytes with zero bytes and writes every lone surrogate as U+FFFD, so either would make two passwords one; `verifyPassword` is unchanged and verifies any string.
 6. No error's message holds anything but its short code.
 
 - [ ] **Step 1: Write the failing tests.**
