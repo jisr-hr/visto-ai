@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+import type { UiConfig } from '../config/load.ts';
 import { testDb } from '../db/testing.ts';
 import type { Db } from '../db/types.ts';
 import type { ForgeChecks, ForgeSignIn, SignedIn } from '../forge/types.ts';
@@ -514,9 +515,15 @@ test('no log line or answer holds the code, the state, the verifier, the session
   const said = JSON.stringify(SEEN);
   for (const secret of SECRETS) assert.ok(!said.includes(secret), `an answer or a log line holds ${secret.slice(0, 8)}`);
 
-  // AuthDeps names no key that could hold the client secret.
-  const uiKeys: Record<keyof AuthDeps['ui'], true> = { accounts: true, team: true, publicUrl: true };
+  // AuthDeps names no key that could hold the client secret, and the config's whole `ui`, held in a variable, cannot be given
+  // as its `ui`: the type check refuses it.
   const depKeys: Record<keyof AuthDeps, true> = { db: true, ui: true, signIn: true, checks: true, clock: true, log: true, random: true };
-  assert.deepEqual([Object.keys(uiKeys), Object.keys(depKeys)], [['accounts', 'team', 'publicUrl'], ['db', 'ui', 'signIn', 'checks', 'clock', 'log', 'random']]);
+  assert.deepEqual(Object.keys(depKeys), ['db', 'ui', 'signIn', 'checks', 'clock', 'log', 'random']);
+  const full: UiConfig = {
+    accounts: ['octo-lead'], team: null, publicUrl: 'https://visto.example.test', clientId: 'Iv1.0123456789abcdef', clientSecret: 'client-secret-for-tests-only',
+  };
+  // @ts-expect-error -- the client secret cannot be handed to sign-in
+  const ui: AuthDeps['ui'] = full;
+  void ui;
   await h.db.close();
 });

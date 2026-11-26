@@ -29,6 +29,7 @@ import { addRecords } from './db/memory-records.ts';
 import { recordComments } from './db/review-comments.ts';
 import type { HumanInlineComment } from './forge/types.ts';
 import type { ForgeSignIn } from './forge/types.ts';
+import type { Activity as UiActivity, Me } from './ui/api-types.ts';
 import type { UiFiles } from './ui/files.ts';
 
 const REF = { service: 'github', owner: 'acme', repo: 'shop', number: 7 } as const;
@@ -370,10 +371,10 @@ async function harness(options: Options = {}) {
         end(body: string) { answer.body = body; resolve(answer); },
       });
     }),
-    /** A request to the listener; a body of null never ends. Resolves with the answer. */
-    request: (method: string, url: string, body: Buffer | null = Buffer.from('')) => new Promise<{ status: number; headers: Record<string, string>; body: string }>((resolve) => {
+    /** A request to the listener, with the headers `sent`; a body of null never ends. Resolves with the answer. */
+    request: (method: string, url: string, body: Buffer | null = Buffer.from(''), sent: Record<string, string> = {}) => new Promise<{ status: number; headers: Record<string, string>; body: string }>((resolve) => {
       const req: RequestLike = {
-        method, url, headers: {},
+        method, url, headers: sent,
         async *[Symbol.asyncIterator]() { if (body === null) await never(); else yield body; },
       };
       let status = 0;
@@ -2355,5 +2356,57 @@ test("the review jobs write their stage, and the app check asks for the team's p
     const other = await harness({ uiYaml: yaml, ui: uiDeps().ui });
     await (await other.start()).settled;
     assert.deepEqual(other.uiTeamCalls, [team], yaml);
+  }
+});
+
+const TEAM_YAML = 'ui:\n  team: acme/reviewers\n  publicUrl: https://visto.example.test\n';
+/** A cookie as a browser sends it back: the first `name=value` of the first value set. */
+const cookieOf = (set: unknown): string => String(Array.isArray(set) ? set[0] : set).split(';')[0] ?? '';
+
+test('a member of the team signs in through the service, and reads its mode, its places, its pause and its running review', async () => {
+  const signIn: ForgeSignIn = {
+    authorizeUrl: (state) => `https://github.example.test/login/oauth/authorize?state=${state}`,
+    signedIn: async (code) => {
+      if (code !== 'code-1') throw new Error('not_expected');
+      return { login: 'octo-dev', isBot: false };
+    },
+    orgInstallation: async (org) => (org === 'acme' ? '99' : null),
+  };
+  const files: UiFiles = new Map([['/ui/index.html', { body: Buffer.from(INDEX_PAGE), type: 'text/html; charset=utf-8' }]]);
+  const h = await harness({ uiYaml: TEAM_YAML, ui: { signIn, files }, member: true, holdReview: true });
+  await (await h.start()).settled;
+  // A review the runner holds; then the day's spend reaches the limit, which pauses the reviews to come.
+  await h.webhook(pr('opened'), 'd1');
+  await h.reviewed();
+  try {
+    await recordRun(h.db, run({ startedAt: at(0), usage: { ...run().usage, cost: 50 } }));
+    const start = await h.request('GET', '/api/auth/start');
+    const state = new URL(String(start.headers.location)).searchParams.get('state') ?? '';
+    const back = await h.request('GET', `/api/auth/callback?code=code-1&state=${state}`, Buffer.from(''), { cookie: cookieOf(start.headers['set-cookie']) });
+    assert.deepEqual([back.status, back.headers.location], [302, '/ui/']);
+    // Let in through the team, which only the checks the service was given could tell.
+    assert.deepEqual(h.checked, [['isTeamMember']]);
+    const cookie = cookieOf(back.headers['set-cookie']);
+
+    const me = await h.request('GET', '/api/me', Buffer.from(''), { cookie });
+    const who = JSON.parse(me.body) as Me;
+    assert.deepEqual([me.status, who.login, who.mode], [200, 'octo-dev', 'dry_run']);
+
+    const now = await h.request('GET', '/api/activity', Buffer.from(''), { cookie });
+    const seen = JSON.parse(now.body) as UiActivity;
+    assert.deepEqual([now.status, seen.places, seen.paused], [200, { reviews: config.limits.queueConcurrency, withdrawals: 2 }, 'spend_limit']);
+    assert.deepEqual(seen.jobs.map((j) => [j.repository, j.number, j.stage, j.startedAt, j.url]), [
+      ['acme/shop', 7, 'preparing', at(0), 'https://git.example.test/acme/shop/pull/7'],
+    ]);
+  } finally {
+    h.releaseReview();
+  }
+});
+
+test('with the UI off the app check asks for no members permission, though the file names a team', async () => {
+  for (const [given, team] of [[undefined, false], [uiDeps().ui, true]] as const) {
+    const h = await harness({ uiYaml: TEAM_YAML, ...(given === undefined ? {} : { ui: given }) });
+    await (await h.start()).settled;
+    assert.deepEqual(h.uiTeamCalls, [team], given === undefined ? 'no ui given' : 'ui given');
   }
 });

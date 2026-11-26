@@ -424,8 +424,8 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps): Pr
 
   async function appCheck(): Promise<void> {
     if (ending) return;
-    // With a team named, the UI reads its members (call 27).
-    const lacking = await deps.appInfo.lacks(config.dryRun, gateUseOf(config), approvalUseOf(config), config.ui !== undefined && config.ui.team !== null);
+    // With the UI on and a team named, the UI reads its members (call 27); with the UI off nothing of it is asked for.
+    const lacking = await deps.appInfo.lacks(config.dryRun, gateUseOf(config), approvalUseOf(config), ui !== null && ui.access.team !== null);
     if (ending) return;
     if (lacking.length === 0) say({ event: 'app_check', missing: 0 });
     for (const { feature, missing } of lacking) {

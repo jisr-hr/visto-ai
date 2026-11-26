@@ -19,7 +19,8 @@ export const SWEEP_MS = 60_000;      // expired rows are deleted at most once in
 export const MAX_LIVE_STATES = 1000;
 export interface AuthDeps {
   db: Db;
-  ui: Pick<UiConfig, 'accounts' | 'team' | 'publicUrl'>;   // never the client secret, which only the adapter holds
+  // Never the client id or secret, which only the adapter holds: the config's `ui` itself is refused by type.
+  ui: Pick<UiConfig, 'accounts' | 'team' | 'publicUrl'> & { clientId?: never; clientSecret?: never };
   signIn: ForgeSignIn; checks: Pick<ForgeChecks, 'isTeamMember'>;
   clock: () => Date; log: (entry: Record<string, unknown>) => void;
   random?: () => string;   // 32 random bytes in base64url; absent: randomBytes(32)

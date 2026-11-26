@@ -13,8 +13,8 @@ import { json, redirect } from './headers.ts';
 /** The fixed name a failed handler is logged with (call 30). */
 type Handler = 'me' | 'activity' | 'reviews' | 'signout';
 
-/** The API's paths, each with the one method it answers. */
-const METHODS: ReadonlyMap<string, string> = new Map([
+/** The API's paths, each with the one method it answers. A path here with no case of its own below is not found. */
+export const METHODS: ReadonlyMap<string, string> = new Map([
   ['/api/auth/start', 'GET'], ['/api/auth/callback', 'GET'], ['/api/auth/signout', 'POST'],
   ['/api/me', 'GET'], ['/api/activity', 'GET'], ['/api/reviews', 'GET'],
 ]);
@@ -60,13 +60,14 @@ export function createUiRoute(deps: { auth: Auth; api: ApiDeps; files: UiFiles; 
         return behindSession(request, 'me', async (session) => json(200, await me(api, session)));
       case '/api/activity':
         return behindSession(request, 'activity', async () => json(200, await activity(api)));
-      default: {
-        // '/api/reviews', the last of METHODS.
+      case '/api/reviews':
         return behindSession(request, 'reviews', async () => {
           const found = await reviews(api, new URLSearchParams(request.query));
           return found === 'bad_request' ? refused(400, 'bad_request') : json(200, found);
         });
-      }
+      default:
+        // A path of METHODS with no case of its own reads nothing.
+        return refused(404, 'not_found');
     }
   };
 }

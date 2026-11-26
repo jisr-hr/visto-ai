@@ -12,7 +12,7 @@ import { activity, reviews } from './api.ts';
 import type { ApiDeps } from './api.ts';
 import { createAuth } from './auth.ts';
 import type { UiFile, UiFiles } from './files.ts';
-import { createUiRoute } from './route.ts';
+import { createUiRoute, METHODS } from './route.ts';
 
 const at = (seconds: number): string => new Date(Date.parse('2026-03-01T10:00:00.000Z') + seconds * 1000).toISOString();
 const REF: PullRequestRef = { service: 'github', owner: 'acme', repo: 'shop', number: 7 };
@@ -220,5 +220,23 @@ test('a handler that fails is internal_error, logged with its route and short co
   // The session the failed sign-out left still reads.
   h.failing.text = null;
   assert.equal((await h.send('GET', '/api/me', { cookie })).status, 200);
+  await h.db.close();
+});
+
+test('a path the table of methods knows but no case answers is not found, and reads nothing, even signed in', async () => {
+  const h = await harness();
+  const { cookie } = await h.signIn();
+  const id = /^__Host-visto_session=(.*)$/.exec(cookie)?.[1] ?? '';
+  // The table as a later change might leave it: a path written there, its case forgotten.
+  const methods = METHODS as Map<string, string>;
+  methods.set('/api/later', 'GET');
+  try {
+    h.statements.length = 0;
+    assert.deepEqual(await h.send('GET', '/api/later', { cookie, csrf: tokenOf(id) }), error(404, 'not_found'));
+    assert.deepEqual(h.statements, []);
+  } finally {
+    methods.delete('/api/later');
+  }
+  assert.deepEqual([...METHODS.keys()].includes('/api/later'), false);
   await h.db.close();
 });
