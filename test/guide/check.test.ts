@@ -68,8 +68,11 @@ test('a missing or empty frontmatter field is named', () => {
   assert.match(problems(valid({ 'a.md': '## One\n' })).join('\n'), /a\.md: .*title/);
 });
 
-test('a description on the next line is accepted', () => {
+test('a block-scalar description is accepted; one off the description line is refused', () => {
   assert.deepEqual(problems(valid({ 'a.md': page('## One', 'title: A\ndescription: >-\n  About A\n  and more') })), []);
+  assert.deepEqual(problems(valid({ 'a.md': page('## One', 'title: A\ndescription: |\n  About A') })), []);
+  assert.match(problems(valid({ 'a.md': page('## One', 'title: A\ndescription:\n  About A') })).join('\n'), /a\.md: .*on the `description:` line/);
+  assert.match(problems(valid({ 'a.md': page('## One', 'title: A\n"description": About A') })).join('\n'), /a\.md: .*on the `description:` line/);
 });
 
 test('a body h1 outside fences is refused, inside fences is not', () => {
@@ -151,4 +154,27 @@ test('reference links, alerts and images are refused', () => {
   assert.match(problems(valid({ 'a.md': page('## One\n\n> [!NOTE]\n> hi') })).join('\n'), /a\.md: .*alert/);
   assert.match(problems(valid({ 'a.md': page('## One\n\n![pic](../../x.png)') }), { 'x.png': '' }).join('\n'), /a\.md: .*image/);
   assert.deepEqual(problems(valid({ 'a.md': page('## One\n\n> A plain quote\n\n```\n![x](y)\n> [!NOTE]\n[r]: z\n```') })), []);
+});
+
+test('a # line the website reads as a heading is refused even when CommonMark sees code', () => {
+  const longer = '## One\n\n````\n```\n# inside\n````';
+  const info = '## One\n\n```\n```sh\n# inside\n```';
+  const tab = '## One\n\n```\n\t```\n# inside\n```';
+  for (const body of [longer, info, tab]) {
+    const out = problems(valid({ 'a.md': page(body) }));
+    assert.match(out.join('\n'), /a\.md: line \d+: .*body heading/, body);
+  }
+});
+
+test('a link with a bad escape is a problem, not a crash', () => {
+  assert.match(problems(valid({ 'a.md': page('## One\n\n[x](100%.md)') })).join('\n'), /a\.md: .*100%\.md/);
+});
+
+test('a bare # link is accepted', () => {
+  assert.deepEqual(problems(valid({ 'a.md': page('## One\n\n[x](#)') })), []);
+});
+
+test('slugs trim and use only the text of a link', () => {
+  assert.equal(slugify('  Spaced out  '), 'spaced-out');
+  assert.equal(slugify('See [Status](#status)'), 'see-status');
 });

@@ -5,6 +5,8 @@ import { parse } from 'yaml';
 /** GitHub's heading-anchor rule: lowercase, drop all but letters, digits, spaces, `-` and `_`, spaces become `-`. */
 export function slugify(heading: string): string {
   return heading
+    .trim()
+    .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
     .toLowerCase()
     .replace(/[^\p{L}\p{M}\p{N} _-]/gu, '')
     .replaceAll(' ', '-');
@@ -24,6 +26,20 @@ function proseLines(markdown: string, firstLine = 1): Line[] {
     } else if (m && m[1]![0] === fence.char && m[1]!.length >= fence.length && m[2]!.trim() === '') {
       fence = null;
     }
+  });
+  return out;
+}
+
+/** The lines outside fences as the website reads them: a fence closes on any line starting with the same character. */
+function websiteProseLines(markdown: string, firstLine: number): Line[] {
+  const out: Line[] = [];
+  let fence: string | null = null;
+  markdown.split('\n').forEach((text, i) => {
+    const marker = /^\s*(```+|~~~+)/.exec(text)?.[1];
+    if (marker) {
+      if (fence === null) fence = marker[0]!;
+      else if (marker[0] === fence) fence = null;
+    } else if (fence === null) out.push({ text, number: firstLine + i });
   });
   return out;
 }
@@ -87,7 +103,14 @@ function linkProblems(markdown: string, file: string, repoRoot: string, label: s
         if (anchor !== '' && !own.has(anchor)) problems.push(`${where}: link "${target}" points at an anchor that is not a heading here`);
         continue;
       }
-      const resolved = resolve(dirname(file), decodeURI(path));
+      let decoded = path;
+      try {
+        decoded = decodeURI(path);
+      } catch {
+        problems.push(`${where}: link "${target}" is not a valid path`);
+        continue;
+      }
+      const resolved = resolve(dirname(file), decoded);
       if (resolved !== root && !resolved.startsWith(root + sep)) {
         problems.push(`${where}: link "${target}" leaves the repository`);
       } else if (!existsSync(resolved)) {
@@ -133,6 +156,18 @@ function pageProblems(file: string, repoRoot: string): string[] {
   for (const key of ['title', 'description']) {
     if (!filled(meta[key])) problems.push(`${label}: frontmatter ${key} is missing or empty`);
   }
+  // The website reads these two with line patterns, so the value must sit on the key's own line.
+  if (front !== null && filled(meta.title) && !/^title:\s*\S/m.test(front)) {
+    problems.push(`${label}: frontmatter title must be written as a plain \`title:\` key`);
+  }
+  if (front !== null && filled(meta.description) && !/^description:[ \t]*(?!(?:""|'')[ \t]*$)\S/m.test(front)) {
+    problems.push(`${label}: frontmatter description must start on the \`description:\` line (a plain key, a value or a > or | indicator there)`);
+  }
+  // The website closes a fence on any line that starts with the same character, whatever its length, info or indent.
+  const seen = new Set<number>();
+  for (const { text, number } of websiteProseLines(body, bodyStart)) {
+    if (/^ {0,3}#(?:[ \t]|$)/.test(text)) seen.add(number);
+  }
   let previous = 1;
   for (const { text, number } of proseLines(body, bodyStart)) {
     const heading = HEADING.exec(text);
@@ -151,6 +186,11 @@ function pageProblems(file: string, repoRoot: string): string[] {
     if (/^ {0,3}\[[^\]]+\]:\s*\S/.test(text)) problems.push(`${label}: line ${number}: reference-style link definition; use an inline link`);
     if (/^\s*>\s*\[!/.test(text)) problems.push(`${label}: line ${number}: GitHub alert; use a plain blockquote`);
     if (/!\[/.test(prose)) problems.push(`${label}: line ${number}: image; the guide has none`);
+  }
+  for (const number of seen) {
+    if (!problems.some((p) => p.startsWith(`${label}: line ${number}: `) && p.includes('body heading'))) {
+      problems.push(`${label}: line ${number}: a line the website reads as a body heading with "# " (its fence reading differs from CommonMark); use ## or deeper, or fence the code the same way`);
+    }
   }
   return [...problems, ...linkProblems(markdown, file, repoRoot, label)];
 }
