@@ -228,7 +228,7 @@ test('a session read that rejects is internal_error, not a sign-out, logged once
   const { cookie } = await h.signIn();
   const before = h.logs.length;
   h.failing.error = new Error('connect failed for postgres://u:p@db.example.test/d');
-  h.failing.text = 'select login, via, last_used_at from visto_ai.ui_sessions';
+  h.failing.text = 'select s.via, s.last_used_at';
   assert.deepEqual(await h.send('GET', '/api/me', { cookie }), error(500, 'internal_error'));
   assert.deepEqual(h.logs.slice(before), [{ event: 'ui_failed', route: 'me', reason: 'internal_error' }]);
   assert.ok(!JSON.stringify(h.logs).includes('postgres'));

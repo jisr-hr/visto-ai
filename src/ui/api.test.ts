@@ -17,7 +17,7 @@ const pr = (number: number, repo = 'shop'): PullRequestRef => ({ service: 'githu
 const HEAD = 'a41c09e2b7d3f00dbabe0123456789abcdef0123';
 const STORED = '17f0c3a9e5b2c0ffee0123456789abcdef012345';
 const BASE = 'b0b0b0b0c1c1c1c1d2d2d2d2e3e3e3e3f4f4f4f4';
-const SESSION: Session = { login: 'octo-lead', idHash: 'h-a', csrf: 'q7Jv0bW2m3n4o5p6q7r8s9t0u1v2w3x4y5z6A7B8C9D' };
+const SESSION: Session = { login: 'octo-lead', idHash: 'h-a', csrf: 'q7Jv0bW2m3n4o5p6q7r8s9t0u1v2w3x4y5z6A7B8C9D', accountId: 1, kind: 'github', role: 'viewer' };
 const urlOf = (ref: PullRequestRef): string => `https://github.example.test/${ref.owner}/${ref.repo}/pull/${ref.number}`;
 
 function deps(db: Db, more: Partial<ApiDeps> = {}): ApiDeps {
