@@ -65,7 +65,7 @@ dryRun: true
 # 100 replies a run and at most 20 of them from accounts with no access, counted in limits.spendPerDay.
 # A reply by a person with access that shows a finding was wrong may become a lesson: one sentence the model
 # writes, shown as data to later reviews of that repository for 90 days.
-# Until the UI exists a record is switched off only in the database: see "Memory" in the README.
+# Until the UI exists a record is switched off only in the database: see "Memory" in docs/guide/memory.md.
 learning: false
 
 # Optional second scorer: a decision model that scores the changed blocks in place of the review model.
@@ -105,7 +105,7 @@ learning: false
 #   webhook: { env: ALERT_WEBHOOK_URL }
 
 # The web UI at <publicUrl>/ui/. It is on when publicUrl is written; with none of publicUrl, accounts and team it is off, and /ui/ and
-# /api/ answer 404. Its accounts are made by an admin in Settings, and the first admin by the command npm run accounts (README, The UI).
+# /api/ answer 404. Its accounts are made by an admin in Settings, and the first admin by the command npm run accounts (docs/guide/the-ui.md).
 # accounts and team name who may also sign in through the GitHub App, as a viewer until an admin says otherwise; with either,
 # app.clientId and app.clientSecret must be written too, and on the app's settings page the callback URL is <publicUrl>/api/auth/callback.
 # With team, install the app on that organisation with Members read. Everyone signed in sees the activity of every repository.
@@ -123,10 +123,10 @@ learning: false
 # Optional extension modules: code of your own that the service loads once, at start. A module can give the reviewer
 # context about a pull request (a ticket's text, acceptance criteria), be told when a review is published and when an
 # alert is raised, and answer HTTP requests under /extensions/<name>/, for example to collect a thumbs up or down.
-# docs/extensions.md states the contract, and examples/extension-example.ts is a module that works.
+# docs/guide/extension-contract.md states the contract, and examples/extension-example.ts is a module that works.
 # A module runs inside the service and can reach whatever the service can: name only code you trust.
 # A module that cannot be loaded stops the start. In dry run a module is asked for context, and it is told of no review and no alert.
-# Under Docker the module's file must be mounted into the container; docs/extensions.md says how.
+# Under Docker the module's file must be mounted into the container; docs/guide/extension-contract.md says how.
 # extensions:
 #     # The module's name in logs and in its route: a lower-case letter, then lower-case letters, digits or underscores, at most 40.
 #   - name: example
@@ -144,7 +144,7 @@ learning: false
 # What the model sends as arguments goes to the server, and what a tool returns can be written in the review:
 # name only a server you trust with the reviewed code, and only tools that read.
 # A server's tool names, descriptions and schemas are trusted like this file. No server is asked for a pull request from a fork.
-# Servers are asked in dry run too; the eval commands ask none. The README's section "MCP tools (optional)" says what it costs.
+# Servers are asked in dry run too; the eval commands ask none. The page docs/guide/mcp-tools.md says what it costs.
 # mcpServers:
 #     # The server's name in records, alerts and tool names: a lower-case letter, then lower-case letters, digits or underscores, at most 20.
 #   - name: docs
@@ -207,7 +207,7 @@ repositories:
     # The app needs Checks read and write and the event Check run; Commit statuses read when requiredChecks are named; the
     # organisation permission Members read when skipTeam is named. An app made by npm run app:create has them. An existing app is given
     # them by hand in its settings, each installation accepts them, and the service is restarted: it reads them once, at start.
-    # Switch it on in shadow mode first. The README's section "The merge gate (optional)" says what it does and what it costs.
+    # Switch it on in shadow mode first. The page docs/guide/merge-gate.md says what it does and what it costs.
     #   enabled:       the gate is off when not written, and then nothing here has any effect.
     #   branches:      the base branches that are gated. Required when the gate is enabled; there is no default list.
     #   checkName:     the name of the check, 1 to 100 printable ASCII characters. It is "AI Review" when not written.

@@ -1,6 +1,6 @@
 # AACR-Bench v2, 2026-11-24
 
-The first full run of the reviewer on [AACR-Bench](https://github.com/alibaba/aacr-bench) v2 (Apache-2.0): merged pull requests of public repositories, each with review comments that experts checked. It measures the findings against those comments, and the score against the places they mark. How to run it is in the README, under "Benchmark (AACR-Bench)".
+The first full run of the reviewer on [AACR-Bench](https://github.com/alibaba/aacr-bench) v2 (Apache-2.0): merged pull requests of public repositories, each with review comments that experts checked. It measures the findings against those comments, and the score against the places they mark. How to run it is in [the Benchmark page](../guide/benchmark.md).
 
 ## Setup
 

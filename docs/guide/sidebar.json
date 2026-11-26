@@ -1,0 +1,8 @@
+[
+  { "label": "Start here", "items": ["", "quick-start", "create-the-github-app", "leave-dry-run"] },
+  { "label": "Concepts", "items": ["the-score", "how-a-review-runs", "scores-across-reviews"] },
+  { "label": "Features", "items": ["automatic-approval", "merge-gate", "inline-notes", "memory", "lessons-and-reverts", "second-scorer", "the-ui"] },
+  { "label": "Extend", "items": ["extension-modules", "extension-contract", "mcp-tools"] },
+  { "label": "Reference", "items": ["configuration", "visto-ai-yml", "running-the-service", "development", "repository-layout"] },
+  { "label": "Measure", "items": ["replay", "backtest", "benchmark"] }
+]
