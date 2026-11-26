@@ -6,18 +6,29 @@ import { savePullRequest } from '../db/pull-requests.ts';
 import { recordRun } from '../db/review-runs.ts';
 import { testDb } from '../db/testing.ts';
 import type { Db } from '../db/types.ts';
+import { insertAccount } from '../db/ui-accounts.ts';
+import type { AccountRow, Role } from '../db/ui-accounts.ts';
 import type { ForgeChecks, ForgeSignIn, PullRequestRef } from '../forge/types.ts';
 import type { UiAnswer } from '../shell/http.ts';
+import { createAccountChanges } from './accounts.ts';
+import type { AccountChanges, Refusal } from './accounts.ts';
 import { activity, reviews } from './api.ts';
 import type { ApiDeps } from './api.ts';
 import { createAuth } from './auth.ts';
 import type { UiFile, UiFiles } from './files.ts';
+import { createPasswordAuth } from './password-auth.ts';
+import { hashPassword } from './passwords.ts';
 import { createUiRoute, METHODS } from './route.ts';
 
 const at = (seconds: number): string => new Date(Date.parse('2026-03-01T10:00:00.000Z') + seconds * 1000).toISOString();
 const REF: PullRequestRef = { service: 'github', owner: 'acme', repo: 'shop', number: 7 };
 const HEAD = 'a41c09e2b7d3f00dbabe0123456789abcdef0123';
 const tokenOf = (id: string): string => createHash('sha256').update('csrf:' + id).digest('base64url');
+const COST = { log2N: 4, r: 1, p: 1 };
+const ORIGIN = 'https://visto.example.test';
+const JSON_TYPE = 'application/json';
+const PASSWORD = 'a long password of mine';
+const OTHER = 'another long password';
 
 // Call 17, written out here apart from the code.
 const SECURITY = {
@@ -34,7 +45,7 @@ const error = (status: number, code: string, extra: Record<string, string> = {})
 const INDEX: UiFile = { body: Buffer.from('<!doctype html><title>Visto AI</title>'), type: 'text/html; charset=utf-8' };
 const FILES: UiFiles = new Map([['/ui/index.html', INDEX]]);
 
-interface Sent { query?: string; cookie?: string; csrf?: string }
+interface Sent { query?: string; cookie?: string; csrf?: string; body?: string; origin?: string; type?: string }
 interface Harness {
   db: Db; api: ApiDeps; logs: Array<Record<string, unknown>>;
   /** Every statement the route's parts ran. */
@@ -46,7 +57,8 @@ interface Harness {
   signIn(): Promise<{ started: UiAnswer; back: UiAnswer; cookie: string }>;
 }
 
-async function harness(): Promise<Harness> {
+/** `github` false: a route with GitHub sign-in off, and auth given no sign-in. `changesOf`: the account changes the route is given, from the real ones. */
+async function harness(github = true, changesOf: (real: AccountChanges) => AccountChanges = (real) => real): Promise<Harness> {
   const real = await testDb();
   const logs: Array<Record<string, unknown>> = [];
   const statements: string[] = [];
@@ -73,15 +85,21 @@ async function harness(): Promise<Harness> {
   const checks: Pick<ForgeChecks, 'isTeamMember'> = { isTeamMember: async () => false };
   const clock = (): Date => new Date(at(0));
   const log = (entry: Record<string, unknown>): void => { logs.push(entry); };
-  const auth = createAuth({ db, ui: { accounts: ['octo-lead'], team: null, publicUrl: 'https://visto.example.test' }, signIn, checks, clock, log });
+  const auth = createAuth({ db, ui: { accounts: ['octo-lead'], team: null, publicUrl: 'https://visto.example.test' }, signIn: github ? signIn : null, checks, clock, log });
   const api: ApiDeps = {
     db, clock, dryRun: true, reviewPlaces: 2, withdrawPlaces: 2, holds: () => true, paused: async () => null,
     pullRequestUrl: (ref) => `https://github.example.test/${ref.owner}/${ref.repo}/pull/${ref.number}`,
   };
-  const route = createUiRoute({ auth, api, files: FILES, log });
+  const route = createUiRoute({
+    auth, passwords: createPasswordAuth({ db, clock, log, cost: COST }), accounts: changesOf(createAccountChanges({ db, clock, log, cost: COST })), api, files: FILES,
+    ui: { publicUrl: 'https://visto.example.test', github }, log,
+  });
   const send: Harness['send'] = (method, path, sent = {}) => route({
-    method, path, query: sent.query ?? '', body: Buffer.alloc(0),
-    headers: { host: 'visto.example.test', ...(sent.cookie === undefined ? {} : { cookie: sent.cookie }), ...(sent.csrf === undefined ? {} : { 'x-visto-csrf': sent.csrf }) },
+    method, path, query: sent.query ?? '', body: sent.body === undefined ? Buffer.alloc(0) : Buffer.from(sent.body),
+    headers: {
+      host: 'visto.example.test', ...(sent.cookie === undefined ? {} : { cookie: sent.cookie }), ...(sent.csrf === undefined ? {} : { 'x-visto-csrf': sent.csrf }),
+      ...(sent.origin === undefined ? {} : { origin: sent.origin }), ...(sent.type === undefined ? {} : { 'content-type': sent.type }),
+    },
   });
   return {
     db: real, api, logs, statements, failing, send,
@@ -122,7 +140,7 @@ test('a person signs in, reads who they are, the activity and the reviews, and s
   const who = await h.send('GET', '/api/me', { cookie });
   assert.deepEqual({ ...who, body: JSON.parse(String(who.body)) }, {
     status: 200, headers: JSON_HEADERS,
-    body: { login: 'octo-lead', csrf: tokenOf(id), mode: 'dry_run', repositories: ['acme/shop'] },
+    body: { name: 'octo-lead', kind: 'github', role: 'viewer', csrf: tokenOf(id), mode: 'dry_run', repositories: ['acme/shop'] },
   });
 
   const now = await h.send('GET', '/api/activity', { cookie });
@@ -228,7 +246,7 @@ test('a session read that rejects is internal_error, not a sign-out, logged once
   const { cookie } = await h.signIn();
   const before = h.logs.length;
   h.failing.error = new Error('connect failed for postgres://u:p@db.example.test/d');
-  h.failing.text = 'select login, via, last_used_at from visto_ai.ui_sessions';
+  h.failing.text = 'select s.via, s.last_used_at';
   assert.deepEqual(await h.send('GET', '/api/me', { cookie }), error(500, 'internal_error'));
   assert.deepEqual(h.logs.slice(before), [{ event: 'ui_failed', route: 'me', reason: 'internal_error' }]);
   assert.ok(!JSON.stringify(h.logs).includes('postgres'));
@@ -252,5 +270,423 @@ test('a path the table of methods knows but no case answers is not found, and re
     methods.delete('/api/later');
   }
   assert.deepEqual([...METHODS.keys()].includes('/api/later'), false);
+  await h.db.close();
+});
+
+// -- password sign-in, the accounts and the roles (the password design 4.3 and 4.5) ------------------------------------
+
+const NO_CONTENT: UiAnswer = { status: 204, headers: { 'cache-control': 'no-store', ...SECURITY }, body: '' };
+const ONE_TIME = 'k7m2q9xh4wz8r3bt6pn5';
+const ONE_TIME_SHAPE = /^[23456789abcdefghjkmnpqrstuvwxyz]{20}$/;
+const SESSION_ID_OF = /^__Host-visto_session=([A-Za-z0-9_-]{43})$/;
+
+/** A password account made by statements, an hour before the clock: its password chosen (PASSWORD), or a one-time password until `until`. */
+async function account(h: Harness, name: string, role: Role, oneTime?: { password: string; until: string }): Promise<AccountRow> {
+  const made = await insertAccount(h.db, {
+    kind: 'password', name, role, passwordHash: await hashPassword(oneTime?.password ?? PASSWORD, COST), oneTimeUntil: oneTime?.until ?? null,
+    at: at(-3600), by: 'command', byName: null, signedInAt: null,
+  });
+  assert.notEqual(made, null);
+  return made!;
+}
+
+/** A GitHub account made by statements, as its first sign-in half an hour before the clock makes it. */
+async function githubRow(h: Harness, login: string): Promise<AccountRow> {
+  const made = await insertAccount(h.db, {
+    kind: 'github', name: login, role: 'viewer', passwordHash: null, oneTimeUntil: null, at: at(-1800), by: 'sign_in', byName: null, signedInAt: at(-1800),
+  });
+  assert.notEqual(made, null);
+  return made!;
+}
+
+/** The cookie an answer sets, as a browser sends it back, and the session id in it ('' for none). */
+function cookieOf(answer: UiAnswer): { cookie: string; id: string } {
+  const set = answer.headers['set-cookie'];
+  const cookie = String((Array.isArray(set) ? set[0] : set) ?? '').split(';')[0] ?? '';
+  return { cookie, id: SESSION_ID_OF.exec(cookie)?.[1] ?? '' };
+}
+
+/** A password sign-in from the UI's own page: its answer, and the cookie it set. */
+async function passwordSignIn(h: Harness, name: string, password = PASSWORD): Promise<{ answer: UiAnswer; cookie: string; id: string }> {
+  const answer = await h.send('POST', '/api/auth/password', { origin: ORIGIN, type: JSON_TYPE, body: JSON.stringify({ name, password }) });
+  return { answer, ...cookieOf(answer) };
+}
+
+test('a password account signs in, reads who it is with its role, and an admin reads the accounts', async () => {
+  const h = await harness();
+  const admin = await account(h, 'octo-admin', 'admin');
+  const lead = await githubRow(h, 'octo-lead');
+  const { answer, cookie, id } = await passwordSignIn(h, 'octo-admin');
+  assert.notEqual(id, '');
+  assert.deepEqual(answer, {
+    status: 200, headers: { 'set-cookie': `__Host-visto_session=${id}; Path=/; Max-Age=43200; HttpOnly; Secure; SameSite=Strict`, ...JSON_HEADERS },
+    body: JSON.stringify({ next: 'signed_in' }),
+  });
+
+  const who = await h.send('GET', '/api/me', { cookie });
+  assert.deepEqual({ ...who, body: JSON.parse(String(who.body)) }, {
+    status: 200, headers: JSON_HEADERS,
+    body: { name: 'octo-admin', kind: 'password', role: 'admin', csrf: tokenOf(id), mode: 'dry_run', repositories: [] },
+  });
+
+  const listed = await h.send('GET', '/api/accounts', { cookie });
+  assert.deepEqual([listed.status, listed.headers], [200, JSON_HEADERS]);
+  assert.deepEqual(JSON.parse(String(listed.body)), {
+    now: at(0), accounts: [
+      { id: admin.id, kind: 'password', name: 'octo-admin', role: 'admin', password: 'set', waitsUntil: null, madeAt: at(-3600),
+        madeBy: { kind: 'command', name: null }, lastSignInAt: at(0), you: true },
+      { id: lead.id, kind: 'github', name: 'octo-lead', role: 'viewer', password: null, waitsUntil: null, madeAt: at(-1800),
+        madeBy: { kind: 'sign_in', name: null }, lastSignInAt: at(-1800), you: false },
+    ],
+  });
+  assert.ok(!String(listed.body).includes('scrypt$'));
+
+  // A right one-time password asks for a password and sets no cookie; the first password then signs in.
+  await account(h, 'octo-new', 'viewer', { password: ONE_TIME, until: at(3600) });
+  const asked = await passwordSignIn(h, 'octo-new', ONE_TIME);
+  assert.deepEqual(asked.answer, { status: 200, headers: JSON_HEADERS, body: JSON.stringify({ next: 'choose_password' }) });
+  const chosen = await h.send('POST', '/api/auth/first-password', {
+    origin: ORIGIN, type: JSON_TYPE, body: JSON.stringify({ name: 'octo-new', oneTimePassword: ONE_TIME, password: OTHER }),
+  });
+  const after = cookieOf(chosen);
+  assert.notEqual(after.id, '');
+  assert.deepEqual([chosen.status, chosen.body], [200, JSON.stringify({ next: 'signed_in' })]);
+  const now = JSON.parse(String((await h.send('GET', '/api/me', { cookie: after.cookie })).body)) as Record<string, unknown>;
+  assert.deepEqual([now.name, now.kind, now.role], ['octo-new', 'password', 'viewer']);
+  assert.equal((await passwordSignIn(h, 'octo-new', OTHER)).answer.status, 200);
+  await h.db.close();
+});
+
+test('a viewer is refused every admin route as forbidden, whatever it sends, and a change without the token is csrf first', async () => {
+  const h = await harness();
+  const admin = await account(h, 'octo-admin', 'admin');
+  const viewer = await account(h, 'octo-viewer', 'viewer');
+  const { cookie, id } = await passwordSignIn(h, 'octo-viewer');
+  const csrf = tokenOf(id);
+  const changes: Array<[string, Record<string, unknown>]> = [
+    ['/api/accounts/new', { name: 'octo-new', role: 'admin' }], ['/api/accounts/role', { id: viewer.id, role: 'admin' }],
+    ['/api/accounts/reset', { id: admin.id }], ['/api/accounts/remove', { id: admin.id }],
+  ];
+  h.statements.length = 0;
+  let requests = 0;
+  const send = (method: string, path: string, sent: Sent): Promise<UiAnswer> => { requests += 1; return h.send(method, path, sent); };
+  assert.deepEqual(await send('GET', '/api/accounts', { cookie }), error(403, 'forbidden'));
+  for (const [path, body] of changes) {
+    const good = JSON.stringify(body);
+    assert.deepEqual(await send('POST', path, { cookie, csrf, type: JSON_TYPE, body: good }), error(403, 'forbidden'), path);
+    assert.deepEqual(await send('POST', path, { cookie, type: JSON_TYPE, body: good }), error(403, 'csrf'), path);
+    assert.deepEqual(await send('POST', path, { cookie, csrf: tokenOf('Z'.repeat(43)), type: JSON_TYPE, body: good }), error(403, 'csrf'), path);
+    // The role before the body.
+    assert.deepEqual(await send('POST', path, { cookie, csrf, type: 'text/plain', body: 'x' }), error(403, 'forbidden'), path);
+    assert.deepEqual(await send('POST', path, { cookie, csrf, type: JSON_TYPE, body: '[]' }), error(403, 'forbidden'), path);
+  }
+  // No statement on the accounts but the session read, once a request.
+  const read = h.statements.filter((text) => text.includes('ui_accounts'));
+  assert.equal(read.length, requests);
+  assert.ok(read.every((text) => text.includes('from visto_ai.ui_sessions s join visto_ai.ui_accounts a on a.id = s.account_id')));
+  // Without a session, each is signed_out first.
+  assert.deepEqual(await h.send('GET', '/api/accounts'), error(401, 'signed_out'));
+  for (const [path, body] of changes) {
+    assert.deepEqual(await h.send('POST', path, { csrf, type: JSON_TYPE, body: JSON.stringify(body) }), error(401, 'signed_out'), path);
+  }
+  assert.deepEqual(await h.db.query('select name, role from visto_ai.ui_accounts order by name'), [
+    { name: 'octo-admin', role: 'admin' }, { name: 'octo-viewer', role: 'viewer' },
+  ]);
+  await h.db.close();
+});
+
+test('the password sign-in and the first password need the public origin and JSON, and say so before reading anything', async () => {
+  const h = await harness();
+  await account(h, 'octo-admin', 'admin');
+  const bodies: Array<[string, string]> = [
+    ['/api/auth/password', JSON.stringify({ name: 'octo-admin', password: PASSWORD })],
+    ['/api/auth/first-password', JSON.stringify({ name: 'octo-admin', oneTimePassword: PASSWORD, password: OTHER })],
+  ];
+  h.statements.length = 0;
+  const before = h.logs.length;
+  for (const [path, good] of bodies) {
+    for (const origin of [undefined, 'https://other.example.test', 'https://visto.example.test/', 'null', 'http://visto.example.test', 'HTTPS://VISTO.EXAMPLE.TEST']) {
+      const sent: Sent = { type: JSON_TYPE, body: good, ...(origin === undefined ? {} : { origin }) };
+      assert.deepEqual(await h.send('POST', path, sent), error(403, 'origin'), `${path} ${String(origin)}`);
+    }
+    // The origin before the type: a form posted from another site is refused as such.
+    assert.deepEqual(await h.send('POST', path, { origin: 'https://other.example.test', type: 'application/x-www-form-urlencoded', body: 'a=1' }), error(403, 'origin'), path);
+    for (const type of ['text/plain', 'application/x-www-form-urlencoded', undefined, 'text/json', 'application/jsonp', 'application/json-patch+json']) {
+      const sent: Sent = { origin: ORIGIN, body: good, ...(type === undefined ? {} : { type }) };
+      assert.deepEqual(await h.send('POST', path, sent), error(415, 'not_json'), `${path} ${String(type)}`);
+    }
+    for (const body of ['[]', 'null', '7', '{', '', '"text"', '[{"name":"octo-admin"}]']) {
+      assert.deepEqual(await h.send('POST', path, { origin: ORIGIN, type: JSON_TYPE, body }), error(400, 'bad_request'), `${path} ${body}`);
+    }
+  }
+  assert.deepEqual(h.statements, []);
+  // (as built, the fix wave) Each refusal is logged as a password sign-in refused as bad_request, its code the reason.
+  const line = (reason: string): Record<string, unknown> => ({ event: 'ui_signin', way: 'password', outcome: 'bad_request', reason });
+  assert.deepEqual(h.logs.slice(before), bodies.flatMap(() => [
+    ...Array.from({ length: 7 }, () => line('origin')), ...Array.from({ length: 6 }, () => line('not_json')), ...Array.from({ length: 7 }, () => line('bad_request')),
+  ]));
+
+  // With a charset, and in capitals, the body is read.
+  const read = await h.send('POST', '/api/auth/password', { origin: ORIGIN, type: 'application/json; charset=utf-8', body: bodies[0]![1] });
+  assert.deepEqual([read.status, read.body], [200, JSON.stringify({ next: 'signed_in' })]);
+  const capitals = await h.send('POST', '/api/auth/first-password', { origin: ORIGIN, type: 'Application/JSON', body: bodies[1]![1] });
+  assert.deepEqual(capitals, error(409, 'already_chosen'));
+  assert.notDeepEqual(h.statements, []);
+  await h.db.close();
+});
+
+test("the open routes log each refusal of their own as a sign-in refused as bad_request, its code the reason and no name, and no other route's does", async () => {
+  const h = await harness();
+  await account(h, 'octo-admin', 'admin');
+  const named = JSON.stringify({ name: 'octo-admin', password: PASSWORD });
+  const line = (reason: string): Record<string, unknown> => ({ event: 'ui_signin', way: 'password', outcome: 'bad_request', reason });
+  for (const path of ['/api/auth/password', '/api/auth/first-password']) {
+    for (const [sent, status, code] of [
+      [{ origin: 'https://other.example.test', type: JSON_TYPE, body: named }, 403, 'origin'],
+      [{ type: JSON_TYPE, body: named }, 403, 'origin'],
+      [{ origin: ORIGIN, type: 'text/plain', body: named }, 415, 'not_json'],
+      [{ origin: ORIGIN, type: JSON_TYPE, body: `[${named}]` }, 400, 'bad_request'],
+    ] as Array<[Sent, number, string]>) {
+      const mark = h.logs.length;
+      assert.deepEqual(await h.send('POST', path, sent), error(status, code), `${path} ${code}`);
+      assert.deepEqual(h.logs.slice(mark), [line(code)], `${path} ${code}`);
+    }
+  }
+  // The same refusals of a route behind a session are no sign-in, and log nothing.
+  const a = await passwordSignIn(h, 'octo-admin');
+  const mark = h.logs.length;
+  assert.deepEqual(await h.send('POST', '/api/me/password', { cookie: a.cookie, csrf: tokenOf(a.id), type: 'text/plain', body: '{}' }), error(415, 'not_json'));
+  assert.deepEqual(await h.send('POST', '/api/accounts/new', { cookie: a.cookie, csrf: tokenOf(a.id), type: JSON_TYPE, body: '[]' }), error(400, 'bad_request'));
+  assert.deepEqual(h.logs.slice(mark), []);
+  assert.ok(!JSON.stringify(h.logs).includes('octo'));
+  await h.db.close();
+});
+
+test("the work's own refusals reach each account route with their status and code", async () => {
+  const given: { refusal: Refusal } = { refusal: 'full' };
+  const h = await harness(true, (real) => ({
+    ...real, make: async () => given.refusal, setRole: async () => given.refusal, reset: async () => given.refusal, remove: async () => given.refusal,
+  }));
+  await account(h, 'octo-admin', 'admin');
+  const target = await account(h, 'octo-viewer', 'viewer');
+  const a = await passwordSignIn(h, 'octo-admin');
+  const routes: Array<[string, unknown]> = [
+    ['/api/accounts/new', { name: 'octo-new', role: 'viewer' }], ['/api/accounts/role', { id: target.id, role: 'admin' }],
+    ['/api/accounts/reset', { id: target.id }], ['/api/accounts/remove', { id: target.id }],
+  ];
+  for (const [refusal, status] of [['full', 409], ['signed_out', 401], ['forbidden', 403]] as const) {
+    given.refusal = refusal;
+    for (const [path, body] of routes) {
+      assert.deepEqual(await h.send('POST', path, { cookie: a.cookie, csrf: tokenOf(a.id), type: JSON_TYPE, body: JSON.stringify(body) }),
+        error(status, refusal), `${refusal} ${path}`);
+    }
+  }
+  await h.db.close();
+});
+
+test("a change made through a route is recorded as made by the session's account, of either kind", async () => {
+  const h = await harness();
+  await account(h, 'octo-admin', 'admin');
+  const viewer = await account(h, 'octo-viewer', 'viewer');
+  const other = await account(h, 'octo-new', 'viewer');
+  const post = (cookie: string, id: string, path: string, body: unknown): Promise<UiAnswer> =>
+    h.send('POST', path, { cookie, csrf: tokenOf(id), type: JSON_TYPE, body: JSON.stringify(body) });
+  const a = await passwordSignIn(h, 'octo-admin');
+  assert.equal((await post(a.cookie, a.id, '/api/accounts/role', { id: viewer.id, role: 'admin' })).status, 200);
+  assert.deepEqual(await post(a.cookie, a.id, '/api/accounts/remove', { id: other.id }), NO_CONTENT);
+  // octo-lead's row is made at its first sign-in, then made an admin by a statement.
+  const { cookie } = await h.signIn();
+  const g = SESSION_ID_OF.exec(cookie)?.[1] ?? '';
+  await h.db.query("update visto_ai.ui_accounts set role = 'admin' where kind = 'github' and name = 'octo-lead'");
+  assert.equal((await post(cookie, g, '/api/accounts/role', { id: viewer.id, role: 'viewer' })).status, 200);
+  assert.deepEqual(await h.db.query('select by_kind, by_name, change, account_kind, account_name, role from visto_ai.ui_account_changes order by id'), [
+    { by_kind: 'password', by_name: 'octo-admin', change: 'role', account_kind: 'password', account_name: 'octo-viewer', role: 'admin' },
+    { by_kind: 'password', by_name: 'octo-admin', change: 'removed', account_kind: 'password', account_name: 'octo-new', role: null },
+    { by_kind: 'sign_in', by_name: null, change: 'made', account_kind: 'github', account_name: 'octo-lead', role: 'viewer' },
+    { by_kind: 'github', by_name: 'octo-lead', change: 'role', account_kind: 'password', account_name: 'octo-viewer', role: 'viewer' },
+  ]);
+  await h.db.close();
+});
+
+test('a role changed takes effect at the next request of the session it was changed for', async () => {
+  const h = await harness();
+  await account(h, 'octo-admin', 'admin');
+  const viewer = await account(h, 'octo-viewer', 'viewer');
+  const a = await passwordSignIn(h, 'octo-admin');
+  const v = await passwordSignIn(h, 'octo-viewer');
+  const change = (path: string, body: Record<string, unknown>): Promise<UiAnswer> =>
+    h.send('POST', path, { cookie: a.cookie, csrf: tokenOf(a.id), type: JSON_TYPE, body: JSON.stringify(body) });
+  const roleOf = async (): Promise<unknown> => (JSON.parse(String((await h.send('GET', '/api/me', { cookie: v.cookie })).body)) as Record<string, unknown>).role;
+
+  assert.deepEqual(await h.send('GET', '/api/accounts', { cookie: v.cookie }), error(403, 'forbidden'));
+  const made = await change('/api/accounts/role', { id: viewer.id, role: 'admin' });
+  assert.deepEqual({ ...made, body: JSON.parse(String(made.body)) }, {
+    status: 200, headers: JSON_HEADERS,
+    body: { account: {
+      id: viewer.id, kind: 'password', name: 'octo-viewer', role: 'admin', password: 'set', waitsUntil: null, madeAt: at(-3600),
+      madeBy: { kind: 'command', name: null }, lastSignInAt: at(0), you: false,
+    } },
+  });
+  assert.equal(await roleOf(), 'admin');
+  assert.equal((await h.send('GET', '/api/accounts', { cookie: v.cookie })).status, 200);
+
+  assert.equal((await change('/api/accounts/role', { id: viewer.id, role: 'viewer' })).status, 200);
+  assert.deepEqual(await h.send('GET', '/api/accounts', { cookie: v.cookie }), error(403, 'forbidden'));
+  assert.equal(await roleOf(), 'viewer');
+
+  assert.deepEqual(await change('/api/accounts/remove', { id: viewer.id }), NO_CONTENT);
+  assert.deepEqual(await h.send('GET', '/api/accounts', { cookie: v.cookie }), error(401, 'signed_out'));
+  assert.deepEqual(await h.send('GET', '/api/me', { cookie: v.cookie }), error(401, 'signed_out'));
+  assert.equal((await h.send('GET', '/api/accounts', { cookie: a.cookie })).status, 200);
+  await h.db.close();
+});
+
+test('with GitHub sign-in off the ways say so, and the start and the way back are not found', async () => {
+  const off = await harness(false);
+  await account(off, 'octo-admin', 'admin');
+  off.statements.length = 0;
+  assert.deepEqual(await off.send('GET', '/api/auth/ways'), { status: 200, headers: JSON_HEADERS, body: JSON.stringify({ github: false }) });
+  assert.deepEqual(await off.send('GET', '/api/auth/start'), error(404, 'not_found'));
+  assert.deepEqual(await off.send('GET', '/api/auth/callback', { query: 'code=code-1&state=x' }), error(404, 'not_found'));
+  assert.deepEqual(await off.send('POST', '/api/auth/ways'), error(405, 'method_not_allowed', { allow: 'GET' }));
+  assert.deepEqual(off.statements, []);
+  assert.deepEqual(off.logs, []);
+  // Password sign-in is there all the same.
+  assert.equal((await passwordSignIn(off, 'octo-admin')).answer.status, 200);
+  await off.db.close();
+
+  const on = await harness();
+  assert.deepEqual(await on.send('GET', '/api/auth/ways'), { status: 200, headers: JSON_HEADERS, body: JSON.stringify({ github: true }) });
+  assert.equal((await on.send('GET', '/api/auth/start')).status, 302);
+  await on.db.close();
+});
+
+test('each account route answers each refusal with its status and code', async () => {
+  const h = await harness();
+  const admin = await account(h, 'octo-admin', 'admin');
+  const lead = await githubRow(h, 'octo-lead');
+  const a = await passwordSignIn(h, 'octo-admin');
+  const csrf = tokenOf(a.id);
+  const post = (path: string, body: unknown, cookie = a.cookie, token = csrf): Promise<UiAnswer> =>
+    h.send('POST', path, { cookie, csrf: token, type: JSON_TYPE, body: JSON.stringify(body) });
+
+  assert.deepEqual(await post('/api/accounts/new', { name: 'Octo', role: 'viewer' }), error(400, 'bad_name'));
+  const made = await post('/api/accounts/new', { name: 'octo-new', role: 'viewer' });
+  const madeBody = JSON.parse(String(made.body)) as { account: { id: number }; oneTimePassword: string; expiresAt: string };
+  assert.match(madeBody.oneTimePassword, ONE_TIME_SHAPE);
+  assert.deepEqual({ ...made, body: madeBody }, {
+    status: 201, headers: JSON_HEADERS,
+    body: {
+      account: {
+        id: madeBody.account.id, kind: 'password', name: 'octo-new', role: 'viewer', password: 'one_time', waitsUntil: null, madeAt: at(0),
+        madeBy: { kind: 'password', name: 'octo-admin' }, lastSignInAt: null, you: false,
+      },
+      oneTimePassword: madeBody.oneTimePassword, expiresAt: at(72 * 3600),
+    },
+  });
+  const made2 = madeBody.account.id;
+  assert.deepEqual(await post('/api/accounts/new', { name: 'octo-new', role: 'admin' }), error(409, 'name_taken'));
+  assert.deepEqual(await post('/api/accounts/role', { id: 9999, role: 'admin' }), error(404, 'not_found'));
+  assert.deepEqual(await post('/api/accounts/role', { id: 2147483647, role: 'admin' }), error(404, 'not_found'));
+
+  // Bodies that are not of the route's shape.
+  for (const [path, body] of [
+    ['/api/accounts/role', { id: 'x', role: 'admin' }], ['/api/accounts/role', { id: 0, role: 'admin' }], ['/api/accounts/role', { id: -1, role: 'admin' }],
+    ['/api/accounts/role', { id: 2147483648, role: 'admin' }], ['/api/accounts/role', { id: 1.5, role: 'admin' }], ['/api/accounts/role', { id: made2, role: 'owner' }],
+    ['/api/accounts/role', { id: made2 }], ['/api/accounts/role', { id: made2, role: 'admin', name: 'octo-new' }], ['/api/accounts/role', { id: made2, role: null }],
+    ['/api/accounts/new', { name: 'x'.repeat(201), role: 'viewer' }], ['/api/accounts/new', { name: 7, role: 'viewer' }], ['/api/accounts/new', { name: 'octo-dev' }],
+    ['/api/accounts/new', { name: 'octo-dev', role: 'viewer', id: 3 }], ['/api/accounts/new', { name: 'octo-dev', role: 'Admin' }], ['/api/accounts/new', {}],
+    ['/api/accounts/reset', { id: String(made2) }], ['/api/accounts/reset', {}], ['/api/accounts/reset', { id: made2, role: 'viewer' }],
+    ['/api/accounts/remove', { id: [made2] }], ['/api/accounts/remove', { id: made2, name: 'octo-new' }], ['/api/accounts/remove', { id: true }],
+  ] as Array<[string, unknown]>) {
+    assert.deepEqual(await post(path, body), error(400, 'bad_request'), `${path} ${JSON.stringify(body)}`);
+  }
+  // A name of 200 characters is of the shape, and refused by the rule of a name.
+  assert.deepEqual(await post('/api/accounts/new', { name: 'x'.repeat(200), role: 'viewer' }), error(400, 'bad_name'));
+  assert.deepEqual(await post('/api/accounts/new', { name: 'octo-dev', role: 'viewer' }, a.cookie, 'wrong'), error(403, 'csrf'));
+  assert.deepEqual(await h.send('POST', '/api/accounts/new', { cookie: a.cookie, csrf, type: 'text/plain', body: '{"name":"octo-dev","role":"viewer"}' }), error(415, 'not_json'));
+
+  assert.deepEqual(await post('/api/accounts/role', { id: admin.id, role: 'viewer' }), error(409, 'last_admin'));
+  assert.deepEqual(await post('/api/accounts/remove', { id: admin.id }), error(409, 'last_admin'));
+  assert.deepEqual(await post('/api/accounts/reset', { id: lead.id }), error(409, 'github_account'));
+  assert.deepEqual(await post('/api/accounts/reset', { id: admin.id }), error(409, 'own_account'));
+  assert.deepEqual(await post('/api/accounts/reset', { id: 9999 }), error(404, 'not_found'));
+  const reset = await post('/api/accounts/reset', { id: made2 });
+  const resetBody = JSON.parse(String(reset.body)) as { account: Record<string, unknown>; oneTimePassword: string; expiresAt: string };
+  assert.deepEqual([reset.status, reset.headers, resetBody.account.id, resetBody.account.password, resetBody.expiresAt], [200, JSON_HEADERS, made2, 'one_time', at(72 * 3600)]);
+  assert.match(resetBody.oneTimePassword, ONE_TIME_SHAPE);
+  assert.notEqual(resetBody.oneTimePassword, madeBody.oneTimePassword);
+  assert.deepEqual(await post('/api/accounts/remove', { id: made2 }), NO_CONTENT);
+  assert.deepEqual(await post('/api/accounts/remove', { id: made2 }), error(404, 'not_found'));
+
+  // Changing one's own password: a GitHub session has none to change; a password session changes its own.
+  const { cookie } = await h.signIn();
+  const github = SESSION_ID_OF.exec(cookie)?.[1] ?? '';
+  assert.notEqual(github, '');
+  assert.deepEqual(await post('/api/me/password', { current: PASSWORD, password: OTHER }, cookie, tokenOf(github)), error(409, 'github_account'));
+  assert.deepEqual(await post('/api/me/password', { current: PASSWORD, password: OTHER }, a.cookie, 'wrong'), error(403, 'csrf'));
+  assert.deepEqual(await h.send('POST', '/api/me/password', { cookie: a.cookie, csrf, type: 'text/plain', body: '{}' }), error(415, 'not_json'));
+  assert.deepEqual(await h.send('POST', '/api/me/password', { cookie: a.cookie, csrf, type: JSON_TYPE, body: '[]' }), error(400, 'bad_request'));
+  assert.deepEqual(await post('/api/me/password', { current: OTHER, password: OTHER }), error(400, 'wrong_password'));
+  assert.deepEqual(await post('/api/me/password', { current: PASSWORD, password: OTHER }), NO_CONTENT);
+  assert.deepEqual(await h.send('POST', '/api/me/password', { csrf, type: JSON_TYPE, body: '{}' }), error(401, 'signed_out'));
+  assert.equal((await passwordSignIn(h, 'octo-admin', OTHER)).answer.status, 200);
+  await h.db.close();
+});
+
+test('a handler of the new routes that fails is internal_error, logged with its route name only', async () => {
+  const h = await harness();
+  await account(h, 'octo-admin', 'admin');
+  const target = await account(h, 'octo-viewer', 'viewer');
+  const a = await passwordSignIn(h, 'octo-admin');
+  const sent = (body: unknown): Sent => ({ cookie: a.cookie, csrf: tokenOf(a.id), type: JSON_TYPE, body: JSON.stringify(body) });
+  const before = h.logs.length;
+  for (const [method, path, body, text] of [
+    ['POST', '/api/me/password', { current: PASSWORD, password: OTHER }, 'from visto_ai.ui_accounts where id = $1'],
+    ['GET', '/api/accounts', null, 'order by lower(name), kind, id'],
+    ['POST', '/api/accounts/new', { name: 'octo-new', role: 'viewer' }, 'insert into visto_ai.ui_accounts'],
+    ['POST', '/api/accounts/role', { id: target.id, role: 'admin' }, 'update visto_ai.ui_accounts set role'],
+    ['POST', '/api/accounts/reset', { id: target.id }, 'one_time_until = $3::timestamptz'],
+    ['POST', '/api/accounts/remove', { id: target.id }, 'delete from visto_ai.ui_accounts'],
+  ] as Array<[string, string, unknown, string]>) {
+    h.failing.text = text;
+    assert.deepEqual(await h.send(method, path, body === null ? { cookie: a.cookie } : sent(body)), error(500, 'internal_error'), path);
+  }
+  // A failure whose text is no short code is logged as internal_error, and its text is nowhere.
+  h.failing.error = new Error('connect failed for postgres://u:p@db.example.test/d');
+  h.failing.text = 'order by lower(name), kind, id';
+  assert.deepEqual(await h.send('GET', '/api/accounts', { cookie: a.cookie }), error(500, 'internal_error'));
+  assert.deepEqual(h.logs.slice(before), [
+    { event: 'ui_failed', route: 'own_password', reason: 'db_down' },
+    { event: 'ui_failed', route: 'accounts', reason: 'db_down' },
+    { event: 'ui_failed', route: 'account_new', reason: 'db_down' },
+    { event: 'ui_failed', route: 'account_role', reason: 'db_down' },
+    { event: 'ui_failed', route: 'account_reset', reason: 'db_down' },
+    { event: 'ui_failed', route: 'account_remove', reason: 'db_down' },
+    { event: 'ui_failed', route: 'accounts', reason: 'internal_error' },
+  ]);
+
+  // The sign-in and the first password answer and log their own failures.
+  h.failing.error = new Error('db_down');
+  h.failing.text = "from visto_ai.ui_accounts where kind = 'password' and name = $1";
+  const mark = h.logs.length;
+  assert.deepEqual(await h.send('POST', '/api/auth/password', { origin: ORIGIN, type: JSON_TYPE, body: JSON.stringify({ name: 'octo-admin', password: PASSWORD }) }),
+    error(500, 'internal_error'));
+  assert.deepEqual(await h.send('POST', '/api/auth/first-password', {
+    origin: ORIGIN, type: JSON_TYPE, body: JSON.stringify({ name: 'octo-admin', oneTimePassword: ONE_TIME, password: OTHER }),
+  }), error(500, 'internal_error'));
+  assert.deepEqual(h.logs.slice(mark), [
+    { event: 'ui_signin', way: 'password', outcome: 'failed', reason: 'db_down' },
+    { event: 'ui_signin', way: 'password', outcome: 'failed', reason: 'db_down' },
+  ]);
+  assert.ok(!JSON.stringify(h.logs).includes('postgres'));
+  assert.ok(!JSON.stringify(h.logs).includes('octo-'));
+
+  // Nothing was changed by the failures, and the session still reads.
+  h.failing.text = null;
+  assert.deepEqual(await h.db.query('select name, role, one_time_until from visto_ai.ui_accounts order by name'), [
+    { name: 'octo-admin', role: 'admin', one_time_until: null }, { name: 'octo-viewer', role: 'viewer', one_time_until: null },
+  ]);
+  assert.equal((await h.send('GET', '/api/accounts', { cookie: a.cookie })).status, 200);
   await h.db.close();
 });

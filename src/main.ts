@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { createServer as createHttpServer } from 'node:http';
 import type { Server } from 'node:http';
 import { dirname, join, resolve } from 'node:path';
-import { ConfigError, contractFile, loadConfig, serviceConfig } from './config/load.ts';
+import { ConfigError, contractFile, githubSignInOn, loadConfig, serviceConfig } from './config/load.ts';
 import type { DeploymentConfig, McpServerConfig } from './config/load.ts';
 import { postgresDb, takeInstanceLock } from './db/postgres.ts';
 import type { InstanceLock } from './db/types.ts';
@@ -247,11 +247,11 @@ export async function main(argv: string[], env: Record<string, string | undefine
       const writer = createGithubWriter({ auth, info, fetch: github });
       const checks = createGithubChecks({ auth, appId: config.app.id, fetch: github });
       const approvals = createGithubApprovals({ auth, fetch: github });
-      // With the UI named in the file: sign-in through the app, which alone is given the client secret, and the built files,
-      // read once here (call 17).
+      // With the UI named in the file: the built files, read once here (call 17), and, with GitHub sign-in on, sign-in through
+      // the app, which alone is given the client secret; with it off, password sign-in alone.
       const uiConfig = config.ui;
       const ui = uiConfig === undefined ? undefined : {
-        signIn: createGithubSignIn({ clientId: uiConfig.clientId, clientSecret: uiConfig.clientSecret, auth, fetch: github }),
+        signIn: githubSignInOn(uiConfig) ? createGithubSignIn({ clientId: uiConfig.clientId, clientSecret: uiConfig.clientSecret, auth, fetch: github }) : null,
         files: loadUiFiles(join(import.meta.dirname, '..', 'ui', 'dist')),
       };
       // The database object is made before the modules, so the function a module reports feedback through exists when

@@ -1,5 +1,5 @@
-// How the screens write logins, ages, durations, time left, money and counts (Task 10, rule 1; call 22: every age and time
-// left is counted from the `now` an answer carries, never from the browser's clock).
+// How the screens write logins, ages, durations, time left, times in UTC, money and counts (Task 10, rule 1; call 22: every age
+// and time left is counted from the `now` an answer carries, never from the browser's clock).
 
 /** Whole seconds from `from` to `to`; a time that cannot be read counts as none. */
 function secondsBetween(from: string, to: string): number {
@@ -39,6 +39,16 @@ export function took(ms: number): string {
 export function left(runAt: string, now: string): string {
   const seconds = Math.max(0, Math.ceil(secondsBetween(now, runAt)));
   return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
+}
+
+/** `YYYY-MM-DD HH:MM UTC`, the seconds dropped; a time that cannot be read is ''. */
+export function utc(at: string): string {
+  const ms = Date.parse(at);
+  if (!Number.isFinite(ms)) return '';
+  const time = new Date(ms);
+  const two = (n: number): string => String(n).padStart(2, '0');
+  const day = `${String(time.getUTCFullYear()).padStart(4, '0')}-${two(time.getUTCMonth() + 1)}-${two(time.getUTCDate())}`;
+  return `${day} ${two(time.getUTCHours())}:${two(time.getUTCMinutes())} UTC`;
 }
 
 export function money(cost: number): string {

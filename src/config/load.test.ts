@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
 import { generateKeyPairSync } from 'node:crypto';
 import {
-  APPROVAL_OFF, ConfigError, GATE_OFF, approvalOf, approvalUseOf, contractFile, gateUseOf, parseConfig, repoConfigFor, repoSettingsFor, serviceConfig,
+  APPROVAL_OFF, ConfigError, GATE_OFF, approvalOf, approvalUseOf, contractFile, gateUseOf, githubSignInOn, parseConfig, repoConfigFor, repoSettingsFor, serviceConfig,
 } from './load.ts';
 import type { DeploymentConfig, RepoSettings } from './load.ts';
 
@@ -1044,7 +1044,7 @@ const refusalOf = (yaml: string, env: Record<string, string | undefined>): Confi
 };
 const uiIssuesOf = (yaml: string, env: Record<string, string | undefined>): string[] => refusalOf(yaml, env)?.issues ?? [];
 
-test('the UI is off unless ui names accounts or a team, and a config that writes no ui gives the config it gave', () => {
+test('the UI is off unless ui writes an address or names accounts or a team, and a config that writes no ui gives the config it gave', () => {
   const cases: Array<[DeploymentConfig, DeploymentConfig['app']]> = [
     [parseConfig(minimal, KEY), null], [parseConfig(SERVICE_YAML, ENV), APP_THREE], [parseConfig(example(), exampleEnv), null],
   ];
@@ -1052,12 +1052,38 @@ test('the UI is off unless ui names accounts or a team, and a config that writes
     assert.equal('ui' in c, false);
     assert.deepEqual(c.app, app);
   }
-  for (const yaml of [`${SERVICE_YAML}ui: { accounts: [] }\n`, `${SERVICE_YAML}ui: { publicUrl: https://visto.example.test }\n`, `${SERVICE_YAML}ui: {}\n`]) {
+  for (const yaml of [`${SERVICE_YAML}ui: { accounts: [] }\n`, `${SERVICE_YAML}ui: {}\n`]) {
     assert.deepEqual(uiIssuesOf(yaml, ENV), [], yaml);
     const c = parseConfig(yaml, ENV);
     assert.equal('ui' in c, false, yaml);
     assert.deepEqual(c.app, APP_THREE, yaml);
   }
+});
+
+test('ui with only an address is on with password sign-in alone, and needs no client id or secret', () => {
+  const block = "ui: { publicUrl: 'https://visto.example.test/' }\n";
+  const alone = { accounts: [], team: null, publicUrl: 'https://visto.example.test', clientId: null, clientSecret: null };
+  const c = parseConfig(`${SERVICE_YAML}${block}`, ENV);
+  assert.deepEqual(c.ui, alone);
+  assert.equal(githubSignInOn(c.ui!), false);
+  assert.deepEqual(c.app, APP_THREE);
+  assert.deepEqual(parseConfig(`${minimal}${block}`, KEY).ui, alone);
+  assert.deepEqual(parseConfig(`${UI_APP}${block}`, UI_ENV).ui, alone);
+});
+
+test('with accounts or a team, GitHub sign-in is on and carries the client id and secret', () => {
+  const on = parseConfig(`${UI_APP}ui: { accounts: [octo-lead], publicUrl: 'https://visto.example.test' }\n`, UI_ENV);
+  assert.equal(githubSignInOn(on.ui!), true);
+  assert.equal(on.ui!.clientId, 'Iv1.0123456789abcdef');
+  assert.equal(githubSignInOn(parseConfig(`${UI_APP}ui: { team: acme/reviewers, publicUrl: 'https://visto.example.test' }\n`, UI_ENV).ui!), true);
+  assert.equal(githubSignInOn(parseConfig(`${UI_APP}ui: { accounts: [], publicUrl: 'https://visto.example.test' }\n`, UI_ENV).ui!), false);
+});
+
+test('an address written alone that is not one is refused by name, and quotes nothing', () => {
+  assert.deepEqual(
+    uiIssuesOf(`${SERVICE_YAML}ui: { publicUrl: 'http://visto.example.test' }\n`, ENV),
+    ['ui.publicUrl: must be an https URL with no path, query or user, or http://localhost or http://127.0.0.1'],
+  );
 });
 
 test('ui with accounts or a team is read with the client id, the client secret from its variable and the public address as an origin', () => {

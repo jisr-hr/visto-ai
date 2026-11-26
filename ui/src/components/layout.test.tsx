@@ -1,4 +1,4 @@
-import { act, render, screen, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { userEvent } from '@testing-library/user-event';
 import { afterEach, expect, test, vi } from 'vitest';
 import { RequestFailed } from '../api.ts';
@@ -7,7 +7,7 @@ import type { Activity, ActivityJob, JobStage, Me, Reviews } from '../api-types.
 import { App } from '../app.tsx';
 
 const NOW = '2026-03-01T10:00:00.000Z';
-const ME: Me = { login: 'octo-lead', csrf: 'csrf-token-for-tests', mode: 'live', repositories: ['acme/billing', 'acme/infra', 'acme/shop', 'acme/web'] };
+const ME: Me = { name: 'octo-lead', kind: 'github', role: 'admin', csrf: 'csrf-token-for-tests', mode: 'live', repositories: ['acme/billing', 'acme/infra', 'acme/shop', 'acme/web'] };
 const ACTIVITY: Activity = { now: NOW, places: { reviews: 2, withdrawals: 2 }, paused: null, jobs: [], withdrawals: [] };
 const REVIEWS: Reviews = { now: NOW, windowDays: 30, total: 0, reviews: [], next: null };
 
@@ -30,6 +30,42 @@ function fakeApi(over: Partial<Api> = {}) {
     signOut: (csrf) => {
       calls.push(['signOut', csrf]);
       return over.signOut ? over.signOut(csrf) : Promise.resolve();
+    },
+    ways: () => {
+      calls.push(['ways']);
+      return over.ways ? over.ways() : Promise.resolve({ github: true });
+    },
+    accounts: () => {
+      calls.push(['accounts']);
+      return over.accounts ? over.accounts() : Promise.resolve({ now: NOW, accounts: [] });
+    },
+    passwordSignIn: (name, password) => {
+      calls.push(['passwordSignIn', name, password]);
+      return over.passwordSignIn ? over.passwordSignIn(name, password) : Promise.reject(new RequestFailed(500, 'not_expected'));
+    },
+    firstPassword: (name, oneTimePassword, password) => {
+      calls.push(['firstPassword', name, oneTimePassword, password]);
+      return over.firstPassword ? over.firstPassword(name, oneTimePassword, password) : Promise.reject(new RequestFailed(500, 'not_expected'));
+    },
+    changePassword: (csrf, current, password) => {
+      calls.push(['changePassword', csrf, current, password]);
+      return over.changePassword ? over.changePassword(csrf, current, password) : Promise.reject(new RequestFailed(500, 'not_expected'));
+    },
+    makeAccount: (csrf, name, role) => {
+      calls.push(['makeAccount', csrf, name, role]);
+      return over.makeAccount ? over.makeAccount(csrf, name, role) : Promise.reject(new RequestFailed(500, 'not_expected'));
+    },
+    setRole: (csrf, id, role) => {
+      calls.push(['setRole', csrf, id, role]);
+      return over.setRole ? over.setRole(csrf, id, role) : Promise.reject(new RequestFailed(500, 'not_expected'));
+    },
+    resetPassword: (csrf, id) => {
+      calls.push(['resetPassword', csrf, id]);
+      return over.resetPassword ? over.resetPassword(csrf, id) : Promise.reject(new RequestFailed(500, 'not_expected'));
+    },
+    removeAccount: (csrf, id) => {
+      calls.push(['removeAccount', csrf, id]);
+      return over.removeAccount ? over.removeAccount(csrf, id) : Promise.reject(new RequestFailed(500, 'not_expected'));
     },
   };
   return { api, calls };
@@ -249,4 +285,234 @@ test('the activity is read every five seconds, and not while the page is hidden'
   await act(() => vi.advanceTimersByTimeAsync(1));
   expect(reads()).toBe(5);
   expect(calls.filter(([name]) => name === 'me')).toHaveLength(1);
+});
+
+// Who is signed in, by kind and role (the password design 4.7).
+const GITHUB_VIEWER: Me = { ...ME, name: 'octo-dev', role: 'viewer' };
+const PASSWORD_ADMIN: Me = { ...ME, name: 'octo-admin', kind: 'password' };
+const PASSWORD_VIEWER: Me = { ...ME, name: 'octo-viewer', kind: 'password', role: 'viewer' };
+const FOUR = [['Overview', '/ui/'], ['Activity', '/ui/activity'], ['Repositories', '/ui/repositories'], ['Memory', '/ui/memory']];
+const FIVE = [...FOUR, ['Settings', '/ui/settings']];
+
+/** The sidebar's entries, each its text and address. */
+const entries = (): (string | null)[][] =>
+  within(screen.getByRole('navigation', { name: 'Main' })).getAllByRole('link').map((link) => [link.textContent, link.getAttribute('href')]);
+
+/** A promise and the ways to settle it. */
+function later<T>() {
+  let resolve: (value: T) => void = () => {};
+  let reject: (error: unknown) => void = () => {};
+  const promise = new Promise<T>((yes, no) => {
+    resolve = yes;
+    reject = no;
+  });
+  return { promise, resolve, reject };
+}
+
+test('a viewer has no Settings entry, and an admin has it', async () => {
+  // An admin's role only: a viewer, and a role this frontend does not know, have none.
+  const people: [Me, string[][]][] = [
+    [GITHUB_VIEWER, FOUR], [PASSWORD_VIEWER, FOUR], [{ ...ME, role: 'Admin' as unknown as Me['role'] }, FOUR], [ME, FIVE], [PASSWORD_ADMIN, FIVE],
+  ];
+  for (const [me, shown] of people) {
+    at('/ui/activity');
+    const { unmount } = render(<App api={fakeApi({ me: () => Promise.resolve(me) }).api} />);
+    expect(await screen.findByRole('heading', { level: 1, name: 'Activity' })).toBeInTheDocument();
+    expect(entries()).toEqual(shown);
+    for (const link of within(screen.getByRole('navigation', { name: 'Main' })).getAllByRole('link')) {
+      expect(classes(link)).toEqual(words(link.getAttribute('href') === '/ui/activity' ? entryOn : entry));
+    }
+    unmount();
+  }
+});
+
+test('a password account is said so and links Change password; a GitHub account does not', async () => {
+  at('/ui/activity');
+  const user = userEvent.setup();
+  const first = render(<App api={fakeApi({ me: () => Promise.resolve(PASSWORD_VIEWER) }).api} />);
+  const line = await screen.findByText('Signed in with a password');
+  expect(line.tagName).toBe('SPAN');
+  expect(classes(line)).toEqual(words('text-xs text-muted'));
+  expect(screen.queryByText('Signed in with GitHub')).toBeNull();
+  expect(classes(screen.getByText('octo-viewer'))).toEqual(words('text-[13px] font-medium'));
+  // Under the line, in the name's column, outside the entries.
+  const link = screen.getByRole('link', { name: 'Change password' });
+  expect(link.tagName).toBe('A');
+  expect(link).toHaveAttribute('href', '/ui/password');
+  expect(classes(link)).toEqual(words('text-xs'));
+  expect(link.parentElement).toBe(line.parentElement);
+  expect([...(line.parentElement?.children ?? [])]).toEqual([screen.getByText('octo-viewer'), line, link]);
+  expect(classes(line.parentElement)).toEqual(words('flex min-w-0 flex-col'));
+  expect(screen.getByRole('navigation', { name: 'Main' }).contains(link)).toBe(false);
+
+  // It leads to the page in the page, and no entry is the current one there.
+  await user.click(link);
+  expect(window.location.pathname).toBe('/ui/password');
+  expect(screen.getByRole('heading', { level: 1, name: 'Change password' })).toBeInTheDocument();
+  expect(within(screen.getByRole('navigation', { name: 'Main' })).queryAllByRole('link', { current: 'page' })).toEqual([]);
+  first.unmount();
+
+  for (const me of [ME, GITHUB_VIEWER]) {
+    at('/ui/activity');
+    const { unmount } = render(<App api={fakeApi({ me: () => Promise.resolve(me) }).api} />);
+    const github = await screen.findByText('Signed in with GitHub');
+    expect(classes(github)).toEqual(words('text-xs text-muted'));
+    expect([...(github.parentElement?.children ?? [])]).toEqual([screen.getByText(me.name), github]);
+    expect(screen.queryByText('Signed in with a password')).toBeNull();
+    expect(screen.queryByRole('link', { name: 'Change password' })).toBeNull();
+    unmount();
+  }
+});
+
+test('a viewer at /ui/settings and a GitHub account at /ui/password see Not found', async () => {
+  const pages: [string, Me, string][] = [
+    ['/ui/settings', GITHUB_VIEWER, 'Not found'],
+    ['/ui/settings', PASSWORD_VIEWER, 'Not found'],
+    ['/ui/password', ME, 'Not found'],
+    ['/ui/password', GITHUB_VIEWER, 'Not found'],
+    // And who may see them, does.
+    ['/ui/settings', ME, 'Settings'],
+    ['/ui/settings', PASSWORD_ADMIN, 'Settings'],
+    ['/ui/password', PASSWORD_ADMIN, 'Change password'],
+    ['/ui/password', PASSWORD_VIEWER, 'Change password'],
+  ];
+  for (const [path, me, heading] of pages) {
+    at(path);
+    const { unmount } = render(<App api={fakeApi({ me: () => Promise.resolve(me) }).api} />);
+    expect(await screen.findByRole('heading', { level: 1, name: heading })).toBeInTheDocument();
+    expect(screen.getAllByRole('heading', { level: 1 })).toHaveLength(1);
+    if (heading === 'Not found') {
+      expect(screen.getByText('No page at this address.')).toBeInTheDocument();
+      expect(screen.queryByRole('form')).toBeNull();
+    }
+    if (heading === 'Settings') expect(screen.getByRole('region', { name: 'Accounts' })).toBeInTheDocument();
+    expect(window.location.pathname).toBe(path);
+    unmount();
+  }
+
+  // A role or a kind this frontend does not know reads as the least: neither page, no Settings entry, no Change password link.
+  const unknown: [string, Me, string[][]][] = [
+    ['/ui/settings', { ...ME, role: 'owner' as unknown as Me['role'] }, FOUR],
+    ['/ui/password', { ...PASSWORD_ADMIN, kind: 'saml' as unknown as Me['kind'] }, FIVE],
+  ];
+  for (const [path, me, shown] of unknown) {
+    at(path);
+    const { unmount } = render(<App api={fakeApi({ me: () => Promise.resolve(me) }).api} />);
+    expect(await screen.findByRole('heading', { level: 1, name: 'Not found' })).toBeInTheDocument();
+    expect(screen.getAllByRole('heading', { level: 1 })).toHaveLength(1);
+    expect(screen.getByText('No page at this address.')).toBeInTheDocument();
+    expect(screen.queryByRole('form')).toBeNull();
+    expect(entries()).toEqual(shown);
+    expect(screen.queryByRole('link', { name: 'Change password' })).toBeNull();
+    expect(screen.queryByText('Signed in with a password')).toBeNull();
+    expect(window.location.pathname).toBe(path);
+    unmount();
+  }
+});
+
+test('a 403 forbidden makes the app read who is signed in again, and Settings goes', async () => {
+  vi.useFakeTimers();
+  at('/ui/activity');
+  const again = later<Me>();
+  const people: (() => Promise<Me>)[] = [() => Promise.resolve(ME), () => again.promise];
+  // A refusal of another kind reads nothing again; a 403 forbidden does, once.
+  const reads: (() => Promise<Activity>)[] = [
+    () => Promise.reject(new RequestFailed(403, 'csrf')),
+    () => Promise.reject(new RequestFailed(500, 'internal_error')),
+    () => Promise.reject(new RequestFailed(404, 'forbidden')),
+    () => Promise.reject(new RequestFailed(403, 'forbidden')),
+  ];
+  const { api, calls } = fakeApi({ me: () => people.shift()!(), activity: () => (reads.shift() ?? (() => Promise.resolve(ACTIVITY)))() });
+  const mes = (): number => calls.filter(([name]) => name === 'me').length;
+  render(<App api={api} />);
+
+  await act(() => vi.advanceTimersByTimeAsync(0));
+  const title = screen.getByRole('heading', { level: 1, name: 'Activity' });
+  expect(entries()).toEqual(FIVE);
+  await act(() => vi.advanceTimersByTimeAsync(5000));
+  await act(() => vi.advanceTimersByTimeAsync(5000));
+  expect(mes()).toBe(1);
+  expect(entries()).toEqual(FIVE);
+
+  // The 403 forbidden: read again, the page kept on screen while it is read.
+  await act(() => vi.advanceTimersByTimeAsync(5000));
+  expect(mes()).toBe(2);
+  expect(title.isConnected).toBe(true);
+  expect(entries()).toEqual(FIVE);
+  expect(screen.queryByRole('heading', { name: 'Sign in' })).toBeNull();
+
+  await act(async () => again.resolve(GITHUB_VIEWER));
+  expect(entries()).toEqual(FOUR);
+  expect(screen.getByText('octo-dev')).toBeInTheDocument();
+  expect(screen.queryByText('octo-lead')).toBeNull();
+  // The same page, never left: the very heading it showed.
+  expect(title.isConnected).toBe(true);
+  expect(screen.getByRole('heading', { level: 1, name: 'Activity' })).toBe(title);
+  expect(window.location.pathname).toBe('/ui/activity');
+
+  // The next reads answer: nothing is read again.
+  await act(() => vi.advanceTimersByTimeAsync(5000));
+  expect(mes()).toBe(2);
+});
+
+test('a read again after a 403 forbidden that is answered 401 signs out, one that fails keeps who is signed in, and one answered after a sign-out signs nobody in', async () => {
+  vi.useFakeTimers();
+  at('/ui/activity');
+  const answers: (() => Promise<Me>)[] = [
+    () => Promise.resolve(ME),
+    () => Promise.reject(new RequestFailed(500, 'internal_error')),
+    () => Promise.reject(new RequestFailed(403, 'forbidden')),
+    () => Promise.reject(new RequestFailed(401, 'signed_out')),
+  ];
+  const { api, calls } = fakeApi({
+    me: () => answers.shift()!(),
+    activity: () => Promise.reject(new RequestFailed(403, 'forbidden')),
+  });
+  const mes = (): number => calls.filter(([name]) => name === 'me').length;
+  render(<App api={api} />);
+
+  // A read again that fails: the page and who is signed in stay.
+  await act(() => vi.advanceTimersByTimeAsync(0));
+  await act(async () => {});
+  expect(mes()).toBe(2);
+  expect(entries()).toEqual(FIVE);
+  expect(screen.getByRole('heading', { level: 1, name: 'Activity' })).toBeInTheDocument();
+
+  // One answered 403 forbidden is not read again in turn: it keeps who is signed in too.
+  await act(() => vi.advanceTimersByTimeAsync(5000));
+  await act(async () => {});
+  expect(mes()).toBe(3);
+  expect(entries()).toEqual(FIVE);
+
+  // One answered 401: the sign-in page.
+  await act(() => vi.advanceTimersByTimeAsync(5000));
+  await act(async () => {});
+  expect(mes()).toBe(4);
+  expect(screen.queryByRole('navigation', { name: 'Main' })).toBeNull();
+  expect(screen.getByRole('heading', { level: 1, name: 'Sign in' })).toBeInTheDocument();
+  cleanup();
+
+  // Signed out while it is read: its answer, when it comes, signs nobody in.
+  at('/ui/activity');
+  const again = later<Me>();
+  const people: (() => Promise<Me>)[] = [() => Promise.resolve(ME), () => again.promise];
+  let refusedOnce = false;
+  const second = fakeApi({
+    me: () => people.shift()!(),
+    activity: () => {
+      if (refusedOnce) return Promise.resolve(ACTIVITY);
+      refusedOnce = true;
+      return Promise.reject(new RequestFailed(403, 'forbidden'));
+    },
+  });
+  render(<App api={second.api} />);
+  await act(() => vi.advanceTimersByTimeAsync(0));
+  expect(second.calls.filter(([name]) => name === 'me')).toHaveLength(2);
+  fireEvent.click(screen.getByRole('button', { name: 'Sign out' }));
+  await act(async () => {});
+  expect(screen.getByRole('heading', { level: 1, name: 'Sign in' })).toBeInTheDocument();
+  await act(async () => again.resolve(ME));
+  expect(screen.queryByRole('navigation', { name: 'Main' })).toBeNull();
+  expect(screen.getByRole('heading', { level: 1, name: 'Sign in' })).toBeInTheDocument();
+  expect(window.location.pathname).toBe('/ui/signin');
 });

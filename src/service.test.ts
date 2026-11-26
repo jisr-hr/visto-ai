@@ -29,8 +29,11 @@ import { addRecords } from './db/memory-records.ts';
 import { recordComments } from './db/review-comments.ts';
 import type { HumanInlineComment } from './forge/types.ts';
 import type { ForgeSignIn } from './forge/types.ts';
+import { insertAccount } from './db/ui-accounts.ts';
 import type { Activity as UiActivity, Me } from './ui/api-types.ts';
 import type { UiFiles } from './ui/files.ts';
+import { hashPassword } from './ui/passwords.ts';
+import type { PasswordCost } from './ui/passwords.ts';
 
 const REF = { service: 'github', owner: 'acme', repo: 'shop', number: 7 } as const;
 const at = (seconds: number): string => new Date(Date.parse('2026-03-01T10:00:00.000Z') + seconds * 1000).toISOString();
@@ -2294,6 +2297,8 @@ test('in dry run the approvals the service was given are never reached: the with
 
 const UI_YAML = 'ui:\n  accounts: [octo-lead]\n  publicUrl: https://visto.example.test\n';
 const INDEX_PAGE = '<!doctype html><title>Visto AI</title>';
+/** The cost every hash of these tests is made at. */
+const PASSWORDS_FOR_TESTS: PasswordCost = { log2N: 4, r: 1, p: 1 };
 /** What the service is given for the UI: a sign-in GitHub is never asked through here, and a built page; `reads` holds each read of either. */
 function uiDeps(): { ui: NonNullable<ServiceDeps['ui']>; reads: unknown[] } {
   const reads: unknown[] = [];
@@ -2308,6 +2313,7 @@ function uiDeps(): { ui: NonNullable<ServiceDeps['ui']>; reads: unknown[] } {
     ui: {
       get signIn() { reads.push('signIn'); return signIn; },
       get files() { reads.push('files'); return files; },
+      passwordCost: PASSWORDS_FOR_TESTS,
     },
   };
 }
@@ -2380,7 +2386,7 @@ test('a member of the team signs in through the service, and reads its mode, its
   };
   const files: UiFiles = new Map([['/ui/index.html', { body: Buffer.from(INDEX_PAGE), type: 'text/html; charset=utf-8' }]]);
   // Three places for the reviews, two for the withdrawals: the two cannot be swapped unseen.
-  const h = await harness({ uiYaml: TEAM_YAML, ui: { signIn, files }, member: true, holdReview: true, queueConcurrency: 3 });
+  const h = await harness({ uiYaml: TEAM_YAML, ui: { signIn, files, passwordCost: PASSWORDS_FOR_TESTS }, member: true, holdReview: true, queueConcurrency: 3 });
   await (await h.start()).settled;
   // A review the runner holds; then the day's spend reaches the limit, which pauses the reviews to come.
   await h.webhook(pr('opened'), 'd1');
@@ -2397,7 +2403,7 @@ test('a member of the team signs in through the service, and reads its mode, its
 
     const me = await h.request('GET', '/api/me', Buffer.from(''), { cookie });
     const who = JSON.parse(me.body) as Me;
-    assert.deepEqual([me.status, who.login, who.mode], [200, 'octo-dev', 'dry_run']);
+    assert.deepEqual([me.status, who.name, who.mode], [200, 'octo-dev', 'dry_run']);
 
     const now = await h.request('GET', '/api/activity', Buffer.from(''), { cookie });
     const seen = JSON.parse(now.body) as UiActivity;
@@ -2416,4 +2422,116 @@ test('with the UI off the app check asks for no members permission, though the f
     await (await h.start()).settled;
     assert.deepEqual(h.uiTeamCalls, [team], given === undefined ? 'no ui given' : 'ui given');
   }
+});
+
+const ADDRESS_YAML = 'ui:\n  publicUrl: https://visto.example.test\n';
+const PASSWORD = 'a long password of mine';
+const OTHER_PASSWORD = 'another long password';
+const ONE_TIME = 'k7m2q9xh4wz8r3bt6pn5';
+/** What the service is given for the UI with no GitHub sign-in; `reads` holds each read of the sign-in. */
+function passwordOnly(): { ui: NonNullable<ServiceDeps['ui']>; reads: string[] } {
+  const reads: string[] = [];
+  const files: UiFiles = new Map([['/ui/index.html', { body: Buffer.from(INDEX_PAGE), type: 'text/html; charset=utf-8' }]]);
+  return { reads, ui: { get signIn() { reads.push('signIn'); return null; }, files, passwordCost: PASSWORDS_FOR_TESTS } };
+}
+/** A password account made by statements: its password chosen, or a one-time password for an hour. */
+async function passwordAccountOf(db: Db, name: string, role: 'admin' | 'viewer', oneTime: string | null = null): Promise<void> {
+  const made = await insertAccount(db, {
+    kind: 'password', name, role, passwordHash: await hashPassword(oneTime ?? PASSWORD, PASSWORDS_FOR_TESTS), oneTimeUntil: oneTime === null ? null : at(3600),
+    at: at(-60), by: 'command', byName: null, signedInAt: null,
+  });
+  assert.notEqual(made, null);
+}
+const FROM_THE_PAGE = { origin: 'https://visto.example.test', 'content-type': 'application/json' };
+
+test("with only the UI's address, the service serves password sign-in alone, and with the UI off nothing of the accounts is read", async () => {
+  const given = passwordOnly();
+  const h = await harness({ uiYaml: ADDRESS_YAML, ui: given.ui });
+  await (await h.start()).settled;
+  const ways = await h.request('GET', '/api/auth/ways');
+  assert.deepEqual([ways.status, ways.headers['content-type'], ways.body], [200, 'application/json; charset=utf-8', '{"github":false}']);
+  for (const path of ['/api/auth/start', '/api/auth/callback?code=code-1&state=x']) {
+    const off = await h.request('GET', path);
+    assert.deepEqual([off.status, off.body], [404, '{"error":"not_found"}'], path);
+  }
+  assert.deepEqual(given.reads, []);
+  assert.deepEqual(h.uiTeamCalls, [false]);
+
+  await passwordAccountOf(h.db, 'octo-admin', 'admin');
+  const signed = await h.request('POST', '/api/auth/password', Buffer.from(JSON.stringify({ name: 'octo-admin', password: PASSWORD })), FROM_THE_PAGE);
+  assert.deepEqual([signed.status, signed.body], [200, '{"next":"signed_in"}']);
+  const cookie = cookieOf(signed.headers['set-cookie']);
+  const me = await h.request('GET', '/api/me', Buffer.from(''), { cookie });
+  const who = JSON.parse(me.body) as Me;
+  assert.deepEqual([me.status, who.name, who.kind, who.role, who.mode], [200, 'octo-admin', 'password', 'admin', 'dry_run']);
+  const listed = await h.request('GET', '/api/accounts', Buffer.from(''), { cookie });
+  assert.equal(listed.status, 200);
+  assert.deepEqual(given.reads, []);
+
+  // With the UI off, whichever half is missing, nothing of the accounts is read.
+  for (const [label, options] of [['as it is', {}], ['ui in the file only', { uiYaml: ADDRESS_YAML }], ['ui given only', { ui: passwordOnly().ui }]] as const) {
+    const off = await harness(options);
+    await (await off.start()).settled;
+    for (const [method, path] of [['GET', '/api/auth/ways'], ['POST', '/api/auth/password'], ['POST', '/api/auth/first-password'], ['GET', '/api/accounts'], ['POST', '/api/me/password']] as const) {
+      const sent = Buffer.from(JSON.stringify({ name: 'octo-admin', password: PASSWORD }));
+      assert.deepEqual(await off.request(method, path, sent, FROM_THE_PAGE),
+        { status: 404, headers: { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' }, body: 'not_found' }, `${label} ${path}`);
+    }
+    assert.deepEqual(off.allQueries.filter(([text]) => text.includes('ui_accounts')), [], label);
+  }
+});
+
+test('a password sign-in through the service logs no name and no password', async () => {
+  const h = await harness({ uiYaml: ADDRESS_YAML, ui: passwordOnly().ui });
+  await (await h.start()).settled;
+  await passwordAccountOf(h.db, 'octo-admin', 'admin');
+  await passwordAccountOf(h.db, 'octo-new', 'viewer', ONE_TIME);
+  const post = (path: string, body: Record<string, string>) => h.request('POST', path, Buffer.from(JSON.stringify(body)), FROM_THE_PAGE);
+  const before = h.logged.length;
+  assert.equal((await post('/api/auth/password', { name: 'octo-admin', password: PASSWORD })).status, 200);
+  assert.deepEqual((await post('/api/auth/password', { name: 'octo-admin', password: OTHER_PASSWORD })).body, '{"error":"refused"}');
+  assert.deepEqual((await post('/api/auth/password', { name: 'octo-new', password: ONE_TIME })).body, '{"next":"choose_password"}');
+  const chosen = await post('/api/auth/first-password', { name: 'octo-new', oneTimePassword: ONE_TIME, password: OTHER_PASSWORD });
+  assert.deepEqual([chosen.status, chosen.body], [200, '{"next":"signed_in"}']);
+  assert.deepEqual((await post('/api/auth/password', { name: 'Octo-Nobody', password: PASSWORD })).body, '{"error":"refused"}');
+
+  const text = JSON.stringify(h.logged);
+  for (const secret of ['octo-', 'Octo-', PASSWORD, OTHER_PASSWORD, ONE_TIME, 'scrypt$']) assert.ok(!text.includes(secret), secret);
+  assert.deepEqual(h.logged.slice(before).filter((e) => e.event === 'ui_signin' || e.event === 'ui_account'), [
+    { event: 'ui_signin', way: 'password', outcome: 'ok', reason: null },
+    { event: 'ui_signin', way: 'password', outcome: 'refused', reason: null },
+    { event: 'ui_signin', way: 'password', outcome: 'choose', reason: null },
+    { event: 'ui_account', change: 'password_changed', role: 'viewer' },
+    { event: 'ui_signin', way: 'password', outcome: 'ok', reason: null },
+    { event: 'ui_signin', way: 'password', outcome: 'refused', reason: null },
+  ]);
+});
+
+test('with a team named and no sign-in through GitHub given, the app check asks for no members permission', async () => {
+  const given = passwordOnly();
+  const h = await harness({ uiYaml: TEAM_YAML, ui: given.ui });
+  await (await h.start()).settled;
+  assert.deepEqual(h.uiTeamCalls, [false]);
+  // The file names a team, so the sign-in given is read: it is none.
+  assert.deepEqual(given.reads, ['signIn']);
+  const ways = await h.request('GET', '/api/auth/ways');
+  assert.deepEqual([ways.status, ways.body], [200, '{"github":false}']);
+});
+
+test('the service hashes at the cost it is given: an account made through the API, and a first password', async () => {
+  const h = await harness({ uiYaml: ADDRESS_YAML, ui: passwordOnly().ui });
+  await (await h.start()).settled;
+  await passwordAccountOf(h.db, 'octo-admin', 'admin');
+  await passwordAccountOf(h.db, 'octo-new', 'viewer', ONE_TIME);
+  const signed = await h.request('POST', '/api/auth/password', Buffer.from(JSON.stringify({ name: 'octo-admin', password: PASSWORD })), FROM_THE_PAGE);
+  const cookie = cookieOf(signed.headers['set-cookie']);
+  const { csrf } = JSON.parse((await h.request('GET', '/api/me', Buffer.from(''), { cookie })).body) as Me;
+  const made = await h.request('POST', '/api/accounts/new', Buffer.from(JSON.stringify({ name: 'octo-viewer', role: 'viewer' })),
+    { cookie, 'x-visto-csrf': csrf, 'content-type': 'application/json' });
+  assert.equal(made.status, 201);
+  const chosen = await h.request('POST', '/api/auth/first-password', Buffer.from(JSON.stringify({ name: 'octo-new', oneTimePassword: ONE_TIME, password: OTHER_PASSWORD })), FROM_THE_PAGE);
+  assert.deepEqual([chosen.status, chosen.body], [200, '{"next":"signed_in"}']);
+  const rows = await h.db.query<{ name: string; password_hash: string }>(
+    "select name, password_hash from visto_ai.ui_accounts where name in ('octo-new', 'octo-viewer') order by name");
+  assert.deepEqual(rows.map((r) => [r.name, r.password_hash.slice(0, 'scrypt$4$1$1$'.length)]), [['octo-new', 'scrypt$4$1$1$'], ['octo-viewer', 'scrypt$4$1$1$']]);
 });

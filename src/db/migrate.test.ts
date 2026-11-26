@@ -292,3 +292,58 @@ test('0014_ui adds the title, the stage, the retry code and the two tables of si
     [{ indexname: 'ui_states_expires' }]);
   await db.close();
 });
+test('0015_accounts deletes the sessions of before, and adds the accounts, the record of changes and the account of each session', async () => {
+  const ledger = await testDb();
+  const names = (await ledger.query<{ name: string }>('select name from visto_ai.schema_migrations order by name')).map((r) => r.name);
+  assert.equal(names.indexOf('0015_accounts'), names.indexOf('0014_ui') + 1);
+  await ledger.close();
+  const db = await pgliteDb();
+  const all = loadMigrations(MIGRATIONS_DIR);
+  await migrate(db, all.filter((m) => m.name < '0015_accounts'));
+  await db.query(
+    `insert into visto_ai.ui_sessions (id_hash, login, via, created_at, last_used_at, expires_at)
+     values ('h-a', 'octo-lead', 'account', '2026-03-01T10:00:00Z', '2026-03-01T10:00:00Z', '2026-03-01T22:00:00Z')`);
+  assert.deepEqual(await migrate(db, all), ['0015_accounts']);
+  assert.deepEqual(await db.query('select count(*)::int as n from visto_ai.ui_sessions'), [{ n: 0 }]);
+  const columns = (table: string) => db.query<{ column_name: string; data_type: string; is_nullable: string }>(
+    `select column_name, data_type, is_nullable from information_schema.columns
+     where table_schema = 'visto_ai' and table_name = $1 order by column_name`, [table]);
+  const time = 'timestamp with time zone';
+  assert.deepEqual(await columns('ui_accounts'), [
+    { column_name: 'failed_tries', data_type: 'integer', is_nullable: 'NO' },
+    { column_name: 'id', data_type: 'integer', is_nullable: 'NO' },
+    { column_name: 'kind', data_type: 'text', is_nullable: 'NO' },
+    { column_name: 'last_sign_in_at', data_type: time, is_nullable: 'YES' },
+    { column_name: 'made_at', data_type: time, is_nullable: 'NO' },
+    { column_name: 'made_by_kind', data_type: 'text', is_nullable: 'NO' },
+    { column_name: 'made_by_name', data_type: 'text', is_nullable: 'YES' },
+    { column_name: 'name', data_type: 'text', is_nullable: 'NO' },
+    { column_name: 'one_time_until', data_type: time, is_nullable: 'YES' },
+    { column_name: 'password_hash', data_type: 'text', is_nullable: 'YES' },
+    { column_name: 'role', data_type: 'text', is_nullable: 'NO' },
+    { column_name: 'wait_until', data_type: time, is_nullable: 'YES' },
+  ]);
+  assert.deepEqual(await columns('ui_account_changes'), [
+    { column_name: 'account_kind', data_type: 'text', is_nullable: 'NO' },
+    { column_name: 'account_name', data_type: 'text', is_nullable: 'NO' },
+    { column_name: 'at', data_type: time, is_nullable: 'NO' },
+    { column_name: 'by_kind', data_type: 'text', is_nullable: 'NO' },
+    { column_name: 'by_name', data_type: 'text', is_nullable: 'YES' },
+    { column_name: 'change', data_type: 'text', is_nullable: 'NO' },
+    { column_name: 'id', data_type: 'integer', is_nullable: 'NO' },
+    { column_name: 'role', data_type: 'text', is_nullable: 'YES' },
+  ]);
+  assert.deepEqual(
+    (await columns('ui_sessions')).filter((c) => c.column_name === 'account_id'),
+    [{ column_name: 'account_id', data_type: 'integer', is_nullable: 'NO' }]);
+  assert.deepEqual(
+    await db.query(
+      `select indexname from pg_indexes where schemaname = 'visto_ai'
+       and indexname in ('ui_accounts_name', 'ui_account_changes_at', 'ui_sessions_account') order by indexname`),
+    [{ indexname: 'ui_account_changes_at' }, { indexname: 'ui_accounts_name' }, { indexname: 'ui_sessions_account' }]);
+  await assert.rejects(db.query(
+    `insert into visto_ai.ui_sessions (id_hash, login, via, created_at, last_used_at, expires_at)
+     values ('h-b', 'octo-lead', 'account', '2026-03-01T10:00:00Z', '2026-03-01T10:00:00Z', '2026-03-01T22:00:00Z')`));
+  assert.deepEqual(await db.query('select count(*)::int as n from visto_ai.ui_sessions'), [{ n: 0 }]);
+  await db.close();
+});

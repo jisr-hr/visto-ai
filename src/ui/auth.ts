@@ -1,9 +1,12 @@
-// Sign-in through the GitHub App with PKCE, sessions in the database, the token for changes, and who may open the UI
-// (UI design 3.2; calls 10, 11, 12 and 30). No answer, log line or error holds a code, a state, a verifier, a session id, the
-// token, the client secret or a login, but the cookies and the location the step itself sets.
+// Sign-in through the GitHub App with PKCE, sessions in the database that each belong to an account, the token for changes,
+// and who may open the UI (UI design 3.2; calls 10, 11, 12 and 30; the password design 4.4 and 4.5, calls 17, 18 and 24). No
+// answer, log line or error holds a code, a state, a verifier, a session id, the token, the client secret, a login or a name,
+// but the cookies and the location the step itself sets.
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import type { UiConfig } from '../config/load.ts';
 import type { Db } from '../db/types.ts';
+import { MAX_ACCOUNTS, githubSignIn } from '../db/ui-accounts.ts';
+import type { AccountKind, AccountRow, Role } from '../db/ui-accounts.ts';
 import { createSession, deleteExpired, deleteSession, liveStates, readSession, saveState, takeState } from '../db/ui-sessions.ts';
 import { SIGN_IN_TIMEOUT_MS } from '../forge/types.ts';
 import type { ForgeChecks, ForgeSignIn, SignedIn } from '../forge/types.ts';
@@ -22,11 +25,13 @@ export interface AuthDeps {
   db: Db;
   // Never the client id or secret, which only the adapter holds: the config's `ui` itself is refused by type.
   ui: Pick<UiConfig, 'accounts' | 'team' | 'publicUrl'> & { clientId?: never; clientSecret?: never };
-  signIn: ForgeSignIn; checks: Pick<ForgeChecks, 'isTeamMember'>;
+  signIn: ForgeSignIn | null;   // null: GitHub sign-in off
+  checks: Pick<ForgeChecks, 'isTeamMember'>;
   clock: () => Date; log: (entry: Record<string, unknown>) => void;
   random?: () => string;   // 32 random bytes in base64url; absent: randomBytes(32)
 }
-export interface Session { login: string; idHash: string; csrf: string }
+/** `login`: the account's name. */
+export interface Session { login: string; idHash: string; csrf: string; accountId: number; kind: AccountKind; role: Role }
 export interface Auth {
   start(): Promise<UiAnswer>;                                                          // GET /api/auth/start
   finish(query: URLSearchParams, cookies: Record<string, string>): Promise<UiAnswer>;  // GET /api/auth/callback
@@ -43,10 +48,14 @@ const STATE_VALUE = /^([A-Za-z0-9_-]{43})\.([A-Za-z0-9_-]{43})$/;
 const stateCookie = (state: string, verifier: string): string =>
   `${STATE_COOKIE}=${state}.${verifier}; Path=/; Max-Age=${STATE_MS / 1000}; HttpOnly; Secure; SameSite=Lax`;
 const STATE_CLEARED = `${STATE_COOKIE}=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax`;
-const sessionCookie = (id: string): string => `${SESSION_COOKIE}=${id}; Path=/; Max-Age=${SESSION_MS / 1000}; HttpOnly; Secure; SameSite=Strict`;
+export function sessionCookie(id: string): string {
+  return `${SESSION_COOKIE}=${id}; Path=/; Max-Age=${SESSION_MS / 1000}; HttpOnly; Secure; SameSite=Strict`;
+}
 const SESSION_CLEARED = `${SESSION_COOKIE}=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Strict`;
 
-const hashOf = (value: string): string => createHash('sha256').update(value).digest('hex');
+export function hashOf(value: string): string {
+  return createHash('sha256').update(value).digest('hex');
+}
 const challengeOf = (verifier: string): string => createHash('sha256').update(verifier).digest('base64url');
 const tokenOf = (id: string): string => createHash('sha256').update('csrf:' + id).digest('base64url');
 /** A time as an ISO string; a clock that gives no time throws here, as a database step would. */
@@ -97,7 +106,7 @@ export function csrfOk(session: Session, header: string | undefined): boolean {
   return header !== undefined && sameSecret(header, session.csrf);
 }
 
-type Outcome = 'denied' | 'state' | 'github' | 'not_allowed' | 'unverified' | 'failed';
+type Outcome = 'denied' | 'state' | 'github' | 'not_allowed' | 'unverified' | 'full' | 'failed';
 type Ending = { outcome: Outcome; reason: string | null } | { outcome: 'ok'; reason: null; id: string };
 const refuse = (outcome: Outcome, reason: string | null = null): Ending => ({ outcome, reason });
 
@@ -111,12 +120,12 @@ export function createAuth(deps: AuthDeps): Auth {
 
   // Call 11: a login named in the file, else an active member of the team, read through the app's installation on its
   // organisation. Anything that cannot be read refuses.
-  async function wayIn(login: string): Promise<{ via: string } | Ending> {
+  async function wayIn(signIn: ForgeSignIn, login: string): Promise<{ via: string } | Ending> {
     if (accounts.has(login.toLowerCase())) return { via: 'account' };
     if (team === null) return refuse('not_allowed');
     let installation: string | null;
     try {
-      installation = await deps.signIn.orgInstallation(team.split('/')[0] ?? '');
+      installation = await signIn.orgInstallation(team.split('/')[0] ?? '');
     } catch (error) {
       return refuse('unverified', codeOf(error));
     }
@@ -131,7 +140,7 @@ export function createAuth(deps: AuthDeps): Auth {
     return member === true ? { via: team } : refuse('not_allowed');
   }
 
-  async function decide(query: URLSearchParams, cookies: Record<string, string>): Promise<Ending> {
+  async function decide(signIn: ForgeSignIn, query: URLSearchParams, cookies: Record<string, string>): Promise<Ending> {
     if (query.has('error')) return refuse('denied');
     const code = query.get('code');
     const state = query.get('state');
@@ -152,17 +161,30 @@ export function createAuth(deps: AuthDeps): Auth {
 
     let user: SignedIn;
     try {
-      user = await deps.signIn.signedIn(code, verifier, callback);
+      user = await signIn.signedIn(code, verifier, callback);
     } catch (error) {
       return refuse('github', codeOf(error));
     }
     if (user.isBot) return refuse('not_allowed');
-    const way = await wayIn(user.login);
+    const way = await wayIn(signIn, user.login);
     if (!('via' in way)) return way;
 
+    // Call 18: the account of the login, made as a viewer at its first sign-in; a row made is logged as soon as it is, so also
+    // when its session then fails.
+    let account: AccountRow;
+    try {
+      const found = await githubSignIn(deps.db, user.login, iso(now), MAX_ACCOUNTS);
+      if (found === 'full') return refuse('full');
+      if (found.made) deps.log({ event: 'ui_account', change: 'made', role: found.account.role });
+      account = found.account;
+    } catch {
+      return refuse('failed');
+    }
     try {
       const id = random();
-      await createSession(deps.db, { idHash: hashOf(id), login: user.login, via: way.via, at: iso(now), expiresAt: iso(now + SESSION_MS) });
+      await createSession(deps.db, {
+        idHash: hashOf(id), login: account.name, via: way.via, accountId: account.id, at: iso(now), expiresAt: iso(now + SESSION_MS),
+      });
       return { outcome: 'ok', reason: null, id };
     } catch {
       return refuse('failed');
@@ -175,8 +197,17 @@ export function createAuth(deps: AuthDeps): Auth {
     return team !== null && row.via.toLowerCase() === team.toLowerCase();
   }
 
+  // A password account's session holds while it is one, whatever the file names; a GitHub account's while its way in holds.
+  function holds(row: { login: string; via: string; kind: AccountKind }): boolean {
+    if (row.kind === 'password') return row.via === 'password';
+    return row.kind === 'github' && stillHolds(row);
+  }
+
   return {
     async start() {
+      // GitHub sign-in off: nothing is read or logged.
+      if (deps.signIn === null) return json(404, { error: 'not_found' });
+      const signIn = deps.signIn;
       try {
         const now = deps.clock().getTime();
         if (sweptAt === null || now - sweptAt >= SWEEP_MS) {
@@ -187,15 +218,16 @@ export function createAuth(deps: AuthDeps): Auth {
         const state = random();
         const verifier = random();
         await saveState(deps.db, { stateHash: hashOf(state), verifierHash: hashOf(verifier), expiresAt: iso(now + STATE_MS) });
-        return redirect(deps.signIn.authorizeUrl(state, challengeOf(verifier), callback), { 'set-cookie': stateCookie(state, verifier) });
+        return redirect(signIn.authorizeUrl(state, challengeOf(verifier), callback), { 'set-cookie': stateCookie(state, verifier) });
       } catch {
         return redirect('/ui/signin?error=failed');
       }
     },
 
     async finish(query, cookies) {
-      const ending = await decide(query, cookies);
-      deps.log({ event: 'ui_signin', outcome: ending.outcome, reason: ending.reason });
+      if (deps.signIn === null) return json(404, { error: 'not_found' });
+      const ending = await decide(deps.signIn, query, cookies);
+      deps.log({ event: 'ui_signin', way: 'github', outcome: ending.outcome, reason: ending.reason });
       if (ending.outcome === 'ok' && 'id' in ending) return redirect('/ui/', { 'set-cookie': [sessionCookie(ending.id), STATE_CLEARED] });
       return redirect(`/ui/signin?error=${ending.outcome}`, { 'set-cookie': STATE_CLEARED });
     },
@@ -213,8 +245,8 @@ export function createAuth(deps: AuthDeps): Auth {
       }
       // A database that rejects (the read or the last use's write) is an error for the route, never a sign-out.
       const row = await readSession(deps.db, idHash, now);
-      if (row === null || !stillHolds(row)) return null;
-      return { login: row.login, idHash, csrf: tokenOf(id) };
+      if (row === null || !holds(row)) return null;
+      return { login: row.login, idHash, csrf: tokenOf(id), accountId: row.accountId, kind: row.kind, role: row.role };
     },
 
     async signOut(session) {

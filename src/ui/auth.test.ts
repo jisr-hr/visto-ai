@@ -4,12 +4,16 @@ import { createHash } from 'node:crypto';
 import type { UiConfig } from '../config/load.ts';
 import { testDb } from '../db/testing.ts';
 import type { Db } from '../db/types.ts';
+import { deleteAccount, insertAccount } from '../db/ui-accounts.ts';
+import { createSession } from '../db/ui-sessions.ts';
 import type { ForgeChecks, ForgeSignIn, SignedIn } from '../forge/types.ts';
 import type { UiAnswer } from '../shell/http.ts';
 import {
   CSRF_HEADER, MAX_LIVE_STATES, SESSION_COOKIE, SESSION_MS, STATE_COOKIE, STATE_MS, SWEEP_MS, cookiesOf, createAuth, csrfOk,
 } from './auth.ts';
 import type { Auth, AuthDeps, Session } from './auth.ts';
+import { hashPassword } from './passwords.ts';
+import type { PasswordCost } from './passwords.ts';
 
 const at = (seconds: number): Date => new Date(Date.parse('2026-03-01T10:00:00.000Z') + seconds * 1000);
 const iso = (seconds: number): string => at(seconds).toISOString();
@@ -52,7 +56,8 @@ const BUSY: UiAnswer = {
   status: 503, body: '{"error":"busy"}', headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', ...SECURITY },
 };
 const SIGNED_OUT: UiAnswer = { status: 204, body: '', headers: { 'set-cookie': SESSION_CLEARED, 'cache-control': 'no-store', ...SECURITY } };
-const signin = (outcome: string, reason: string | null = null): Record<string, unknown> => ({ event: 'ui_signin', outcome, reason });
+const signin = (outcome: string, reason: string | null = null): Record<string, unknown> => ({ event: 'ui_signin', way: 'github', outcome, reason });
+const signins = (logs: Record<string, unknown>[]) => logs.filter((e) => e.event === 'ui_signin');
 
 // The n-th value random gives: 'a' 43 times, then 'b' 43 times, and so on.
 const LETTERS = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_';
@@ -192,7 +197,7 @@ const states = async (db: Db): Promise<unknown[]> =>
     .map((r) => ({ ...r, expires_at: r.expires_at.toISOString() }));
 const sessions = async (db: Db): Promise<unknown[]> =>
   (await db.query<{ id_hash: string; login: string; via: string; created_at: Date; last_used_at: Date; expires_at: Date }>(
-    'select * from visto_ai.ui_sessions order by created_at, id_hash'))
+    'select id_hash, login, via, created_at, last_used_at, expires_at from visto_ai.ui_sessions order by created_at, id_hash'))
     .map((r) => ({ ...r, created_at: r.created_at.toISOString(), last_used_at: r.last_used_at.toISOString(), expires_at: r.expires_at.toISOString() }));
 const count = async (db: Db, table: 'ui_sessions' | 'ui_states'): Promise<number> =>
   (await db.query<{ n: number }>(`select count(*)::int as n from visto_ai.${table}`))[0]!.n;
@@ -205,7 +210,7 @@ test('the start stores a state and a verifier for ten minutes, sets both in one 
   assert.deepEqual(await h.auth.start(), toGithub(A, B));
   assert.deepEqual(h.calls, [['authorizeUrl', A, challengeOf(B), BACK]]);
   assert.deepEqual(await states(h.db), [{ state_hash: hex(A), verifier_hash: hex(B), expires_at: iso(600) }]);
-  assert.deepEqual(h.logs, []);
+  assert.deepEqual(signins(h.logs), []);
   await h.db.close();
 });
 
@@ -217,8 +222,9 @@ test('while 1,000 states are live a start answers busy and stores nothing, and e
      select $1::text || g::text, 'v-' || g::text, $2::timestamptz from generate_series(1, $3::int) g`, [prefix, iso(expires), n]);
   await store('live-', 1000, 600);
   await store('old-', 2, 0);
-  await h.db.query(`insert into visto_ai.ui_sessions (id_hash, login, via, created_at, last_used_at, expires_at)
-    values ('old-session', 'octo-lead', 'account', $1::timestamptz, $1::timestamptz, $1::timestamptz)`, [iso(-1)]);
+  await h.db.query(`insert into visto_ai.ui_accounts (kind, name, role, made_at, made_by_kind) values ('github', 'octo-lead', 'viewer', $1::timestamptz, 'sign_in')`, [iso(-1)]);
+  await h.db.query(`insert into visto_ai.ui_sessions (id_hash, login, via, account_id, created_at, last_used_at, expires_at)
+    values ('old-session', 'octo-lead', 'account', (select id from visto_ai.ui_accounts), $1::timestamptz, $1::timestamptz, $1::timestamptz)`, [iso(-1)]);
 
   assert.deepEqual(await h.auth.start(), BUSY);
   assert.deepEqual([await count(h.db, 'ui_states'), await count(h.db, 'ui_sessions')], [1000, 0]);
@@ -252,7 +258,7 @@ test('the way back with the right state and verifier and a named account makes a
     { id_hash: hex(C), login: 'octo-lead', via: 'account', created_at: iso(0), last_used_at: iso(0), expires_at: iso(43200) },
   ]);
   assert.deepEqual(await states(h.db), []);
-  assert.deepEqual(h.logs, [signin('ok')]);
+  assert.deepEqual(signins(h.logs), [signin('ok')]);
   await h.db.close();
 });
 
@@ -264,7 +270,7 @@ test('a state is taken once: the same way back again is refused as state', async
   assert.deepEqual(await h.auth.finish(query, sent(started)), refused('state'));
   assert.equal(await count(h.db, 'ui_sessions'), 1);
   assert.equal(named(h.calls, 'signedIn').length, 1);
-  assert.deepEqual(h.logs, [signin('ok'), signin('state')]);
+  assert.deepEqual(signins(h.logs), [signin('ok'), signin('state')]);
   await h.db.close();
 });
 
@@ -306,7 +312,7 @@ test('a way back whose state or verifier differs from its cookie, has none, or h
 
   assert.equal(await count(h.db, 'ui_sessions'), 0);
   assert.deepEqual(named(h.calls, 'signedIn'), []);
-  assert.deepEqual(h.logs, [...Array.from({ length: 11 }, () => signin('state')), signin('denied'), signin('denied')]);
+  assert.deepEqual(signins(h.logs), [...Array.from({ length: 11 }, () => signin('state')), signin('denied'), signin('denied')]);
   await h.db.close();
 });
 
@@ -315,7 +321,7 @@ test("GitHub's refusal, an account not named, a bot, and a team that cannot be r
   assert.deepEqual((await alone.signIn('code-2')).answer, refused('github'));
   assert.deepEqual((await alone.signIn('code-4')).answer, refused('not_allowed'));
   assert.deepEqual((await alone.signIn('code-5')).answer, refused('not_allowed'));
-  assert.deepEqual(alone.logs, [signin('github', 'oauth_refused'), signin('not_allowed'), signin('not_allowed')]);
+  assert.deepEqual(signins(alone.logs), [signin('github', 'oauth_refused'), signin('not_allowed'), signin('not_allowed')]);
   assert.equal(await count(alone.db, 'ui_sessions'), 0);
   await alone.db.close();
 
@@ -336,7 +342,7 @@ test("GitHub's refusal, an account not named, a bot, and a team that cannot be r
   assert.deepEqual((await unread.signIn('code-3')).answer, refused('unverified'));
   const odd = await team({ acme: '99' }, { '99 acme/reviewers octo-dev': new Error(`odd ${CLIENT_SECRET}`) });
   assert.deepEqual((await odd.signIn('code-3')).answer, refused('unverified'));
-  assert.deepEqual([...none.logs, ...down.logs, ...unread.logs, ...odd.logs], [
+  assert.deepEqual(signins([...none.logs, ...down.logs, ...unread.logs, ...odd.logs]), [
     signin('unverified', 'not_installed'), signin('unverified', 'github_502'), signin('unverified', 'github_403'), signin('unverified', 'internal_error'),
   ]);
   for (const h of [none, down, unread, odd]) {
@@ -361,7 +367,7 @@ test("an active member of the team is let in through the organisation's installa
   assert.deepEqual(h.calls.slice(-2), [['orgInstallation', 'Acme'], ['isTeamMember', '99', 'Acme/Reviewers', 'octo-dev']]);
   assert.deepEqual((await sessions(h.db)).map((r) => r as { id_hash: string; login: string; via: string }).map((r) => [r.id_hash, r.login, r.via]).sort(),
     [[hex(C), 'octo-dev', 'acme/reviewers'], [hex(nth(7)), 'octo-dev', 'Acme/Reviewers']].sort());
-  assert.deepEqual(h.logs, [signin('ok'), signin('not_allowed'), signin('ok')]);
+  assert.deepEqual(signins(h.logs), [signin('ok'), signin('not_allowed'), signin('ok')]);
   await h.db.close();
 });
 
@@ -370,8 +376,8 @@ test('a login GitHub writes in another letter case than the file is let in, and 
   const { answer, id } = await h.signIn('code-6');
   assert.deepEqual(answer, letIn(C));
   assert.deepEqual((await sessions(h.db)).map((r) => [(r as { login: string }).login, (r as { via: string }).via]), [['Octo-Lead', 'account']]);
-  assert.deepEqual(await h.auth.sessionOf(cookie(id!)), { login: 'Octo-Lead', idHash: hex(C), csrf: tokenOf(C) });
-  assert.deepEqual(h.logs, [signin('ok')]);
+  assert.deepEqual(await h.auth.sessionOf(cookie(id!)), { login: 'Octo-Lead', idHash: hex(C), csrf: tokenOf(C), accountId: 1, kind: 'github', role: 'viewer' });
+  assert.deepEqual(signins(h.logs), [signin('ok')]);
   await h.db.close();
 });
 
@@ -381,7 +387,7 @@ test('a refusal of the sign-in or of the installation read whose message is no s
   assert.deepEqual((await h.signIn('code-7')).answer, refused('github'));
   assert.deepEqual((await h.signIn('code-3')).answer, refused('unverified'));
   assert.deepEqual(named(h.calls, 'orgInstallation'), [['orgInstallation', 'acme']]);
-  assert.deepEqual(h.logs, [signin('github', 'internal_error'), signin('unverified', 'internal_error')]);
+  assert.deepEqual(signins(h.logs), [signin('github', 'internal_error'), signin('unverified', 'internal_error')]);
   assert.ok(!JSON.stringify(h.logs).includes('odd'));
   assert.ok(!JSON.stringify(h.logs).includes(CLIENT_SECRET));
   await h.db.close();
@@ -405,7 +411,7 @@ test('a team read that answers nothing within 10 seconds is unverified as github
   for (let i = 0; i < 1000 && answer === null; i += 1) await turn();
   assert.deepEqual(answer, refused('unverified'));
   await back;
-  assert.deepEqual(h.logs, [signin('unverified', 'github_network')]);
+  assert.deepEqual(signins(h.logs), [signin('unverified', 'github_network')]);
   assert.equal(await count(h.db, 'ui_sessions'), 0);
   await h.db.close();
 });
@@ -419,7 +425,7 @@ test("the team read's limit leaves no timer running once the read has answered o
   assert.deepEqual((await h.signIn('code-3')).answer, letIn(C));
   assert.deepEqual((await h.signIn('code-4')).answer, refused('unverified'));
   assert.equal(timers(), before);
-  assert.deepEqual(h.logs, [signin('ok'), signin('unverified', 'github_403')]);
+  assert.deepEqual(signins(h.logs), [signin('ok'), signin('unverified', 'github_403')]);
   await h.db.close();
 });
 
@@ -428,7 +434,7 @@ test('a session is read by its cookie, and stops being one when it expires or is
   const { id } = await h.signIn('code-1');
   assert.equal(id, C);
   const session = await h.auth.sessionOf(cookie(C));
-  assert.deepEqual(session, { login: 'octo-lead', idHash: hex(C), csrf: tokenOf(C) });
+  assert.deepEqual(session, { login: 'octo-lead', idHash: hex(C), csrf: tokenOf(C), accountId: 1, kind: 'github', role: 'viewer' });
 
   h.clock.now = at(10);
   const second = await h.signIn('code-1');
@@ -476,10 +482,132 @@ test('a session stops being one when the way it was let in no longer holds, with
   await h.db.close();
 });
 
+const MADE = { event: 'ui_account', change: 'made', role: 'viewer' };
+// Call 4: every hash of these tests is made at COST.
+const COST: PasswordCost = { log2N: 4, r: 1, p: 1 };
+const accountsOf = async (db: Db): Promise<unknown[]> =>
+  (await db.query<{ last_sign_in_at: Date | null }>('select id, kind, name, role, made_by_kind, made_by_name, last_sign_in_at from visto_ai.ui_accounts order by id'))
+    .map((r) => ({ ...r, last_sign_in_at: r.last_sign_in_at?.toISOString() ?? null }));
+const changesOf = (db: Db): Promise<unknown[]> =>
+  db.query('select by_kind, by_name, change, account_kind, account_name, role from visto_ai.ui_account_changes order by id');
+const LEAD_MADE = [{ by_kind: 'sign_in', by_name: null, change: 'made', account_kind: 'github', account_name: 'octo-lead', role: 'viewer' }];
+
+test("a GitHub sign-in makes the account a viewer at its first sign-in, logs it once, and the session reads the row's role at each request", async () => {
+  const h = await harness();
+  assert.deepEqual((await h.signIn('code-1')).answer, letIn(C));
+  assert.deepEqual(h.logs, [MADE, signin('ok')]);
+  assert.deepEqual(await accountsOf(h.db), [
+    { id: 1, kind: 'github', name: 'octo-lead', role: 'viewer', made_by_kind: 'sign_in', made_by_name: null, last_sign_in_at: iso(0) },
+  ]);
+  assert.deepEqual(await changesOf(h.db), LEAD_MADE);
+  assert.equal((await h.auth.sessionOf(cookie(C)))?.role, 'viewer');
+  await h.db.query(`update visto_ai.ui_accounts set role = 'admin' where name = 'octo-lead'`);
+  assert.deepEqual(await h.auth.sessionOf(cookie(C)), { login: 'octo-lead', idHash: hex(C), csrf: tokenOf(C), accountId: 1, kind: 'github', role: 'admin' });
+
+  h.clock.now = at(10);
+  assert.deepEqual((await h.signIn('code-1')).answer, letIn(F));
+  assert.deepEqual(h.logs.slice(2), [signin('ok')]);
+  assert.equal((await h.auth.sessionOf(cookie(F)))?.role, 'admin');
+  assert.deepEqual((await accountsOf(h.db)).map((r) => (r as { last_sign_in_at: string }).last_sign_in_at), [iso(10)]);
+  assert.deepEqual(await changesOf(h.db), LEAD_MADE);
+  await h.db.close();
+});
+
+test('a GitHub row made whose session cannot be made is still logged as made, then failed', async () => {
+  const h = await harness();
+  h.failing.text = 'insert into visto_ai.ui_sessions';
+  assert.deepEqual((await h.signIn('code-1')).answer, refused('failed'));
+  assert.deepEqual(h.logs, [MADE, signin('failed')]);
+  h.failing.text = null;
+  assert.deepEqual((await accountsOf(h.db)).map((r) => (r as { name: string }).name), ['octo-lead']);
+  assert.deepEqual(await changesOf(h.db), LEAD_MADE);
+  assert.equal(await count(h.db, 'ui_sessions'), 0);
+  await h.db.close();
+
+  // A row whose record cannot be written is not made, nor logged as made.
+  const other = await harness();
+  other.failing.text = 'insert into visto_ai.ui_account_changes';
+  assert.deepEqual((await other.signIn('code-1')).answer, refused('failed'));
+  assert.deepEqual(other.logs, [signin('failed')]);
+  other.failing.text = null;
+  assert.deepEqual([await accountsOf(other.db), await changesOf(other.db), await count(other.db, 'ui_sessions')], [[], [], 0]);
+  await other.db.close();
+});
+
+test('a GitHub sign-in with 1,000 accounts and none of its own is refused as full', async () => {
+  const h = await harness();
+  const hash = await hashPassword('a long password of mine', COST);
+  await h.db.query(
+    `insert into visto_ai.ui_accounts (kind, name, role, password_hash, made_at, made_by_kind)
+     select 'password', 'octo-user-' || g::text, 'viewer', $1, $2::timestamptz, 'command' from generate_series(1, 1000) g`, [hash, iso(0)]);
+  assert.deepEqual((await h.signIn('code-1')).answer, refused('full'));
+  assert.deepEqual(h.logs, [signin('full')]);
+  assert.equal(await count(h.db, 'ui_sessions'), 0);
+  assert.deepEqual(await h.db.query(`select count(*)::int as n from visto_ai.ui_accounts where kind = 'github'`), [{ n: 0 }]);
+  assert.deepEqual(await changesOf(h.db), []);
+  await h.db.close();
+});
+
+test('with GitHub sign-in off the start and the way back are not found, and read nothing', async () => {
+  const db = await testDb();
+  const seen: string[] = [];
+  const spy: Db = {
+    query: (text, params) => { seen.push(text); return db.query(text, params); },
+    script: (sql) => { seen.push(sql); return db.script(sql); },
+    close: () => db.close(),
+    transaction: (work) => { seen.push('transaction'); return db.transaction(work); },
+  };
+  const logs: Record<string, unknown>[] = [];
+  const auth = createAuth({
+    db: spy, ui: { accounts: [], team: null, publicUrl: PUBLIC_URL }, signIn: null,
+    checks: { isTeamMember: () => { seen.push('isTeamMember'); return Promise.resolve(true); } },
+    clock: () => { seen.push('clock'); return at(0); }, log: (entry) => { logs.push(entry); }, random: () => { seen.push('random'); return A; },
+  });
+  const NOT_FOUND: UiAnswer = {
+    status: 404, body: '{"error":"not_found"}', headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', ...SECURITY },
+  };
+  assert.deepEqual(await auth.start(), NOT_FOUND);
+  assert.deepEqual(await auth.finish(new URLSearchParams({ code: 'code-1', state: A }), cookiesOf(`${STATE_COOKIE}=${A}.${B}`)), NOT_FOUND);
+  assert.deepEqual(await auth.finish(new URLSearchParams({ error: 'access_denied' }), {}), NOT_FOUND);
+  assert.deepEqual([seen, logs], [[], []]);
+  await db.close();
+});
+
+test("a password session reads by its kind, whatever the file's accounts say, and a removed account's session is none", async () => {
+  const h = await harness({ accounts: [] });
+  const hash = await hashPassword('a long password of mine', COST);
+  const admin = await insertAccount(h.db, {
+    kind: 'password', name: 'octo-admin', role: 'admin', passwordHash: hash, oneTimeUntil: null, at: iso(0), by: 'command', byName: null, signedInAt: null,
+  });
+  assert.ok(admin !== null);
+  const id = nth(9);
+  await createSession(h.db, { idHash: hex(id), login: 'octo-admin', via: 'password', accountId: admin.id, at: iso(0), expiresAt: iso(43200) });
+  const expected = { login: 'octo-admin', idHash: hex(id), csrf: tokenOf(id), accountId: admin.id, kind: 'password', role: 'admin' };
+  assert.deepEqual(await h.auth.sessionOf(cookie(id)), expected);
+  assert.deepEqual(await h.with({ accounts: ['octo-lead'], team: TEAM }).sessionOf(cookie(id)), expected);
+
+  // A way in of the other kind holds for neither: a password account let in as a named login, a GitHub account as a password.
+  const named = nth(10);
+  await createSession(h.db, { idHash: hex(named), login: 'octo-admin', via: 'account', accountId: admin.id, at: iso(0), expiresAt: iso(43200) });
+  assert.equal(await h.with({ accounts: ['octo-admin'] }).sessionOf(cookie(named)), null);
+  const lead = await insertAccount(h.db, {
+    kind: 'github', name: 'octo-lead', role: 'admin', passwordHash: null, oneTimeUntil: null, at: iso(0), by: 'command', byName: null, signedInAt: null,
+  });
+  assert.ok(lead !== null);
+  const github = nth(11);
+  await createSession(h.db, { idHash: hex(github), login: 'octo-lead', via: 'password', accountId: lead.id, at: iso(0), expiresAt: iso(43200) });
+  assert.equal(await h.with({ accounts: ['octo-lead'] }).sessionOf(cookie(github)), null);
+
+  assert.equal((await deleteAccount(h.db, admin.id))?.id, admin.id);
+  assert.equal(await h.auth.sessionOf(cookie(id)), null);
+  assert.equal(await h.with({ accounts: ['octo-lead'], team: TEAM }).sessionOf(cookie(id)), null);
+  await h.db.close();
+});
+
 test("the token for changes is the session's own, and another session's or none is refused", () => {
   assert.equal(CSRF_HEADER, 'x-visto-csrf');
-  const s: Session = { login: 'octo-lead', idHash: hex(C), csrf: tokenOf(C) };
-  const another: Session = { login: 'octo-lead', idHash: hex(F), csrf: tokenOf(F) };
+  const s: Session = { login: 'octo-lead', idHash: hex(C), csrf: tokenOf(C), accountId: 1, kind: 'github', role: 'viewer' };
+  const another: Session = { login: 'octo-lead', idHash: hex(F), csrf: tokenOf(F), accountId: 1, kind: 'github', role: 'viewer' };
   assert.equal(csrfOk(s, s.csrf), true);
   assert.equal(csrfOk(s, another.csrf), false);
   assert.equal(csrfOk(s, undefined), false);
@@ -526,7 +654,7 @@ test('a database step that rejects sends the browser to the sign-in page with fa
   const lateState = new URL(String(late.headers.location)).searchParams.get('state') ?? '';
   assert.deepEqual(await h.auth.finish(new URLSearchParams({ code: 'code-1', state: lateState }), sent(late)), refused('failed'));
   assert.deepEqual(await h.auth.start(), START_FAILED);
-  assert.deepEqual(h.logs, [signin('failed'), signin('failed'), signin('failed')]);
+  assert.deepEqual(signins(h.logs), [signin('failed'), signin('failed'), signin('failed')]);
   assert.equal(await count(h.db, 'ui_sessions'), 0);
 
   h.clock.now = at(2);

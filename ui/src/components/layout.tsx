@@ -1,5 +1,6 @@
 // The layout of the approved mockups (Activity.dc.html, lines 48 to 73): the sidebar with the brand, the entries, the mode, who
-// is signed in, the theme switch and sign-out (call 24), around the page in the main box (Task 10, rules 3 and 5 to 8).
+// is signed in, the theme switch and sign-out (call 24), around the page in the main box (Task 10, rules 3 and 5 to 8). Settings
+// is an admin's entry only, and the user block says how the person signed in (the password design 4.7).
 import { useMemo, useSyncExternalStore } from 'react';
 import type { ReactNode } from 'react';
 import { usePoll } from '../api.ts';
@@ -26,12 +27,13 @@ const ENTRY_ON =
 // The card's classes without its shadow: cn keeps shadow-card beside shadow-none, so the mode card is not a Card.
 const MODE_CARD = 'flex flex-col gap-1.5 rounded-[12px] border border-border bg-card p-3 shadow-none';
 
-const ENTRIES: readonly { name: string; to: string; icon: ReactNode; on: (path: string) => boolean }[] = [
+// `admin`: listed only for a person whose role is admin (the API refuses a viewer the admin routes whatever is listed).
+const ENTRIES: readonly { name: string; to: string; icon: ReactNode; on: (path: string) => boolean; admin?: true }[] = [
   { name: 'Overview', to: '/ui/', icon: <OverviewIcon />, on: (path) => path === '/ui/' },
   { name: 'Activity', to: '/ui/activity', icon: <ActivityIcon />, on: (path) => path === '/ui/activity' || REVIEW_PATH.test(path) },
   { name: 'Repositories', to: '/ui/repositories', icon: <RepositoriesIcon />, on: (path) => path === '/ui/repositories' },
   { name: 'Memory', to: '/ui/memory', icon: <MemoryIcon />, on: (path) => path === '/ui/memory' },
-  { name: 'Settings', to: '/ui/settings', icon: <SettingsIcon />, on: (path) => path === '/ui/settings' },
+  { name: 'Settings', to: '/ui/settings', icon: <SettingsIcon />, on: (path) => path === '/ui/settings', admin: true },
 ];
 
 export function Brand() {
@@ -114,7 +116,7 @@ export function Layout({ api, me, onSignedOut, children }: { api: Api; me: Me; o
         <aside className="flex max-w-full shrink grow basis-[232px] flex-col gap-6 border-r border-border bg-card px-3.5 py-5">
           <Brand />
           <nav aria-label="Main" className="flex flex-col gap-0.5">
-            {ENTRIES.map((entry) => {
+            {ENTRIES.filter((entry) => entry.admin !== true || me.role === 'admin').map((entry) => {
               const on = entry.on(path);
               return (
                 <Link key={entry.to} to={entry.to} className={on ? ENTRY_ON : ENTRY_OFF} aria-current={on ? 'page' : undefined}>
@@ -133,11 +135,20 @@ export function Layout({ api, me, onSignedOut, children }: { api: Api; me: Me; o
             <Mode me={me} />
             <div className="flex items-center gap-2.5 px-1.5">
               <div aria-hidden="true" className="flex size-[30px] items-center justify-center rounded-full bg-subtle text-xs font-semibold">
-                {initials(me.login)}
+                {initials(me.name)}
               </div>
               <div className="flex min-w-0 flex-col">
-                <span className="text-[13px] font-medium">{me.login}</span>
-                <span className="text-xs text-muted">Signed in with GitHub</span>
+                <span className="text-[13px] font-medium">{me.name}</span>
+                {me.kind === 'password' ? (
+                  <>
+                    <span className="text-xs text-muted">Signed in with a password</span>
+                    <Link to="/ui/password" className="text-xs">
+                      Change password
+                    </Link>
+                  </>
+                ) : (
+                  <span className="text-xs text-muted">Signed in with GitHub</span>
+                )}
               </div>
               <Button
                 type="button"
