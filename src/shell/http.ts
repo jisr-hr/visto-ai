@@ -24,17 +24,23 @@ export type ExtensionRoute = (request: RouteRequest) => { answer: Promise<Checke
 export interface RequestLike extends AsyncIterable<Buffer> {
   method?: string | undefined; url?: string | undefined; headers: Record<string, string | string[] | undefined>;
 }
-/** `statusMessage` and `destroy` are Node's: the reason phrase a refused head leaves behind, and closing the connection. */
+/**
+ * `statusMessage`, `getHeaderNames`, `removeHeader` and `destroy` are Node's: the reason phrase a refused head leaves behind, the
+ * headers it may leave set, and closing the connection.
+ */
 export interface ResponseLike {
   writeHead(status: number, headers: Record<string, string | string[]>): unknown;
   end(body: string | Buffer): unknown;
   statusMessage?: string | undefined;
+  getHeaderNames?(): string[];
+  removeHeader?(name: string): unknown;
   destroy?(): unknown;
 }
 
 const HEADERS = { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' };
 const PREFIX = '/extensions/';
 const MODULE_FAILED: CheckedAnswer = { status: 500, headers: {}, body: 'internal_error' };
+const INTERNAL_ERROR = 'internal_error';
 
 /** The three parts of the UI's group, each with places of its own (call 17). */
 type UiPart = 'files' | 'signIn' | 'api';
@@ -217,7 +223,15 @@ export function createListener(
       // refused, or no answer: the 500 below
     }
     res.statusMessage = undefined;   // the refused head's reason phrase ('OK') would stand on the 500
-    if (!write(res, 500, { ...HEADERS, ...SECURITY_HEADERS }, 'internal_error')) res.destroy?.();
+    // Its own length and `connection: close`: a length the refused head gave stays with Node and would stand on the 500 too.
+    const headers = { ...HEADERS, ...SECURITY_HEADERS, 'content-length': String(Buffer.byteLength(INTERNAL_ERROR)), connection: 'close' };
+    try {
+      for (const name of res.getHeaderNames?.() ?? []) res.removeHeader?.(name);   // what the refused head left set
+      res.writeHead(500, headers);
+      res.end(INTERNAL_ERROR);
+    } catch {
+      res.destroy?.();
+    }
   }
 
   /**

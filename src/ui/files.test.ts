@@ -81,6 +81,43 @@ test('the built files are loaded by the path they are served at, and a folder th
   }
 });
 
+test('two links that loop back into the built folder are never entered, and the walk ends within 2 seconds with the real files', () => {
+  const root = mkdtempSync(join(tmpdir(), 'visto-ai-ui-files-'));
+  try {
+    const dist = join(root, 'dist');
+    mkdirSync(join(dist, 'assets'), { recursive: true });
+    mkdirSync(join(dist, 'real'));
+    for (const path of ['index.html', 'assets/index-a1.js', 'real/notes.txt']) writeFileSync(join(dist, ...path.split('/')), path);
+    symlinkSync('..', join(dist, 'assets', 'up'));
+    symlinkSync('..', join(dist, 'real', 'up'));
+
+    const start = performance.now();
+    const files = loadUiFiles(dist);
+    const took = performance.now() - start;
+    assert.ok(took < 2000, `took ${took} ms`);
+    assert.deepEqual([...files.keys()].sort(), ['/ui/assets/index-a1.js', '/ui/index.html', '/ui/real/notes.txt']);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('a built folder reached through a link is loaded as the folder itself', () => {
+  const root = mkdtempSync(join(tmpdir(), 'visto-ai-ui-files-'));
+  try {
+    const dist = join(root, 'dist');
+    mkdirSync(join(dist, 'assets', 'fonts'), { recursive: true });
+    for (const path of ['index.html', 'assets/index-a1.js', 'assets/fonts/x.woff2']) writeFileSync(join(dist, ...path.split('/')), path);
+    const via = join(root, 'via');
+    symlinkSync(dist, via);
+
+    const keys = ['/ui/assets/fonts/x.woff2', '/ui/assets/index-a1.js', '/ui/index.html'];
+    assert.deepEqual([...loadUiFiles(dist).keys()].sort(), keys);
+    assert.deepEqual([...loadUiFiles(via).keys()].sort(), [...loadUiFiles(dist).keys()].sort());
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('a hashed asset is served with its type and cached for a year; index.html is never stored', () => {
   assert.deepEqual(answer(FILES, 'GET', '/ui/assets/index-a1.js'), served(SCRIPT, YEAR));
   assert.deepEqual(answer(FILES, 'GET', '/ui/'), served(INDEX, 'no-store'));

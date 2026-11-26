@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer, request as httpRequest } from 'node:http';
+import type { ServerResponse } from 'node:http';
 import { duplexPair, Readable } from 'node:stream';
 import {
   createListener, EXTENSION_BODY_BYTES, EXTENSION_IN_FLIGHT, MAX_BODY_BYTES, MAX_IN_FLIGHT,
@@ -798,8 +799,9 @@ type OverNode = { status: number; message: string; rawHeaders: string[]; body: s
 /**
  * One GET through Node's own HTTP server and client, joined by a connection held in memory (the tests' setup refuses every
  * socket's connect): what the client read, or the code it saw when the connection closed with no answer. Bounded at 2 seconds.
+ * The request asks for `connection` ('close' unless given).
  */
-async function overNode(listener: (req: RequestLike, res: ResponseLike) => void, path: string): Promise<OverNode> {
+async function overNode(listener: (req: RequestLike, res: ResponseLike) => void, path: string, connection = 'close'): Promise<OverNode> {
   const server = createServer(listener);
   const [client, side] = duplexPair();
   server.emit('connection', side);
@@ -807,7 +809,7 @@ async function overNode(listener: (req: RequestLike, res: ResponseLike) => void,
   try {
     return await Promise.race([
       new Promise<OverNode>((resolve) => {
-        const req = httpRequest({ createConnection: () => client, path, headers: { host: 'visto.example.test', connection: 'close' } }, (res) => {
+        const req = httpRequest({ createConnection: () => client, path, headers: { host: 'visto.example.test', connection } }, (res) => {
           let body = '';
           res.setEncoding('utf8');
           res.on('data', (piece: string) => { body += piece; });
@@ -848,7 +850,7 @@ test('an answer Node refuses, or none at all, is answered 500 internal_error wit
     const { date, ...lines } = headLines(got.rawHeaders);
     assert.ok(date, path);
     assert.equal(got.rawHeaders.length, 2 * (Object.keys(lines).length + 1), path);
-    assert.deepEqual(lines, { ...UI_TEXT, connection: 'close', 'transfer-encoding': 'chunked' }, path);
+    assert.deepEqual(lines, { ...UI_TEXT, connection: 'close', 'content-length': '14' }, path);
     await idle();
     const next = await overNode(listener, '/api/me');
     assert.ok('status' in next, path);
@@ -865,6 +867,37 @@ test('an answer that cannot be written, nor the 500 after it, closes the connect
   assert.deepEqual(await overNode(listener, '/api/body'), { closed: 'ECONNRESET' });
   await idle();
   const next = await overNode(listener, '/api/me');
+  assert.ok('status' in next);
+  assert.deepEqual([next.status, next.body], [200, 'fine']);
+});
+
+test('the 500 in place of a refused answer states its own length, closes the connection, and keeps nothing the refused head left', async () => {
+  const answers: Record<string, UiAnswer> = {
+    '/api/length': { status: 200, headers: { 'content-length': '5', 'x-a': 'a\r\nb' }, body: 'x' },
+    '/api/left': { status: 200, headers: { 'x-b': 'b', 'x-a': 'a\r\nb' }, body: 'x' },
+    '/api/body': { status: 200, headers: {}, body: 5 as unknown as string },
+  };
+  const { listener, idle } = createListener({ webhook: async () => ok, ui: async (request) => answers[request.path] ?? FINE }, { maxUiApiInFlight: 1 });
+  const alone = (got: OverNode, name: string): void => {
+    assert.ok('status' in got, `${name}: ${JSON.stringify(got)}`);
+    assert.deepEqual([got.status, got.message, got.body], [500, 'Internal Server Error', 'internal_error'], name);
+    const { date, ...lines } = headLines(got.rawHeaders);
+    assert.ok(date, name);
+    assert.equal(got.rawHeaders.length, 2 * (Object.keys(lines).length + 1), name);
+    assert.deepEqual(lines, { ...UI_TEXT, 'content-length': '14', connection: 'close' }, name);
+  };
+  for (const connection of ['keep-alive', 'close']) {
+    alone(await overNode(listener, '/api/length', connection), connection);
+    await idle();
+  }
+  // A header set before the head makes Node take the head's own one by one, keeping each before the refused one: none is on the 500.
+  const early = (req: RequestLike, res: ResponseLike): void => { (res as unknown as ServerResponse).setHeader('x-early', 'e'); listener(req, res); };
+  alone(await overNode(early, '/api/left', 'keep-alive'), 'left');
+  await idle();
+  // A head already stored: nothing can be removed, no 500 written, and the connection is closed.
+  assert.deepEqual(await overNode(early, '/api/body', 'keep-alive'), { closed: 'ECONNRESET' });
+  await idle();
+  const next = await overNode(listener, '/api/me', 'keep-alive');
   assert.ok('status' in next);
   assert.deepEqual([next.status, next.body], [200, 'fine']);
 });

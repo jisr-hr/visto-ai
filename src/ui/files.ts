@@ -25,35 +25,42 @@ const INDEX = '/ui/index.html';
 const YEAR = 'public, max-age=31536000, immutable';   // Vite's names under assets/ carry a hash
 
 /**
- * Every file under `dir`, read whole. A folder that is not there, is no folder, or cannot be walked (a loop the walk fails on)
- * gives none. No link is followed: a link to a file is no file, and the walk, which goes through a link to a folder, finds files
- * whose real path is not their path in the folder (outside it, or back inside it through a loop); they are left out.
+ * Every file under `dir`, read whole. A folder that is not there, is no folder, or one of whose folders cannot be read gives none.
+ * The walk is by hand, one folder at a time, and no link is followed: a link is neither a folder entered nor a file loaded, and a
+ * file whose real path is not its path in the folder is left out too.
  */
 export function loadUiFiles(dir: string): UiFiles {
   const files = new Map<string, UiFile>();
   let root: string;
-  let entries: Dirent[];
   try {
     root = realpathSync(dir);
-    entries = readdirSync(dir, { recursive: true, withFileTypes: true });
   } catch {
     return files;
   }
-  for (const entry of entries) {
-    if (!entry.isFile()) continue;
-    const full = join(entry.parentPath, entry.name);
-    const inFolder = relative(dir, full);
-    let real: string;
+  const folders = [dir];
+  for (let folder = folders.pop(); folder !== undefined; folder = folders.pop()) {
+    let entries: Dirent[];
     try {
-      real = realpathSync(full);
+      entries = readdirSync(folder, { withFileTypes: true });
     } catch {
-      continue;
+      return new Map();
     }
-    // Its real path is its path in the folder: inside the folder (a link out leads elsewhere), and reached through no link
-    // (a loop's files are inside the folder too, but at another path).
-    if (real !== join(root, inFolder)) continue;
-    const served = '/ui/' + inFolder.split(sep).join('/');
-    files.set(served, { body: readFileSync(full), type: TYPES.get(extname(entry.name)) ?? 'application/octet-stream' });
+    for (const entry of entries) {
+      const full = join(folder, entry.name);
+      if (entry.isDirectory()) folders.push(full);
+      if (!entry.isFile()) continue;
+      const inFolder = relative(dir, full);
+      let real: string;
+      try {
+        real = realpathSync(full);
+      } catch {
+        continue;
+      }
+      // Its real path is its path in the folder: inside the folder, and reached through no link.
+      if (real !== join(root, inFolder)) continue;
+      const served = '/ui/' + inFolder.split(sep).join('/');
+      files.set(served, { body: readFileSync(full), type: TYPES.get(extname(entry.name)) ?? 'application/octet-stream' });
+    }
   }
   return files;
 }
