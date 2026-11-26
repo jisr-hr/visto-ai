@@ -83,8 +83,8 @@ interface Fakes {
   users?: Record<string, SignedIn | Error>;
   /** By organisation: an installation, null (not installed), or an Error it rejects with. */
   installations?: Record<string, string | null | Error>;
-  /** By "<installation> <team> <login>"; false when not given. */
-  members?: Record<string, boolean | Error>;
+  /** By "<installation> <team> <login>"; false when not given; 'never' never settles. */
+  members?: Record<string, boolean | Error | 'never'>;
 }
 interface Harness {
   /** The database as it is, for the test's own reads and writes. */
@@ -152,6 +152,7 @@ async function harness(ui: Partial<Ui> = {}, fakes: Fakes = {}): Promise<Harness
       calls.push(['isTeamMember', installation, team, login]);
       const found = fakes.members?.[`${installation} ${team} ${login}`];
       if (found instanceof Error) throw found;
+      if (found === 'never') return new Promise<boolean>(() => {});
       return found ?? false;
     },
   };
@@ -364,6 +365,64 @@ test("an active member of the team is let in through the organisation's installa
   await h.db.close();
 });
 
+test('a login GitHub writes in another letter case than the file is let in, and its session reads back', async () => {
+  const h = await harness({ accounts: ['octo-lead'] }, { users: { 'code-6': { login: 'Octo-Lead', isBot: false } } });
+  const { answer, id } = await h.signIn('code-6');
+  assert.deepEqual(answer, letIn(C));
+  assert.deepEqual((await sessions(h.db)).map((r) => [(r as { login: string }).login, (r as { via: string }).via]), [['Octo-Lead', 'account']]);
+  assert.deepEqual(await h.auth.sessionOf(cookie(id!)), { login: 'Octo-Lead', idHash: hex(C), csrf: tokenOf(C) });
+  assert.deepEqual(h.logs, [signin('ok')]);
+  await h.db.close();
+});
+
+test('a refusal of the sign-in or of the installation read whose message is no short code is logged as internal_error, never its message', async () => {
+  const odd = new Error(`odd ${CLIENT_SECRET}`);
+  const h = await harness({ accounts: [], team: TEAM }, { users: { ...USERS, 'code-7': odd }, installations: { acme: odd } });
+  assert.deepEqual((await h.signIn('code-7')).answer, refused('github'));
+  assert.deepEqual((await h.signIn('code-3')).answer, refused('unverified'));
+  assert.deepEqual(named(h.calls, 'orgInstallation'), [['orgInstallation', 'acme']]);
+  assert.deepEqual(h.logs, [signin('github', 'internal_error'), signin('unverified', 'internal_error')]);
+  assert.ok(!JSON.stringify(h.logs).includes('odd'));
+  assert.ok(!JSON.stringify(h.logs).includes(CLIENT_SECRET));
+  await h.db.close();
+});
+
+/** One turn of the event loop, which mock timers of setTimeout leave as it is. */
+const turn = (): Promise<void> => new Promise((resolve) => { setImmediate(resolve); });
+
+test('a team read that answers nothing within 10 seconds is unverified as github_network, and the way back ends then, giving its place back', async (t) => {
+  const h = await harness({ accounts: [], team: TEAM }, { installations: { acme: '99' }, members: { '99 acme/reviewers octo-dev': 'never' } });
+  const started = await h.auth.start();
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let answer: UiAnswer | null = null;
+  const back = h.auth.finish(new URLSearchParams({ code: 'code-3', state: A }), sent(started)).then((a) => { answer = a; });
+  for (let i = 0; i < 1000 && named(h.calls, 'isTeamMember').length === 0; i += 1) await turn();
+  assert.deepEqual(named(h.calls, 'isTeamMember'), [['isTeamMember', '99', TEAM, 'octo-dev']]);
+  t.mock.timers.tick(9_999);
+  for (let i = 0; i < 50; i += 1) await turn();
+  assert.equal(answer, null);
+  t.mock.timers.tick(1);
+  for (let i = 0; i < 1000 && answer === null; i += 1) await turn();
+  assert.deepEqual(answer, refused('unverified'));
+  await back;
+  assert.deepEqual(h.logs, [signin('unverified', 'github_network')]);
+  assert.equal(await count(h.db, 'ui_sessions'), 0);
+  await h.db.close();
+});
+
+test("the team read's limit leaves no timer running once the read has answered or failed", async () => {
+  const timers = (): number => process.getActiveResourcesInfo().filter((name) => name === 'Timeout').length;
+  const h = await harness({ accounts: [], team: TEAM }, {
+    installations: { acme: '99' }, members: { '99 acme/reviewers octo-dev': true, '99 acme/reviewers octo-guest': new Error('github_403') },
+  });
+  const before = timers();
+  assert.deepEqual((await h.signIn('code-3')).answer, letIn(C));
+  assert.deepEqual((await h.signIn('code-4')).answer, refused('unverified'));
+  assert.equal(timers(), before);
+  assert.deepEqual(h.logs, [signin('ok'), signin('unverified', 'github_403')]);
+  await h.db.close();
+});
+
 test('a session is read by its cookie, and stops being one when it expires or is signed out', async () => {
   const h = await harness();
   const { id } = await h.signIn('code-1');
@@ -438,7 +497,7 @@ test('cookies are read at their first equals sign, the first of a name is kept, 
   assert.deepEqual(cookiesOf(''), {});
 });
 
-test('a database step that rejects sends the browser to the sign-in page with failed, and a session that cannot be read is none', async () => {
+test('a database step that rejects sends the browser to the sign-in page with failed, and a session read that rejects rejects', async () => {
   const h = await harness();
   h.failing.text = 'expires_at <= $1';
   assert.deepEqual(await h.auth.start(), START_FAILED);
@@ -473,11 +532,18 @@ test('a database step that rejects sends the browser to the sign-in page with fa
   h.clock.now = at(2);
   const { id } = await h.signIn('code-1');
   assert.ok(id !== null);
+  // A database that rejects is an error, never a sign-out: the read, and the last use's write once the stored one is a minute old.
   h.failing.text = 'from visto_ai.ui_sessions';
-  assert.equal(await h.auth.sessionOf(cookie(id)), null);
+  await assert.rejects(h.auth.sessionOf(cookie(id)), /^Error: down /);
+  h.failing.text = 'update visto_ai.ui_sessions set last_used_at';
+  h.clock.now = at(62);
+  await assert.rejects(h.auth.sessionOf(cookie(id)), /^Error: down /);
   h.failing.text = null;
+  // A clock that gives no time reads no session, with no statement.
+  const statements = h.statements.length;
   h.clock.now = new Date(Number.NaN);
   assert.equal(await h.auth.sessionOf(cookie(id)), null);
+  assert.equal(h.statements.length, statements);
   h.clock.now = at(3);
   assert.equal((await h.auth.sessionOf(cookie(id)))?.login, 'octo-lead');
   await h.db.close();

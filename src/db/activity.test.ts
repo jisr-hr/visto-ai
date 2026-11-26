@@ -65,7 +65,7 @@ test('the activity reads running review jobs first, then the pending by when the
   await db.close();
 });
 
-test('the withdrawals waiting are the pending withdraw jobs with a start, with their code', async () => {
+test('the withdrawals waiting are the pending withdraw jobs with a start and the code of a failed try', async () => {
   const db = await testDb();
   const id = (await askWithdraw(db, pr(7), at(0), '99'))!;
   assert.deepEqual(await waitingWithdrawals(db, 50), []);
@@ -76,13 +76,18 @@ test('the withdrawals waiting are the pending withdraw jobs with a start, with t
   const review = await enqueue(db, pr(8));
   await claimJob(db, review, at(0));
   await requeueJob(db, review, at(30), at(1), false);
-  // One put back with no code, due earlier.
+  // One with a start and no code, as a crash's recovery leaves it or a superseded one hands it its starts: no try failed.
   const other = (await askWithdraw(db, pr(9, 'web'), at(0)))!;
   await claimJob(db, other, at(0));
   await requeueJob(db, other, at(20), at(1), false);
+  assert.deepEqual(await db.query('select starts, retry_code from visto_ai.jobs where id = $1', [other]), [{ starts: 1, retry_code: null }]);
+  // One more that failed, due earlier.
+  const failed = (await askWithdraw(db, pr(10, 'web'), at(0)))!;
+  await claimJob(db, failed, at(0));
+  await requeueJob(db, failed, at(40), at(1), false, 'github_502');
 
   assert.deepEqual(await waitingWithdrawals(db, 50), [
-    { owner: 'acme', repo: 'web', number: 9, retry_code: null, run_at: date(20) },
+    { owner: 'acme', repo: 'web', number: 10, retry_code: 'github_502', run_at: date(40) },
     { owner: 'acme', repo: 'shop', number: 7, retry_code: 'github_403', run_at: date(52) },
   ]);
   assert.equal((await waitingWithdrawals(db, 1)).length, 1);

@@ -1,3 +1,4 @@
+import { SIGN_IN_TIMEOUT_MS } from '../types.ts';
 import type { ForgeSignIn, SignedIn } from '../types.ts';
 import type { AppAuth } from './app-auth.ts';
 import { isObject, jsonOf } from './http.ts';
@@ -5,8 +6,8 @@ import { isObject, jsonOf } from './http.ts';
 const CODE = /^[A-Za-z0-9_-]{1,100}$/;
 const VERIFIER = /^[A-Za-z0-9_-]{43,128}$/;
 const LOGIN = /^[A-Za-z0-9-]{1,39}$/;
-/** How long each call to GitHub may take; a call cut off is github_network. */
-export const SIGN_IN_TIMEOUT_MS = 10_000;
+/** How long each call to GitHub may take; a call cut off is github_network. Kept beside ForgeSignIn, where the UI's team read takes it too. */
+export { SIGN_IN_TIMEOUT_MS };
 
 const bad = (): Error => new Error('github_bad_response');
 

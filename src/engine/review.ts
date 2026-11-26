@@ -195,7 +195,8 @@ async function oneCall(run: Run, files: FileContext[], firstFileNumber: number, 
 }
 
 // Never rejects: an unexpected error is recorded in `ctl`, which stops every worker from starting more work.
-// `onEnd` is called once the batch has ended, answered or given up, just before its outcome is returned, with no wait added; it must not throw.
+// `onEnd` is called once the batch has ended, answered or given up, just before its outcome is returned, with no wait added; one
+// that throws is ignored, so the bookkeeping never makes this reject.
 async function runBatch(run: Run, ctl: Control, batch: Batch, firstFileNumber: number, batchIndex: number, onEnd?: () => void): Promise<BatchOutcome> {
   const out: BatchOutcome = { answers: [], reviewed: [], failedFiles: [], failedCodes: [], usage: zeroUsage(), models: [], providers: [], audit: [] };
   try {
@@ -207,7 +208,11 @@ async function runBatch(run: Run, ctl: Control, batch: Batch, firstFileNumber: n
     }
     ctl.stopped = true;
   }
-  onEnd?.();
+  try {
+    onEnd?.();
+  } catch {
+    // ignored on purpose
+  }
   return out;
 }
 

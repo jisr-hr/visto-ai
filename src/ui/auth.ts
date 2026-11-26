@@ -5,6 +5,7 @@ import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import type { UiConfig } from '../config/load.ts';
 import type { Db } from '../db/types.ts';
 import { createSession, deleteExpired, deleteSession, liveStates, readSession, saveState, takeState } from '../db/ui-sessions.ts';
+import { SIGN_IN_TIMEOUT_MS } from '../forge/types.ts';
 import type { ForgeChecks, ForgeSignIn, SignedIn } from '../forge/types.ts';
 import { codeOf } from '../shell/codes.ts';
 import type { UiAnswer } from '../shell/http.ts';
@@ -58,6 +59,22 @@ function sameSecret(a: string, b: string): boolean {
   return x.length === y.length && timingSafeEqual(x, y);
 }
 
+/**
+ * The work, or a rejection with github_network once SIGN_IN_TIMEOUT_MS have passed, whichever comes first; the timer is cleared
+ * as soon as either settles, so none is left running.
+ */
+async function inTime<T>(work: Promise<T>): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const late = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => { reject(new Error('github_network')); }, SIGN_IN_TIMEOUT_MS);
+  });
+  try {
+    return await Promise.race([work, late]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /** A cookie the request sent, read as the object's own key only. */
 const own = (cookies: Record<string, string>, name: string): string | undefined => (Object.hasOwn(cookies, name) ? cookies[name] : undefined);
 
@@ -106,7 +123,8 @@ export function createAuth(deps: AuthDeps): Auth {
     if (installation === null) return refuse('unverified', 'not_installed');
     let member: boolean;
     try {
-      member = await deps.checks.isTeamMember(installation, team, login);
+      // The gate's adapter tries a call again and waits up to a minute each time: the sign-in waits for it 10 seconds at most.
+      member = await inTime(deps.checks.isTeamMember(installation, team, login));
     } catch (error) {
       return refuse('unverified', codeOf(error));
     }
@@ -186,13 +204,15 @@ export function createAuth(deps: AuthDeps): Auth {
       const id = own(cookies, SESSION_COOKIE);
       if (id === undefined || !SESSION_ID.test(id)) return null;
       const idHash = hashOf(id);
-      let row: { login: string; via: string } | null;
+      let now: string;
       try {
-        row = await readSession(deps.db, idHash, iso(deps.clock().getTime()));
+        now = iso(deps.clock().getTime());
       } catch {
-        // A session that cannot be read is none: signed out, never an error.
+        // A clock that gives no time reads no session.
         return null;
       }
+      // A database that rejects (the read or the last use's write) is an error for the route, never a sign-out.
+      const row = await readSession(deps.db, idHash, now);
       if (row === null || !stillHolds(row)) return null;
       return { login: row.login, idHash, csrf: tokenOf(id) };
     },

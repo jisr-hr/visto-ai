@@ -112,6 +112,8 @@ interface Options {
   uiYaml?: string;
   /** What the service is given for the UI; none when not given. */
   ui?: ServiceDeps['ui'];
+  /** `limits.queueConcurrency` in the deployment file; the config's default (2) when not given. */
+  queueConcurrency?: number;
 }
 interface Timer { ms: number; work: () => Promise<void>; cancelled: boolean }
 
@@ -214,12 +216,16 @@ async function harness(options: Options = {}) {
     published: () => published,
     start: async () => {
       const yaml = options.repositoriesYaml ?? (options.gate === true ? GATE_YAML : undefined);
+      // A second `limits:` would be a duplicate key too: the concurrency goes into the one there is.
+      const baseYaml = options.queueConcurrency === undefined
+        ? BASE_YAML
+        : BASE_YAML.replace('limits:\n  spendPerDay: 50\n', `limits:\n  spendPerDay: 50\n  queueConcurrency: ${options.queueConcurrency}\n`);
       // A second `app:` would be a duplicate key: the client id and secret go into the one there is.
       const base = options.uiYaml !== undefined
         ? serviceConfig(parseConfig(
-          BASE_YAML.replace('  webhookSecret: { env: S }\n', '  webhookSecret: { env: S }\n  clientId: Iv1.0123456789abcdef\n  clientSecret: { env: C }\n') + (yaml ?? '') + options.uiYaml,
+          baseYaml.replace('  webhookSecret: { env: S }\n', '  webhookSecret: { env: S }\n  clientId: Iv1.0123456789abcdef\n  clientSecret: { env: C }\n') + (yaml ?? '') + options.uiYaml,
           { ...ENV, C: 'client-secret-for-tests-only' }))
-        : yaml === undefined ? config : serviceConfig(parseConfig(BASE_YAML + yaml, ENV));
+        : yaml === undefined && options.queueConcurrency === undefined ? config : serviceConfig(parseConfig(baseYaml + (yaml ?? ''), ENV));
       const dry = options.dryRun ?? options.gate !== true;
       const chosen = options.toolChoice === undefined ? base : { ...base, model: { ...base.model, toolChoice: options.toolChoice } };
       const learned = options.learning === true ? { ...chosen, learning: true } : chosen;
@@ -2373,7 +2379,8 @@ test('a member of the team signs in through the service, and reads its mode, its
     orgInstallation: async (org) => (org === 'acme' ? '99' : null),
   };
   const files: UiFiles = new Map([['/ui/index.html', { body: Buffer.from(INDEX_PAGE), type: 'text/html; charset=utf-8' }]]);
-  const h = await harness({ uiYaml: TEAM_YAML, ui: { signIn, files }, member: true, holdReview: true });
+  // Three places for the reviews, two for the withdrawals: the two cannot be swapped unseen.
+  const h = await harness({ uiYaml: TEAM_YAML, ui: { signIn, files }, member: true, holdReview: true, queueConcurrency: 3 });
   await (await h.start()).settled;
   // A review the runner holds; then the day's spend reaches the limit, which pauses the reviews to come.
   await h.webhook(pr('opened'), 'd1');
@@ -2394,7 +2401,7 @@ test('a member of the team signs in through the service, and reads its mode, its
 
     const now = await h.request('GET', '/api/activity', Buffer.from(''), { cookie });
     const seen = JSON.parse(now.body) as UiActivity;
-    assert.deepEqual([now.status, seen.places, seen.paused], [200, { reviews: config.limits.queueConcurrency, withdrawals: 2 }, 'spend_limit']);
+    assert.deepEqual([now.status, seen.places, seen.paused], [200, { reviews: 3, withdrawals: 2 }, 'spend_limit']);
     assert.deepEqual(seen.jobs.map((j) => [j.repository, j.number, j.stage, j.startedAt, j.url]), [
       ['acme/shop', 7, 'preparing', at(0), 'https://git.example.test/acme/shop/pull/7'],
     ]);

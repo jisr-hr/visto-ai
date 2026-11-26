@@ -120,6 +120,22 @@ test('a running job this service does not hold reads as stopped, and a pending o
   await db.close();
 });
 
+test('the requester of a /review or a /done is shown, and never that of a re-run of the check', async () => {
+  const db = await testDb();
+  const reasons = ['command', 'command_retry', 'done', 'done_retry', 'rerun', 'rerun_retry'];
+  for (const [i, reason] of reasons.entries()) {
+    await enqueue(db, pr(i + 1), { reason, headSha: '', runAt: at(-1), now: at(-1), trigger: 'manual', requestedBy: 'octo-dev' });
+  }
+  const answer = await activity(deps(db));
+  assert.deepEqual(answer.jobs.map((j) => [j.number, j.askedBy]), [
+    [1, { reason: 'command', login: 'octo-dev' }], [2, { reason: 'command_retry', login: 'octo-dev' }],
+    [3, { reason: 'done', login: 'octo-dev' }], [4, { reason: 'done_retry', login: 'octo-dev' }],
+    [5, { reason: 'rerun', login: null }], [6, { reason: 'rerun_retry', login: null }],
+  ]);
+  assert.ok(!JSON.stringify(answer.jobs.slice(4)).includes('octo-dev'));
+  await db.close();
+});
+
 test('the pause is told only as spend_limit or model_error', async () => {
   const db = await testDb();
   const id = (await askWithdraw(db, pr(10), at(-20), '99'))!;

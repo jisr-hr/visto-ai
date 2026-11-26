@@ -202,6 +202,8 @@ export interface ForgeApprovals {
   dismissReview(ref: PullRequestRef, installation: string, reviewId: string, message: string): Promise<void>;
 }
 export interface SignedIn { login: string; isBot: boolean }
+/** How long each of sign-in's calls to GitHub may take, the UI's read of a team membership included; a call cut off is github_network. */
+export const SIGN_IN_TIMEOUT_MS = 10_000;
 export interface ForgeSignIn {
   /** The page where a person approves the sign-in; `challenge` is the base64url SHA-256 of the PKCE verifier. */
   authorizeUrl(state: string, challenge: string, redirectUri: string): string;

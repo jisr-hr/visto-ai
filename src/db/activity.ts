@@ -22,11 +22,14 @@ export async function activityJobs(db: Db, limit: number): Promise<JobRow[]> {
     [limit]);
 }
 
-/** The withdraw jobs waiting to try again (pending, with at least one start), with their retry code; at most `limit`. */
+/**
+ * The withdraw jobs waiting to try again after a failed try (pending, with at least one start and a retry code), with that code; at
+ * most `limit`. One with starts and no code (a crash's recovery, or starts handed on by a superseded one) tried nothing that failed.
+ */
 export async function waitingWithdrawals(db: Db, limit: number): Promise<Array<{ owner: string; repo: string; number: number; retry_code: string | null; run_at: Date }>> {
   return db.query(
     `select owner, repo, number, retry_code, run_at from visto_ai.jobs
-     where kind = 'withdraw' and status = 'pending' and starts > 0
+     where kind = 'withdraw' and status = 'pending' and starts > 0 and retry_code is not null
      order by run_at, id limit $1`,
     [limit]);
 }

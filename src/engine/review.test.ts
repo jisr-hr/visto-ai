@@ -931,6 +931,7 @@ test('a batch that ends adds no turn before its worker takes the next, told or n
     told.push(await sent(lag, () => {}));
   }
   // As the engine sent them before it told any progress (measured on that release): from 3 turns on, the stop comes too late.
+  // An await added on only one side of a model call (src/engine/model/call.ts, `attempt`) also moves the step; the table is then re-measured against the engine before progress existed.
   assert.deepEqual(plain, [2, 2, 2, 3, 3, 3, 3, 3, 3, 3]);
   assert.deepEqual(told, plain);
 });

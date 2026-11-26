@@ -3215,6 +3215,33 @@ test('with stages on, preparing is the first statement the job runs: a job dropp
   assert.deepEqual(await db.query('select stage from visto_ai.jobs where id = $1', [h.job.id]), [{ stage: 'preparing' }]);
 });
 
+test('with stages on, the job waits for preparing to be written before its next step', async () => {
+  const h = await harness();
+  h.deps.stages = true;
+  // The first stage's write is held for a while; every statement sent meanwhile is recorded.
+  const order: string[] = [];
+  const inner = h.deps.db;
+  const held = (text: string): string => (text.includes(STAGE_WRITE) ? 'stage' : 'other');
+  const watched = (query: Db['query']): Db['query'] => async <Row>(text: string, values?: unknown[]): Promise<Row[]> => {
+    order.push(`${held(text)} sent`);
+    if (held(text) === 'stage' && order.filter((o) => o === 'stage sent').length === 1) {
+      await new Promise((resolve) => { setTimeout(resolve, 20); });
+    }
+    const rows = await query<Row>(text, values);
+    if (held(text) === 'stage') order.push('stage written');
+    return rows;
+  };
+  h.deps.db = {
+    query: watched((text, values) => inner.query(text, values)),
+    script: (sql) => inner.script(sql),
+    close: () => inner.close(),
+    transaction: (work) => inner.transaction((tx) => work({ ...tx, query: watched((text, values) => tx.query(text, values)) })),
+  };
+  await runReviewJob(h.job, h.deps);
+  assert.deepEqual(order.slice(0, 3), ['stage sent', 'stage written', 'other sent']);
+  assert.equal((await getJob(db, h.job.id))?.outcome, 'reviewed');
+});
+
 test('with stages on, a later start whose time of posting cannot be written posts nothing and writes no publishing stage', async () => {
   const before = await live({ posts: [new Error('github_502')] });
   await runReviewJob(before.job, before.deps);

@@ -33,6 +33,8 @@ const NUL = String.fromCharCode(0);
 const OUTCOMES: ReadonlyMap<string, string[]> = new Map([
   ['approved', ['approved']], ['needs_person', ['needs_person', 'audit']], ['failed', ['failed']],
 ]);
+/** The reasons whose requester the page shows, a /review's or a /done's (call 13); a re-run's, which GitHub decided, is not. */
+const REQUESTER_SHOWN: ReadonlySet<string> = new Set(['command', 'command_retry', 'done', 'done_retry']);
 /** The stages a running review job writes on its row (call 14). */
 const RUNNING_STAGES: ReadonlySet<string> = new Set(['preparing', 'reviewing', 'judging_threads', 'publishing']);
 
@@ -77,7 +79,7 @@ function jobOf(deps: ApiDeps, row: JobRow, now: number): ActivityJob {
     job: row.id, repository: `${row.owner}/${row.repo}`, number: row.number, title: row.title, url: deps.pullRequestUrl(ref),
     head: headOf(row), stage: place.stage, batch: place.batch, batches: place.batches, threadsDue: place.threadsDue,
     startedAt: running && row.started_at !== null ? row.started_at.toISOString() : null, runAt: row.run_at.toISOString(),
-    askedBy: { reason: row.reason, login: row.trigger === 'manual' ? row.requested_by : null },
+    askedBy: { reason: row.reason, login: REQUESTER_SHOWN.has(row.reason) ? row.requested_by : null },
   };
 }
 

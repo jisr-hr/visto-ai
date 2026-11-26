@@ -1134,6 +1134,15 @@ test('an account that is not a login, and a team that is not org/slug, are refus
   assert.equal(parseConfig(`${UI_APP}ui: { accounts: [${logins(99)}, ${'a'.repeat(39)}], publicUrl: https://visto.example.test }\n`, UI_ENV).ui?.accounts.length, 100);
 });
 
+test('a client id that is not one is refused with its own issue, which quotes no value', () => {
+  const ISSUE = 'app.clientId: must be 1 to 100 letters, digits, dots, hyphens or underscores';
+  for (const written of ['not a client id', '', 'x'.repeat(101), 'Iv1.0123/456']) {
+    const yaml = `${withAppKeys(`clientId: '${written}', clientSecret: { env: APP_CLIENT_SECRET }`)}ui: { accounts: [octo-lead], publicUrl: https://visto.example.test }\n`;
+    assert.deepEqual(uiIssuesOf(yaml, UI_ENV), [ISSUE], written);
+  }
+  assert.equal(parseConfig(`${UI_APP}ui: { accounts: [octo-lead], publicUrl: https://visto.example.test }\n`, UI_ENV).ui?.clientId, 'Iv1.0123456789abcdef');
+});
+
 test('a client secret written is resolved whatever ui says, and refused when its variable is not set', () => {
   const NOT_SET = ['app.clientSecret: environment variable APP_CLIENT_SECRET is not set'];
   const secretOnly = withAppKeys('clientSecret: { env: APP_CLIENT_SECRET }');

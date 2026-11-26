@@ -36,13 +36,14 @@ export async function saveState(db: Db, s: { stateHash: string; verifierHash: st
     [s.stateHash, s.verifierHash, s.expiresAt]);
 }
 
-/** Deletes the state; its verifier's hash when it was there and had not expired, else null. */
+/** Deletes the state; its verifier's hash when it was there and had not expired, else null. A `now` that cannot be read rejects first, taking nothing. */
 export async function takeState(db: Db, stateHash: string, now: string): Promise<{ verifierHash: string } | null> {
+  const at = Date.parse(now);
+  if (Number.isNaN(at)) throw new Error('bad_time');
   const rows = await db.query<{ verifier_hash: string; expires_at: Date }>(
     `delete from visto_ai.ui_states where state_hash = $1 returning verifier_hash, expires_at`, [stateHash]);
   const r = rows[0];
-  // A time that cannot be read is no time after the expiry: the state answers null.
-  if (r === undefined || !(r.expires_at.getTime() > Date.parse(now))) return null;
+  if (r === undefined || !(r.expires_at.getTime() > at)) return null;
   return { verifierHash: r.verifier_hash };
 }
 

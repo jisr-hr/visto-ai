@@ -223,6 +223,20 @@ test('a handler that fails is internal_error, logged with its route and short co
   await h.db.close();
 });
 
+test('a session read that rejects is internal_error, not a sign-out, logged once with its route and no text of the error', async () => {
+  const h = await harness();
+  const { cookie } = await h.signIn();
+  const before = h.logs.length;
+  h.failing.error = new Error('connect failed for postgres://u:p@db.example.test/d');
+  h.failing.text = 'select login, via, last_used_at from visto_ai.ui_sessions';
+  assert.deepEqual(await h.send('GET', '/api/me', { cookie }), error(500, 'internal_error'));
+  assert.deepEqual(h.logs.slice(before), [{ event: 'ui_failed', route: 'me', reason: 'internal_error' }]);
+  assert.ok(!JSON.stringify(h.logs).includes('postgres'));
+  h.failing.text = null;
+  assert.equal((await h.send('GET', '/api/me', { cookie })).status, 200);
+  await h.db.close();
+});
+
 test('a path the table of methods knows but no case answers is not found, and reads nothing, even signed in', async () => {
   const h = await harness();
   const { cookie } = await h.signIn();

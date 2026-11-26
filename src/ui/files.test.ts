@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileAnswer, loadUiFiles } from './files.ts';
@@ -97,6 +97,24 @@ test('two links that loop back into the built folder are never entered, and the 
     assert.ok(took < 2000, `took ${took} ms`);
     assert.deepEqual([...files.keys()].sort(), ['/ui/assets/index-a1.js', '/ui/index.html', '/ui/real/notes.txt']);
   } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// Root reads a folder whatever its mode, so the refusal cannot be made there.
+test('a folder below the top that cannot be read gives no files at all', { skip: process.getuid?.() === 0 }, () => {
+  const root = mkdtempSync(join(tmpdir(), 'visto-ai-ui-files-'));
+  const dist = join(root, 'dist');
+  const sub = join(dist, 'assets');
+  try {
+    mkdirSync(sub, { recursive: true });
+    writeFileSync(join(dist, 'index.html'), '<!doctype html>');
+    writeFileSync(join(sub, 'index-a1.js'), 'export {};');
+    assert.deepEqual([...loadUiFiles(dist).keys()].sort(), ['/ui/assets/index-a1.js', '/ui/index.html']);
+    chmodSync(sub, 0);
+    assert.equal(loadUiFiles(dist).size, 0);
+  } finally {
+    if (existsSync(sub)) chmodSync(sub, 0o755);
     rmSync(root, { recursive: true, force: true });
   }
 });

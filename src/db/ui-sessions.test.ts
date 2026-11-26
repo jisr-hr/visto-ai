@@ -32,6 +32,15 @@ test('a session is read with its way in while it has not expired, and its use is
   assert.equal(await readSession(db, 'h-c', at(30)), null);
   await db.close();
 });
+test('a session read at a clock gone back writes no last use', async () => {
+  const db = await testDb();
+  await createSession(db, { idHash: 'h-a', login: 'octo-lead', via: 'account', at: at(120), expiresAt: at(43320) });
+  assert.deepEqual(await readSession(db, 'h-a', at(30)), { login: 'octo-lead', via: 'account' });
+  assert.equal(await lastUsed(db, 'h-a'), at(120));
+  assert.deepEqual(await readSession(db, 'h-a', at(-3600)), { login: 'octo-lead', via: 'account' });
+  assert.equal(await lastUsed(db, 'h-a'), at(120));
+  await db.close();
+});
 test('a deleted or expired session is not read', async () => {
   const db = await testDb();
   await createSession(db, { idHash: 'h-a', login: 'octo-lead', via: 'account', at: at(0), expiresAt: at(43200) });
@@ -54,6 +63,14 @@ test('a state is taken once with its verifier hash, and an expired one is taken 
   assert.equal(await takeState(db, 'h-s2', at(600)), null);
   assert.equal(await count(db, 'ui_states'), 0);
   assert.equal(await takeState(db, 'h-none', at(10)), null);
+  await db.close();
+});
+test('a state asked for at a time that cannot be read rejects, and is not taken', async () => {
+  const db = await testDb();
+  await saveState(db, { stateHash: 'h-s', verifierHash: 'h-v', expiresAt: at(600) });
+  for (const now of ['not a time', '']) await assert.rejects(takeState(db, 'h-s', now), /^Error: bad_time$/, now);
+  assert.equal(await count(db, 'ui_states'), 1);
+  assert.deepEqual(await takeState(db, 'h-s', at(10)), { verifierHash: 'h-v' });
   await db.close();
 });
 test('live states are counted, and expired sessions and states are deleted while the rest stays', async () => {
