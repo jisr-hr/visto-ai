@@ -194,16 +194,16 @@ test('a wrong try is counted, the fifth starts the wait it is given and counts a
   await wrongTry(db, id, at(1000));
   await wrongTry(db, id, at(1100));
   assert.deepEqual(await state(), [2, at(900)]);
-  assert.equal(await rightTry(db, id, other), false);
+  assert.equal(await rightTry(db, id, other, at(900)), false);
   assert.deepEqual(await state(), [2, at(900)]);
-  assert.equal(await rightTry(db, id, hash), true);
+  assert.equal(await rightTry(db, id, hash, at(900)), true);
   assert.deepEqual(await state(), [0, null]);
 
   const lead = await made(db, 'github', 'octo-lead', 'admin', null);
   for (let i = 1; i <= 5; i += 1) await wrongTry(db, lead.id, at(900));
   const after = await accountById(db, lead.id);
   assert.deepEqual([after!.failed_tries, after!.wait_until], [0, null]);
-  assert.equal(await rightTry(db, lead.id, hash), false);
+  assert.equal(await rightTry(db, lead.id, hash, at(0)), false);
   await db.close();
 });
 
@@ -212,20 +212,43 @@ test('a password is set only over the hash that was verified', async () => {
   const [h1, h2, h3] = [await hashOf('a long password of mine'), await hashOf('another long password'), await hashOf('a third long password')];
   const { id } = await made(db, 'password', 'octo-new', 'viewer', h1, at(259200));
   await wrongTry(db, id, at(900));
-  assert.equal(await setOwnPassword(db, id, h2, h1), true);
+  assert.equal(await setOwnPassword(db, id, h2, h1, at(0)), true);
   const set = await accountById(db, id);
   assert.deepEqual([set!.password_hash, set!.one_time_until, set!.failed_tries], [h2, null, 0]);
-  assert.equal(await setOwnPassword(db, id, h3, h1), false);
+  assert.equal(await setOwnPassword(db, id, h3, h1, at(0)), false);
   assert.equal((await accountById(db, id))!.password_hash, h2);
 
   // A one-time password set over it is the row's hash from then on, its end written, its count and wait cleared.
   for (let i = 1; i <= 5; i += 1) await wrongTry(db, id, at(900));
   const reset = await setOneTime(db, id, h3, at(259200));
   assert.deepEqual([reset!.password_hash, iso(reset!.one_time_until), reset!.failed_tries, reset!.wait_until], [h3, at(259200), 0, null]);
-  assert.equal(await setOwnPassword(db, id, h1, h2), false);
+  assert.equal(await setOwnPassword(db, id, h1, h2, at(0)), false);
   const lead = await made(db, 'github', 'octo-lead', 'viewer', null);
   assert.equal(await setOneTime(db, lead.id, h3, at(259200)), null);
-  assert.equal(await setOwnPassword(db, lead.id, h3, h1), false);
+  assert.equal(await setOwnPassword(db, lead.id, h3, h1, at(0)), false);
+  await db.close();
+});
+
+test('a right try and a chosen password write nothing while the account waits by the clock they are given, and both hold from its end', async () => {
+  const db = await testDb();
+  const [h1, h2] = [await hashOf('a long password of mine'), await hashOf('another long password')];
+  const { id } = await made(db, 'password', 'octo-new', 'viewer', h1, at(259200));
+  const state = async (): Promise<[string | null, string | null, number, string | null]> => {
+    const row = await accountById(db, id);
+    return [row!.password_hash, iso(row!.one_time_until), row!.failed_tries, iso(row!.wait_until)];
+  };
+  for (let i = 1; i <= 5; i += 1) await wrongTry(db, id, at(900));
+  assert.equal(await rightTry(db, id, h1, at(899)), false);
+  assert.equal(await setOwnPassword(db, id, h2, h1, at(899)), false);
+  assert.deepEqual(await state(), [h1, at(259200), 0, at(900)]);
+  assert.equal(await rightTry(db, id, h1, at(900)), true);
+  assert.deepEqual(await state(), [h1, at(259200), 0, null]);
+
+  for (let i = 1; i <= 5; i += 1) await wrongTry(db, id, at(1800));
+  assert.equal(await setOwnPassword(db, id, h2, h1, at(1799)), false);
+  assert.deepEqual(await state(), [h1, at(259200), 0, at(1800)]);
+  assert.equal(await setOwnPassword(db, id, h2, h1, at(1800)), true);
+  assert.deepEqual(await state(), [h2, null, 0, null]);
   await db.close();
 });
 

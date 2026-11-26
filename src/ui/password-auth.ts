@@ -1,8 +1,9 @@
 // Password sign-in, the first password chosen after a one-time password, and changing one's own password (the password design
 // 4.3, 4.5 and 4.8; calls 13 to 17 and 24). Every refusal of a sign-in reads alike and runs exactly one verify: the account's
 // hash for a wrong password, the hash made at start for the rest. A session is made only inside the transaction whose first
-// statement is guarded by the hash that was verified, so a reset or a change committed meanwhile wins. No answer, log line or
-// error holds a name, a password, a one-time password, a hash or a session id, but the cookie the sign-in itself sets.
+// statement is guarded by the hash that was verified and by the wait at the clock read, so a reset, a change or a wait begun
+// meanwhile wins. No answer, log line or error holds a name, a password, a one-time password, a hash or a session id, but the
+// cookie the sign-in itself sets.
 import { randomBytes } from 'node:crypto';
 import type { Db } from '../db/types.ts';
 import { accountById, passwordAccount, recordChange, rightTry, setOwnPassword, signedInAt, wrongTry } from '../db/ui-accounts.ts';
@@ -117,13 +118,13 @@ export function createPasswordAuth(deps: PasswordAuthDeps): PasswordAuth {
         return refused();
       }
       if (row.one_time_until !== null) {
-        if (!(await rightTry(deps.db, row.id, hash))) return refused();
+        if (!(await rightTry(deps.db, row.id, hash, iso(now)))) return refused();
         if (row.one_time_until.getTime() <= now) return ending(json(401, { error: 'expired' }), 'expired');
         return ending(json(200, step('choose_password')), 'choose');
       }
-      // Call 17: the guarded right try first; a hash changed meanwhile writes nothing and makes no session.
+      // Call 17: the guarded right try first; a hash changed, or a wait begun, meanwhile writes nothing and makes no session.
       const id = await deps.db.transaction(async (tx) => {
-        if (!(await rightTry(tx, row.id, hash))) return null;
+        if (!(await rightTry(tx, row.id, hash, iso(now)))) return null;
         return openSession(tx, row.id, name, now);
       });
       return id === null ? refused() : signedIn(id);
@@ -148,13 +149,14 @@ export function createPasswordAuth(deps: PasswordAuthDeps): PasswordAuth {
         await wrongTry(deps.db, row.id, iso(now + WAIT_MS));
         return refused();
       }
-      if (!(await rightTry(deps.db, row.id, hash))) return refused();
+      if (!(await rightTry(deps.db, row.id, hash, iso(now)))) return refused();
       if (row.one_time_until === null) return ending(json(409, { error: 'already_chosen' }), 'already_chosen');
       if (row.one_time_until.getTime() <= now) return ending(json(401, { error: 'expired' }), 'expired');
-      // The new hash outside any transaction; then the first password only over the one-time password's hash (call 17).
+      // The new hash outside any transaction; then the first password only over the one-time password's hash, and while the
+      // account does not wait (call 17).
       const chosen = await hashPassword(given.password, cost);
       const id = await deps.db.transaction(async (tx) => {
-        if (!(await setOwnPassword(tx, row.id, chosen, hash))) return null;
+        if (!(await setOwnPassword(tx, row.id, chosen, hash, iso(now)))) return null;
         await recordChange(tx, { at: iso(now), by: 'password', byName: name, change: 'password_changed', kind: 'password', name, role: row.role });
         return openSession(tx, row.id, name, now);
       });
@@ -197,10 +199,10 @@ export function createPasswordAuth(deps: PasswordAuthDeps): PasswordAuth {
         await wrongTry(deps.db, row.id, iso(now + WAIT_MS));
         return wrongPassword();
       }
-      if (!(await rightTry(deps.db, row.id, hash))) return wrongPassword();
+      if (!(await rightTry(deps.db, row.id, hash, iso(now)))) return wrongPassword();
       const chosen = await hashPassword(given.password, cost);
       const changed = await deps.db.transaction(async (tx) => {
-        if (!(await setOwnPassword(tx, row.id, chosen, hash))) return false;
+        if (!(await setOwnPassword(tx, row.id, chosen, hash, iso(now)))) return false;
         await deleteSessionsOf(tx, row.id, session.idHash);
         await recordChange(tx, {
           at: iso(now), by: 'password', byName: row.name, change: 'password_changed', kind: 'password', name: row.name, role: row.role,

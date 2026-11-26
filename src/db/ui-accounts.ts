@@ -85,12 +85,15 @@ export function setOneTime(db: Db, id: number, hash: string, until: string): Pro
     [id, hash, until]);
 }
 
-/** Sets a password chosen by its account, only over the hash that was verified; false when the row's hash is another now. */
-export async function setOwnPassword(db: Db, id: number, hash: string, verified: string): Promise<boolean> {
+/**
+ * Sets a password chosen by its account, only over the hash that was verified and while the account does not wait at `now` (the
+ * service's clock); false when the row's hash is another now, or a wait began after the verify, and nothing is written.
+ */
+export async function setOwnPassword(db: Db, id: number, hash: string, verified: string, now: string): Promise<boolean> {
   const rows = await db.query(
     `update visto_ai.ui_accounts set password_hash = $2, one_time_until = null, failed_tries = 0, wait_until = null
-     where id = $1 and kind = 'password' and password_hash = $3 returning id`,
-    [id, hash, verified]);
+     where id = $1 and kind = 'password' and password_hash = $3 and (wait_until is null or wait_until <= $4::timestamptz) returning id`,
+    [id, hash, verified, now]);
   return rows.length === 1;
 }
 
@@ -109,10 +112,14 @@ export async function wrongTry(db: Db, id: number, waitUntil: string): Promise<v
     [id, waitUntil]);
 }
 
-/** Clears the count and the wait only while the row's hash is still `verified` (call 17); false when it is another now, and nothing is written. */
-export async function rightTry(db: Db, id: number, verified: string): Promise<boolean> {
+/**
+ * Clears the count and the wait only while the row's hash is still `verified` and the account does not wait at `now` (call 17; the
+ * service's clock); false when it is another now, or a wait began after the verify, and nothing is written.
+ */
+export async function rightTry(db: Db, id: number, verified: string, now: string): Promise<boolean> {
   const rows = await db.query(
-    'update visto_ai.ui_accounts set failed_tries = 0, wait_until = null where id = $1 and password_hash = $2 returning id', [id, verified]);
+    'update visto_ai.ui_accounts set failed_tries = 0, wait_until = null where id = $1 and password_hash = $2 and (wait_until is null or wait_until <= $3::timestamptz) returning id',
+    [id, verified, now]);
   return rows.length === 1;
 }
 

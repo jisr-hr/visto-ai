@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { testDb } from '../db/testing.ts';
 import type { Db } from '../db/types.ts';
-import { insertAccount, setOneTime } from '../db/ui-accounts.ts';
+import { insertAccount, setOneTime, wrongTry } from '../db/ui-accounts.ts';
 import type { AccountKind, Role } from '../db/ui-accounts.ts';
 import { createSession, deleteSessionsOf, readSession } from '../db/ui-sessions.ts';
 import type { UiAnswer } from '../shell/http.ts';
@@ -75,6 +75,8 @@ interface Harness {
   verified: number[];
   /** Called once, inside the next verify, before it resolves. */
   during: (() => Promise<unknown>) | null;
+  /** Called once, when the password sign-in begins its next transaction, before the transaction's first statement. */
+  atTransaction: (() => Promise<unknown>) | null;
   clock: { now: Date };
   auth: PasswordAuth;
   /** Another object on the same database, clock, log and verify. */
@@ -101,7 +103,7 @@ async function harness(): Promise<Harness> {
   const db = await testDb();
   // The object the test reads and sets: the spy and the verify below read it as the test leaves it.
   const h: Omit<Harness, 'auth' | 'another'> = {
-    db, logs: [], statements: [], failing: { text: null }, verifies: [], verified: [], during: null, clock: { now: at(0) },
+    db, logs: [], statements: [], failing: { text: null }, verifies: [], verified: [], during: null, atTransaction: null, clock: { now: at(0) },
   };
   const spy = (inner: Db, tx: boolean): Db => ({
     query: (text, params) => {
@@ -111,7 +113,15 @@ async function harness(): Promise<Harness> {
     },
     script: (sql) => inner.script(sql),
     close: () => inner.close(),
-    transaction: (work) => inner.transaction((t) => work(spy(t, true))),
+    // PGlite runs one transaction at a time: what the test commits here is committed before this one begins.
+    transaction: async (work) => {
+      const first = h.atTransaction;
+      if (first !== null) {
+        h.atTransaction = null;
+        await first();
+      }
+      return inner.transaction((t) => work(spy(t, true)));
+    },
   });
   const verify = async (password: string, stored: string): Promise<boolean> => {
     h.verifies.push([password, stored]);
@@ -167,6 +177,9 @@ const reset = (db: Db, id: number, hash: string): Promise<void> => db.transactio
   await deleteSessionsOf(tx, id, null);
 });
 const RIGHT_TRY = 'update visto_ai.ui_accounts set failed_tries = 0, wait_until = null where id = $1 and password_hash = $2';
+const SET_OWN = 'update visto_ai.ui_accounts set password_hash = $2, one_time_until = null, failed_tries = 0, wait_until = null';
+/** A statement as [the guarded write it is, or its text; whether it ran inside a transaction]. */
+const guarded = (s: { text: string; tx: boolean }): [string, boolean] => [[RIGHT_TRY, SET_OWN].find((p) => s.text.startsWith(p)) ?? s.text, s.tx];
 
 test('a right password makes a session of twelve hours with the cookie of GitHub sign-in, and writes the last sign-in', async () => {
   const h = await harness();
@@ -221,6 +234,21 @@ test('a wrong password, a name that does not exist, a name of another shape and 
   // Only the wrong password is counted: the account that waits is not tried.
   assert.deepEqual([(await rowOf(h.db, admin.id)).failed_tries, (await rowOf(h.db, viewer.id)).failed_tries], [1, 0]);
   assert.deepEqual(await sessions(h.db), []);
+
+  // The same refusals at the first password: one verify each, of the one-time password sent, against the hash made at start.
+  const firsts: Array<Record<string, unknown>> = [
+    { name: 'octo-nobody', oneTimePassword: ONE_TIME, password: MINE },
+    { name: 'octo-lead', oneTimePassword: ONE_TIME, password: MINE },
+    { name: 'octo-viewer', oneTimePassword: ANOTHER, password: THIRD },
+    { name: 'octo admin!', oneTimePassword: ONE_TIME, password: MINE },
+  ];
+  for (const body of firsts) {
+    assert.deepEqual(await h.auth.firstPassword(body), REFUSED, JSON.stringify(body));
+    assert.deepEqual(h.verifies.splice(0), [[body.oneTimePassword, starts[0]]], JSON.stringify(body));
+  }
+  assert.deepEqual(h.logs, [...tries, ...firsts].map(() => signin('refused')));
+  assert.deepEqual([(await rowOf(h.db, admin.id)).failed_tries, (await rowOf(h.db, viewer.id)).failed_tries], [1, 0]);
+  assert.deepEqual([await sessions(h.db), await changesOf(h.db)], [[], []]);
   await h.db.close();
 });
 
@@ -251,6 +279,24 @@ test('five wrong passwords in a row make the account wait 15 minutes by the cloc
   await h.db.close();
 });
 
+test('five wrong one-time passwords at the first password, or five wrong current passwords at a change, make the account wait 15 minutes by the clock', async () => {
+  const h = await harness();
+  const fresh = await account(h.db, 'octo-new', 'viewer', ONE_TIME, iso(259200));
+  const admin = await account(h.db, 'octo-admin', 'admin', MINE);
+  const s = session(A, admin.id, 'octo-admin', 'admin');
+  h.clock.now = at(100);
+  for (let i = 0; i < 5; i += 1) {
+    assert.deepEqual(await h.auth.firstPassword({ name: 'octo-new', oneTimePassword: ONE_TIME_2, password: MINE }), REFUSED);
+    assert.deepEqual(await h.auth.change(s, { current: WRONG, password: ANOTHER }), WRONG_PASSWORD);
+  }
+  for (const id of [fresh.id, admin.id]) {
+    const row = await rowOf(h.db, id);
+    assert.deepEqual([row.failed_tries, row.wait_until], [0, iso(1000)]);
+  }
+  assert.deepEqual(h.logs, Array.from({ length: 5 }, () => signin('refused')));
+  await h.db.close();
+});
+
 test('a right one-time password asks for a password and makes no session; an expired one is refused as expired', async () => {
   const h = await harness();
   const fresh = await account(h.db, 'octo-new', 'viewer', ONE_TIME, iso(259200));
@@ -270,6 +316,13 @@ test('a right one-time password asks for a password and makes no session; an exp
   assert.deepEqual((await rowOf(h.db, fresh.id)).one_time_until, iso(259200));
   assert.deepEqual(await sessions(h.db), []);
   assert.deepEqual(h.logs, [signin('refused'), signin('choose'), signin('choose'), signin('expired'), signin('refused')]);
+
+  // The first password at the same time, exactly 72 hours after the one-time password was made: expired too, and nothing is made.
+  assert.deepEqual(await h.auth.firstPassword({ name: 'octo-new', oneTimePassword: ONE_TIME, password: MINE }), EXPIRED);
+  const row = await rowOf(h.db, fresh.id);
+  assert.deepEqual([row.password_hash, row.one_time_until, row.last_sign_in_at], [fresh.hash, iso(259200), null]);
+  assert.deepEqual([await sessions(h.db), await changesOf(h.db)], [[], []]);
+  assert.deepEqual(h.logs, [signin('refused'), signin('choose'), signin('choose'), signin('expired'), signin('refused'), signin('expired')]);
   await h.db.close();
 });
 
@@ -344,6 +397,18 @@ test('a first password whose one-time password was reset meanwhile is refused', 
   assert.deepEqual(h.statements.slice(h.verified.at(-1)).map((s) => s.text.startsWith(RIGHT_TRY)), [true]);
   assert.deepEqual([await sessions(h.db), await changesOf(h.db)], [[], []]);
   assert.deepEqual(h.logs, [signin('refused')]);
+
+  // A reset committed after the right try, while the new hash is made and before the guarded write: refused, and nothing written.
+  const third = await hashPassword(ONE_TIME, COST);
+  h.atTransaction = () => reset(h.db, fresh.id, third);
+  assert.deepEqual(await h.auth.firstPassword({ name: 'octo-new', oneTimePassword: ONE_TIME_2, password: MINE }), REFUSED);
+  assert.equal(h.atTransaction, null);
+  assert.deepEqual(h.verifies.at(-1), [ONE_TIME_2, other]);
+  const again = await rowOf(h.db, fresh.id);
+  assert.deepEqual([again.password_hash, again.one_time_until, again.last_sign_in_at], [third, iso(259200), null]);
+  assert.deepEqual(h.statements.slice(h.verified.at(-1)).map(guarded), [[RIGHT_TRY, false], [SET_OWN, true]]);
+  assert.deepEqual([await sessions(h.db), await changesOf(h.db)], [[], []]);
+  assert.deepEqual(h.logs, [signin('refused'), signin('refused')]);
   await h.db.close();
 });
 
@@ -376,6 +441,93 @@ test("a change of one's own password while another sign-in verifies makes no ses
   assert.deepEqual(await sessions(h.db), [sessionRow(A, admin.id, 'octo-admin')]);
   assert.equal(await verifyPassword(ANOTHER, (await rowOf(h.db, admin.id)).password_hash), true);
   assert.deepEqual(h.logs, [signin('ok'), changed('admin'), signin('refused')]);
+  await h.db.close();
+});
+
+test('a right password whose verify began before the wait makes no session, and the wait holds', async () => {
+  const h = await harness();
+  const admin = await account(h.db, 'octo-admin', 'admin', MINE);
+  for (let i = 0; i < 4; i += 1) assert.deepEqual(await h.auth.signIn({ name: 'octo-admin', password: WRONG }), REFUSED);
+  h.verifies.length = 0;
+  // The fifth wrong one, sent at the same time, is verified and counted while the right one verifies.
+  let fifth: UiAnswer | null = null;
+  h.during = async () => { fifth = await h.auth.signIn({ name: 'octo-admin', password: WRONG }); };
+  const refused = await h.auth.signIn({ name: 'octo-admin', password: MINE });
+  assert.deepEqual([refused, fifth], [REFUSED, REFUSED]);
+  assert.equal(refused.headers['set-cookie'], undefined);
+  // Both read the row before the wait began, and verified against its hash.
+  assert.deepEqual(h.verifies, [[MINE, admin.hash], [WRONG, admin.hash]]);
+  const row = await rowOf(h.db, admin.id);
+  assert.deepEqual([row.failed_tries, row.wait_until, row.last_sign_in_at], [0, iso(900), null]);
+  assert.deepEqual(await sessions(h.db), []);
+  // After the right one's verify, only its guarded right try ran, inside the transaction, and it wrote nothing.
+  assert.deepEqual(h.statements.slice(h.verified.at(-1)).map(guarded), [[RIGHT_TRY, true]]);
+  assert.deepEqual(h.logs, Array.from({ length: 6 }, () => signin('refused')));
+  await h.db.close();
+});
+
+test('a first password whose verify began before the wait, or whose wait began before its guarded write, is refused', async () => {
+  const h = await harness();
+  const fresh = await account(h.db, 'octo-new', 'viewer', ONE_TIME, iso(259200));
+  const wrong = { name: 'octo-new', oneTimePassword: ONE_TIME_2, password: MINE };
+  const right = { name: 'octo-new', oneTimePassword: ONE_TIME, password: MINE };
+  for (let i = 0; i < 4; i += 1) assert.deepEqual(await h.auth.firstPassword(wrong), REFUSED);
+  h.verifies.length = 0;
+  let fifth: UiAnswer | null = null;
+  h.during = async () => { fifth = await h.auth.firstPassword(wrong); };
+  assert.deepEqual(await h.auth.firstPassword(right), REFUSED);
+  assert.deepEqual(fifth, REFUSED);
+  assert.deepEqual(h.verifies.splice(0), [[ONE_TIME, fresh.hash], [ONE_TIME_2, fresh.hash]]);
+  let row = await rowOf(h.db, fresh.id);
+  assert.deepEqual([row.password_hash, row.one_time_until, row.failed_tries, row.wait_until], [fresh.hash, iso(259200), 0, iso(900)]);
+  assert.deepEqual(h.statements.slice(h.verified.at(-1)).map(guarded), [[RIGHT_TRY, false]]);
+
+  // At the wait's end it does not wait. Five wrong ones counted after its right try, while the new hash is made, start another
+  // wait before the guarded write, which then writes nothing.
+  h.clock.now = at(900);
+  h.atTransaction = async () => { for (let i = 0; i < 5; i += 1) await wrongTry(h.db, fresh.id, iso(1800)); };
+  assert.deepEqual(await h.auth.firstPassword(right), REFUSED);
+  assert.equal(h.atTransaction, null);
+  assert.deepEqual(h.verifies.splice(0), [[ONE_TIME, fresh.hash]]);
+  row = await rowOf(h.db, fresh.id);
+  assert.deepEqual([row.password_hash, row.one_time_until, row.failed_tries, row.wait_until], [fresh.hash, iso(259200), 0, iso(1800)]);
+  assert.deepEqual(h.statements.slice(h.verified.at(-1)).map(guarded), [[RIGHT_TRY, false], [SET_OWN, true]]);
+  assert.deepEqual([await sessions(h.db), await changesOf(h.db)], [[], []]);
+  assert.deepEqual(h.logs, Array.from({ length: 7 }, () => signin('refused')));
+  await h.db.close();
+});
+
+test('a change whose verify began before the wait, or whose wait began before its guarded write, is wrong_password and changes nothing', async () => {
+  const h = await harness();
+  const admin = await account(h.db, 'octo-admin', 'admin', MINE);
+  for (const [i, id] of [A, B].entries()) {
+    await createSession(h.db, { idHash: hex(id), login: 'octo-admin', via: 'password', accountId: admin.id, at: iso(i), expiresAt: iso(i + 43200) });
+  }
+  const s = session(A, admin.id, 'octo-admin', 'admin');
+  const wrong = { current: WRONG, password: ANOTHER };
+  const right = { current: MINE, password: ANOTHER };
+  for (let i = 0; i < 4; i += 1) assert.deepEqual(await h.auth.change(s, wrong), WRONG_PASSWORD);
+  h.verifies.length = 0;
+  let fifth: UiAnswer | null = null;
+  h.during = async () => { fifth = await h.auth.change(s, wrong); };
+  assert.deepEqual(await h.auth.change(s, right), WRONG_PASSWORD);
+  assert.deepEqual(fifth, WRONG_PASSWORD);
+  assert.deepEqual(h.verifies.splice(0), [[MINE, admin.hash], [WRONG, admin.hash]]);
+  let row = await rowOf(h.db, admin.id);
+  assert.deepEqual([row.password_hash, row.failed_tries, row.wait_until], [admin.hash, 0, iso(900)]);
+  assert.deepEqual(h.statements.slice(h.verified.at(-1)).map(guarded), [[RIGHT_TRY, false]]);
+
+  // At the wait's end it does not wait; a wait begun after its right try, before the guarded write, refuses the write.
+  h.clock.now = at(900);
+  h.atTransaction = async () => { for (let i = 0; i < 5; i += 1) await wrongTry(h.db, admin.id, iso(1800)); };
+  assert.deepEqual(await h.auth.change(s, right), WRONG_PASSWORD);
+  assert.equal(h.atTransaction, null);
+  assert.deepEqual(h.verifies.splice(0), [[MINE, admin.hash]]);
+  row = await rowOf(h.db, admin.id);
+  assert.deepEqual([row.password_hash, row.failed_tries, row.wait_until], [admin.hash, 0, iso(1800)]);
+  assert.deepEqual(h.statements.slice(h.verified.at(-1)).map(guarded), [[RIGHT_TRY, false], [SET_OWN, true]]);
+  assert.deepEqual(await sessions(h.db), [sessionRow(A, admin.id, 'octo-admin'), sessionRow(B, admin.id, 'octo-admin', 1)]);
+  assert.deepEqual([await changesOf(h.db), h.logs], [[], []]);
   await h.db.close();
 });
 
@@ -419,6 +571,20 @@ test("changing one's own password needs the current one, ends the other sessions
   assert.deepEqual([(await rowOf(h.db, admin.id)).failed_tries, (await rowOf(h.db, admin.id)).password_hash], [1, row.password_hash]);
   // A session whose account is gone.
   assert.deepEqual(await h.auth.change(session(C, 9999, 'octo-gone', 'admin'), { current: ANOTHER, password: THIRD }), error(401, 'signed_out'));
+  assert.deepEqual(h.logs, [signin('ok'), signin('ok'), changed('admin')]);
+  assert.equal((await changesOf(h.db)).length, 1);
+
+  // At the wait's end it does not wait. A reset committed after the right try, while the new hash is made and before the guarded
+  // write: wrong_password, and the change writes nothing (the reset itself ends every session of the account).
+  h.clock.now = at(900);
+  const one = await hashPassword(ONE_TIME, COST);
+  h.atTransaction = () => reset(h.db, admin.id, one);
+  assert.deepEqual(await h.auth.change(s, { current: ANOTHER, password: THIRD }), WRONG_PASSWORD);
+  assert.equal(h.atTransaction, null);
+  assert.deepEqual(h.verifies.splice(0), [[ANOTHER, row.password_hash]]);
+  assert.deepEqual(h.statements.slice(h.verified.at(-1)).map(guarded), [[RIGHT_TRY, false], [SET_OWN, true]]);
+  const afterReset = await rowOf(h.db, admin.id);
+  assert.deepEqual([afterReset.password_hash, afterReset.one_time_until], [one, iso(259200)]);
   assert.deepEqual(h.logs, [signin('ok'), signin('ok'), changed('admin')]);
   assert.equal((await changesOf(h.db)).length, 1);
   await h.db.close();

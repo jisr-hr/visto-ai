@@ -240,7 +240,7 @@ test('the last admin cannot be made a viewer or removed, and an admin who has no
   assert.equal(await h.changes.setRole(a, { id: admin.id }, 'viewer'), 'last_admin');
   assert.equal(await h.changes.remove(a, admin.id), 'last_admin');
   assert.ok(fresh.account.password_hash !== null);
-  assert.equal(await setOwnPassword(h.db, fresh.account.id, await hashPassword(ANOTHER, COST), fresh.account.password_hash), true);
+  assert.equal(await setOwnPassword(h.db, fresh.account.id, await hashPassword(ANOTHER, COST), fresh.account.password_hash, h.clock.now.toISOString()), true);
   assert.equal(ok(await h.changes.setRole(a, { id: admin.id }, 'viewer')).changed, true);
 
   // octo-new is the last now, for its own session and for the command alike.
