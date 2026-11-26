@@ -1,6 +1,7 @@
 // The application (Task 10, rules 3, 4 and 8; the password design 4.7): who is signed in is read once; signed out, the sign-in
 // page, which reads it again once a sign-in made a session; signed in, the layout around the page of the path. Any read of the
-// pages answered 401 shows the sign-in page.
+// pages answered 401 shows the sign-in page; one answered 403 forbidden reads who is signed in again, the page kept on screen,
+// so a role changed meanwhile shows at the next request to an admin route (call 25).
 import { useEffect, useMemo, useState } from 'react';
 import { RequestFailed } from './api.ts';
 import type { Api } from './api.ts';
@@ -10,12 +11,15 @@ import { Button } from './components/ui/button.tsx';
 import { ActivityPage } from './pages/activity.tsx';
 import { Later } from './pages/later.tsx';
 import { NotFound } from './pages/not-found.tsx';
+import { PasswordPage } from './pages/password.tsx';
 import { SignIn } from './pages/sign-in.tsx';
 import { navigate, useLocation } from './router.tsx';
 
 type State = { kind: 'reading' } | { kind: 'signed_out' } | { kind: 'unreachable' } | { kind: 'signed_in'; me: Me };
 
 const isSignedOut = (error: unknown): boolean => error instanceof RequestFailed && error.status === 401;
+/** The API's refusal of a role (call 20): the role the page knew may have changed. */
+const isForbidden = (error: unknown): boolean => error instanceof RequestFailed && error.status === 403 && error.code === 'forbidden';
 
 /** Signed in, the sign-in page's address leads to the overview, in its place in the history. */
 function ToOverview() {
@@ -25,7 +29,8 @@ function ToOverview() {
   return null;
 }
 
-function Page({ path }: { path: string }) {
+/** The page of the path; Settings is an admin's, Change password a password account's, and the not-found page to anyone else. */
+function Page({ path, me }: { path: string; me: Me }) {
   switch (path) {
     case '/ui/':
       return <Later title="Overview" />;
@@ -36,7 +41,9 @@ function Page({ path }: { path: string }) {
     case '/ui/memory':
       return <Later title="Memory" />;
     case '/ui/settings':
-      return <Later title="Settings" />;
+      return me.role === 'admin' ? <Later title="Settings" /> : <NotFound />;
+    case '/ui/password':
+      return me.kind === 'password' ? <PasswordPage /> : <NotFound />;
     case '/ui/signin':
       return <ToOverview />;
     default:
@@ -64,11 +71,25 @@ export function App({ api }: { api: Api }) {
     };
   }, [api, tries]);
 
-  // The API the pages read: one of its reads answered 401 signs the person out here.
+  // The API the pages read: one of its reads answered 401 signs the person out here; one answered 403 forbidden reads who is
+  // signed in again.
   const watched = useMemo<Api>(() => {
+    /**
+     * Who is signed in, read again with the raw API (so a refusal of this read reads nothing again) while the page stays: its
+     * answer replaces who was signed in, if anyone still is; a 401 signs out; any other failure keeps who was.
+     */
+    const readAgain = (): void => {
+      api.me().then(
+        (me) => setState((last) => (last.kind === 'signed_in' ? { kind: 'signed_in', me } : last)),
+        (error: unknown) => {
+          if (isSignedOut(error)) setState({ kind: 'signed_out' });
+        },
+      );
+    };
     const watch = <T,>(read: Promise<T>): Promise<T> =>
       read.catch((error: unknown) => {
         if (isSignedOut(error)) setState({ kind: 'signed_out' });
+        else if (isForbidden(error)) readAgain();
         throw error;
       });
     return {
@@ -120,7 +141,7 @@ export function App({ api }: { api: Api }) {
   }
   return (
     <Layout api={watched} me={state.me} onSignedOut={() => setState({ kind: 'signed_out' })}>
-      <Page path={path} />
+      <Page path={path} me={state.me} />
     </Layout>
   );
 }
