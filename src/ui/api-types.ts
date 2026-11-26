@@ -1,6 +1,8 @@
 // The answers of the UI's API (UI design 3.1; calls 13, 14, 19, 20 and 28). Types only, and it imports nothing: the frontend
 // reads it through ui/src/api-types.ts.
 export interface ApiError { error: string }
+/** The answer of a password sign-in and of a first password (the password design 4.3; call 13). */
+export interface SignInStep { next: 'signed_in' | 'choose_password' }
 export interface Me { login: string; csrf: string; mode: 'live' | 'dry_run'; repositories: string[] }
 export type JobStage = 'waiting' | 'retrying' | 'queued' | 'preparing' | 'reviewing' | 'judging_threads' | 'publishing' | 'stopped';
 export interface ActivityJob {
