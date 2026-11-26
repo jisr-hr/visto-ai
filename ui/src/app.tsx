@@ -1,5 +1,6 @@
-// The application (Task 10, rules 3, 4 and 8): who is signed in is read once; signed out, the sign-in page; signed in, the
-// layout around the page of the path. Any read answered 401 shows the sign-in page.
+// The application (Task 10, rules 3, 4 and 8; the password design 4.7): who is signed in is read once; signed out, the sign-in
+// page, which reads it again once a sign-in made a session; signed in, the layout around the page of the path. Any read of the
+// pages answered 401 shows the sign-in page.
 import { useEffect, useMemo, useState } from 'react';
 import { RequestFailed } from './api.ts';
 import type { Api } from './api.ts';
@@ -75,11 +76,32 @@ export function App({ api }: { api: Api }) {
       activity: () => watch(api.activity()),
       reviews: (query) => watch(api.reviews(query)),
       signOut: (csrf) => watch(api.signOut(csrf)),
+      ways: () => watch(api.ways()),
+      passwordSignIn: (name, password) => watch(api.passwordSignIn(name, password)),
+      firstPassword: (name, oneTimePassword, password) => watch(api.firstPassword(name, oneTimePassword, password)),
+      changePassword: (csrf, current, password) => watch(api.changePassword(csrf, current, password)),
+      accounts: () => watch(api.accounts()),
+      makeAccount: (csrf, name, role) => watch(api.makeAccount(csrf, name, role)),
+      setRole: (csrf, id, role) => watch(api.setRole(csrf, id, role)),
+      resetPassword: (csrf, id) => watch(api.resetPassword(csrf, id)),
+      removeAccount: (csrf, id) => watch(api.removeAccount(csrf, id)),
     };
   }, [api]);
 
   if (state.kind === 'reading') return <div aria-busy="true"></div>;
-  if (state.kind === 'signed_out') return <SignIn error={path === '/ui/signin' ? new URLSearchParams(search).get('error') : null} />;
+  if (state.kind === 'signed_out') {
+    // The raw API: a sign-in answered 401 is a refusal said on the page, not a sign-out.
+    return (
+      <SignIn
+        api={api}
+        error={path === '/ui/signin' ? new URLSearchParams(search).get('error') : null}
+        onSignedIn={() => {
+          setState({ kind: 'reading' });
+          setTries((n) => n + 1);
+        }}
+      />
+    );
+  }
   if (state.kind === 'unreachable') {
     return (
       <div className="flex min-h-screen flex-col items-center justify-center gap-4 bg-bg px-4 font-sans text-text">

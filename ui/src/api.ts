@@ -1,7 +1,9 @@
-// The one way the frontend reaches data (UI design 3.1; calls 13 and 23): same-origin requests under /api/ that accept JSON; a
-// change sends the token for changes in its header. An answer that is not ok rejects with its status and its short code.
+// The one way the frontend reaches data (UI design 3.1; calls 13 and 23; the password design 4.3 and 4.5, call 19): same-origin
+// requests under /api/ that accept JSON; a body is sent as JSON, and a change behind a session sends the token for changes in its
+// header. An answer that is not ok rejects with its status and its short code. No password, one-time password or name is put in
+// an address, a log or an error: they travel in the body only.
 import { useEffect, useRef, useState } from 'react';
-import type { Activity, ApiError, Me, Reviews } from './api-types.ts';
+import type { AccountAnswer, Accounts, Activity, ApiError, Me, OneTime, Reviews, Role, SignInStep, Ways } from './api-types.ts';
 
 /**
  * A request the API did not answer with success; not `ApiError`, which is the JSON type of the answer it carries. A request
@@ -22,9 +24,20 @@ export class RequestFailed extends Error {
 export interface ReviewQuery { repo?: string; outcome?: 'approved' | 'needs_person' | 'failed'; q?: string; before?: number }
 export interface Api {
   me(): Promise<Me>; activity(): Promise<Activity>; reviews(query: ReviewQuery): Promise<Reviews>; signOut(csrf: string): Promise<void>;
+  ways(): Promise<Ways>;
+  passwordSignIn(name: string, password: string): Promise<SignInStep>;
+  firstPassword(name: string, oneTimePassword: string, password: string): Promise<SignInStep>;
+  changePassword(csrf: string, current: string, password: string): Promise<void>;
+  accounts(): Promise<Accounts>;
+  makeAccount(csrf: string, name: string, role: Role): Promise<OneTime>;
+  setRole(csrf: string, id: number, role: Role): Promise<AccountAnswer>;
+  resetPassword(csrf: string, id: number): Promise<OneTime>;
+  removeAccount(csrf: string, id: number): Promise<void>;
 }
 
 const CSRF_HEADER = 'x-visto-csrf';
+/** The body of a change, as the service reads it (an object of exactly the route's keys). */
+type Body = Record<string, string | number>;
 /** A short code as the API writes one; anything else an answer carries reads as `unknown`. */
 const SHORT_CODE = /^[a-z][a-z0-9_]{0,63}$/;
 
@@ -43,11 +56,16 @@ export function createApi(fetchFn?: typeof fetch): Api {
   // Called as a function of its own, never as a method of another object, which a browser's fetch refuses.
   const call: typeof fetch = fetchFn ?? ((input, init) => fetch(input, init));
 
-  /** A network failure is status 0, `network`. */
-  async function send(method: 'GET' | 'POST', path: string, headers: Record<string, string> = {}): Promise<Response> {
+  /** A network failure is status 0, `network`. A body is sent as JSON, said so in its content-type. */
+  async function send(method: 'GET' | 'POST', path: string, headers: Record<string, string> = {}, body?: Body): Promise<Response> {
+    const init: RequestInit = { method, credentials: 'same-origin', headers: { accept: 'application/json', ...headers } };
+    if (body !== undefined) {
+      init.headers = { accept: 'application/json', 'content-type': 'application/json', ...headers };
+      init.body = JSON.stringify(body);
+    }
     let response: Response;
     try {
-      response = await call(path, { method, credentials: 'same-origin', headers: { accept: 'application/json', ...headers } });
+      response = await call(path, init);
     } catch {
       throw new RequestFailed(0, 'network');
     }
@@ -56,14 +74,22 @@ export function createApi(fetchFn?: typeof fetch): Api {
   }
 
   /** An ok answer that is not JSON is `unreadable`. */
-  async function read<T>(path: string): Promise<T> {
-    const response = await send('GET', path);
+  async function answerOf<T>(response: Response): Promise<T> {
     try {
       return (await response.json()) as T;
     } catch {
       throw new RequestFailed(response.status, 'unreadable');
     }
   }
+
+  const read = async <T>(path: string): Promise<T> => answerOf<T>(await send('GET', path));
+  /** A change; `csrf` given, behind a session with its token. Its answer is JSON. */
+  const post = async <T>(path: string, body: Body, csrf?: string): Promise<T> =>
+    answerOf<T>(await send('POST', path, csrf === undefined ? {} : { [CSRF_HEADER]: csrf }, body));
+  /** A change behind a session answered 204: no body is read. */
+  const postEmpty = async (path: string, body: Body, csrf: string): Promise<void> => {
+    await send('POST', path, { [CSRF_HEADER]: csrf }, body);
+  };
 
   return {
     me: () => read<Me>('/api/me'),
@@ -82,6 +108,16 @@ export function createApi(fetchFn?: typeof fetch): Api {
       // 204, no body to read.
       await send('POST', '/api/auth/signout', { [CSRF_HEADER]: csrf });
     },
+    ways: () => read<Ways>('/api/auth/ways'),
+    // The two that sign in have no session yet, so no token: the service checks their Origin instead.
+    passwordSignIn: (name, password) => post<SignInStep>('/api/auth/password', { name, password }),
+    firstPassword: (name, oneTimePassword, password) => post<SignInStep>('/api/auth/first-password', { name, oneTimePassword, password }),
+    changePassword: (csrf, current, password) => postEmpty('/api/me/password', { current, password }, csrf),
+    accounts: () => read<Accounts>('/api/accounts'),
+    makeAccount: (csrf, name, role) => post<OneTime>('/api/accounts/new', { name, role }, csrf),
+    setRole: (csrf, id, role) => post<AccountAnswer>('/api/accounts/role', { id, role }, csrf),
+    resetPassword: (csrf, id) => post<OneTime>('/api/accounts/reset', { id }, csrf),
+    removeAccount: (csrf, id) => postEmpty('/api/accounts/remove', { id }, csrf),
   };
 }
 

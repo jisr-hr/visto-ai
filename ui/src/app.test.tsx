@@ -3,7 +3,7 @@ import { userEvent } from '@testing-library/user-event';
 import { afterEach, expect, test, vi } from 'vitest';
 import { createApi, RequestFailed, usePoll } from './api.ts';
 import type { Api } from './api.ts';
-import type { Activity, Me, Reviews } from './api-types.ts';
+import type { Account, Accounts, Activity, Me, OneTime, Reviews, SignInStep } from './api-types.ts';
 import { App } from './app.tsx';
 
 const NOW = '2026-03-01T10:00:00.000Z';
@@ -30,6 +30,42 @@ function fakeApi(over: Partial<Api> = {}) {
     signOut: (csrf) => {
       calls.push(['signOut', csrf]);
       return over.signOut ? over.signOut(csrf) : Promise.resolve();
+    },
+    ways: () => {
+      calls.push(['ways']);
+      return over.ways ? over.ways() : Promise.resolve({ github: true });
+    },
+    accounts: () => {
+      calls.push(['accounts']);
+      return over.accounts ? over.accounts() : Promise.resolve({ now: NOW, accounts: [] });
+    },
+    passwordSignIn: (name, password) => {
+      calls.push(['passwordSignIn', name, password]);
+      return over.passwordSignIn ? over.passwordSignIn(name, password) : Promise.reject(new RequestFailed(500, 'not_expected'));
+    },
+    firstPassword: (name, oneTimePassword, password) => {
+      calls.push(['firstPassword', name, oneTimePassword, password]);
+      return over.firstPassword ? over.firstPassword(name, oneTimePassword, password) : Promise.reject(new RequestFailed(500, 'not_expected'));
+    },
+    changePassword: (csrf, current, password) => {
+      calls.push(['changePassword', csrf, current, password]);
+      return over.changePassword ? over.changePassword(csrf, current, password) : Promise.reject(new RequestFailed(500, 'not_expected'));
+    },
+    makeAccount: (csrf, name, role) => {
+      calls.push(['makeAccount', csrf, name, role]);
+      return over.makeAccount ? over.makeAccount(csrf, name, role) : Promise.reject(new RequestFailed(500, 'not_expected'));
+    },
+    setRole: (csrf, id, role) => {
+      calls.push(['setRole', csrf, id, role]);
+      return over.setRole ? over.setRole(csrf, id, role) : Promise.reject(new RequestFailed(500, 'not_expected'));
+    },
+    resetPassword: (csrf, id) => {
+      calls.push(['resetPassword', csrf, id]);
+      return over.resetPassword ? over.resetPassword(csrf, id) : Promise.reject(new RequestFailed(500, 'not_expected'));
+    },
+    removeAccount: (csrf, id) => {
+      calls.push(['removeAccount', csrf, id]);
+      return over.removeAccount ? over.removeAccount(csrf, id) : Promise.reject(new RequestFailed(500, 'not_expected'));
     },
   };
   return { api, calls };
@@ -158,6 +194,7 @@ test('any read answered 401 shows the sign-in page', async () => {
   expect(reads).toBe(1);
 
   await act(() => vi.advanceTimersByTimeAsync(5000));
+  await act(async () => {});
   expect(reads).toBe(2);
   expect(screen.getByRole('link', { name: 'Sign in with GitHub' })).toHaveAttribute('href', '/api/auth/start');
   expect(screen.queryByRole('navigation', { name: 'Main' })).toBeNull();
@@ -218,6 +255,119 @@ test('the client asks its own origin for JSON, sends the token for changes, and 
   await expect(createApi().me()).rejects.toMatchObject({ status: 0, code: 'network' });
   expect(own).toHaveBeenCalledTimes(1);
   expect(own.mock.calls[0]?.[0]).toBe('/api/me');
+});
+
+test('the new requests send JSON with their method, path and body, and a change behind a session its token', async () => {
+  const seen: [string, RequestInit | undefined][] = [];
+  const answers: (() => Response)[] = [];
+  const fetchFn = ((input: RequestInfo | URL, init?: RequestInit) => {
+    seen.push([String(input), init]);
+    const next = answers.shift();
+    return next ? Promise.resolve(next()) : Promise.reject(new TypeError('Failed to fetch'));
+  }) as typeof fetch;
+  const api = createApi(fetchFn);
+  const jsonOf = (status: number, value: unknown) => () =>
+    new Response(JSON.stringify(value), { status, headers: { 'content-type': 'application/json' } });
+  // A 204 whose body is never read: reading it at all is recorded.
+  const bodiesRead: string[] = [];
+  const empty = () => {
+    const response = new Response(null, { status: 204 });
+    for (const way of ['json', 'text', 'arrayBuffer', 'blob'] as const) {
+      vi.spyOn(response, way).mockImplementation(() => {
+        bodiesRead.push(way);
+        return Promise.reject(new Error('The body of a 204 was read.'));
+      });
+    }
+    return response;
+  };
+  const get = { method: 'GET', credentials: 'same-origin', headers: { accept: 'application/json' } };
+  const post = (body: unknown) => ({
+    method: 'POST', credentials: 'same-origin', headers: { accept: 'application/json', 'content-type': 'application/json' }, body: JSON.stringify(body),
+  });
+  const change = (body: unknown) => ({
+    method: 'POST', credentials: 'same-origin',
+    headers: { accept: 'application/json', 'content-type': 'application/json', 'x-visto-csrf': ME.csrf }, body: JSON.stringify(body),
+  });
+
+  const account: Account = {
+    id: 3, kind: 'password', name: 'octo-viewer', role: 'viewer', password: 'one_time', waitsUntil: null, madeAt: NOW,
+    madeBy: { kind: 'password', name: 'octo-admin' }, lastSignInAt: null, you: false,
+  };
+  const accounts: Accounts = { now: NOW, accounts: [account] };
+  const oneTime: OneTime = { account, oneTimePassword: 'k7m2q9xh4wz8r3bt6pn5', expiresAt: '2026-03-04T10:00:00.000Z' };
+
+  answers.push(
+    jsonOf(200, { github: false }), jsonOf(200, { next: 'choose_password' }), jsonOf(200, { next: 'signed_in' }), empty, jsonOf(200, accounts),
+    jsonOf(201, oneTime), jsonOf(200, { account: { ...account, role: 'admin' } }), jsonOf(200, oneTime), empty,
+  );
+  expect(await api.ways()).toEqual({ github: false });
+  expect(await api.passwordSignIn('octo-admin', 'a long password of mine')).toEqual({ next: 'choose_password' });
+  expect(await api.firstPassword('octo-new', 'k7m2q9xh4wz8r3bt6pn5', 'a long password of mine')).toEqual({ next: 'signed_in' });
+  await expect(api.changePassword(ME.csrf, 'a long password of mine', 'another long password')).resolves.toBeUndefined();
+  expect(await api.accounts()).toEqual(accounts);
+  expect(await api.makeAccount(ME.csrf, 'octo-viewer', 'viewer')).toEqual(oneTime);
+  expect(await api.setRole(ME.csrf, 3, 'admin')).toEqual({ account: { ...account, role: 'admin' } });
+  expect(await api.resetPassword(ME.csrf, 3)).toEqual(oneTime);
+  await expect(api.removeAccount(ME.csrf, 3)).resolves.toBeUndefined();
+  expect(bodiesRead).toEqual([]);
+  expect(seen).toStrictEqual([
+    ['/api/auth/ways', get],
+    ['/api/auth/password', post({ name: 'octo-admin', password: 'a long password of mine' })],
+    ['/api/auth/first-password', post({ name: 'octo-new', oneTimePassword: 'k7m2q9xh4wz8r3bt6pn5', password: 'a long password of mine' })],
+    ['/api/me/password', change({ current: 'a long password of mine', password: 'another long password' })],
+    ['/api/accounts', get],
+    ['/api/accounts/new', change({ name: 'octo-viewer', role: 'viewer' })],
+    ['/api/accounts/role', change({ id: 3, role: 'admin' })],
+    ['/api/accounts/reset', change({ id: 3 })],
+    ['/api/accounts/remove', change({ id: 3 })],
+  ]);
+  // The exact text sent, key by key in its order.
+  expect(seen[2]?.[1]?.body).toBe('{"name":"octo-new","oneTimePassword":"k7m2q9xh4wz8r3bt6pn5","password":"a long password of mine"}');
+
+  // A refusal carries its status and code; an ok answer that is not JSON is unreadable; no answer is the network.
+  const refused = async (sending: () => Promise<unknown>, status: number, code: string) => {
+    const error: unknown = await sending().then(() => null, (failure: unknown) => failure);
+    expect(error).toBeInstanceOf(RequestFailed);
+    expect(error).toMatchObject({ status, code });
+  };
+  answers.push(jsonOf(409, { error: 'last_admin' }));
+  await refused(() => api.removeAccount(ME.csrf, 1), 409, 'last_admin');
+  answers.push(jsonOf(409, { error: 'last_admin' }));
+  await refused(() => api.setRole(ME.csrf, 1, 'viewer'), 409, 'last_admin');
+  answers.push(jsonOf(401, { error: 'refused' }));
+  await refused(() => api.passwordSignIn('octo-admin', 'another long password'), 401, 'refused');
+  answers.push(jsonOf(400, { error: 'wrong_password' }));
+  await refused(() => api.changePassword(ME.csrf, 'another long password', 'a long password of mine'), 400, 'wrong_password');
+  answers.push(() => new Response('busy', { status: 503 }));
+  await refused(() => api.firstPassword('octo-new', 'k7m2q9xh4wz8r3bt6pn5', 'a long password of mine'), 503, 'unknown');
+  answers.push(() => new Response('<html>', { status: 201 }));
+  await refused(() => api.makeAccount(ME.csrf, 'octo-viewer', 'viewer'), 201, 'unreadable');
+  await refused(() => api.ways(), 0, 'network');
+});
+
+test('a password sign-in reads who is signed in again and opens the page, and a refusal is said on the page', async () => {
+  at('/ui/signin');
+  const people: (() => Promise<Me>)[] = [() => Promise.reject(new RequestFailed(401, 'signed_out')), () => Promise.resolve(ME)];
+  const steps: (() => Promise<SignInStep>)[] = [() => Promise.reject(new RequestFailed(401, 'refused')), () => Promise.resolve({ next: 'signed_in' })];
+  const { api, calls } = fakeApi({ me: () => people.shift()!(), passwordSignIn: () => steps.shift()!() });
+  render(<App api={api} />);
+  const user = userEvent.setup();
+
+  await user.type(await screen.findByLabelText('Name'), 'octo-admin');
+  await user.type(screen.getByLabelText('Password'), 'another long password');
+  await user.click(screen.getByRole('button', { name: 'Sign in' }));
+  expect(await screen.findByRole('alert')).toHaveTextContent('The name or the password is wrong.');
+  expect(calls.filter(([name]) => name === 'me')).toHaveLength(1);
+
+  await user.type(screen.getByLabelText('Password'), 'a long password of mine');
+  await user.click(screen.getByRole('button', { name: 'Sign in' }));
+  expect(await screen.findByRole('navigation', { name: 'Main' })).toBeInTheDocument();
+  expect(await screen.findByRole('heading', { level: 1, name: 'Overview' })).toBeInTheDocument();
+  expect(window.location.pathname).toBe('/ui/');
+  expect(calls.filter(([name]) => name === 'me')).toHaveLength(2);
+  expect(calls.filter(([name]) => name === 'passwordSignIn')).toEqual([
+    ['passwordSignIn', 'octo-admin', 'another long password'], ['passwordSignIn', 'octo-admin', 'a long password of mine'],
+  ]);
 });
 
 test('a poll keeps its last answer when a read fails and says so until one works, and a new key starts from none', async () => {
