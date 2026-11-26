@@ -24,7 +24,7 @@ test('the first step is the token check, so a missing token ends the job without
   assert.match(job.env.TOKEN_SET ?? '', /secrets\.WEBSITE_DISPATCH_TOKEN/);
   const first = job.steps[0];
   assert.ok(first);
-  assert.match(first.if ?? '', /TOKEN_SET/);
+  assert.equal(first.if, "env.TOKEN_SET != 'true'");
   assert.match(first.run ?? '', /^echo "::notice::/);
   assert.doesNotMatch(first.run ?? '', /exit [1-9]/);
 });
@@ -32,11 +32,20 @@ test('the first step is the token check, so a missing token ends the job without
 test('the dispatch is gated on the token and sends docs-changed', () => {
   const dispatch = job.steps.find((step) => step.run?.includes('gh api'));
   assert.ok(dispatch, 'a step runs gh api');
-  assert.match(dispatch.if ?? '', /TOKEN_SET/);
+  assert.equal(dispatch.if, "env.TOKEN_SET == 'true' && github.ref == 'refs/heads/main'");
+  assert.match(dispatch.run ?? '', /client_payload\[ref\]=\$SHA/);
   assert.match(dispatch.run ?? '', /repos\/visto-ai\/website\/dispatches/);
   assert.match(dispatch.run ?? '', /event_type=docs-changed/);
   assert.equal(dispatch.env?.GH_TOKEN, '${{ secrets.WEBSITE_DISPATCH_TOKEN }}');
   assert.equal(dispatch.env?.SHA, '${{ github.sha }}');
+});
+
+test('a run from another branch only says it does not dispatch', () => {
+  const other = job.steps.find((step) => step.if?.includes('!= \'refs/heads/main\''));
+  assert.ok(other, 'a step runs on any branch but main');
+  assert.equal(other.if, "github.ref != 'refs/heads/main'");
+  assert.match(other.run ?? '', /^echo "::notice::.*main/);
+  assert.doesNotMatch(other.run ?? '', /gh api|exit [1-9]/);
 });
 
 test('no run line interpolates an expression', () => {
