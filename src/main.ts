@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { createServer as createHttpServer } from 'node:http';
 import type { Server } from 'node:http';
 import { dirname, join, resolve } from 'node:path';
-import { ConfigError, contractFile, loadConfig, serviceConfig } from './config/load.ts';
+import { ConfigError, contractFile, githubSignInOn, loadConfig, serviceConfig } from './config/load.ts';
 import type { DeploymentConfig, McpServerConfig } from './config/load.ts';
 import { postgresDb, takeInstanceLock } from './db/postgres.ts';
 import type { InstanceLock } from './db/types.ts';
@@ -250,7 +250,7 @@ export async function main(argv: string[], env: Record<string, string | undefine
       // With the UI named in the file: sign-in through the app, which alone is given the client secret, and the built files,
       // read once here (call 17).
       const uiConfig = config.ui;
-      const ui = uiConfig === undefined ? undefined : {
+      const ui = uiConfig === undefined || !githubSignInOn(uiConfig) ? undefined : {
         signIn: createGithubSignIn({ clientId: uiConfig.clientId, clientSecret: uiConfig.clientSecret, auth, fetch: github }),
         files: loadUiFiles(join(import.meta.dirname, '..', 'ui', 'dist')),
       };

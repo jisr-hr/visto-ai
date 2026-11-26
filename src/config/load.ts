@@ -46,10 +46,15 @@ export interface UiConfig {
   team: string | null;
   /** The origin, with no trailing slash. */
   publicUrl: string;
-  /** `app.clientId` as written. */
-  clientId: string;
-  /** The value of the variable `app.clientSecret` names. Never logged, stored or posted. */
-  clientSecret: string;
+  /** `app.clientId` as written. Null exactly when GitHub sign-in is off: ui names neither an account nor a team. */
+  clientId: string | null;
+  /** The value of the variable `app.clientSecret` names. Never logged, stored or posted. Null when GitHub sign-in is off. */
+  clientSecret: string | null;
+}
+
+/** Whether ui names an account or a team, which turns GitHub sign-in on (its client id and secret are then written). */
+export function githubSignInOn(ui: UiConfig): ui is UiConfig & { clientId: string; clientSecret: string } {
+  return ui.accounts.length > 0 || ui.team !== null;
 }
 
 export interface DeploymentConfig {
@@ -60,7 +65,7 @@ export interface DeploymentConfig {
   /** The value of the variable `auditKey` names; present only when `auditKey` is written. Never logged, stored or posted. */
   auditKey?: string;
   server: { port: number };
-  /** Present only when `ui` names an account or a team. */
+  /** Present only when `ui` writes an address, names an account or writes a team. */
   ui?: UiConfig;
   dryRun: boolean;
   learning: boolean;
@@ -197,9 +202,14 @@ function auditKeyNeeded(repositories: { defaults: { score: ApprovalKeys }; overr
 
 const UI_NEEDS = 'must be written when ui names accounts or a team';
 
-/** The UI is on when `ui` names at least one account or writes a team. */
-function uiOn<T extends { accounts: string[]; team?: string | undefined }>(ui: T | undefined): ui is T {
-  return ui !== undefined && (ui.accounts.length > 0 || ui.team !== undefined);
+/** The UI is on when `ui` writes an address, names at least one account or writes a team. */
+function uiOn<T extends { accounts: string[]; team?: string | undefined; publicUrl?: string | undefined }>(ui: T | undefined): ui is T {
+  return ui !== undefined && (ui.publicUrl !== undefined || githubOn(ui));
+}
+
+/** GitHub sign-in is on when `ui` names at least one account or writes a team. */
+function githubOn(ui: { accounts: string[]; team?: string | undefined }): boolean {
+  return ui.accounts.length > 0 || ui.team !== undefined;
 }
 
 function isMapping(value: unknown): value is Record<string, unknown> {
@@ -259,7 +269,7 @@ export function parseConfig(yamlText: string, env: Record<string, string | undef
   // Needed with no key written fails closed, dry run or not: one issue, however many repositories need it.
   const keyIssues = raw.auditKey === undefined && auditKeyNeeded(raw.repositories) ? [AUDIT_KEY_NEEDED] : [];
   // What sign-in needs fails closed the same way: each key missing is named, dry run or not, and no value is quoted.
-  const uiIssues = uiOn(raw.ui)
+  const uiIssues = raw.ui !== undefined && githubOn(raw.ui)
     ? [
       raw.ui.publicUrl === undefined ? `ui.publicUrl: ${UI_NEEDS}` : null,
       raw.app?.clientId === undefined ? `app.clientId: ${UI_NEEDS}` : null,
@@ -393,8 +403,12 @@ export function parseConfig(yamlText: string, env: Record<string, string | undef
   const publicUrl = raw.ui?.publicUrl;
   const clientId = raw.app?.clientId;
   let ui: UiConfig | undefined;
-  if (uiOn(raw.ui) && publicUrl !== undefined && clientId !== undefined && clientSecret !== undefined) {
-    ui = { accounts: raw.ui.accounts, team: raw.ui.team ?? null, publicUrl: new URL(publicUrl).origin, clientId, clientSecret };
+  if (uiOn(raw.ui) && publicUrl !== undefined) {
+    const github = githubOn(raw.ui);
+    ui = {
+      accounts: raw.ui.accounts, team: raw.ui.team ?? null, publicUrl: new URL(publicUrl).origin,
+      clientId: github ? clientId ?? null : null, clientSecret: github ? clientSecret ?? null : null,
+    };
   }
   return {
     model: { ...raw.model, apiKey },
