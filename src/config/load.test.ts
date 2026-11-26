@@ -1148,3 +1148,18 @@ test('a client secret written is resolved whatever ui says, and refused when its
     assert.deepEqual(c.app, APP_THREE);
   }
 });
+
+test("the example's ui block, uncommented with the app's client id and secret, reads who may open the UI and what sign-in needs", () => {
+  const text = uncomment(uncomment(example(), '# app:'), '# ui:')
+    .replace('  # clientId:', '  clientId:')
+    .replace('  # clientSecret:', '  clientSecret:');
+  const env = {
+    ...exampleEnv, APP_PRIVATE_KEY: PEM, ALERT_WEBHOOK_URL: 'https://alerts.example.test/in/abc', WEBHOOK_SECRET: 'hook-secret-value',
+    DATABASE_URL: 'postgres://u:p@db:5432/visto', APP_CLIENT_SECRET: 'client-secret-for-tests-only',
+  };
+  const c = parseConfig(text, env);
+  assert.deepEqual(c.ui, {
+    accounts: ['octo-lead'], team: 'acme/reviewers', publicUrl: 'https://visto.example.test',
+    clientId: 'Iv1.0123456789abcdef', clientSecret: env.APP_CLIENT_SECRET,
+  });
+});

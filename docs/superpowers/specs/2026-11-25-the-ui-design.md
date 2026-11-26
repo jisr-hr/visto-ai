@@ -38,16 +38,16 @@ Quoted or restated from the conversation of 2026-11-25:
 
 - **Who may open it.** The deployment config names `ui.team` (one `org/team`) or `ui.accounts` (GitHub logins), or both. With neither, the UI is off: `/ui/` and `/api/` answer 404, as design 18 item 10 says. Access is read from the file only (section 4.1), so nobody can lock everyone out from inside the UI.
 - **How.** Sign-in goes through the GitHub App's own user authorization (OAuth for GitHub Apps): the app's client id in the config, its client secret by reference (`APP_CLIENT_SECRET`), the callback `<public URL>/api/auth/callback`. The service asks GitHub for the signed-in user's login, then checks it: listed in `ui.accounts`, or an active member of `ui.team`, read with the existing team-membership read (`GET orgs/{org}/teams/{team}/memberships/{login}`, Members read) through the installation of that organisation. Anything that cannot be read refuses the sign-in.
-- **Sessions** are rows of a table (`ui_sessions`): a random id stored hashed, the login, the times it was made and last used, and an expiry 12 hours after it was made. The cookie holds the id only: `HttpOnly`, `Secure`, `SameSite=Strict`, path `/`. Membership is checked again at each sign-in, not on every request; signing out deletes the row. The OAuth `state` is a random value stored with a 10-minute expiry and used once.
+- **Sessions** are rows of a table (`ui_sessions`): a random id stored hashed, the login, the times it was made and last used, and an expiry 12 hours after it was made. The cookie holds the id only: `HttpOnly`, `Secure`, `SameSite=Strict`, path `/`. Membership is checked again at each sign-in, not on every request; signing out deletes the row. The OAuth `state` is a random value stored with a 10-minute expiry and used once. The way back's state and a PKCE verifier are also set in a cookie of their own, `__Host-`, `SameSite=Lax`, 10 minutes, cleared on the way back, because a `Strict` cookie is not sent when GitHub sends the browser back; the cookies carry the `__Host-` prefix; a session's last use is written when the stored one is 60 seconds old or more; a session keeps the way it was let in (a named account, or the team) and ends when that way no longer holds; expired rows are deleted at most once a minute, at most 1,000 states are live, and the sign-in routes have 2 places of their own and the rest of the API 4.
 - **Who may change settings.** Everyone who may open the UI. Every change is recorded with who made it and when (section 4.4).
-- **Requests that change something** (`POST`, `PUT`, `DELETE`) carry a per-session token in a header the API checks; a read never changes anything.
+- **Requests that change something** (`POST`, `PUT`, `DELETE`) carry a per-session token in a header the API checks; a read never changes anything. The token is derived from the session's id and given by `GET /api/me`.
 - **Headers.** A content security policy that allows only the service's own origin (no inline script, no third-party origin; the fonts are bundled), `X-Content-Type-Options: nosniff`, `Referrer-Policy: same-origin`, `X-Frame-Options: DENY`, and `Cache-Control: no-store` on every API answer.
 
 ### 3.3 What the UI needs that the service does not store yet
 
 From the map of the code made for this stage. Each becomes a task of a plan:
 
-1. **A review's stage while it runs.** The job's row gains a stage and the time it started; the review job writes the stage at each step (preparing, reviewing batch n of m, judging threads, publishing).
+1. **A review's stage while it runs.** The job's row gains a stage (preparing; reviewing batch n of m, from the engine as its batches end; judging threads while a batch holding a thread owed a verdict has not ended; publishing) and the time it was reached; a claim clears it, and a running row the service does not hold reads as stopped.
 2. **A pull request's title**, stored with its facts on each delivery.
 3. **Alerts.** A table of alerts: code, short details (never a secret, a login or a text), when raised and when cleared. The alerts the service already raises are written there as well as logged and posted; an alert that has a pair (a dependency failing, then working) is cleared by its pair.
 4. **Dependency health.** A table holding each dependency's current status (the model's key check, the second scorer, memory, each extension, each MCP server, the app's permissions and events) and since when, written where the service already learns it.
@@ -110,7 +110,7 @@ All under `/api/`, all answers JSON, all behind a session but the sign-in routes
 - `GET /api/settings`, `PUT /api/settings`, `GET /api/settings/changes`, `GET /api/settings/export`.
 - `GET /api/health` (dependency statuses and open alerts).
 
-The plans fix the shapes. Every list is paged and bounded.
+The plans fix the shapes. Every list is paged and bounded. `GET /api/activity` also lists the withdrawals waiting to try again; `GET /api/reviews` reads the last 30 days, 25 a page; `GET /api/me` holds the repositories the service has seen.
 
 ## 6. Testing
 
@@ -120,7 +120,7 @@ The plans fix the shapes. Every list is paged and bounded.
 
 ## 7. The cut into plans
 
-1. **The frame:** the `ui/` application and its build, serving it, the API's route group, sign-in, sessions and access, the layout with its sidebar and theme switch, Activity (with the stage of a running review and pull request titles) and One review. It ends with a signed-in person seeing what runs and opening a review.
+1. **The frame:** the `ui/` application and its build, serving it, the API's route group, sign-in, sessions and access, the layout with its sidebar and theme switch, Activity (with the stage of a running review and pull request titles) and One review. It ends with a signed-in person seeing what runs and opening a review. Cut in two plans: sign-in, serving, the layout and Activity, which is built, and the One review screen, which is next.
 2. **Settings:** the settings tables, the sync at start, validation, saving, the record of changes, the export, applying at the next review and marking what waits for a restart, `*` in "Reviewed on every push", and the Settings screen.
 3. **The rest:** alerts and dependency health stored, spend and reviews per day, feedback read, live score quality, the kill switch, and the Overview, Repositories and Memory screens.
 
@@ -135,6 +135,6 @@ Each plan is reviewed before it is built, built task by task with a review of ea
 
 ## 9. Changes to the main design
 
-- **Section 4,** the `ui` part: it serves the screens of this document and writes settings, the record of changes and memory switches, not only the kill switch.
+- **Section 4,** the `ui` part: it serves the screens of this document and writes settings, the record of changes and memory switches, and sign-in's sessions and states, not only the kill switch.
 - **Section 11.1:** the deployment config's editable part lives in the database once the service has started, kept in sync with the file by section 4.3; the file keeps `app`, `database`, `server`, `alerts`, `auditKey`, `extensions`, `mcpServers` and `ui`. D10 is unchanged: a reviewed repository's own file still cannot loosen anything, and the UI is part of the deployment, not of a repository.
 - **Section 18, item 10:** cut in three plans, as section 7 says.
