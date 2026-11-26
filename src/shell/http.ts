@@ -1,4 +1,5 @@
 import type { RouteRequest } from '../extensions/types.ts';
+import { SECURITY_HEADERS } from '../ui/headers.ts';
 import type { HttpAnswer } from './receive.ts';
 
 export const MAX_BODY_BYTES = 25 * 1024 * 1024;
@@ -23,9 +24,12 @@ export type ExtensionRoute = (request: RouteRequest) => { answer: Promise<Checke
 export interface RequestLike extends AsyncIterable<Buffer> {
   method?: string | undefined; url?: string | undefined; headers: Record<string, string | string[] | undefined>;
 }
+/** `statusMessage` and `destroy` are Node's: the reason phrase a refused head leaves behind, and closing the connection. */
 export interface ResponseLike {
   writeHead(status: number, headers: Record<string, string | string[]>): unknown;
   end(body: string | Buffer): unknown;
+  statusMessage?: string | undefined;
+  destroy?(): unknown;
 }
 
 const HEADERS = { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' };
@@ -67,13 +71,20 @@ export function createListener(
   const taken = new Map<string, number>();   // places in use, by module name
   const uiTaken: Record<UiPart, number> = { files: 0, signIn: 0, api: 0 };
 
-  function answer(res: ResponseLike, a: HttpAnswer, close = false): void {
+  /** Writes one answer; false when it could not be (Node refused it, or the caller is gone, and nothing more is owed). */
+  function write(res: ResponseLike, status: number, headers: Record<string, string | string[]>, body: string | Buffer): boolean {
     try {
-      res.writeHead(a.status, close ? { ...HEADERS, connection: 'close' } : { ...HEADERS });
-      res.end(a.body);
+      res.writeHead(status, headers);
+      res.end(body);
+      return true;
     } catch {
-      // the caller is gone: nothing is owed
+      return false;
     }
+  }
+
+  /** A plain answer: today's two headers, then `extra` (the UI group's security headers), then `connection: close` when asked. */
+  function answer(res: ResponseLike, a: HttpAnswer, close = false, extra: Readonly<Record<string, string>> = {}): void {
+    write(res, a.status, close ? { ...HEADERS, ...extra, connection: 'close' } : { ...HEADERS, ...extra }, a.body);
   }
 
   function firstValues(headers: RequestLike['headers']): Record<string, string | undefined> {
@@ -192,29 +203,39 @@ export function createListener(
     answerModule(res, result);
   }
 
-  /** The UI's answer, written with exactly its headers: a list is handed to Node as it is, which writes one line for each value. */
+  /**
+   * The UI's answer, written with exactly its headers: a list is handed to Node as it is, which writes one line for each value.
+   * One Node refuses (a header value with CR or LF, a status out of range) or none at all is answered 500 in its place, as
+   * nothing was sent; when even that cannot be written, the connection is closed rather than left open.
+   */
   function answerUi(res: ResponseLike, a: UiAnswer): void {
     try {
       res.writeHead(a.status, a.headers);
       res.end(a.body);
+      return;
     } catch {
-      // the caller is gone: nothing is owed
+      // refused, or no answer: the 500 below
     }
+    res.statusMessage = undefined;   // the refused head's reason phrase ('OK') would stand on the 500
+    if (!write(res, 500, { ...HEADERS, ...SECURITY_HEADERS }, 'internal_error')) res.destroy?.();
   }
 
-  /** A request of the UI's group. Its place, in its own part, is taken before the body is read and given back once the route settled. */
+  /**
+   * A request of the UI's group. Its place, in its own part, is taken before the body is read and given back once the route settled.
+   * Every answer written here carries the security headers (call 17).
+   */
   async function ui(req: RequestLike, res: ResponseLike, route: UiRoute, part: UiPart, path: string, query: string): Promise<void> {
-    if (uiTaken[part] >= uiPlaces[part]) return answer(res, { status: 503, body: 'busy' });
+    if (uiTaken[part] >= uiPlaces[part]) return answer(res, { status: 503, body: 'busy' }, false, SECURITY_HEADERS);
     uiTaken[part] += 1;
     try {
       const read = await readBody(req, maxUiBody);
       if ('failed' in read) return;
-      if ('tooLarge' in read) return answer(res, { status: 413, body: 'payload_too_large' }, true);
+      if ('tooLarge' in read) return answer(res, { status: 413, body: 'payload_too_large' }, true, SECURITY_HEADERS);
       let result: UiAnswer;
       try {
         result = await route({ method: req.method ?? '', path, query, headers: lowerFirstValues(req.headers), body: read.body });
       } catch {
-        return answer(res, { status: 500, body: 'internal_error' });
+        return answer(res, { status: 500, body: 'internal_error' }, false, SECURITY_HEADERS);
       }
       answerUi(res, result);
     } finally {

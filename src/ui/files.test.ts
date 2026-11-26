@@ -56,6 +56,11 @@ test('the built files are loaded by the path they are served at, and a folder th
     for (const [path, text] of written) writeFileSync(join(dist, ...path.split('/')), text);
     writeFileSync(join(root, 'outside.txt'), 'outside');
     symlinkSync(join(root, 'outside.txt'), join(dist, 'linked.txt'));
+    // a link to a folder outside the built folder, and one that loops back into it
+    mkdirSync(join(root, 'outside'));
+    writeFileSync(join(root, 'outside', 'secret.txt'), 'outside');
+    symlinkSync(join(root, 'outside'), join(dist, 'linkdir'));
+    symlinkSync('..', join(dist, 'assets', 'up'));
 
     const files = loadUiFiles(dist);
     assert.deepEqual([...files.keys()].sort(), written.map(([path]) => `/ui/${path}`).sort());
@@ -66,6 +71,8 @@ test('the built files are loaded by the path they are served at, and a folder th
     }
     for (const key of ['/ui/index.html', '/ui/assets/index-a1.js', '/ui/assets/fonts/x.woff2', '/ui/favicon.svg']) assert.ok(files.has(key), key);
     assert.equal(files.has('/ui/linked.txt'), false);
+    for (const key of ['/ui/linkdir/secret.txt', '/ui/assets/up/index.html', '/ui/assets/up/assets/index-a1.js']) assert.equal(files.has(key), false, key);
+    assert.equal([...files.keys()].some((key) => key.startsWith('/ui/linkdir/') || key.startsWith('/ui/assets/up/')), false);
 
     assert.equal(loadUiFiles(join(root, 'nope')).size, 0);
     assert.equal(loadUiFiles(join(dist, 'index.html')).size, 0);
@@ -88,6 +95,9 @@ test('a path that is no file is answered with index.html, and a missing asset is
   for (const path of ['/ui/', '/ui/index.html', '/ui/activity']) assert.deepEqual(answer(NO_INDEX, 'GET', path), NOT_FOUND, path);
   assert.deepEqual(answer(NO_INDEX, 'GET', '/ui/assets/index-a1.js'), served(SCRIPT, YEAR));
   assert.deepEqual(answer(new Map(), 'GET', '/ui/'), NOT_FOUND);
+  // never decoded: each decodes to a key, and neither is one
+  assert.deepEqual(answer(FILES, 'GET', '/ui/assets/index%2Da1.js'), NOT_FOUND);
+  assert.deepEqual(answer(FILES, 'GET', '/ui/favicon%2esvg'), served(INDEX, 'no-store'));
 });
 
 test('/ui is sent to /ui/, and a method other than GET is refused', () => {
@@ -131,4 +141,14 @@ test('every answer carries the content security policy and the three other heade
     assert.equal(a.headers['referrer-policy'], 'same-origin', name);
     assert.equal(a.headers['x-frame-options'], 'DENY', name);
   }
+});
+
+test('what a caller adds replaces neither the type, the cache nor a security header, whatever the case of its names', () => {
+  assert.deepEqual(json(200, {}, { 'Content-Type': 'text/html', 'Content-Security-Policy': 'default-src *' }), {
+    status: 200, body: '{}', headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', ...SECURITY },
+  });
+  const cookies = ['a=1', 'b=2'];
+  assert.deepEqual(redirect('/ui/', { Location: '/elsewhere', 'Cache-Control': 'public', 'X-Frame-Options': 'SAMEORIGIN', 'Set-Cookie': cookies }), {
+    status: 302, body: '', headers: { location: '/ui/', 'cache-control': 'no-store', 'set-cookie': cookies, ...SECURITY },
+  });
 });

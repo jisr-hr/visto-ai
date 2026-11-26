@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { Readable } from 'node:stream';
+import { createServer, request as httpRequest } from 'node:http';
+import { duplexPair, Readable } from 'node:stream';
 import {
   createListener, EXTENSION_BODY_BYTES, EXTENSION_IN_FLIGHT, MAX_BODY_BYTES, MAX_IN_FLIGHT,
   UI_API_IN_FLIGHT, UI_BODY_BYTES, UI_FILES_IN_FLIGHT, UI_SIGNIN_IN_FLIGHT,
@@ -543,7 +544,15 @@ test('a route that returns no object is answered 500, and its place is given bac
 // -- the UI's route group ---------------------------------------------------------------------------------------
 
 const UI_OK: UiAnswer = { status: 200, headers: { 'content-type': 'text/html; charset=utf-8', 'x-ui': 'yes' }, body: Buffer.from('ui') };
-const BUSY = { status: 503, body: 'busy', headers: TEXT };
+// Call 17, written out here apart from the code: every answer of the group carries these, the listener's own too.
+const UI_SECURITY = {
+  'content-security-policy': "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; font-src 'self'; connect-src 'self'; "
+    + "manifest-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+  'x-content-type-options': 'nosniff', 'referrer-policy': 'same-origin', 'x-frame-options': 'DENY',
+};
+const UI_TEXT = { ...TEXT, ...UI_SECURITY };
+const UI_CLOSE = { ...UI_TEXT, connection: 'close' };
+const BUSY = { status: 503, body: 'busy', headers: UI_TEXT };
 /** A fake UI route: records each request; one whose path is held waits for the test, any other is answered at once. */
 function uiRoute(a: UiAnswer = UI_OK) {
   const seen: UiRequest[] = [];
@@ -676,8 +685,8 @@ test('the files, the sign-in routes and the rest of the API have places of their
   listener(request('POST', '/ui/x', [Buffer.alloc(UI_BODY_BYTES), Buffer.from('a')]), arriving.res);
   const before = ui.seen.length;
   await idle();
-  assert.deepEqual(declared.out.written, { status: 413, body: 'payload_too_large', headers: CLOSE });
-  assert.deepEqual(arriving.out.written, { status: 413, body: 'payload_too_large', headers: CLOSE });
+  assert.deepEqual(declared.out.written, { status: 413, body: 'payload_too_large', headers: UI_CLOSE });
+  assert.deepEqual(arriving.out.written, { status: 413, body: 'payload_too_large', headers: UI_CLOSE });
   assert.equal(ui.seen.length, before);
   const exact = response();
   listener(request('POST', '/api/auth/start', [Buffer.alloc(UI_BODY_BYTES)]), exact.res);
@@ -703,12 +712,12 @@ test('the files, the sign-in routes and the rest of the API have places of their
     },
   }, { maxUiBodyBytes: 8, maxUiFilesInFlight: 1, maxUiSignInInFlight: 1, maxUiApiInFlight: 1 });
   const one = async (req: RequestLike) => { const { res, out } = response(); small.listener(req, res); await small.idle(); return out; };
-  const TOO_LARGE = { status: 413, body: 'payload_too_large', headers: CLOSE };
+  const TOO_LARGE = { status: 413, body: 'payload_too_large', headers: UI_CLOSE };
   assert.deepEqual((await one(request('POST', '/api/x', [Buffer.from('abcd'), Buffer.from('efghi')]))).written, TOO_LARGE);
   assert.deepEqual((await one(request('POST', '/api/x', [Buffer.from('a')], { 'content-length': '9' }))).written, TOO_LARGE);
   assert.equal((await one(request('POST', '/api/x', [Buffer.from('abcdefgh')]))).written?.status, 200);
   for (const path of ['/api/fail', '/api/throw']) {
-    assert.deepEqual((await one(request('GET', path))).written, { status: 500, body: 'internal_error', headers: TEXT }, path);
+    assert.deepEqual((await one(request('GET', path))).written, { status: 500, body: 'internal_error', headers: UI_TEXT }, path);
   }
   async function* broken() { yield Buffer.from('ab'); throw new Error('connection reset'); }
   assert.equal((await one(Object.assign(Readable.from(broken()), { method: 'POST', url: '/api/x', headers: {} }))).calls, 0);
@@ -740,6 +749,124 @@ test('an answer with several values of one header is written with each', async (
   const out = await send(request('GET', '/api/auth/callback?code=code-1', []), { webhook: async () => ok, ui: ui.route });
   assert.deepEqual(out.written, { status: 302, headers: { location: '/ui/', 'set-cookie': ['a=1', 'b=2'] }, body: '' });
   assert.equal(out.written?.headers['set-cookie'], cookies);
+});
+
+test('a UI request beyond its places is answered 503 busy with the four security headers, exactly; a webhook as today', async () => {
+  const ui = uiRoute();
+  ui.holding.add('/api/me');
+  const { listener, idle } = createListener({ webhook: async () => ok, ui: ui.route }, { maxUiApiInFlight: 1, maxInFlight: 0 });
+  const held = response();
+  listener(request('GET', '/api/me', []), held.res);
+  await until(() => ui.held.length === 1);
+  const busy = response();
+  listener(untouched('GET', '/api/me').req, busy.res);
+  assert.deepEqual(busy.out.written, { status: 503, body: 'busy', headers: UI_TEXT });
+  const hook = response();
+  listener(request('POST', '/webhooks/github'), hook.res);
+  assert.deepEqual(hook.out.written, { status: 503, body: 'busy', headers: TEXT });
+  assert.deepEqual(Object.keys(hook.out.written?.headers ?? {}), ['content-type', 'cache-control']);
+  for (const h of ui.held.splice(0)) h.answer(UI_OK);
+  await idle();
+  assert.equal(held.out.written?.status, 200);
+});
+
+test('a UI body over its limit is answered 413 with connection close and the four security headers, exactly; a webhook as today', async () => {
+  const ui = uiRoute();
+  const { listener, idle } = createListener({ webhook: async () => ok, ui: ui.route }, { maxUiBodyBytes: 8, maxBodyBytes: 8 });
+  const one = async (req: RequestLike) => { const { res, out } = response(); listener(req, res); await idle(); return out.written; };
+  const TOO_LARGE = { status: 413, body: 'payload_too_large', headers: UI_CLOSE };
+  assert.deepEqual(await one(request('POST', '/api/x', [Buffer.from('abcd'), Buffer.from('efghi')])), TOO_LARGE);
+  assert.deepEqual(await one(request('POST', '/ui/x', [Buffer.from('a')], { 'content-length': '9' })), TOO_LARGE);
+  assert.equal(ui.seen.length, 0);
+  const hook = await one(request('POST', '/webhooks/github', [Buffer.from('abcdefghi')]));
+  assert.deepEqual(hook, { status: 413, body: 'payload_too_large', headers: CLOSE });
+  assert.deepEqual(Object.keys(hook?.headers ?? {}), ['content-type', 'cache-control', 'connection']);
+});
+
+test('a UI route that rejects or throws is answered 500 internal_error with the four security headers, exactly; a webhook as today', async () => {
+  const failing: UiRoute[] = [() => Promise.reject(new Error('secret detail')), () => { throw new Error('secret detail'); }];
+  for (const route of failing) {
+    assert.deepEqual((await send(request('GET', '/api/me', []), { webhook: async () => ok, ui: route })).written,
+      { status: 500, body: 'internal_error', headers: UI_TEXT });
+  }
+  const hook = (await send(request('POST', '/webhooks/github'), { webhook: async () => { throw new Error('x'); }, ui: uiRoute().route })).written;
+  assert.deepEqual(hook, { status: 500, body: 'internal_error', headers: TEXT });
+  assert.deepEqual(Object.keys(hook?.headers ?? {}), ['content-type', 'cache-control']);
+});
+
+type OverNode = { status: number; message: string; rawHeaders: string[]; body: string } | { closed: string };
+/**
+ * One GET through Node's own HTTP server and client, joined by a connection held in memory (the tests' setup refuses every
+ * socket's connect): what the client read, or the code it saw when the connection closed with no answer. Bounded at 2 seconds.
+ */
+async function overNode(listener: (req: RequestLike, res: ResponseLike) => void, path: string): Promise<OverNode> {
+  const server = createServer(listener);
+  const [client, side] = duplexPair();
+  server.emit('connection', side);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      new Promise<OverNode>((resolve) => {
+        const req = httpRequest({ createConnection: () => client, path, headers: { host: 'visto.example.test', connection: 'close' } }, (res) => {
+          let body = '';
+          res.setEncoding('utf8');
+          res.on('data', (piece: string) => { body += piece; });
+          res.on('end', () => resolve({ status: res.statusCode ?? 0, message: res.statusMessage ?? '', rawHeaders: res.rawHeaders, body }));
+        });
+        req.on('error', (e: NodeJS.ErrnoException) => resolve({ closed: e.code ?? 'unknown' }));
+        req.end();
+      }),
+      new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error('no answer within 2 seconds')), 2000); }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+    client.destroy();
+    side.destroy();
+  }
+}
+/** Each line of an answer's head by its lower-case name. */
+function headLines(raw: string[]): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (let i = 0; i < raw.length; i += 2) out[raw[i]!.toLowerCase()] = raw[i + 1]!;
+  return out;
+}
+const FINE: UiAnswer = { status: 200, headers: { 'x-ui': 'yes' }, body: 'fine' };
+
+test('an answer Node refuses, or none at all, is answered 500 internal_error with the security headers, and its place comes back', async () => {
+  const refused: Record<string, UiAnswer | null> = {
+    '/api/crlf': { status: 200, headers: { 'x-a': 'a\r\nb' }, body: 'x' },
+    '/api/none': null,
+  };
+  const { listener, idle } = createListener({
+    webhook: async () => ok,
+    ui: async (request) => (Object.hasOwn(refused, request.path) ? refused[request.path] : FINE) as UiAnswer,
+  }, { maxUiApiInFlight: 1 });
+  for (const path of Object.keys(refused)) {
+    const got = await overNode(listener, path);
+    assert.ok('status' in got, `${path}: ${JSON.stringify(got)}`);
+    assert.deepEqual([got.status, got.message, got.body], [500, 'Internal Server Error', 'internal_error'], path);
+    const { date, ...lines } = headLines(got.rawHeaders);
+    assert.ok(date, path);
+    assert.equal(got.rawHeaders.length, 2 * (Object.keys(lines).length + 1), path);
+    assert.deepEqual(lines, { ...UI_TEXT, connection: 'close', 'transfer-encoding': 'chunked' }, path);
+    await idle();
+    const next = await overNode(listener, '/api/me');
+    assert.ok('status' in next, path);
+    assert.deepEqual([next.status, next.body, headLines(next.rawHeaders)['x-ui']], [200, 'fine', 'yes'], path);
+  }
+});
+
+test('an answer that cannot be written, nor the 500 after it, closes the connection, and its place comes back', async () => {
+  const { listener, idle } = createListener({
+    webhook: async () => ok,
+    // Node takes the head, then refuses the body: the head is stored, so no 500 can follow
+    ui: async (request) => (request.path === '/api/body' ? { status: 200, headers: {}, body: 5 as unknown as string } : FINE),
+  }, { maxUiApiInFlight: 1 });
+  assert.deepEqual(await overNode(listener, '/api/body'), { closed: 'ECONNRESET' });
+  await idle();
+  const next = await overNode(listener, '/api/me');
+  assert.ok('status' in next);
+  assert.deepEqual([next.status, next.body], [200, 'fine']);
 });
 
 test('with no UI route, /, /ui/ and /api/ are not found as before', async () => {

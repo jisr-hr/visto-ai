@@ -1,5 +1,5 @@
 // The built files of the UI, read once at start and served from memory (call 17).
-import { readdirSync, readFileSync } from 'node:fs';
+import { readdirSync, readFileSync, realpathSync } from 'node:fs';
 import type { Dirent } from 'node:fs';
 import { extname, join, relative, sep } from 'node:path';
 import type { UiAnswer } from '../shell/http.ts';
@@ -24,11 +24,17 @@ const ASSETS = '/ui/assets/';
 const INDEX = '/ui/index.html';
 const YEAR = 'public, max-age=31536000, immutable';   // Vite's names under assets/ carry a hash
 
-/** Every file under `dir`, read whole. A folder that is not there, or is no folder, gives none; a link is not a file and is left out. */
+/**
+ * Every file under `dir`, read whole. A folder that is not there, is no folder, or cannot be walked (a loop the walk fails on)
+ * gives none. No link is followed: a link to a file is no file, and the walk, which goes through a link to a folder, finds files
+ * whose real path is not their path in the folder (outside it, or back inside it through a loop); they are left out.
+ */
 export function loadUiFiles(dir: string): UiFiles {
   const files = new Map<string, UiFile>();
+  let root: string;
   let entries: Dirent[];
   try {
+    root = realpathSync(dir);
     entries = readdirSync(dir, { recursive: true, withFileTypes: true });
   } catch {
     return files;
@@ -36,7 +42,17 @@ export function loadUiFiles(dir: string): UiFiles {
   for (const entry of entries) {
     if (!entry.isFile()) continue;
     const full = join(entry.parentPath, entry.name);
-    const served = '/ui/' + relative(dir, full).split(sep).join('/');
+    const inFolder = relative(dir, full);
+    let real: string;
+    try {
+      real = realpathSync(full);
+    } catch {
+      continue;
+    }
+    // Its real path is its path in the folder: inside the folder (a link out leads elsewhere), and reached through no link
+    // (a loop's files are inside the folder too, but at another path).
+    if (real !== join(root, inFolder)) continue;
+    const served = '/ui/' + inFolder.split(sep).join('/');
     files.set(served, { body: readFileSync(full), type: TYPES.get(extname(entry.name)) ?? 'application/octet-stream' });
   }
   return files;
