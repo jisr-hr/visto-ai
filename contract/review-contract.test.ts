@@ -38,6 +38,27 @@ test('has no nit severity and no leftover tooling', () => {
   assert.doesNotMatch(text, /chunk|read tool|shell|summary_markdown|inline_comments/i);
 });
 test('names the three severities', () => { has(/blocker/); has(/major/); has(/minor/); });
+test('a finding is what a careful reviewer would comment on, minor problems included', () => {
+  has(/problem in this change that a careful reviewer would comment on: a bug, a security issue, a performance problem, or a maintainability problem worth fixing/);
+  has(/`minor`: everything else worth fixing/);
+  has(/minor ones included/);
+});
+test('blocker and major keep their bar: shown from the code, and tried against a disproof', () => {
+  has(/`blocker`: breaks production, loses or corrupts data, or is exploitable, and you can show the path from the code/);
+  has(/`major`: a realistic input or state produces a wrong result, a crash or a security gap, and you can state the reproduction/);
+  has(/Before you choose `major` or `blocker`, try to disprove the finding/);
+});
+test('a mismatch shown in the code is evidence, as a minor finding when its consequence cannot be traced', () =>
+  has(/A mismatch you can point at in the code you were given[^.]*is evidence even when you cannot trace every consequence; report it as `minor` when you cannot/));
+test('the review goes through every file, with the three checks, and asks what it did not report', () => {
+  has(/Go through every file you are given, one at a time/);
+  has(/Removed lines are a specification/);
+  has(/find every caller and consumer you were given/);
+  has(/Follow a changed value to where it is consumed/);
+  has(/There is no quota of findings/);
+  has(/ask what you saw and did not report/);
+});
+test('style, naming and formatting stay out', () => has(/- Style, naming and formatting\./));
 test('answers with three arguments', () => { has(/`files`/); has(/`change_summary`/); });
 test('the score is need for judgement, not bug likelihood', () => { has(/not a probability/i); has(/judgement/i); });
 test('names the five bands', () => { for (const b of ['0 to 19', '20 to 39', '40 to 69', '70 to 89', '90 to 100']) has(new RegExp(b)); });
