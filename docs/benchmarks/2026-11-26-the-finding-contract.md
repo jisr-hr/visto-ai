@@ -40,6 +40,20 @@ Two changes, both in [the review contract](../../contract/review-contract.md) an
 
 The planning call adds about 0.02 of recall at twice the cost and time; it is not adopted. Full files help: without them recall falls from 0.132 to 0.108 with the minimal contract, and the tools row, run with the diff only, mixes that loss with the tools. Lower reasoning effort costs recall, and the first change alone gives less than the three together. The rest moves nothing beyond the noise between identical runs (recall under 0.01, precision about 0.04).
 
+## Files that take no findings
+
+Adopted the same day (design section 5.6, step 4): a test, documentation, generated, vendored or lock file is still read and scored, but takes no finding. Measured on the same 142 cases with the contract above:
+
+| | Recall | Precision | F1 | Findings |
+| --- | --- | --- | --- | --- |
+| The contract above, A / B | 0.141 / 0.139 | 0.422 / 0.426 | 0.211 / 0.209 | 275 / 263 |
+| A first, wider rule (dropped after review: it also silenced production code under `docs`, `build`, `vendor` and `spec` directories) | 0.140 | 0.429 | 0.211 | 261 |
+| **The rule adopted** | **0.130** | **0.446** | **0.201** | 249 |
+
+- Applied to the findings of the two rounds above, the rule adopted removes 23 and 21 findings, of which one in each round covers an expert comment: precision 0.422 to 0.456 and 0.426 to 0.459, recall down by 0.001.
+- Its own run agrees on precision (0.446). Its recall, 0.130, sits at the edge of the noise between identical runs; the replay above says the rule itself costs about 0.001.
+- So on this benchmark the file focus trades about 20 findings a run, nearly all of them not matching an expert comment, for no measurable change in F1. What it is for is the review a team reads: no findings on tests, documents, generated output or lock files.
+
 ## What this does not show
 
 - Whether safe pull requests are approved: every pull request in v2 has a problem.
