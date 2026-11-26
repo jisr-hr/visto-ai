@@ -2,7 +2,7 @@
 // page, which reads it again once a sign-in made a session; signed in, the layout around the page of the path. Any read of the
 // pages answered 401 shows the sign-in page; one answered 403 forbidden reads who is signed in again, the page kept on screen,
 // so a role changed meanwhile shows at the next request to an admin route (call 25).
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { RequestFailed } from './api.ts';
 import type { Api } from './api.ts';
 import type { Me } from './api-types.ts';
@@ -71,18 +71,25 @@ export function App({ api }: { api: Api }) {
     };
   }, [api, tries]);
 
+  // The session signed in at the last render, by its token for changes: a read again belongs to the one that asked it.
+  const session = useRef<string | null>(null);
+  session.current = state.kind === 'signed_in' ? state.me.csrf : null;
+
   // The API the pages read: one of its reads answered 401 signs the person out here; one answered 403 forbidden reads who is
   // signed in again.
   const watched = useMemo<Api>(() => {
     /**
      * Who is signed in, read again with the raw API (so a refusal of this read reads nothing again) while the page stays: its
-     * answer replaces who was signed in, if anyone still is; a 401 signs out; any other failure keeps who was.
+     * answer replaces who was signed in and a 401 signs out, each only while the session that asked is still the one signed in
+     * (a sign-out and another person's sign-in meanwhile leave that person as they are); any other failure keeps who was.
      */
     const readAgain = (): void => {
+      const asked = session.current;
+      const still = (last: State): boolean => last.kind === 'signed_in' && last.me.csrf === asked;
       api.me().then(
-        (me) => setState((last) => (last.kind === 'signed_in' ? { kind: 'signed_in', me } : last)),
+        (me) => setState((last) => (still(last) ? { kind: 'signed_in', me } : last)),
         (error: unknown) => {
-          if (isSignedOut(error)) setState({ kind: 'signed_out' });
+          if (isSignedOut(error)) setState((last) => (still(last) ? { kind: 'signed_out' } : last));
         },
       );
     };

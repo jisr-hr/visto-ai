@@ -389,6 +389,25 @@ test('a viewer at /ui/settings and a GitHub account at /ui/password see Not foun
     expect(window.location.pathname).toBe(path);
     unmount();
   }
+
+  // A role or a kind this frontend does not know reads as the least: neither page, no Settings entry, no Change password link.
+  const unknown: [string, Me, string[][]][] = [
+    ['/ui/settings', { ...ME, role: 'owner' as unknown as Me['role'] }, FOUR],
+    ['/ui/password', { ...PASSWORD_ADMIN, kind: 'saml' as unknown as Me['kind'] }, FIVE],
+  ];
+  for (const [path, me, shown] of unknown) {
+    at(path);
+    const { unmount } = render(<App api={fakeApi({ me: () => Promise.resolve(me) }).api} />);
+    expect(await screen.findByRole('heading', { level: 1, name: 'Not found' })).toBeInTheDocument();
+    expect(screen.getAllByRole('heading', { level: 1 })).toHaveLength(1);
+    expect(screen.getByText('No page at this address.')).toBeInTheDocument();
+    expect(screen.queryByRole('form')).toBeNull();
+    expect(entries()).toEqual(shown);
+    expect(screen.queryByRole('link', { name: 'Change password' })).toBeNull();
+    expect(screen.queryByText('Signed in with a password')).toBeNull();
+    expect(window.location.pathname).toBe(path);
+    unmount();
+  }
 });
 
 test('a 403 forbidden makes the app read who is signed in again, and Settings goes', async () => {

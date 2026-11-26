@@ -18,6 +18,7 @@ const BUSY = 'The service is busy. Try again in a moment.';
 const UNREACHABLE = 'The service could not be reached. Try again in a moment.';
 const FAILED = 'The password could not be changed.';
 const CHANGED = 'Your password is changed. Your other sessions have ended.';
+const MISSING = 'Write your current password.';
 
 /** An API that answers canned values, or what `over` answers, and records every call. */
 function fakeApi(over: Partial<Api> = {}) {
@@ -203,6 +204,7 @@ test('the current password and the new one twice change the password, and say so
 
 test('each refusal reads as pinned, and nothing is sent for two new ones that differ or a length out of bounds', async () => {
   at('/ui/password');
+  const logged = (['log', 'info', 'warn', 'error', 'debug'] as const).map((way) => vi.spyOn(console, way));
   const refusals: [() => Promise<void>, string][] = [
     [() => Promise.reject(new RequestFailed(400, 'wrong_password')), WRONG],
     [() => Promise.reject(new RequestFailed(400, 'password_length')), LENGTH],
@@ -264,6 +266,45 @@ test('each refusal reads as pinned, and nothing is sent for two new ones that di
     ['changePassword', 'csrf-token-for-tests', 'a long password of mine', 'another long password'],
     ...refusals.map((_, index) => ['changePassword', 'csrf-token-for-tests', 'another long password', index % 2 === 0 ? face.repeat(12) : 'y'.repeat(128)]),
   ]);
+  // As on a change: no password or name typed is kept anywhere the page writes to, whatever refused it.
+  expect(localStorage.length).toBe(0);
+  expect(sessionStorage.length).toBe(0);
+  expect(window.location.href).toBe('http://localhost:3000/ui/password');
+  const typed = ['long password', 'passwrod', 'eleven char', 'short', 'x'.repeat(129), 'y'.repeat(128), face, 'octo-admin'];
+  for (const spy of logged) {
+    for (const args of spy.mock.calls) for (const value of typed) expect(args.map(String).join(' ')).not.toContain(value);
+  }
+});
+
+test('an empty current password is not sent, and says so', async () => {
+  at('/ui/password');
+  const { api, sent } = fakeApi({ changePassword: () => Promise.resolve() });
+  const user = userEvent.setup();
+  render(<App api={api} />);
+  await screen.findByRole('heading', { level: 1, name: 'Change password' });
+  const form = screen.getByRole('form', { name: 'Change password' });
+
+  // Checked first: with it empty, two new ones that differ or a length out of bounds say the same.
+  for (const [chosen, again] of [['another long password', 'another long password'], ['short', 'shorter'], ['', '']] as const) {
+    fill('', chosen, again);
+    await user.click(screen.getByRole('button', { name: 'Change password' }));
+    const alert = screen.getByRole('alert');
+    expect(alert.textContent).toBe(MISSING);
+    expect(alert.tagName).toBe('P');
+    expect(classes(alert)).toEqual(words('text-sm text-bad'));
+    expect(alert.parentElement).toBe(form.closest('[data-slot="card"]'));
+    expect(alert.compareDocumentPosition(form) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(screen.queryByRole('status')).toBeNull();
+    expect(values()).toEqual(['', '', '']);
+    expect(screen.getByRole('button', { name: 'Change password' })).toBeEnabled();
+  }
+  expect(sent('changePassword')).toEqual([]);
+
+  // Written, it is sent.
+  fill('a long password of mine', 'another long password', 'another long password');
+  await user.click(screen.getByRole('button', { name: 'Change password' }));
+  expect(await screen.findByRole('status')).toHaveTextContent(CHANGED);
+  expect(sent('changePassword')).toEqual([['changePassword', 'csrf-token-for-tests', 'a long password of mine', 'another long password']]);
 });
 
 test('a change answered 401 shows the sign-in page', async () => {

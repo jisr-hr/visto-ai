@@ -441,6 +441,75 @@ test('a password sign-in reads who is signed in again and opens the page, and a 
   ]);
 });
 
+/** A promise and the ways to settle it. */
+function later<T>() {
+  let resolve: (value: T) => void = () => {};
+  let reject: (error: unknown) => void = () => {};
+  const promise = new Promise<T>((yes, no) => {
+    resolve = yes;
+    reject = no;
+  });
+  return { promise, resolve, reject };
+}
+
+test('a read again answered after its session signed out and another person signed in leaves that person as they are', async () => {
+  const viewer: Me = { ...ME, name: 'octo-viewer', kind: 'password', role: 'viewer', csrf: 'csrf-token-of-the-viewer' };
+  const four = ['Overview', 'Activity', 'Repositories', 'Memory'];
+  // The admin's late answer: who the admin is, then, in the second case, a 401.
+  const answers: ((late: ReturnType<typeof later<Me>>) => void)[] = [
+    (late) => late.resolve(ME),
+    (late) => late.reject(new RequestFailed(401, 'signed_out')),
+  ];
+  for (const answer of answers) {
+    at('/ui/activity');
+    const again = later<Me>();
+    const people: (() => Promise<Me>)[] = [() => Promise.resolve(ME), () => again.promise, () => Promise.resolve(viewer)];
+    let refused = false;
+    const { api, calls } = fakeApi({
+      me: () => people.shift()!(),
+      activity: () => {
+        if (refused) return Promise.resolve(ACTIVITY);
+        refused = true;
+        return Promise.reject(new RequestFailed(403, 'forbidden'));
+      },
+      passwordSignIn: () => Promise.resolve({ next: 'signed_in' }),
+    });
+    const entries = (): string[] =>
+      within(screen.getByRole('navigation', { name: 'Main' })).getAllByRole('link').map((link) => link.textContent ?? '');
+    const user = userEvent.setup();
+    const { unmount } = render(<App api={api} />);
+
+    // The admin's Activity answers 403 forbidden: who is signed in is read again, and the answer waits.
+    expect(await screen.findByText('octo-lead')).toBeInTheDocument();
+    await act(async () => {});
+    expect(calls.filter(([name]) => name === 'me')).toHaveLength(2);
+    expect(entries()).toEqual([...four, 'Settings']);
+
+    // The admin signs out, and a viewer signs in with a password.
+    await user.click(screen.getByRole('button', { name: 'Sign out' }));
+    expect(await screen.findByRole('heading', { level: 1, name: 'Sign in' })).toBeInTheDocument();
+    await user.type(screen.getByLabelText('Name'), 'octo-viewer');
+    await user.type(screen.getByLabelText('Password'), 'a long password of mine');
+    await user.click(screen.getByRole('button', { name: 'Sign in' }));
+    expect(await screen.findByText('octo-viewer')).toBeInTheDocument();
+    expect(entries()).toEqual(four);
+
+    // The admin's answer comes: the viewer stays signed in, as themselves, with their own token.
+    await act(async () => answer(again));
+    expect(screen.getByRole('navigation', { name: 'Main' })).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { level: 1, name: 'Sign in' })).toBeNull();
+    expect(screen.getByText('octo-viewer')).toBeInTheDocument();
+    expect(screen.queryByText('octo-lead')).toBeNull();
+    expect(screen.getByText('Signed in with a password')).toBeInTheDocument();
+    expect(entries()).toEqual(four);
+    expect(calls.filter(([name]) => name === 'me')).toHaveLength(3);
+    await user.click(screen.getByRole('button', { name: 'Sign out' }));
+    expect(await screen.findByRole('heading', { level: 1, name: 'Sign in' })).toBeInTheDocument();
+    expect(calls.filter(([name]) => name === 'signOut')).toEqual([['signOut', ME.csrf], ['signOut', viewer.csrf]]);
+    unmount();
+  }
+});
+
 test('a poll keeps its last answer when a read fails and says so until one works, and a new key starts from none', async () => {
   vi.useFakeTimers();
   const results: (() => Promise<string>)[] = [];

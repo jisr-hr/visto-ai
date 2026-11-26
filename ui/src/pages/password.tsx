@@ -21,6 +21,8 @@ const BUSY = 'The service is busy. Try again in a moment.';
 const UNREACHABLE = 'The service could not be reached. Try again in a moment.';
 const FAILED = 'The password could not be changed.';
 const CHANGED = 'Your password is changed. Your other sessions have ended.';
+// An empty current password is not sent: the service would count it as a wrong try toward the wait.
+const MISSING = 'Write your current password.';
 
 /** What a refusal says: its code's sentence (the object's own key only), else a busy service, one not reached, or a failure. */
 function refusalOf(error: unknown): string {
@@ -71,7 +73,8 @@ export function PasswordPage() {
   async function change(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
     if (sending) return;
-    // Before sending: the two the same, then the length.
+    // Before sending: the current password written, the two the same, then the length.
+    if (current === '') return answered(false, MISSING);
     if (chosen !== again) return answered(false, NOT_THE_SAME);
     if (!lengthOk(chosen)) return answered(false, LENGTH);
     setSending(true);
