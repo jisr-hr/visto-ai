@@ -6,6 +6,19 @@ import type { Api } from './api.ts';
 import type { Account, Accounts, Activity, Me, OneTime, Reviews, SignInStep } from './api-types.ts';
 import { App } from './app.tsx';
 
+// The page of a screen still to come, as it is, which also keeps the API the app gave the pages: no page calls every method
+// yet, so a test calls each of them on it.
+const shown = vi.hoisted(() => ({ api: null as Api | null }));
+vi.mock('./pages/later.tsx', async (importOriginal) => {
+  const real = await importOriginal<typeof import('./pages/later.tsx')>();
+  const { useApp } = await import('./context.tsx');
+  function Later(props: { title: string }) {
+    shown.api = useApp().api;
+    return real.Later(props);
+  }
+  return { Later };
+});
+
 const NOW = '2026-03-01T10:00:00.000Z';
 const ME: Me = { name: 'octo-lead', kind: 'github', role: 'admin', csrf: 'csrf-token-for-tests', mode: 'live', repositories: ['acme/billing', 'acme/infra', 'acme/shop', 'acme/web'] };
 const ACTIVITY: Activity = { now: NOW, places: { reviews: 2, withdrawals: 2 }, paused: null, jobs: [], withdrawals: [] };
@@ -202,6 +215,64 @@ test('any read answered 401 shows the sign-in page', async () => {
   // Signed out, nothing is read again.
   await act(() => vi.advanceTimersByTimeAsync(20000));
   expect(reads).toBe(2);
+});
+
+test('a 401 from any method of the API the pages are given shows the sign-in page', async () => {
+  // Each method of the client, called as a page would, and the call the API under it records.
+  const each: [keyof Api, (api: Api) => Promise<unknown>, unknown[]][] = [
+    ['me', (api) => api.me(), ['me']],
+    ['activity', (api) => api.activity(), ['activity']],
+    ['reviews', (api) => api.reviews({ repo: 'acme/shop' }), ['reviews', { repo: 'acme/shop' }]],
+    ['signOut', (api) => api.signOut(ME.csrf), ['signOut', ME.csrf]],
+    ['ways', (api) => api.ways(), ['ways']],
+    ['passwordSignIn', (api) => api.passwordSignIn('octo-admin', 'a long password of mine'), ['passwordSignIn', 'octo-admin', 'a long password of mine']],
+    [
+      'firstPassword', (api) => api.firstPassword('octo-new', 'k7m2q9xh4wz8r3bt6pn5', 'a long password of mine'),
+      ['firstPassword', 'octo-new', 'k7m2q9xh4wz8r3bt6pn5', 'a long password of mine'],
+    ],
+    [
+      'changePassword', (api) => api.changePassword(ME.csrf, 'a long password of mine', 'another long password'),
+      ['changePassword', ME.csrf, 'a long password of mine', 'another long password'],
+    ],
+    ['accounts', (api) => api.accounts(), ['accounts']],
+    ['makeAccount', (api) => api.makeAccount(ME.csrf, 'octo-viewer', 'viewer'), ['makeAccount', ME.csrf, 'octo-viewer', 'viewer']],
+    ['setRole', (api) => api.setRole(ME.csrf, 3, 'admin'), ['setRole', ME.csrf, 3, 'admin']],
+    ['resetPassword', (api) => api.resetPassword(ME.csrf, 3), ['resetPassword', ME.csrf, 3]],
+    ['removeAccount', (api) => api.removeAccount(ME.csrf, 3), ['removeAccount', ME.csrf, 3]],
+  ];
+  // Every method there is.
+  expect(each.map(([name]) => name).sort()).toEqual(Object.keys(createApi()).sort());
+
+  for (const [name, call, recorded] of each) {
+    at('/ui/');
+    shown.api = null;
+    // The method called answers as the fake does until the page shows, then 401; every other one as the fake does.
+    let refusing = false;
+    const canned = fakeApi().api[name] as (...args: unknown[]) => Promise<unknown>;
+    const { api, calls } = fakeApi({
+      [name]: (...args: unknown[]) => (refusing ? Promise.reject(new RequestFailed(401, 'signed_out')) : canned(...args)),
+    } as Partial<Api>);
+    const { unmount } = render(<App api={api} />);
+    expect(await screen.findByRole('heading', { level: 1, name: 'Overview' })).toBeInTheDocument();
+    const pages = shown.api as Api | null;
+    expect(pages).not.toBeNull();
+    expect(pages).not.toBe(api);
+
+    refusing = true;
+    const before = calls.length;
+    let failure: unknown = null;
+    await act(async () => {
+      failure = await call(pages!).then(() => null, (error: unknown) => error);
+    });
+    // The call went through with its arguments, its refusal is passed on, and the person is signed out here.
+    expect(calls[before]).toEqual(recorded);
+    expect(failure).toBeInstanceOf(RequestFailed);
+    expect(failure).toMatchObject({ status: 401, code: 'signed_out' });
+    expect(screen.getByRole('heading', { level: 1, name: 'Sign in' })).toBeInTheDocument();
+    expect(screen.queryByRole('navigation', { name: 'Main' })).toBeNull();
+    await act(async () => {});
+    unmount();
+  }
 });
 
 test('the client asks its own origin for JSON, sends the token for changes, and a refusal carries its code', async () => {

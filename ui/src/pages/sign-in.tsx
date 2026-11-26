@@ -1,7 +1,8 @@
 // The sign-in page (the password design 4.3 and 4.7; calls 13, 15 and 25): a name and a password; a right one-time password
 // turns the card into the choice of a password, sent with it again to sign in; GitHub's way in below, only while the service
-// says GitHub sign-in is on. The one-time password lives in this page's memory only, until it is chosen over or Cancel forgets
-// it; no password, one-time password or name is written anywhere else.
+// says GitHub sign-in is on. The one-time password lives in this page's memory only, with the name it was given for, until it
+// is chosen over, Cancel forgets it, or the service says it can no longer work; no password, one-time password or name is
+// written anywhere else.
 import { Fragment, useEffect, useState } from 'react';
 import type { FormEvent, ReactNode } from 'react';
 import { RequestFailed } from '../api.ts';
@@ -33,6 +34,9 @@ const NOT_THE_SAME = 'The two passwords are not the same.';
 const BUSY = 'The service is busy. Try again in a moment.';
 const UNREACHABLE = 'The service could not be reached. Try again in a moment.';
 const FAILED = 'The sign-in failed.';
+// The refusals of the choice after which its one-time password can no longer work: the page goes back to the first step, as
+// Cancel does, so that it is never sent again (each wrong try counts, and five make the account wait).
+const DEAD: ReadonlySet<string> = new Set(['refused', 'expired', 'already_chosen']);
 const HEADING = 'm-0 text-2xl font-semibold tracking-[-0.01em]';
 
 /** A text of `texts`, read as the object's own key only (a code such as `__proto__` is any other); else a failed sign-in. */
@@ -71,10 +75,10 @@ function Field({ id, label, children }: { id: string; label: string; children: R
  */
 export function SignIn({ api, error, onSignedIn }: { api: Api; error: string | null; onSignedIn: () => void }) {
   const [github, setGithub] = useState(false);
-  const [step, setStep] = useState<'password' | 'choose'>('password');
   const [name, setName] = useState('');
   const [password, setPassword] = useState('');
-  const [oneTime, setOneTime] = useState<string | null>(null);
+  // The choice of a password: the name and the one-time password the first step sent, kept together; null on the first step.
+  const [choice, setChoice] = useState<{ name: string; oneTimePassword: string } | null>(null);
   const [chosen, setChosen] = useState('');
   const [again, setAgain] = useState('');
   const [sending, setSending] = useState(false);
@@ -104,19 +108,18 @@ export function SignIn({ api, error, onSignedIn }: { api: Api; error: string | n
   async function signIn(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
     if (sending) return;
-    const typed = password;
+    const typed = { name, password };
     setSending(true);
     setSaid({ text: null });
     try {
-      const answer = await api.passwordSignIn(name, typed);
+      const answer = await api.passwordSignIn(typed.name, typed.password);
       // Signed in, the page stays as it is until the app reads who is signed in.
       if (answer.next === 'signed_in') return onSignedIn();
       if (answer.next !== 'choose_password') return refuse(FAILED);
-      setOneTime(typed);
+      setChoice({ name: typed.name, oneTimePassword: typed.password });
       setPassword('');
       setChosen('');
       setAgain('');
-      setStep('choose');
       setSending(false);
     } catch (failure) {
       refuse(refusalOf(failure));
@@ -125,29 +128,30 @@ export function SignIn({ api, error, onSignedIn }: { api: Api; error: string | n
 
   async function choose(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
-    if (sending || oneTime === null) return;
+    if (sending || choice === null) return;
     // Before sending: the two the same, then the length.
     if (chosen !== again) return refuse(NOT_THE_SAME);
     if (!lengthOk(chosen)) return refuse(LENGTH);
     setSending(true);
     setSaid({ text: null });
     try {
-      const answer = await api.firstPassword(name, oneTime, chosen);
+      const answer = await api.firstPassword(choice.name, choice.oneTimePassword, chosen);
       if (answer.next === 'signed_in') return onSignedIn();
       refuse(FAILED);
     } catch (failure) {
+      if (failure instanceof RequestFailed && DEAD.has(failure.code)) return back(refusalOf(failure));
       refuse(refusalOf(failure));
     }
   }
 
-  /** Back to the first step: the one-time password is forgotten, the name kept. */
-  function cancel(): void {
-    setOneTime(null);
+  /** Back to the first step, saying `text` (nothing when null): the one-time password is forgotten, the name kept. */
+  function back(text: string | null): void {
+    setChoice(null);
     setPassword('');
     setChosen('');
     setAgain('');
-    setSaid({ text: null });
-    setStep('password');
+    setSaid({ text });
+    setSending(false);
   }
 
   const alert = said === null ? (error ? textOf(REASONS, error) : null) : said.text;
@@ -162,7 +166,7 @@ export function SignIn({ api, error, onSignedIn }: { api: Api; error: string | n
       <Card className="flex w-full max-w-[400px] flex-col gap-4 p-8">
         <Brand />
         {/* Each step its own, by its key: no field of one is reused as a field of the other. */}
-        {step === 'password' ? (
+        {choice === null ? (
           <Fragment key="password">
             <h1 className={HEADING}>Sign in</h1>
             <p className="text-sm text-muted">Sign in with your name and password.</p>
@@ -174,6 +178,7 @@ export function SignIn({ api, error, onSignedIn }: { api: Api; error: string | n
                   autoComplete="username"
                   autoCapitalize="none"
                   spellCheck={false}
+                  disabled={sending}
                   value={name}
                   onChange={(event) => setName(event.target.value)}
                 />
@@ -183,6 +188,7 @@ export function SignIn({ api, error, onSignedIn }: { api: Api; error: string | n
                   id="signin-password"
                   type="password"
                   autoComplete="current-password"
+                  disabled={sending}
                   value={password}
                   onChange={(event) => setPassword(event.target.value)}
                 />
@@ -206,6 +212,8 @@ export function SignIn({ api, error, onSignedIn }: { api: Api; error: string | n
             <p className="text-sm text-muted">This was a one-time password. Choose the password you will sign in with: 12 to 128 characters.</p>
             {alertLine}
             <form aria-label="Choose your password" className="flex flex-col gap-3" onSubmit={choose}>
+              {/* The name the new password is for, so a password manager keeps it under that name: hidden, never tabbed to. */}
+              <input type="text" className="sr-only" autoComplete="username" readOnly tabIndex={-1} value={choice.name} />
               <Field id="signin-new" label="New password">
                 <Input
                   id="signin-new"
@@ -229,7 +237,7 @@ export function SignIn({ api, error, onSignedIn }: { api: Api; error: string | n
                 <Button type="submit" variant="primary" disabled={sending}>
                   {sending ? 'Signing in' : 'Choose and sign in'}
                 </Button>
-                <Button type="button" disabled={sending} onClick={cancel}>
+                <Button type="button" disabled={sending} onClick={() => back(null)}>
                   Cancel
                 </Button>
               </div>

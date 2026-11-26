@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, within } from '@testing-library/react';
+import { act, createEvent, fireEvent, render, screen, within } from '@testing-library/react';
 import { userEvent } from '@testing-library/user-event';
 import { expect, test, vi } from 'vitest';
 import { RequestFailed } from '../api.ts';
@@ -319,8 +319,8 @@ test('a one-time password leads to choosing a password, twice, which signs in', 
   expect(screen.queryByRole('link')).toBeNull();
   expect(screen.queryByText(OR_GITHUB)).toBeNull();
   expect(screen.queryByRole('alert')).toBeNull();
-  // The one-time password is in no field of the page.
-  expect([...document.querySelectorAll('input')].map((input) => input.value)).toEqual(['', '']);
+  // The one-time password is in no field of the page; the name is, in the choice's hidden field for a password manager.
+  expect([...document.querySelectorAll('input')].map((input) => input.value)).toEqual(['octo-new', '', '']);
   expect(onSignedIn).not.toHaveBeenCalled();
 
   const form = screen.getByRole('form', { name: 'Choose your password' });
@@ -366,7 +366,8 @@ test('a one-time password leads to choosing a password, twice, which signs in', 
 test('the choice checks the two passwords and their length before sending', async () => {
   const { api, sent } = fakeApi({
     passwordSignIn: () => Promise.resolve({ next: 'choose_password' }),
-    firstPassword: () => Promise.reject(new RequestFailed(401, 'refused')),
+    // A refusal that keeps the choice, said only once a choice was sent.
+    firstPassword: () => Promise.reject(new RequestFailed(400, 'same_password')),
   });
   const user = userEvent.setup();
   render(<SignIn api={api} error={null} onSignedIn={() => {}} />);
@@ -396,8 +397,8 @@ test('the choice checks the two passwords and their length before sending', asyn
   expect(sent('firstPassword')).toEqual([]);
 
   // Twelve code points and 128 are sent.
-  expect(await choose(face.repeat(12), face.repeat(12))).toBe(REFUSED);
-  expect(await choose('y'.repeat(128), 'y'.repeat(128))).toBe(REFUSED);
+  expect(await choose(face.repeat(12), face.repeat(12))).toBe(SAME);
+  expect(await choose('y'.repeat(128), 'y'.repeat(128))).toBe(SAME);
   expect(sent('firstPassword')).toEqual([
     ['firstPassword', 'octo-new', ONE_TIME, face.repeat(12)],
     ['firstPassword', 'octo-new', ONE_TIME, 'y'.repeat(128)],
@@ -405,19 +406,25 @@ test('the choice checks the two passwords and their length before sending', asyn
 });
 
 test('each refusal of the choice reads as pinned, and Cancel goes back', async () => {
-  const refusals: [() => Promise<SignInStep>, string][] = [
-    [() => Promise.reject(new RequestFailed(401, 'expired')), EXPIRED],
-    [() => Promise.reject(new RequestFailed(409, 'already_chosen')), ALREADY_CHOSEN],
+  // Refusals after which the one-time password may still work: the choice stays.
+  const kept: [() => Promise<SignInStep>, string][] = [
     [() => Promise.reject(new RequestFailed(400, 'same_password')), SAME],
     [() => Promise.reject(new RequestFailed(400, 'password_length')), LENGTH],
-    [() => Promise.reject(new RequestFailed(401, 'refused')), REFUSED],
     [() => Promise.reject(new RequestFailed(503, 'unknown')), BUSY],
     [() => Promise.reject(new RequestFailed(0, 'network')), UNREACHABLE],
     [() => Promise.reject(new RequestFailed(500, 'internal_error')), FAILED],
     [() => Promise.reject(new RequestFailed(400, 'bad_request')), FAILED],
+    [() => Promise.reject(new RequestFailed(400, 'constructor')), FAILED],
+    [() => Promise.reject(new TypeError('Failed to fetch')), FAILED],
     [() => Promise.resolve({ next: 'choose_password' }), FAILED],
   ];
-  const answers = refusals.map(([refusal]) => refusal);
+  // Refusals after which it can no longer work, each followed by the new one-time password an admin gave.
+  const dead: [RequestFailed, string, string][] = [
+    [new RequestFailed(401, 'refused'), REFUSED, 'h4n7r2w9x3k8m5t6q2zb'],
+    [new RequestFailed(401, 'expired'), EXPIRED, 'w5q8t3m7k2x9n4r6h3ce'],
+    [new RequestFailed(409, 'already_chosen'), ALREADY_CHOSEN, 'r6t2k9w4m8q3x7n5h2df'],
+  ];
+  const answers = [...kept.map(([refusal]) => refusal), ...dead.map(([failure]) => () => Promise.reject(failure))];
   const lastChoice = later<SignInStep>();
   answers.push(() => lastChoice.promise);
   const { api, sent } = fakeApi({ passwordSignIn: () => Promise.resolve({ next: 'choose_password' }), firstPassword: () => answers.shift()!() });
@@ -430,7 +437,7 @@ test('each refusal of the choice reads as pinned, and Cancel goes back', async (
   await user.click(screen.getByRole('button', { name: 'Sign in' }));
   await screen.findByRole('heading', { level: 1, name: 'Choose your password' });
 
-  for (const [, text] of refusals) {
+  for (const [, text] of kept) {
     await user.type(screen.getByLabelText('New password'), 'a long password of mine');
     await user.type(screen.getByLabelText('New password again'), 'a long password of mine');
     await user.click(screen.getByRole('button', { name: 'Choose and sign in' }));
@@ -444,7 +451,39 @@ test('each refusal of the choice reads as pinned, and Cancel goes back', async (
     expect(screen.getByRole('button', { name: 'Choose and sign in' })).toBeEnabled();
     expect(screen.getByRole('button', { name: 'Cancel' })).toBeEnabled();
   }
-  expect(sent('firstPassword')).toEqual(refusals.map(() => ['firstPassword', 'octo-new', ONE_TIME, 'a long password of mine']));
+  expect(sent('firstPassword')).toEqual(kept.map(() => ['firstPassword', 'octo-new', ONE_TIME, 'a long password of mine']));
+
+  // Each of these does what Cancel does and says its sentence above the first form; the next press signs in with a password and
+  // never sends the dead one-time password again.
+  let oneTime = ONE_TIME;
+  for (const [, text, next] of dead) {
+    await user.type(screen.getByLabelText('New password'), 'a long password of mine');
+    await user.type(screen.getByLabelText('New password again'), 'a long password of mine');
+    await user.click(screen.getByRole('button', { name: 'Choose and sign in' }));
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent).toBe(text);
+    expect(alert.tagName).toBe('P');
+    expect(classes(alert)).toEqual(words('text-sm text-bad'));
+    expect(screen.getByRole('heading', { level: 1, name: 'Sign in' })).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'Choose your password' })).toBeNull();
+    expect(screen.queryByRole('form', { name: 'Choose your password' })).toBeNull();
+    expect(alert.compareDocumentPosition(screen.getByRole('form', { name: 'Sign in with a password' })) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(screen.getByLabelText('Name')).toHaveValue('octo-new');
+    expect(screen.getByLabelText('Password')).toHaveValue('');
+    expect(screen.getByRole('button', { name: 'Sign in' })).toBeEnabled();
+    expect(screen.getByRole('link', { name: 'Sign in with GitHub' })).toBeInTheDocument();
+    expect(sent('firstPassword').at(-1)).toEqual(['firstPassword', 'octo-new', oneTime, 'a long password of mine']);
+    const chosen = sent('firstPassword').length;
+
+    await user.type(screen.getByLabelText('Password'), next);
+    await user.click(screen.getByRole('button', { name: 'Sign in' }));
+    expect(sent('passwordSignIn').at(-1)).toEqual(['passwordSignIn', 'octo-new', next]);
+    expect(sent('firstPassword')).toHaveLength(chosen);
+    await screen.findByRole('heading', { level: 1, name: 'Choose your password' });
+    expect(screen.queryByRole('alert')).toBeNull();
+    oneTime = next;
+  }
+  expect(sent('firstPassword')).toHaveLength(kept.length + dead.length);
   expect(onSignedIn).not.toHaveBeenCalled();
 
   // Cancel: the first step again, the name kept, no password and no alert, GitHub's way back.
@@ -467,6 +506,103 @@ test('each refusal of the choice reads as pinned, and Cancel goes back', async (
   await user.click(screen.getByRole('button', { name: 'Choose and sign in' }));
   await act(async () => lastChoice.resolve({ next: 'signed_in' }));
   expect(onSignedIn).toHaveBeenCalledTimes(1);
-  expect(sent('passwordSignIn')).toEqual([['passwordSignIn', 'octo-new', ONE_TIME], ['passwordSignIn', 'octo-new', 'p3x8w2m9k4h7t5r6n2qa']]);
+  expect(sent('passwordSignIn')).toEqual([ONE_TIME, ...dead.map(([, , next]) => next), 'p3x8w2m9k4h7t5r6n2qa'].map((typed) => ['passwordSignIn', 'octo-new', typed]));
   expect(sent('firstPassword').at(-1)).toEqual(['firstPassword', 'octo-new', 'p3x8w2m9k4h7t5r6n2qa', 'another long password']);
+});
+
+test('the choice sends the name its one-time password was given for, and the first step cannot be typed into while it is sent', async () => {
+  const first = later<SignInStep>();
+  const { api, sent } = fakeApi({ passwordSignIn: () => first.promise, firstPassword: () => Promise.resolve({ next: 'signed_in' }) });
+  const onSignedIn = vi.fn();
+  const user = userEvent.setup();
+  render(<SignIn api={api} error={null} onSignedIn={onSignedIn} />);
+  const name = screen.getByLabelText('Name');
+  const password = screen.getByLabelText('Password');
+  await user.type(name, 'octo-new');
+  await user.type(password, ONE_TIME);
+  await user.click(screen.getByRole('button', { name: 'Sign in' }));
+
+  // While the first step is sent: neither field takes what is typed.
+  expect(name).toBeDisabled();
+  expect(password).toBeDisabled();
+  await user.type(name, '-admin');
+  expect(name).toHaveValue('octo-new');
+  // A change that reaches the field all the same (fireEvent goes past disabled) is not the name the choice sends.
+  fireEvent.change(name, { target: { value: 'octo-admin' } });
+  await act(async () => first.resolve({ next: 'choose_password' }));
+  const form = await screen.findByRole('form', { name: 'Choose your password' });
+  expect(form.querySelector('input[autocomplete="username"]')).toHaveValue('octo-new');
+  await user.type(screen.getByLabelText('New password'), 'a long password of mine');
+  await user.type(screen.getByLabelText('New password again'), 'a long password of mine');
+  await user.click(screen.getByRole('button', { name: 'Choose and sign in' }));
+  expect(sent('passwordSignIn')).toEqual([['passwordSignIn', 'octo-new', ONE_TIME]]);
+  expect(sent('firstPassword')).toEqual([['firstPassword', 'octo-new', ONE_TIME, 'a long password of mine']]);
+  expect(onSignedIn).toHaveBeenCalledTimes(1);
+});
+
+test('the choice holds the name it is for, read-only, hidden and out of the tab order, for a password manager', async () => {
+  const { api } = fakeApi({ passwordSignIn: () => Promise.resolve({ next: 'choose_password' }) });
+  const user = userEvent.setup();
+  render(<SignIn api={api} error={null} onSignedIn={() => {}} />);
+  await user.type(screen.getByLabelText('Name'), 'octo-new');
+  await user.type(screen.getByLabelText('Password'), ONE_TIME);
+  await user.click(screen.getByRole('button', { name: 'Sign in' }));
+  const form = await screen.findByRole('form', { name: 'Choose your password' });
+
+  const names = form.querySelectorAll('input[autocomplete="username"]');
+  expect(names).toHaveLength(1);
+  const held = names[0] as HTMLInputElement;
+  expect(held.value).toBe('octo-new');
+  expect(held.type).toBe('text');
+  expect(held.readOnly).toBe(true);
+  expect(held).toHaveAttribute('tabindex', '-1');
+  // Hidden by the utility class, never by an inline style (the content security policy refuses one).
+  expect(classes(held)).toEqual(['sr-only']);
+  expect(held).not.toHaveAttribute('style');
+  // Before the new password, where a password manager looks for the name.
+  expect(held.compareDocumentPosition(screen.getByLabelText('New password')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+  // Tab goes round the page and never reaches it.
+  const reached: (Element | null)[] = [];
+  for (let press = 0; press < 6; press += 1) {
+    await user.tab();
+    reached.push(document.activeElement);
+  }
+  expect(reached).toContain(screen.getByRole('button', { name: 'Cancel' }));
+  expect(reached).not.toContain(held);
+});
+
+test('neither form lets its submit reload the page, also while it is sent', async () => {
+  const first = later<SignInStep>();
+  const chosen = later<SignInStep>();
+  const { api, sent } = fakeApi({ passwordSignIn: () => first.promise, firstPassword: () => chosen.promise });
+  const onSignedIn = vi.fn();
+  const user = userEvent.setup();
+  render(<SignIn api={api} error={null} onSignedIn={onSignedIn} />);
+  /** Submits `form` as a browser would, and says whether the page's own submission was stopped. */
+  const prevented = (form: HTMLElement): boolean => {
+    const event = createEvent.submit(form);
+    fireEvent(form, event);
+    return event.defaultPrevented;
+  };
+
+  const signIn = screen.getByRole('form', { name: 'Sign in with a password' });
+  await user.type(screen.getByLabelText('Name'), 'octo-new');
+  await user.type(screen.getByLabelText('Password'), ONE_TIME);
+  expect(prevented(signIn)).toBe(true);
+  expect(prevented(signIn)).toBe(true);
+  expect(sent('passwordSignIn')).toEqual([['passwordSignIn', 'octo-new', ONE_TIME]]);
+
+  await act(async () => first.resolve({ next: 'choose_password' }));
+  const choice = await screen.findByRole('form', { name: 'Choose your password' });
+  // Refused before sending, then sent, then sent already.
+  expect(prevented(choice)).toBe(true);
+  expect(await screen.findByRole('alert')).toHaveTextContent(LENGTH);
+  fireEvent.change(screen.getByLabelText('New password'), { target: { value: 'a long password of mine' } });
+  fireEvent.change(screen.getByLabelText('New password again'), { target: { value: 'a long password of mine' } });
+  expect(prevented(choice)).toBe(true);
+  expect(prevented(choice)).toBe(true);
+  expect(sent('firstPassword')).toEqual([['firstPassword', 'octo-new', ONE_TIME, 'a long password of mine']]);
+  await act(async () => chosen.resolve({ next: 'signed_in' }));
+  expect(onSignedIn).toHaveBeenCalledTimes(1);
 });
