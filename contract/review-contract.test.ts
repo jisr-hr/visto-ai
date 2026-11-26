@@ -44,9 +44,12 @@ test('a finding is what a careful reviewer would comment on, minor problems incl
   has(/minor ones included/);
 });
 test('blocker and major keep their bar: shown from the code, and tried against a disproof', () => {
-  has(/`blocker`: breaks production, loses or corrupts data, or is exploitable, and you can show the path from the code/);
-  has(/`major`: a realistic input or state produces a wrong result, a crash or a security gap, and you can state the reproduction/);
+  // Anchored at the end of each line, so nothing can be appended to either bar.
+  has(/^- `blocker`: breaks production, loses or corrupts data, or is exploitable, and you can show the path from the code\.$/m);
+  has(/^- `major`: a realistic input or state produces a wrong result, a crash or a security gap, and you can state the reproduction\.$/m);
   has(/Before you choose `major` or `blocker`, try to disprove the finding/);
+  has(/drop the finding, or lower it to `minor` when a real but unlikely path remains/);
+  has(/If your input cannot show whether such a guard exists, use `minor`\./);
 });
 test('a mismatch shown in the code is evidence, as a minor finding when its consequence cannot be traced', () =>
   has(/A mismatch you can point at in the code you were given[^.]*is evidence even when you cannot trace every consequence; report it as `minor` when you cannot/));
