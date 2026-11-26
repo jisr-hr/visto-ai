@@ -1,11 +1,20 @@
 import type { RouteRequest } from '../extensions/types.ts';
+import { SECURITY_HEADERS } from '../ui/headers.ts';
 import type { HttpAnswer } from './receive.ts';
 
 export const MAX_BODY_BYTES = 25 * 1024 * 1024;
 export const MAX_IN_FLIGHT = 20;
 export const EXTENSION_BODY_BYTES = 1024 * 1024;
 export const EXTENSION_IN_FLIGHT = 10;        // the places of one module
+export const UI_BODY_BYTES = 64 * 1024;
+export const UI_FILES_IN_FLIGHT = 16;    // '/', '/ui', '/ui/...'
+export const UI_SIGNIN_IN_FLIGHT = 2;    // '/api/auth/start', '/api/auth/callback'
+export const UI_API_IN_FLIGHT = 4;       // every other '/api' path
 export interface CheckedAnswer { status: number; headers: Record<string, string>; body: string }
+/** A request of the UI's route group. `path` is the URL before '?', `query` what follows the first '?'; neither is decoded. */
+export interface UiRequest { method: string; path: string; query: string; headers: Record<string, string | undefined>; body: Buffer }
+export interface UiAnswer { status: number; headers: Record<string, string | string[]>; body: string | Buffer }   // a list: one header line for each value (set-cookie)
+export type UiRoute = (request: UiRequest) => Promise<UiAnswer>;
 /**
  * One module's route. `answer` resolves at the latest when the handler's limit passes, and never rejects.
  * `settled` resolves when the promise the handler returned has settled, which can be later, and never rejects.
@@ -15,43 +24,90 @@ export type ExtensionRoute = (request: RouteRequest) => { answer: Promise<Checke
 export interface RequestLike extends AsyncIterable<Buffer> {
   method?: string | undefined; url?: string | undefined; headers: Record<string, string | string[] | undefined>;
 }
+/**
+ * `statusMessage`, `getHeaderNames`, `removeHeader` and `destroy` are Node's: the reason phrase a refused head leaves behind, the
+ * headers it may leave set, and closing the connection.
+ */
 export interface ResponseLike {
-  writeHead(status: number, headers: Record<string, string>): unknown;
-  end(body: string): unknown;
+  writeHead(status: number, headers: Record<string, string | string[]>): unknown;
+  end(body: string | Buffer): unknown;
+  statusMessage?: string | undefined;
+  getHeaderNames?(): string[];
+  removeHeader?(name: string): unknown;
+  destroy?(): unknown;
 }
 
 const HEADERS = { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' };
 const PREFIX = '/extensions/';
 const MODULE_FAILED: CheckedAnswer = { status: 500, headers: {}, body: 'internal_error' };
+const INTERNAL_ERROR = 'internal_error';
+
+/** The three parts of the UI's group, each with places of its own (call 17). */
+type UiPart = 'files' | 'signIn' | 'api';
+function uiPart(path: string): UiPart | null {
+  if (path === '/' || path === '/ui' || path.startsWith('/ui/')) return 'files';
+  if (path === '/api/auth/start' || path === '/api/auth/callback') return 'signIn';
+  if (path === '/api' || path.startsWith('/api/')) return 'api';
+  return null;
+}
 
 export function createListener(
   routes: {
     webhook: (headers: Record<string, string | undefined>, body: Buffer) => Promise<HttpAnswer>;
     extensions?: ReadonlyMap<string, ExtensionRoute>;   // by module name; absent reads as none
+    ui?: UiRoute;                                       // absent: '/', '/ui/...' and '/api/...' are answered as any unknown path
   },
-  limits: { maxBodyBytes?: number; maxInFlight?: number; maxExtensionBodyBytes?: number; maxExtensionInFlight?: number } = {},
+  limits: {
+    maxBodyBytes?: number; maxInFlight?: number; maxExtensionBodyBytes?: number; maxExtensionInFlight?: number;
+    maxUiBodyBytes?: number; maxUiFilesInFlight?: number; maxUiSignInInFlight?: number; maxUiApiInFlight?: number;
+  } = {},
 ): { listener: (req: RequestLike, res: ResponseLike) => void; idle: () => Promise<void> } {
   const maxBody = limits.maxBodyBytes ?? MAX_BODY_BYTES;
   const maxInFlight = limits.maxInFlight ?? MAX_IN_FLIGHT;
   const maxExtensionBody = limits.maxExtensionBodyBytes ?? EXTENSION_BODY_BYTES;
   const maxExtensionInFlight = limits.maxExtensionInFlight ?? EXTENSION_IN_FLIGHT;
+  const maxUiBody = limits.maxUiBodyBytes ?? UI_BODY_BYTES;
+  const uiPlaces: Record<UiPart, number> = {
+    files: limits.maxUiFilesInFlight ?? UI_FILES_IN_FLIGHT,
+    signIn: limits.maxUiSignInInFlight ?? UI_SIGNIN_IN_FLIGHT,
+    api: limits.maxUiApiInFlight ?? UI_API_IN_FLIGHT,
+  };
   const handling = new Set<Promise<void>>();
   let webhooks = 0;
   const taken = new Map<string, number>();   // places in use, by module name
+  const uiTaken: Record<UiPart, number> = { files: 0, signIn: 0, api: 0 };
 
-  function answer(res: ResponseLike, a: HttpAnswer, close = false): void {
+  /** Writes one answer; false when it could not be (Node refused it, or the caller is gone, and nothing more is owed). */
+  function write(res: ResponseLike, status: number, headers: Record<string, string | string[]>, body: string | Buffer): boolean {
     try {
-      res.writeHead(a.status, close ? { ...HEADERS, connection: 'close' } : { ...HEADERS });
-      res.end(a.body);
+      res.writeHead(status, headers);
+      res.end(body);
+      return true;
     } catch {
-      // the caller is gone: nothing is owed
+      return false;
     }
+  }
+
+  /** A plain answer: today's two headers, then `extra` (the UI group's security headers), then `connection: close` when asked. */
+  function answer(res: ResponseLike, a: HttpAnswer, close = false, extra: Readonly<Record<string, string>> = {}): void {
+    write(res, a.status, close ? { ...HEADERS, ...extra, connection: 'close' } : { ...HEADERS, ...extra }, a.body);
   }
 
   function firstValues(headers: RequestLike['headers']): Record<string, string | undefined> {
     const out: Record<string, string | undefined> = {};
     for (const [k, v] of Object.entries(headers)) out[k] = Array.isArray(v) ? v[0] : v;
     return out;
+  }
+
+  /** First values under lower-case names (call 33); defined, not assigned, so no name reaches the prototype. */
+  function lowerFirstValues(given: RequestLike['headers']): Record<string, string | undefined> {
+    const headers: Record<string, string | undefined> = {};
+    for (const [k, v] of Object.entries(given)) {
+      const lower = k.toLowerCase();
+      if (Object.hasOwn(headers, lower)) continue;
+      Object.defineProperty(headers, lower, { value: Array.isArray(v) ? v[0] : v, enumerable: true, writable: true, configurable: true });
+    }
+    return headers;
   }
 
   /** The body, or why there is none: over the limit, or the stream failed. */
@@ -130,14 +186,7 @@ export function createListener(
     }
     if ('failed' in read) return giveBack();
     if ('tooLarge' in read) { giveBack(); return answer(res, { status: 413, body: 'payload_too_large' }, true); }
-    // First values under lower-case names (call 33); defined, not assigned, so no name reaches the prototype.
-    const headers: Record<string, string | undefined> = {};
-    for (const [k, v] of Object.entries(req.headers)) {
-      const lower = k.toLowerCase();
-      if (Object.hasOwn(headers, lower)) continue;
-      Object.defineProperty(headers, lower, { value: Array.isArray(v) ? v[0] : v, enumerable: true, writable: true, configurable: true });
-    }
-    const request: RouteRequest = { method: req.method ?? '', path: rest === '' ? '/' : rest, query, headers, body: read.body };
+    const request: RouteRequest = { method: req.method ?? '', path: rest === '' ? '/' : rest, query, headers: lowerFirstValues(req.headers), body: read.body };
     // Both read inside the guard: a route that returns no object, or one whose fields throw, gives its place back.
     let settled: Promise<void>;
     let answered: Promise<CheckedAnswer>;
@@ -160,6 +209,54 @@ export function createListener(
     answerModule(res, result);
   }
 
+  /**
+   * The UI's answer, written with exactly its headers: a list is handed to Node as it is, which writes one line for each value.
+   * One Node refuses (a header value with CR or LF, a status out of range) or none at all is answered 500 in its place, as
+   * nothing was sent; when even that cannot be written, the connection is closed rather than left open.
+   */
+  function answerUi(res: ResponseLike, a: UiAnswer): void {
+    try {
+      res.writeHead(a.status, a.headers);
+      res.end(a.body);
+      return;
+    } catch {
+      // refused, or no answer: the 500 below
+    }
+    res.statusMessage = undefined;   // the refused head's reason phrase ('OK') would stand on the 500
+    // Its own length and `connection: close`: a length the refused head gave stays with Node and would stand on the 500 too.
+    const headers = { ...HEADERS, ...SECURITY_HEADERS, 'content-length': String(Buffer.byteLength(INTERNAL_ERROR)), connection: 'close' };
+    try {
+      for (const name of res.getHeaderNames?.() ?? []) res.removeHeader?.(name);   // what the refused head left set
+      res.writeHead(500, headers);
+      res.end(INTERNAL_ERROR);
+    } catch {
+      res.destroy?.();
+    }
+  }
+
+  /**
+   * A request of the UI's group. Its place, in its own part, is taken before the body is read and given back once the route settled.
+   * Every answer written here carries the security headers (call 17).
+   */
+  async function ui(req: RequestLike, res: ResponseLike, route: UiRoute, part: UiPart, path: string, query: string): Promise<void> {
+    if (uiTaken[part] >= uiPlaces[part]) return answer(res, { status: 503, body: 'busy' }, false, SECURITY_HEADERS);
+    uiTaken[part] += 1;
+    try {
+      const read = await readBody(req, maxUiBody);
+      if ('failed' in read) return;
+      if ('tooLarge' in read) return answer(res, { status: 413, body: 'payload_too_large' }, true, SECURITY_HEADERS);
+      let result: UiAnswer;
+      try {
+        result = await route({ method: req.method ?? '', path, query, headers: lowerFirstValues(req.headers), body: read.body });
+      } catch {
+        return answer(res, { status: 500, body: 'internal_error' }, false, SECURITY_HEADERS);
+      }
+      answerUi(res, result);
+    } finally {
+      uiTaken[part] -= 1;
+    }
+  }
+
   async function serve(req: RequestLike, res: ResponseLike): Promise<void> {
     const url = req.url ?? '';
     const path = url.split('?')[0] ?? '';
@@ -180,6 +277,11 @@ export function createListener(
     if (path === '/healthz') {
       if (req.method !== 'GET') return answer(res, { status: 405, body: 'method_not_allowed' });
       return answer(res, { status: 200, body: 'ok' });
+    }
+    const part = uiPart(path);
+    if (routes.ui !== undefined && part !== null) {
+      const mark = url.indexOf('?');
+      return ui(req, res, routes.ui, part, path, mark === -1 ? '' : url.slice(mark + 1));
     }
     return answer(res, { status: 404, body: 'not_found' });
   }

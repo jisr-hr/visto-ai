@@ -17,7 +17,7 @@ import { serviceConfig, parseConfig } from './config/load.ts';
 import type { AppIdentity, FeatureOff, ForgeApprovals, ForgeChecks, ForgeEvent, ForgeWriter, HookDelivery, LivePullRequest, OwnCheck, PostedComment, PullRequestAction, PullRequestFacts, ReviewThread, Source } from './forge/types.ts';
 import type { BlockScore, ModelRequest, ModelResponse, ReviewDeps, ReviewInput, ReviewResult } from './engine/types.ts';
 import { approvalsFor, BEAT_MS, CLOSE_WAIT_MS, DRAIN_WAIT_MS, gateForge, startService, STOP_WAIT_MS, TICK_MS, UPKEEP_MS, WITHDRAW_CONCURRENCY } from './service.ts';
-import type { Listening } from './service.ts';
+import type { Listening, ServiceDeps } from './service.ts';
 import type { RequestLike, ResponseLike } from './shell/http.ts';
 import { checkText } from './gate/check.ts';
 import type { LoadedExtension } from './extensions/types.ts';
@@ -28,6 +28,9 @@ import type { Activity } from './db/human-activity.ts';
 import { addRecords } from './db/memory-records.ts';
 import { recordComments } from './db/review-comments.ts';
 import type { HumanInlineComment } from './forge/types.ts';
+import type { ForgeSignIn } from './forge/types.ts';
+import type { Activity as UiActivity, Me } from './ui/api-types.ts';
+import type { UiFiles } from './ui/files.ts';
 
 const REF = { service: 'github', owner: 'acme', repo: 'shop', number: 7 } as const;
 const at = (seconds: number): string => new Date(Date.parse('2026-03-01T10:00:00.000Z') + seconds * 1000).toISOString();
@@ -105,6 +108,12 @@ interface Options {
   toolChoice?: 'auto' | 'forced';
   /** The approvals the service is given; none when not given. */
   approvals?: ForgeApprovals;
+  /** `ui` and what follows, added to the deployment file with the app's client id and secret; none when not given. */
+  uiYaml?: string;
+  /** What the service is given for the UI; none when not given. */
+  ui?: ServiceDeps['ui'];
+  /** `limits.queueConcurrency` in the deployment file; the config's default (2) when not given. */
+  queueConcurrency?: number;
 }
 interface Timer { ms: number; work: () => Promise<void>; cancelled: boolean }
 
@@ -148,6 +157,8 @@ async function harness(options: Options = {}) {
   const gateCalls: unknown[] = [];
   /** The third argument of each call of `lacks`. */
   const approvalCalls: unknown[] = [];
+  /** The fourth argument of each call of `lacks`. */
+  const uiTeamCalls: unknown[] = [];
   /** Every call of the checks, as [name, ...args]. */
   const checked: unknown[][] = [];
   /** The checks GitHub holds, by commit. */
@@ -160,7 +171,7 @@ async function harness(options: Options = {}) {
   const appInfo: AppIdentity = {
     read: () => Promise.reject(new Error('not_used')),
     canResolve: () => Promise.resolve(false),
-    lacks: (dryRun, gate, approval) => (order.push('lacks'), lacksCalls.push(dryRun), gateCalls.push(gate), approvalCalls.push(approval), options.lacks instanceof Error ? Promise.reject(options.lacks) : Promise.resolve(options.lacks ?? [])),
+    lacks: (dryRun, gate, approval, uiTeam) => (order.push('lacks'), lacksCalls.push(dryRun), gateCalls.push(gate), approvalCalls.push(approval), uiTeamCalls.push(uiTeam), options.lacks instanceof Error ? Promise.reject(options.lacks) : Promise.resolve(options.lacks ?? [])),
   };
 
   const db: Db = {
@@ -181,7 +192,7 @@ async function harness(options: Options = {}) {
   const lock: InstanceLock = { release: async () => { events.push('release'); } };
 
   const h = {
-    db, queries, allQueries, reviewDeps, modelRequests, events, order, lacksCalls, gateCalls, approvalCalls, checked, held, timers, inputs, fetched, listedSince, logged, writes,
+    db, queries, allQueries, reviewDeps, modelRequests, events, order, lacksCalls, gateCalls, approvalCalls, uiTeamCalls, checked, held, timers, inputs, fetched, listedSince, logged, writes,
     port: 0,
     /** What the clock reads; a test may move it. */
     now: options.now ?? at(0),
@@ -205,7 +216,16 @@ async function harness(options: Options = {}) {
     published: () => published,
     start: async () => {
       const yaml = options.repositoriesYaml ?? (options.gate === true ? GATE_YAML : undefined);
-      const base = yaml === undefined ? config : serviceConfig(parseConfig(BASE_YAML + yaml, ENV));
+      // A second `limits:` would be a duplicate key too: the concurrency goes into the one there is.
+      const baseYaml = options.queueConcurrency === undefined
+        ? BASE_YAML
+        : BASE_YAML.replace('limits:\n  spendPerDay: 50\n', `limits:\n  spendPerDay: 50\n  queueConcurrency: ${options.queueConcurrency}\n`);
+      // A second `app:` would be a duplicate key: the client id and secret go into the one there is.
+      const base = options.uiYaml !== undefined
+        ? serviceConfig(parseConfig(
+          baseYaml.replace('  webhookSecret: { env: S }\n', '  webhookSecret: { env: S }\n  clientId: Iv1.0123456789abcdef\n  clientSecret: { env: C }\n') + (yaml ?? '') + options.uiYaml,
+          { ...ENV, C: 'client-secret-for-tests-only' }))
+        : yaml === undefined && options.queueConcurrency === undefined ? config : serviceConfig(parseConfig(baseYaml + (yaml ?? ''), ENV));
       const dry = options.dryRun ?? options.gate !== true;
       const chosen = options.toolChoice === undefined ? base : { ...base, model: { ...base.model, toolChoice: options.toolChoice } };
       const learned = options.learning === true ? { ...chosen, learning: true } : chosen;
@@ -341,6 +361,7 @@ async function harness(options: Options = {}) {
       reviewUrl: (ref, reviewId) => `https://git.example.test/${ref.owner}/${ref.repo}/pull/${ref.number}#review-${reviewId}`,
       pullRequestUrl: (ref) => `https://git.example.test/${ref.owner}/${ref.repo}/pull/${ref.number}`,
       ...(options.approvals === undefined ? {} : { approvals: options.approvals }),
+      ...(options.ui === undefined ? {} : { ui: options.ui }),
       });
       started.push(service);
       return service;
@@ -356,10 +377,10 @@ async function harness(options: Options = {}) {
         end(body: string) { answer.body = body; resolve(answer); },
       });
     }),
-    /** A request to the listener; a body of null never ends. Resolves with the answer. */
-    request: (method: string, url: string, body: Buffer | null = Buffer.from('')) => new Promise<{ status: number; headers: Record<string, string>; body: string }>((resolve) => {
+    /** A request to the listener, with the headers `sent`; a body of null never ends. Resolves with the answer. */
+    request: (method: string, url: string, body: Buffer | null = Buffer.from(''), sent: Record<string, string> = {}) => new Promise<{ status: number; headers: Record<string, string>; body: string }>((resolve) => {
       const req: RequestLike = {
-        method, url, headers: {},
+        method, url, headers: sent,
         async *[Symbol.asyncIterator]() { if (body === null) await never(); else yield body; },
       };
       let status = 0;
@@ -2269,4 +2290,130 @@ test('in dry run the approvals the service was given are never reached: the with
   }
   assert.equal(approvalsFor(false, seen.approvals), seen.approvals);
   assert.deepEqual(seen.calls, []);
+});
+
+const UI_YAML = 'ui:\n  accounts: [octo-lead]\n  publicUrl: https://visto.example.test\n';
+const INDEX_PAGE = '<!doctype html><title>Visto AI</title>';
+/** What the service is given for the UI: a sign-in GitHub is never asked through here, and a built page; `reads` holds each read of either. */
+function uiDeps(): { ui: NonNullable<ServiceDeps['ui']>; reads: unknown[] } {
+  const reads: unknown[] = [];
+  const signIn: ForgeSignIn = {
+    authorizeUrl: (_state, _challenge, redirectUri) => { reads.push(['authorizeUrl', redirectUri]); return 'https://github.example.test/login/oauth/authorize'; },
+    signedIn: () => Promise.reject(new Error('not_expected')),
+    orgInstallation: () => Promise.reject(new Error('not_expected')),
+  };
+  const files: UiFiles = new Map([['/ui/index.html', { body: Buffer.from(INDEX_PAGE), type: 'text/html; charset=utf-8' }]]);
+  return {
+    reads,
+    ui: {
+      get signIn() { reads.push('signIn'); return signIn; },
+      get files() { reads.push('files'); return files; },
+    },
+  };
+}
+
+test('with the UI off, /, /ui/ and /api/me are not found as before, and nothing is read for them', async () => {
+  const given = uiDeps();
+  for (const [label, options] of [['as it is', {}], ['ui in the file only', { uiYaml: UI_YAML }], ['ui given only', { ui: given.ui }]] as const) {
+    const h = await harness(options);
+    await (await h.start()).settled;
+    for (const path of ['/', '/ui/', '/ui', '/ui/assets/index-a1.js', '/api/me', '/api/auth/start', '/api']) {
+      assert.deepEqual(await h.request('GET', path), { status: 404, headers: { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' }, body: 'not_found' }, `${label} ${path}`);
+    }
+    assert.deepEqual(h.allQueries.filter(([text]) => text.includes('ui_sessions') || text.includes('ui_states')), [], label);
+    assert.deepEqual(h.logged.filter((e) => e.event === 'ui'), [], label);
+  }
+  assert.deepEqual(given.reads, []);
+});
+
+test('with the UI on, / goes to /ui/, the built page is served, and /api/me asks for a sign-in', async () => {
+  const given = uiDeps();
+  const h = await harness({ uiYaml: UI_YAML, ui: given.ui });
+  let saidAtListen: boolean | null = null;
+  h.onListen = async () => { saidAtListen = h.logged.some((e) => e.event === 'ui'); };
+  await (await h.start()).settled;
+  const home = await h.request('GET', '/');
+  assert.deepEqual([home.status, home.headers.location, home.headers['x-frame-options']], [302, '/ui/', 'DENY']);
+  const page = await h.request('GET', '/ui/');
+  assert.deepEqual([page.status, page.headers['content-type'], page.headers['cache-control'], String(page.body)], [200, 'text/html; charset=utf-8', 'no-store', INDEX_PAGE]);
+  for (const path of ['/api/me', '/api/activity', '/api/reviews']) {
+    const read = await h.request('GET', path);
+    assert.deepEqual([read.status, read.headers['content-type'], read.body], [401, 'application/json; charset=utf-8', '{"error":"signed_out"}'], path);
+  }
+  // The sign-in starts at GitHub, sent back to the address the file names.
+  const start = await h.request('GET', '/api/auth/start');
+  assert.deepEqual([start.status, start.headers.location], [302, 'https://github.example.test/login/oauth/authorize']);
+  assert.deepEqual(given.reads.filter((r) => Array.isArray(r)), [['authorizeUrl', 'https://visto.example.test/api/auth/callback']]);
+  // Said once, after listening.
+  assert.deepEqual([saidAtListen, h.logged.filter((e) => e.event === 'ui')], [false, [{ event: 'ui', files: 1 }]]);
+  assert.equal(JSON.stringify(h.logged).includes('client-secret-for-tests-only'), false);
+});
+
+test("the review jobs write their stage, and the app check asks for the team's permission", async () => {
+  const h = await harness();
+  await (await h.start()).settled;
+  await h.webhook(pr('opened'), 'd1');
+  await h.reviewed();
+  // In dry run, and with the fake review telling no progress: the first stage only.
+  assert.deepEqual(h.allQueries.filter(([text]) => text.includes('set stage = $2')).map(([, params]) => params[1]), ['preparing']);
+  assert.equal(typeof h.reviewDeps[0]!.progress, 'function');
+  assert.deepEqual(h.uiTeamCalls, [false]);
+  for (const [yaml, team] of [['ui:\n  team: acme/reviewers\n  publicUrl: https://visto.example.test\n', true], [UI_YAML, false]] as const) {
+    const other = await harness({ uiYaml: yaml, ui: uiDeps().ui });
+    await (await other.start()).settled;
+    assert.deepEqual(other.uiTeamCalls, [team], yaml);
+  }
+});
+
+const TEAM_YAML = 'ui:\n  team: acme/reviewers\n  publicUrl: https://visto.example.test\n';
+/** A cookie as a browser sends it back: the first `name=value` of the first value set. */
+const cookieOf = (set: unknown): string => String(Array.isArray(set) ? set[0] : set).split(';')[0] ?? '';
+
+test('a member of the team signs in through the service, and reads its mode, its places, its pause and its running review', async () => {
+  const signIn: ForgeSignIn = {
+    authorizeUrl: (state) => `https://github.example.test/login/oauth/authorize?state=${state}`,
+    signedIn: async (code) => {
+      if (code !== 'code-1') throw new Error('not_expected');
+      return { login: 'octo-dev', isBot: false };
+    },
+    orgInstallation: async (org) => (org === 'acme' ? '99' : null),
+  };
+  const files: UiFiles = new Map([['/ui/index.html', { body: Buffer.from(INDEX_PAGE), type: 'text/html; charset=utf-8' }]]);
+  // Three places for the reviews, two for the withdrawals: the two cannot be swapped unseen.
+  const h = await harness({ uiYaml: TEAM_YAML, ui: { signIn, files }, member: true, holdReview: true, queueConcurrency: 3 });
+  await (await h.start()).settled;
+  // A review the runner holds; then the day's spend reaches the limit, which pauses the reviews to come.
+  await h.webhook(pr('opened'), 'd1');
+  await h.reviewed();
+  try {
+    await recordRun(h.db, run({ startedAt: at(0), usage: { ...run().usage, cost: 50 } }));
+    const start = await h.request('GET', '/api/auth/start');
+    const state = new URL(String(start.headers.location)).searchParams.get('state') ?? '';
+    const back = await h.request('GET', `/api/auth/callback?code=code-1&state=${state}`, Buffer.from(''), { cookie: cookieOf(start.headers['set-cookie']) });
+    assert.deepEqual([back.status, back.headers.location], [302, '/ui/']);
+    // Let in through the team, which only the checks the service was given could tell.
+    assert.deepEqual(h.checked, [['isTeamMember']]);
+    const cookie = cookieOf(back.headers['set-cookie']);
+
+    const me = await h.request('GET', '/api/me', Buffer.from(''), { cookie });
+    const who = JSON.parse(me.body) as Me;
+    assert.deepEqual([me.status, who.login, who.mode], [200, 'octo-dev', 'dry_run']);
+
+    const now = await h.request('GET', '/api/activity', Buffer.from(''), { cookie });
+    const seen = JSON.parse(now.body) as UiActivity;
+    assert.deepEqual([now.status, seen.places, seen.paused], [200, { reviews: 3, withdrawals: 2 }, 'spend_limit']);
+    assert.deepEqual(seen.jobs.map((j) => [j.repository, j.number, j.stage, j.startedAt, j.url]), [
+      ['acme/shop', 7, 'preparing', at(0), 'https://git.example.test/acme/shop/pull/7'],
+    ]);
+  } finally {
+    h.releaseReview();
+  }
+});
+
+test('with the UI off the app check asks for no members permission, though the file names a team', async () => {
+  for (const [given, team] of [[undefined, false], [uiDeps().ui, true]] as const) {
+    const h = await harness({ uiYaml: TEAM_YAML, ...(given === undefined ? {} : { ui: given }) });
+    await (await h.start()).settled;
+    assert.deepEqual(h.uiTeamCalls, [team], given === undefined ? 'no ui given' : 'ui given');
+  }
 });

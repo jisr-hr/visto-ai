@@ -37,8 +37,8 @@ import { shownOf } from './score/shown.ts';
 import type { ScoredBy, ScoreEntry, ScoreHistory } from './score/types.ts';
 import { askScorer, summariesOf } from './scorer/ask.ts';
 import type {
-  AcceptanceRow, AuditEntry, ChangedFile, Discussed, EarlierThread, Effort, ExtensionStatus, Finding, LessonsStatus, Memory, MemoryStatus, NotReviewed, PullRequestInfo, RepoConfig, ReviewDeps, ReviewInput, ReviewResult,
-  Severity, Side, Source, ToolDefinition, Usage,
+  AcceptanceRow, AuditEntry, ChangedFile, Discussed, EarlierThread, Effort, ExtensionStatus, Finding, LessonsStatus, Memory, MemoryStatus, NotReviewed, PullRequestInfo, RepoConfig, ReviewDeps, ReviewInput,
+  ReviewProgress, ReviewResult, Severity, Side, Source, ToolDefinition, Usage,
 } from './types.ts';
 
 const CONCURRENCY = 2;
@@ -152,6 +152,16 @@ function safeLog(deps: ReviewDeps, entry: Record<string, unknown>): void {
   }
 }
 
+// A progress that throws, or answers a promise that rejects, changes nothing; with none, nobody is told.
+function tell(deps: ReviewDeps, progress: ReviewProgress): void {
+  try {
+    const out: unknown = deps.progress?.(progress);
+    if (out instanceof Promise) out.catch(() => {});
+  } catch {
+    // ignored on purpose
+  }
+}
+
 // `withTools`: the batch's first call, which is offered the review's tools while they are not withheld. Every
 // other call is made as in a review with no server. `given` says whether this one was offered them.
 async function oneCall(run: Run, files: FileContext[], firstFileNumber: number, batchIndex: number, withTools = false): Promise<BatchAnswer & { given: boolean }> {
@@ -185,7 +195,9 @@ async function oneCall(run: Run, files: FileContext[], firstFileNumber: number, 
 }
 
 // Never rejects: an unexpected error is recorded in `ctl`, which stops every worker from starting more work.
-async function runBatch(run: Run, ctl: Control, batch: Batch, firstFileNumber: number, batchIndex: number): Promise<BatchOutcome> {
+// `onEnd` is called once the batch has ended, answered or given up, just before its outcome is returned, with no wait added; one
+// that throws is ignored, so the bookkeeping never makes this reject.
+async function runBatch(run: Run, ctl: Control, batch: Batch, firstFileNumber: number, batchIndex: number, onEnd?: () => void): Promise<BatchOutcome> {
   const out: BatchOutcome = { answers: [], reviewed: [], failedFiles: [], failedCodes: [], usage: zeroUsage(), models: [], providers: [], audit: [] };
   try {
     await attempt(run, ctl, out, batch, firstFileNumber, batchIndex);
@@ -195,6 +207,11 @@ async function runBatch(run: Run, ctl: Control, batch: Batch, firstFileNumber: n
       ctl.error = error;
     }
     ctl.stopped = true;
+  }
+  try {
+    onEnd?.();
+  } catch {
+    // ignored on purpose
   }
   return out;
 }
@@ -690,7 +707,19 @@ async function reviewOnce(input: ReviewInput, deps: ReviewDeps, asked: Asked): P
       seen += b.files.length;
     }
     const ctl: Control = { stopped: false, error: null, failed: false };
-    const settled = await inPool(packed.batches.length, CONCURRENCY, ctl, (i) => runBatch(run, ctl, packed.batches[i]!, firsts[i]!, i));
+    // The progress: before the first batch is sent, then as each batch ends, with the threads owed a verdict in the batches not ended.
+    const batches = packed.batches.length;
+    const dueIn = packed.batches.map((b) => b.files.reduce((n, f) => n + (f.threads ?? []).filter((t) => t.due).length, 0));
+    const ended = dueIn.map(() => false);
+    let endedCount = 0;
+    const dueLeft = (): number => dueIn.reduce((n, due, i) => (ended[i] === true ? n : n + due), 0);
+    tell(deps, { batches, ended: 0, threadsDue: dueLeft() });
+    // Told from inside the batch as it ends: no wait is added between a batch's end and its worker taking the next one.
+    const settled = await inPool(batches, CONCURRENCY, ctl, (i) => runBatch(run, ctl, packed.batches[i]!, firsts[i]!, i, () => {
+      ended[i] = true;
+      endedCount += 1;
+      tell(deps, { batches, ended: endedCount, threadsDue: dueLeft() });
+    }));
     const outcomes = settled.filter((o): o is BatchOutcome => o !== undefined);
 
     for (const o of outcomes) {

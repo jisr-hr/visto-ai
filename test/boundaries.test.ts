@@ -199,3 +199,10 @@ test('the memory part imports the config as types only, and reaches no Node modu
   }
   assert.deepEqual(await lint("import type { ServiceConfig } from '../config/load.ts';\nexport type C = ServiceConfig;\n", file), []);
 });
+test("the UI's server part may not import the GitHub adapter or a Postgres client", async () => {
+  assert.ok((await lint("import '../forge/github/sign-in.ts';\n", 'src/ui/x.ts')).includes('no-restricted-imports'));
+  for (const name of ['pg', '@electric-sql/pglite']) {
+    assert.ok((await lint(`import '${name}';\n`, 'src/ui/x.ts')).includes('no-restricted-imports'), name);
+  }
+  assert.deepEqual(await lint("import '../forge/types.ts';\n", 'src/ui/x.ts'), []);
+});

@@ -318,6 +318,18 @@ test('no word of the description is in the event', () => {
     const text = JSON.stringify(event);
     assert.equal(factsIn(event).reverts, 6);
     assert.equal(text.includes('doubled'), false);
-    assert.equal(text.includes('Double'), false);
+    assert.equal(factsIn(event).title, 'Revert "Double the totals"');
+  }
+});
+
+test('the title of the pull request is carried as written, and absent when the payload has none', () => {
+  const titled = eventOf('pull_request', pr({ title: 'Round prices before tax' }));
+  assert.deepEqual(titled, { kind: 'pull_request', action: 'opened', facts: facts({ title: 'Round prices before tax' }) });
+  assert.equal(factsIn(titled).title, 'Round prices before tax');
+  assert.equal(factsIn(eventOf('pull_request', pr({ title: '' }))).title, '');
+  for (const over of [{}, { title: 7 }, { title: null }]) {
+    const event = eventOf('pull_request', pr(over));
+    assert.deepEqual(event, { kind: 'pull_request', action: 'opened', facts: facts() }, JSON.stringify(over));
+    assert.equal('title' in factsIn(event), false, JSON.stringify(over));
   }
 });

@@ -5,13 +5,14 @@ import type { Db } from './types.ts';
 /**
  * Inserts or updates. false, and nothing written, when the stored facts are newer (a later updatedAt).
  * `reverts`: a number is stored, absent stores null, and 'kept' leaves what is stored (null for a pull request not stored before).
+ * `title`: stored when given; absent leaves what is stored (null for a pull request not stored before).
  */
 export async function savePullRequest(db: Db, facts: PullRequestFacts): Promise<boolean> {
   const rows = await db.query(
     `insert into visto_ai.pull_requests
        (service, owner, repo, number, author, author_is_bot, base_branch, head_branch, head_sha,
-        draft, state, merged_at, closed_at, merge_commit, installation, updated_at, reverts)
-     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::timestamptz, $13::timestamptz, $14, $15, $16::timestamptz, $17::integer)
+        draft, state, merged_at, closed_at, merge_commit, installation, updated_at, reverts, title)
+     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::timestamptz, $13::timestamptz, $14, $15, $16::timestamptz, $17::integer, $19)
      on conflict (service, owner, repo, number) do update set
        author = excluded.author, author_is_bot = excluded.author_is_bot,
        base_branch = excluded.base_branch, head_branch = excluded.head_branch, head_sha = excluded.head_sha,
@@ -19,7 +20,8 @@ export async function savePullRequest(db: Db, facts: PullRequestFacts): Promise<
        merged_at = excluded.merged_at, closed_at = excluded.closed_at, merge_commit = excluded.merge_commit,
        installation = coalesce(excluded.installation, visto_ai.pull_requests.installation),
        updated_at = excluded.updated_at,
-       reverts = case when $18::boolean then visto_ai.pull_requests.reverts else excluded.reverts end
+       reverts = case when $18::boolean then visto_ai.pull_requests.reverts else excluded.reverts end,
+       title = coalesce(excluded.title, visto_ai.pull_requests.title)
      where visto_ai.pull_requests.updated_at <= excluded.updated_at
      returning number`,
     [
@@ -29,6 +31,7 @@ export async function savePullRequest(db: Db, facts: PullRequestFacts): Promise<
       facts.draft, facts.state, facts.mergedAt, facts.closedAt, storableOrNull(facts.mergeCommit),
       storableOrNull(facts.installation), facts.updatedAt,
       typeof facts.reverts === 'number' ? facts.reverts : null, facts.reverts === 'kept',
+      storableOrNull(facts.title ?? null),
     ]);
   return rows.length === 1;
 }

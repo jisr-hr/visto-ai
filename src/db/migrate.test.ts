@@ -226,3 +226,69 @@ test('0013_approval comes right after 0012_reverts, and applies over the rows of
     [{ indexname: 'review_runs_standing' }]);
   await db.close();
 });
+test('0014_ui adds the title, the stage, the retry code and the two tables of sign-in, and every row stored before reads as none', async () => {
+  const ledger = await testDb();
+  const names = (await ledger.query<{ name: string }>('select name from visto_ai.schema_migrations order by name')).map((r) => r.name);
+  assert.equal(names.indexOf('0014_ui'), names.indexOf('0013_approval') + 1);
+  await ledger.close();
+  const db = await pgliteDb();
+  const all = loadMigrations(MIGRATIONS_DIR);
+  await migrate(db, all.filter((m) => m.name < '0014_ui'));
+  await db.query(
+    `insert into visto_ai.pull_requests (service, owner, repo, number, author, author_is_bot, base_branch, head_branch, head_sha, draft, state, updated_at)
+     values ('github', 'acme', 'shop', 7, 'octo-dev', false, 'main', 'feature', 'aaa111', false, 'open', '2026-03-01T10:00:00Z')`);
+  await db.query(
+    `insert into visto_ai.jobs (service, owner, repo, number, reason, head_sha, status, run_at, starts, created_at, started_at, trigger)
+     values ('github', 'acme', 'shop', 7, 'opened', 'aaa111', 'running', '2026-03-01T10:00:00Z', 1, '2026-03-01T10:00:00Z', '2026-03-01T10:00:05Z',
+             'automatic')`);
+  const prsBefore = await db.query('select * from visto_ai.pull_requests');
+  const jobsBefore = await db.query('select * from visto_ai.jobs');
+  assert.deepEqual(await migrate(db, all.filter((m) => m.name <= '0014_ui')), ['0014_ui']);
+  const jobColumns = ['stage', 'stage_at', 'batch', 'batches', 'threads_due', 'retry_code'];
+  const without = (rows: Array<Record<string, unknown>>, added: string[]) =>
+    rows.map((r) => Object.fromEntries(Object.entries(r).filter(([k]) => !added.includes(k))));
+  assert.deepEqual(without(await db.query('select * from visto_ai.pull_requests'), ['title']), prsBefore);
+  assert.deepEqual(without(await db.query('select * from visto_ai.jobs'), jobColumns), jobsBefore);
+  assert.deepEqual(await db.query('select title from visto_ai.pull_requests'), [{ title: null }]);
+  assert.deepEqual(
+    await db.query(`select ${jobColumns.join(', ')} from visto_ai.jobs`),
+    [{ stage: null, stage_at: null, batch: null, batches: null, threads_due: null, retry_code: null }]);
+  const columns = (table: string) => db.query<{ column_name: string; data_type: string; is_nullable: string }>(
+    `select column_name, data_type, is_nullable from information_schema.columns
+     where table_schema = 'visto_ai' and table_name = $1 order by column_name`, [table]);
+  assert.deepEqual(
+    (await columns('pull_requests')).filter((c) => c.column_name === 'title'),
+    [{ column_name: 'title', data_type: 'text', is_nullable: 'YES' }]);
+  assert.deepEqual(
+    (await columns('jobs')).filter((c) => jobColumns.includes(c.column_name)),
+    [
+      { column_name: 'batch', data_type: 'integer', is_nullable: 'YES' },
+      { column_name: 'batches', data_type: 'integer', is_nullable: 'YES' },
+      { column_name: 'retry_code', data_type: 'text', is_nullable: 'YES' },
+      { column_name: 'stage', data_type: 'text', is_nullable: 'YES' },
+      { column_name: 'stage_at', data_type: 'timestamp with time zone', is_nullable: 'YES' },
+      { column_name: 'threads_due', data_type: 'integer', is_nullable: 'YES' },
+    ]);
+  assert.deepEqual(await columns('ui_sessions'), [
+    { column_name: 'created_at', data_type: 'timestamp with time zone', is_nullable: 'NO' },
+    { column_name: 'expires_at', data_type: 'timestamp with time zone', is_nullable: 'NO' },
+    { column_name: 'id_hash', data_type: 'text', is_nullable: 'NO' },
+    { column_name: 'last_used_at', data_type: 'timestamp with time zone', is_nullable: 'NO' },
+    { column_name: 'login', data_type: 'text', is_nullable: 'NO' },
+    { column_name: 'via', data_type: 'text', is_nullable: 'NO' },
+  ]);
+  assert.deepEqual(await columns('ui_states'), [
+    { column_name: 'expires_at', data_type: 'timestamp with time zone', is_nullable: 'NO' },
+    { column_name: 'state_hash', data_type: 'text', is_nullable: 'NO' },
+    { column_name: 'verifier_hash', data_type: 'text', is_nullable: 'NO' },
+  ]);
+  for (const table of ['ui_sessions', 'ui_states']) {
+    assert.deepEqual(await db.query(`select count(*)::int as n from visto_ai.${table}`), [{ n: 0 }], table);
+    assert.deepEqual(
+      await db.query(`select count(*)::int as n from pg_constraint where conrelid = 'visto_ai.${table}'::regclass and contype = 'p'`), [{ n: 1 }], table);
+  }
+  assert.deepEqual(
+    await db.query("select indexname from pg_indexes where schemaname = 'visto_ai' and indexname = 'ui_states_expires'"),
+    [{ indexname: 'ui_states_expires' }]);
+  await db.close();
+});

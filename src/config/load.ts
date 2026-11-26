@@ -37,6 +37,21 @@ export interface McpServerConfig {
 }
 
 export interface ScorerConfig { baseUrl: string; apiKey: string; model: string; timeoutSeconds: number }
+
+/** Who may open the UI, and what sign-in needs (section 3.2). Read from the file only. */
+export interface UiConfig {
+  /** As written. */
+  accounts: string[];
+  /** "org/team-slug"; null when not written. */
+  team: string | null;
+  /** The origin, with no trailing slash. */
+  publicUrl: string;
+  /** `app.clientId` as written. */
+  clientId: string;
+  /** The value of the variable `app.clientSecret` names. Never logged, stored or posted. */
+  clientSecret: string;
+}
+
 export interface DeploymentConfig {
   model: ModelConfig;
   scorer: ScorerConfig | null;
@@ -45,6 +60,8 @@ export interface DeploymentConfig {
   /** The value of the variable `auditKey` names; present only when `auditKey` is written. Never logged, stored or posted. */
   auditKey?: string;
   server: { port: number };
+  /** Present only when `ui` names an account or a team. */
+  ui?: UiConfig;
   dryRun: boolean;
   learning: boolean;
   alerts: { webhook: string } | null;
@@ -178,6 +195,13 @@ function auditKeyNeeded(repositories: { defaults: { score: ApprovalKeys }; overr
   return Object.values(repositories.overrides).some((o) => draws({ ...APPROVAL_OFF, ...defaults, ...approvalWritten(o.score).approval }));
 }
 
+const UI_NEEDS = 'must be written when ui names accounts or a team';
+
+/** The UI is on when `ui` names at least one account or writes a team. */
+function uiOn<T extends { accounts: string[]; team?: string | undefined }>(ui: T | undefined): ui is T {
+  return ui !== undefined && (ui.accounts.length > 0 || ui.team !== undefined);
+}
+
 function isMapping(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
@@ -234,8 +258,16 @@ export function parseConfig(yamlText: string, env: Record<string, string | undef
   const raw = result.data;
   // Needed with no key written fails closed, dry run or not: one issue, however many repositories need it.
   const keyIssues = raw.auditKey === undefined && auditKeyNeeded(raw.repositories) ? [AUDIT_KEY_NEEDED] : [];
-  const repositoryIssues = [...gateBranchIssues(raw.repositories), ...keyIssues];
-  if (repositoryIssues.length > 0) throw new ConfigError(repositoryIssues);
+  // What sign-in needs fails closed the same way: each key missing is named, dry run or not, and no value is quoted.
+  const uiIssues = uiOn(raw.ui)
+    ? [
+      raw.ui.publicUrl === undefined ? `ui.publicUrl: ${UI_NEEDS}` : null,
+      raw.app?.clientId === undefined ? `app.clientId: ${UI_NEEDS}` : null,
+      raw.app?.clientSecret === undefined ? `app.clientSecret: ${UI_NEEDS}` : null,
+    ].filter((i) => i !== null)
+    : [];
+  const writtenIssues = [...gateBranchIssues(raw.repositories), ...keyIssues, ...uiIssues];
+  if (writtenIssues.length > 0) throw new ConfigError(writtenIssues);
   const varName = raw.model.apiKey.env;
   const apiKey = env[varName];
   if (apiKey === undefined || apiKey === '') {
@@ -255,11 +287,20 @@ export function parseConfig(yamlText: string, env: Record<string, string | undef
     scorer = { ...raw.scorer, apiKey: scorerKey };
   }
   let app: { id: string; privateKey: string; webhookSecret: string } | null = null;
+  let clientSecret: string | undefined;
   if (raw.app !== undefined) {
     const hookVar = raw.app.webhookSecret.env;
     const webhookSecret = env[hookVar];
     if (webhookSecret === undefined || webhookSecret === '') {
       throw new ConfigError([`app.webhookSecret: environment variable ${hookVar} is not set`]);
+    }
+    // Resolved whenever it is written, whatever ui says; it stays out of `app`.
+    if (raw.app.clientSecret !== undefined) {
+      const secretVar = raw.app.clientSecret.env;
+      clientSecret = env[secretVar];
+      if (clientSecret === undefined || clientSecret === '') {
+        throw new ConfigError([`app.clientSecret: environment variable ${secretVar} is not set`]);
+      }
     }
     const keyVar = raw.app.privateKey.env;
     const keyText = env[keyVar];
@@ -348,6 +389,13 @@ export function parseConfig(yamlText: string, env: Record<string, string | undef
     seen.set(name.toLowerCase(), name);
   }
   const { approval: defaultsApproval } = approvalWritten(defaults.score);
+  // With the UI on, the issues above have made each of these written.
+  const publicUrl = raw.ui?.publicUrl;
+  const clientId = raw.app?.clientId;
+  let ui: UiConfig | undefined;
+  if (uiOn(raw.ui) && publicUrl !== undefined && clientId !== undefined && clientSecret !== undefined) {
+    ui = { accounts: raw.ui.accounts, team: raw.ui.team ?? null, publicUrl: new URL(publicUrl).origin, clientId, clientSecret };
+  }
   return {
     model: { ...raw.model, apiKey },
     scorer,
@@ -355,6 +403,7 @@ export function parseConfig(yamlText: string, env: Record<string, string | undef
     database,
     ...(auditKey === undefined ? {} : { auditKey }),
     server: raw.server,
+    ...(ui === undefined ? {} : { ui }),
     dryRun: raw.dryRun,
     learning: raw.learning,
     alerts,

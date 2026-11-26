@@ -6,7 +6,7 @@ const READ = new Set(['read', 'write', 'admin']);
 const WRITE = new Set(['write', 'admin']);
 
 /** What the app lacks, one entry for each permission or event a feature needs and the app has not got. */
-export function missingFor(info: AppInfo, dryRun: boolean, gate?: GateNeeds, approval?: boolean): FeatureOff[] {
+export function missingFor(info: AppInfo, dryRun: boolean, gate?: GateNeeds, approval?: boolean, uiTeam?: boolean): FeatureOff[] {
   const missing: FeatureOff[] = [];
   const need = (feature: FeatureOff['feature'], permission: string, level: 'read' | 'write'): void => {
     if (!(level === 'read' ? READ : WRITE).has(info.permissions[permission] ?? '')) missing.push({ feature, missing: `${permission}:${level}` });
@@ -36,6 +36,8 @@ export function missingFor(info: AppInfo, dryRun: boolean, gate?: GateNeeds, app
     need('approval', 'pull_requests', 'write');
     subscribe('approval', 'pull_request_review');
   }
+  // A sign-in reads the team's membership, in dry run too.
+  if (uiTeam === true) need('ui', 'members', 'read');
   return missing;
 }
 
@@ -81,7 +83,7 @@ export function createAppInfo(opts: { auth: AppAuth; fetch: typeof fetch; apiBas
 
   return {
     read,
-    lacks: async (dryRun, gate, approval) => missingFor(await read(), dryRun, gate, approval),
+    lacks: async (dryRun, gate, approval, uiTeam) => missingFor(await read(), dryRun, gate, approval, uiTeam),
     canResolve: async () => WRITE.has((await read()).permissions.contents ?? ''),
   };
 }

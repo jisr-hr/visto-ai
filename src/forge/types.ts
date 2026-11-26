@@ -85,6 +85,7 @@ export interface PullRequestFacts {
   // a number: the description names that pull request as the one it reverts; absent: it names none;
   // 'kept': this event may not say (an event of a merged pull request other than its `closed` one): what is stored stays
   reverts?: number | 'kept';
+  title?: string;   // the title the event carries; absent: it carries none, and what is stored stays
 }
 export type PullRequestAction = 'opened' | 'reopened' | 'ready_for_review' | 'synchronize' | 'retargeted' | 'closed' | 'other';
 export type ForgeEvent =
@@ -113,11 +114,12 @@ export interface AppInfo {
 }
 /** What the configured gate uses of the app; all false when no gate is configured. */
 export interface GateNeeds { check: boolean; statuses: boolean; members: boolean }
-export interface FeatureOff { feature: 'reviews' | 'publishing' | 'resolving' | 'commands' | 'capture' | 'gate' | 'approval'; missing: string }
+export interface FeatureOff { feature: 'reviews' | 'publishing' | 'resolving' | 'commands' | 'capture' | 'gate' | 'approval' | 'ui'; missing: string }
 export interface AppIdentity {
   read(): Promise<AppInfo>;
-  /** What the app lacks: one entry for each permission or event a feature needs and the app has not got. `approval`: whether any repository has approval on. */
-  lacks(dryRun: boolean, gate?: GateNeeds, approval?: boolean): Promise<FeatureOff[]>;
+  /** What the app lacks: one entry for each permission or event a feature needs and the app has not got. `approval`: whether any repository has approval on.
+   *  `uiTeam`: whether the UI lets in the members of a team. */
+  lacks(dryRun: boolean, gate?: GateNeeds, approval?: boolean, uiTeam?: boolean): Promise<FeatureOff[]>;
   /** True when the app may resolve a review thread: its `contents` permission is write or admin. */
   canResolve(): Promise<boolean>;
 }
@@ -198,4 +200,15 @@ export interface ForgeApprovals {
   readReview(ref: PullRequestRef, installation: string, reviewId: string): Promise<{ state: OwnReviewState; commit: string | null } | null>;
   /** Dismisses one review. Sent once. Rejects with a short code and says nothing about whether it took effect. */
   dismissReview(ref: PullRequestRef, installation: string, reviewId: string, message: string): Promise<void>;
+}
+export interface SignedIn { login: string; isBot: boolean }
+/** How long each of sign-in's calls to GitHub may take, the UI's read of a team membership included; a call cut off is github_network. */
+export const SIGN_IN_TIMEOUT_MS = 10_000;
+export interface ForgeSignIn {
+  /** The page where a person approves the sign-in; `challenge` is the base64url SHA-256 of the PKCE verifier. */
+  authorizeUrl(state: string, challenge: string, redirectUri: string): string;
+  /** The account that approved: the code is exchanged once, with the verifier, for a user token, which reads the account once and is dropped. Rejects with a short code. */
+  signedIn(code: string, verifier: string, redirectUri: string): Promise<SignedIn>;
+  /** The app's installation on an organisation, read with the app's own token; null when it is not installed there. Rejects with a short code. */
+  orgInstallation(org: string): Promise<string | null>;
 }

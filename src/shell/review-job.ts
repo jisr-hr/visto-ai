@@ -2,8 +2,8 @@ import { drawnForAudit } from '../approval/audit.ts';
 import { approvalOf } from '../config/load.ts';
 import type { RepoSettings } from '../config/load.ts';
 import { hasStandingApproval, markDismissed, newestWasApproval } from '../db/approvals.ts';
-import { askWithdraw, enqueueJob, finishJob, requeueJob } from '../db/jobs.ts';
-import type { Job } from '../db/jobs.ts';
+import { askWithdraw, enqueueJob, finishJob, markStage, requeueJob } from '../db/jobs.ts';
+import type { Job, ReviewStage } from '../db/jobs.ts';
 import { recordBlockScores, reusableScores } from '../db/block-scores.ts';
 import { getPullRequest } from '../db/pull-requests.ts';
 import { listComments, NOTE, recordComments } from '../db/review-comments.ts';
@@ -16,7 +16,7 @@ import { renderReview } from '../engine/render/body.ts';
 import type { InlineComment } from '../engine/render/body.ts';
 import { renderNotes } from '../engine/render/notes.ts';
 import type { Category, ScoredBy, Span } from '../engine/score/types.ts';
-import type { EarlierState, LessonsStatus, Limits, Memory, MemoryState, ReviewDeps, ReviewInput, ReviewResult, ThreadVerdict, Usage } from '../engine/types.ts';
+import type { EarlierState, LessonsStatus, Limits, Memory, MemoryState, ReviewDeps, ReviewInput, ReviewProgress, ReviewResult, ThreadVerdict, Usage } from '../engine/types.ts';
 import type {
   ForgeAccess, ForgeApprovals, ForgeWriter, LivePullRequest, OwnReviewState, PullRequestInfo, PullRequestRef, ReviewThread, Source,
 } from '../forge/types.ts';
@@ -94,6 +94,8 @@ export interface ReviewJobDeps {
   onWithdraw?: () => void;
   /** The deployment's audit key; absent: a share above 0 draws every pull request. Never logged, stored or posted. */
   auditKey?: string;
+  /** Whether the job writes its stage on its row; absent: none is written and the engine is given no progress. */
+  stages?: boolean;
 }
 
 /** The newest published run of these, or null. */
@@ -274,6 +276,27 @@ export async function runReviewJob(job: Job, deps: ReviewJobDeps): Promise<void>
     return new Date(t.getTime() + ms).toISOString();
   };
   const retryWait = RETRY_WAITS_MS[job.starts <= 1 ? 0 : 1]!;
+
+  /** Writes the job's stage on its row, at the clock's time; called only with `stages`. One that cannot be written changes nothing and is not logged. Never rejects. */
+  const stage = async (s: ReviewStage): Promise<void> => {
+    try {
+      await markStage(db, job.id, s, deps.clock().toISOString());
+    } catch {
+      // a stage that cannot be written changes nothing
+    }
+  };
+  /** The stages the engine told, written one after the other; the job waits for them once the engine has returned. */
+  let told: Promise<void> = Promise.resolve();
+  const isCount = (n: number): boolean => Number.isInteger(n) && n >= 0;
+  /** What the engine is given with `stages`: each progress whose counts are whole numbers at or above 0 becomes the next stage. */
+  const progress = (p: ReviewProgress): void => {
+    const { batches, ended, threadsDue } = p;
+    if (!isCount(batches) || !isCount(ended) || !isCount(threadsDue)) return;
+    const batch = Math.min(ended + 1, batches);
+    const next: ReviewStage = threadsDue > 0 ? { stage: 'judging_threads', batch, batches, threadsDue } : { stage: 'reviewing', batch, batches };
+    told = told.then(() => stage(next));
+  };
+  const stages = deps.stages === true;
 
   /** Runs one write, up to three times, with the waits between. false when the third try failed too. */
   const tried = async (write: () => Promise<void>): Promise<boolean> => {
@@ -470,6 +493,9 @@ export async function runReviewJob(job: Job, deps: ReviewJobDeps): Promise<void>
     }
   };
   try {
+    // 0. The stage, first of all.
+    if (stages) await stage({ stage: 'preparing' });
+
     // 1. The installation: the job's own, else the stored pull request's.
     const installation = job.installation ?? (await getPullRequest(db, job.ref))?.installation ?? null;
     if (installation === null) return await drop('no_installation');
@@ -648,13 +674,14 @@ export async function runReviewJob(job: Job, deps: ReviewJobDeps): Promise<void>
           // With learning on, the review is given its repository's memory, in dry run too; with it off the object is what it was.
           const engine = deps.memoryFor === undefined ? deps.engineDeps(source) : { ...deps.engineDeps(source), memory: deps.memoryFor(job.ref) };
           if (deps.dryRun) {
-            result = await deps.review(input, engine);
+            result = await deps.review(input, stages ? { ...engine, progress } : engine);
           } else {
             by = engine.scorer !== undefined ? 'scorer' : 'model';
             const scoredBy = by;
             const since = new Date(now.getTime() - REUSE_DAYS * 86_400_000).toISOString();
             result = await deps.review({ ...input, mode, history: historyOf({ runs, last, by: scoredBy }), earlierAcceptance: acceptanceOf(runs) }, {
               ...engine,
+              ...(stages ? { progress } : {}),
               reusableScores: async (blocks) => (await reusableScores(db, job.ref, scoredBy, blocks, since)).map((row) => ({
                 path: row.path, hash: row.hash, around: row.around,
                 entry: { score: row.score, category: (CATEGORY_NAMES.includes(row.category) ? row.category : 'other') as Category, reason: row.reason },
@@ -664,6 +691,8 @@ export async function runReviewJob(job: Job, deps: ReviewJobDeps): Promise<void>
         } catch {
           failure = { stage: 'engine', code: 'internal_error' };
         }
+        // The stages the engine told are written before anything is rendered.
+        if (stages) await told;
       }
     }
 
@@ -879,6 +908,7 @@ export async function runReviewJob(job: Job, deps: ReviewJobDeps): Promise<void>
       if (!timed) {
         out = { kind: 'failed', code: 'record_failed' };
       } else {
+        if (stages) await stage({ stage: 'publishing' });
         const approval = await approvalContext();
         // A run another job recorded keeps that job's trigger and requester; one recorded with no job, by an older release, is this job's.
         const ownRun = resumed === null || resumed.job === null || resumed.job === job.id;

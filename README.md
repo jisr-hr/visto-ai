@@ -68,7 +68,8 @@ The full design, with every decision and its reason, is in [docs/superpowers/spe
 | Evals with lessons as of each case: the findings replay with memory, lessons in both evals, and what a lesson does to findings and to the score | Planned |
 | Automatic approval and its withdrawal (off unless switched on) | Built. Tried in part against a real GitHub App on a private scratch repository, and under Docker (see "What was tried" under [Automatic approval](#automatic-approval-optional)): not an approval decided and posted by the service, a merge under a standing approval, GitHub's own deliveries, a pull request from a fork, or a branch name with a slash |
 | Audit sample: a share of the pull requests automatic approval would approve, sent to a person anyway (5% unless the config says otherwise; 0 switches it off) | Built. Tried under Docker (the start and its key, not the draw's effect on a review); not tried against GitHub: no review on the scratch repository gets past `rule_unreadable` (see "What was tried" under [Automatic approval](#automatic-approval-optional)) |
-| UI | Planned |
+| UI: sign-in through the GitHub App and the Activity screen (off unless the config names who may open it) | Built. Tried under Docker with a real Chromium against a stub of GitHub (see "What was tried" under [The UI](#the-ui-optional)); not tried against GitHub |
+| UI: the review page, settings, the overview, repositories and memory | Planned |
 
 What exists today is a library, a command-line tool, and a service that you can run with Docker. The service receives, queues, reviews and records. In dry run it posts nothing; out of dry run it posts a review when a pull request is opened and again when its head or base moves, unless the review would say nothing the newest one does not already say, and writes into the threads of its own earlier reviews. A repository can also switch on inline notes, one short comment in the diff for each block listed for a person, and the merge gate, a check that a repository can require in GitHub (see [The merge gate](#the-merge-gate-optional); it was tried against a real GitHub App in part, and never as a required check). With the gate off, the service holds no merge back. It approves a pull request only where a repository switches automatic approval on, and only when, as it posts the review, every file is reviewed, nothing is at or above the threshold, no major or blocker finding is open, the pull request is no draft and not from a fork, the base branch's own rules dismiss stale approvals, and the pull request is not drawn for the audit sample, a share of the pull requests it would approve that goes to a person anyway; a new commit withdraws the approval (see [Automatic approval](#automatic-approval-optional)). Otherwise the score is only listed for a person.
 
@@ -103,6 +104,18 @@ npm run lint
 ```
 
 Tests never reach the network. The test setup blocks sockets and `fetch`, and clears credential variables, so a test that tries to reach GitHub or a model fails.
+
+The web UI is a package of its own, `ui/` (React, TypeScript, Vite, Tailwind CSS, with Vitest and Testing Library), with its own exact versions and lock file, its own lint config and its own `node_modules`; the root lint ignores it, and nothing in `src/` imports from it. It needs its own install, which reaches the network once:
+
+```bash
+npm --prefix ui ci
+npm --prefix ui run lint
+npm --prefix ui run typecheck
+npm --prefix ui test
+npm --prefix ui run build
+```
+
+Its tests stub the API and block `fetch`, `XMLHttpRequest`, `WebSocket` and `EventSource`. `build` writes `ui/dist`, which git ignores. CI runs the root checks and these.
 
 ## Run the service
 
@@ -150,9 +163,10 @@ npm run app:create -- --webhook-url https://reviews.example.test/webhooks/github
 - **When it fails after GitHub created the app.** It prints `failed:` and a short code (`github_<status>`, `github_network`, `github_bad_response` or `write_failed`), removes the reserved file and exits with 1. An app may then exist with no private key in anyone's hands: the command prints the settings page (`https://github.com/settings/apps`, or `https://github.com/organizations/<org>/settings/apps`). Generate a key and a webhook secret there, or delete the app and run the command again. Before GitHub is involved, a failure to listen prints `failed: listen_failed`, and any other failure of the command itself `failed: internal_error`; both remove the reserved file and exit with 1.
 - **When you stop it** (Ctrl-C, a termination signal, or closing the terminal). The reserved file is removed, unless the secrets were already written, and nothing is written after the stop. If GitHub had already sent the browser back, so that the app may exist, the command says that it stopped before the key was written and where the app's settings are. The exit code is 130.
 - **What is left to do by hand.** Put the app's id in the config as `app.id`. Put the two lines in `.env`. If the app should not hold write access to contents, lower `Contents` to read-only in the app's settings before you install it (this was not tried): the app then replies in a thread it cleared and leaves it open, and the service says so at each start (see [Leaving dry run](#leaving-dry-run)). Then install the app on the repositories it should review (the printed address). The service reads the app's permissions once, at start, so restart it after changing them.
+- **For the UI** (see [The UI](#the-ui-optional)). The manifest names no callback URL, and the command keeps neither the client id nor the client secret that GitHub's answer holds by its documentation. On the app's settings page, set the **Callback URL** to `<ui.publicUrl>/api/auth/callback`, generate a **client secret** and put it in the variable `app.clientSecret` names, and copy the **Client ID** into `app.clientId`. A client secret can be generated again at any time.
 - **What the service checks at start.** The service reads the app's permissions and events from GitHub and logs `feature_off` for each thing a feature lacks (see [Leaving dry run](#leaving-dry-run)). The manifest asks for everything these checks look for, the gate's and automatic approval's included.
 
-To create the app in GitHub's own form instead, give it these: permissions `pull_requests` write, `contents` write (read is enough if threads are not to be resolved), `issues` write and `metadata` read; the events `pull_request`, `issue_comment`, `pull_request_review`, `pull_request_review_comment` and `pull_request_review_thread`; and, for the merge gate, `Checks` write, `Commit statuses` read (only when `requiredChecks` are named), the organisation permission `Members` read (only when a skip team is named) and the event `Check run`; for automatic approval, `Administration` read; a webhook that goes to the service's address with the path `/webhooks/github`, with a secret of your own; and a private key. In dry run only the read permissions are used. An app that exists already is given the gate's permissions and the event by hand, as [The merge gate](#the-merge-gate-optional) says, and automatic approval's as [Automatic approval](#automatic-approval-optional) says.
+To create the app in GitHub's own form instead, give it these: permissions `pull_requests` write, `contents` write (read is enough if threads are not to be resolved), `issues` write and `metadata` read; the events `pull_request`, `issue_comment`, `pull_request_review`, `pull_request_review_comment` and `pull_request_review_thread`; and, for the merge gate, `Checks` write, `Commit statuses` read (only when `requiredChecks` are named), the organisation permission `Members` read (only when a skip team is named) and the event `Check run`; for automatic approval, `Administration` read; for the UI, the callback URL `<ui.publicUrl>/api/auth/callback`, a client secret, and the organisation permission `Members` read when `ui.team` is named; a webhook that goes to the service's address with the path `/webhooks/github`, with a secret of your own; and a private key. In dry run only the read permissions are used. An app that exists already is given the gate's permissions and the event by hand, as [The merge gate](#the-merge-gate-optional) says, and automatic approval's as [Automatic approval](#automatic-approval-optional) says.
 
 ### Leaving dry run
 
@@ -673,6 +687,107 @@ docker compose exec db psql -U postgres -d visto -c "select id, owner, repo, num
 
 `body` is the text that would have been posted (or was posted, out of dry run), `outcome` how the run ended and `cost` what the model calls cost, as recorded (see the daily limit below). The inline comments, and the notes when they are on, are in the `comments` column.
 
+### The UI (optional)
+
+The service can serve a web UI at `/ui/`: a sign-in through the GitHub App, the layout of the approved screens (a sidebar with the five screens, the mode, who is signed in, a light or dark theme and sign-out), and one screen, Activity, which shows what runs now and the reviews of the last 30 days. It is off unless the config names who may open it. **It was not tried against GitHub:** in its tests and in its run under Docker, GitHub's authorize page, its code exchange and its reads of the user, of an installation and of a membership are stand-ins. What follows is what its code does.
+
+**Switching it on.**
+
+- **The keys.** `ui.accounts`: GitHub logins, at most 100. `ui.team`: one team, written `<org>/<team-slug>`. `ui.publicUrl`: the address people open the service at, an `https` address with no path, query or user name, or, for a try on one machine, `http://localhost` or `http://127.0.0.1`, with a port or none. In the `app` block, `clientId`, the client id the app's settings page shows, and `clientSecret`, by reference (`{ env: APP_CLIENT_SECRET }` in [config.example.yml](config.example.yml) and [env.example](env.example)).
+- **On or off.** The UI is on when `ui.accounts` names a login or `ui.team` is written. Otherwise `/`, `/ui/` and `/api/` answer 404 `not_found`, as any unknown address does, and nothing is read for them.
+- **The refusal.** With the UI on, `ui.publicUrl`, `app.clientId` and `app.clientSecret` must be written. Each one missing is an issue of its own (`<key>: must be written when ui names accounts or a team`), and the start is refused, in dry run too, with no value quoted. The eval commands read the same file, so they refuse it too. A `clientSecret` that is written is read whatever `ui` says, and its variable must then be set.
+- **Access is read from the file only.** Nothing in the UI changes who may open it.
+
+**On GitHub, before a real sign-in can work.**
+
+- On the app's settings page, set the **Callback URL** to `<ui.publicUrl>/api/auth/callback`, keep "Expire user authorization tokens" on, generate a **client secret** and put it in the variable `app.clientSecret` names, and copy the **Client ID** into `app.clientId` (see [Creating the app](#creating-the-app)).
+- With `ui.team`, install the app on that organisation and accept the organisation permission Members read. While `ui.team` is written and the app lacks it, the service logs `feature_off` with the feature `ui` and `members:read` at each start, in dry run too, raises an alert of that name, and keeps running; a sign-in through the team is then refused.
+- Serve the service over HTTPS at `ui.publicUrl`: both of its cookies are `Secure`. `http://localhost` and `http://127.0.0.1` are accepted for a try on one machine; Chromium kept both cookies on `http://localhost` in the run under Docker, and `127.0.0.1` and other browsers were not tried.
+- Open the service at `ui.publicUrl` itself. The state's cookie belongs to the host that set it, so a sign-in started at another name of the same service (`127.0.0.1` while `ui.publicUrl` says `localhost`, say) loses it on the way back, and is refused as `state`.
+
+**Building the files.** The image builds `ui/` in a stage of its own and keeps only the built files. To start the service outside Docker, build them first; the install reaches the network:
+
+```bash
+npm --prefix ui ci && npm --prefix ui run build
+```
+
+The service reads `ui/dist` once, at start, and serves it from memory, so restart it after a rebuild. With the UI on and nothing built, `/ui/` answers 404 while the API works, and the start logs `{ event: 'ui', files: 0 }`.
+
+**Signing in.**
+
+- **The start.** The sign-in page's button opens `GET /api/auth/start`. It makes a random state and a random PKCE verifier, 32 bytes each, stores the SHA-256 of each for 10 minutes, and sets both in one cookie, `__Host-visto_oauth` (`Path=/; Max-Age=600; HttpOnly; Secure; SameSite=Lax`). It then sends the browser to GitHub's authorize page with the client id, the callback, the state, the verifier's SHA-256 as the challenge (`S256`), and `allow_signup=false`.
+- **The way back.** GitHub sends the browser to `GET /api/auth/callback`, which clears the state's cookie whatever it answers. It goes on only when the state in the address is the cookie's, is stored and has not expired, and the cookie's verifier is the one stored with it. A state is taken once. The code is then exchanged once, with the verifier and the client secret, for the person's token, which reads the account once (`GET /user`) and is dropped. The token is not revoked: it stays valid until GitHub expires it, after 8 hours by GitHub's documentation while "Expire user authorization tokens" is on. Each of sign-in's own calls to GitHub (the exchange, the read of the user, the read of an organisation's installation) ends after 10 seconds and is not tried again.
+- **Who is let in.** A user account, never a bot or an account of another type, whose login is in `ui.accounts`, letter case aside: no further call is made. Otherwise, with `ui.team`, an active member of that team: the service reads the app's installation on the team's organisation with the app's own token, then the membership through that installation. The membership is read through the merge gate's client, which waits up to a minute for a call and tries once more; the sign-in waits for it 10 seconds at most and is then refused as `unverified` (reason `github_network`). A pending membership is not let in, and anything that cannot be read refuses the sign-in (`unverified`). By GitHub's documentation, a member of a child team of `ui.team` reads as an active member of it, so such a member may be let in; this was not tried. A person is their login: a login freed on GitHub and taken by someone else is let in under the name the file writes. A login with an underscore, as Enterprise Managed Users have, cannot sign in: the way back refuses GitHub's answer as `github`.
+- **The session.** A person let in gets a session of 12 hours and lands on `/ui/`. Its id, 32 random bytes, is the value of the cookie `__Host-visto_session` (`Path=/; Max-Age=43200; HttpOnly; Secure; SameSite=Strict`). The database keeps only its SHA-256, with the login, the way it was let in (`account`, or the team as `ui.team` writes it), when it was made and last used, and when it expires. Neither cookie names a `Domain`, as the `__Host-` prefix needs. The state's cookie is `Lax` because a `Strict` cookie is not sent when GitHub sends the browser back. A person refused lands on `/ui/signin`, which says why.
+- **Read again at each request.** Each API request behind a session reads it from the database. It must not have expired, and the way it was let in must still hold in the running config: for `account` the login still listed, for a team the same team, letter case aside, whatever else the file names. So a restart with a login removed, or with the team changed, ends those sessions. The membership is read only at sign-in: a member removed from the team keeps a session for up to 12 hours. The last use is written when the stored one is 60 seconds old or more. A database that fails while the session is read, or while its last use is written, is not a sign-out: the request answers 500 `internal_error` and logs `ui_failed`, and the page says `Not updating` (or, at its first read, that it could not reach the service) rather than showing the sign-in page.
+- **Signing out** (the button beside the theme switch) is `POST /api/auth/signout` with the token for changes in the header `x-visto-csrf`. It deletes the row and clears the cookie. The token is the SHA-256 of `csrf:` and the session's id, stored nowhere, and given by `GET /api/me`; a request without it is refused (403 `csrf`). Cost: whoever holds a session's cookie can know its token. A session deleted in the database leaves its cookie in the browser until it expires, and it reads as signed out.
+
+**The caps.**
+
+- Expired sessions and states are deleted when a sign-in starts, at most once a minute. While 1,000 states are live, `GET /api/auth/start` answers 503 `busy` and stores nothing, so a flood of starts can hold sign-in off for up to 10 minutes.
+- The UI's routes have places of their own, apart from the webhook's 20 and each module's 10, counted in three parts: 16 for the files (`/`, `/ui` and `/ui/...`, answered from memory with no database), 2 for the two sign-in routes, and 4 for every other `/api` address. A request beyond its part's places is answered 503 `busy`, in plain text. So at most 6 of the UI's requests at once use the database, and they share its 5 connections with the reviews.
+- A body is at most 64 KiB (413 `payload_too_large`).
+- Nothing limits requests by address or by minute: that belongs to the proxy in front.
+
+**Who sees what.** Everyone let in sees the same: every repository the service holds review jobs or runs of, the titles, numbers and short heads of their pull requests, and the login of whoever asked for a review with a `/review` or a `/done`, a commenter who may not command included; such a job is refused when it runs. The login of whoever asked for a re-run of the check is not shown. Nothing narrows this to a person's own access on GitHub: a member of the team without read access to a repository sees its titles, numbers and requesters. No answer holds the loaded config, a secret, a review's body, comments or result (only its counts of findings, its threshold and whether it found nothing new are read from it), the id of a review, a comment, an installation or a delivery, any author's login, or any text a person wrote but a title.
+
+**The screens.** The sidebar's entries are Overview, Activity, Repositories, Memory and Settings. Activity is the one screen of this release. The Overview at `/ui/`, where a sign-in lands, Repositories, Memory, Settings, and a review's page (`/ui/reviews/<run>`, where each row of Recent reviews leads) say "Coming in a later plan." Any other address under `/ui/` says "Not found". The sidebar also shows the mode (`Live` with the number of repositories the service has seen, or `Dry run`), who is signed in, a switch between a light and a dark theme (kept in the browser; with no choice it follows the system), and sign-out. A choice kept is applied by a small script of the page's own, `/ui/theme.js`, loaded in its head before anything paints, so the page never shows the other theme first.
+
+- **In review now** lists the review jobs running or pending, at most 200, the running first. Each shows its pull request (the title linked to GitHub, or `<owner>/<name> #<number>` until a delivery has stored a title), its stage, who or what asked for it, when it started and a progress bar. Under them come the withdrawals of approvals waiting to try again after a failed try, at most 50, each with the code of that try and when it tries again; one that waits with no failed try (put back by a restart's recovery, say) is not listed. The header counts `<r> running, <q> queued`: running counts the jobs that run, are stopped or wait for pushes to settle, and queued the due ones and those waiting to try again; the sidebar's badge is the running count. Beside it stand the places of the review lane and of the withdrawal lane, and a queued job says when reviews are paused.
+- **Recent reviews** lists the runs started in the last 30 days, newest first, 25 a page, with the total that match. Each shows its outcome, its highest score (red at or above the run's own threshold, 70 when it holds none; blue at 40 or above; green below), its findings by severity, its mode, cost, time taken and age. The outcome is the first that holds: `Failed`, `Nothing new`, `Drawn for the audit`, `Approved`, `Not posted` (out of dry run and not published), `Needs a person`, `Reviewed`; so a dry run never reads as approved. A failed run's score reads `None`, and a nothing-new one's `Kept`. The list is filtered by repository and by outcome (`Approved`; `Needs a person`, which takes the audit sample too; `Failed`), and searched by title (any part of it, letter case aside, with `%`, `_` and `\` taken as themselves) or by number, with or without `#`.
+- **Reading.** The layout reads the activity every 5 seconds, and Activity reads the first page of the reviews every 15 seconds. Neither reads while the page is hidden, and both read at once when it shows again. A read that fails turns `Updating live` into `Not updating`; one answered 401 shows the sign-in page. Ages and times left are counted from the time each answer carries, not from the browser's clock. Cost: one person viewing makes about 16 requests a minute.
+
+**The stage of a running review.** Each review job writes its stage on its row, with the UI off too. What each reads as:
+
+| Stage | When |
+|---|---|
+| `Waiting for pushes to settle` | A push's job (`synchronize`) in its 180 quiet seconds: pending, and due 180 seconds after it was made |
+| `Waiting to try again` | Any other pending job not yet due, such as one put back after a failed try, or because the head moved while it ran |
+| `Queued` | A pending job that is due |
+| `Preparing` | Written first by the job; also a running job with no stage yet |
+| `Reviewing`, batch n of m | Written before the first batch is sent, and as each batch ends |
+| `Judging threads`, with the threads due | While a batch that holds a thread owed a verdict has not ended; such files are sent first |
+| `Publishing` | Written just before the review is posted, so never in dry run |
+| `Stopped` | A running job this service does not hold, left so by a job that could not record its run; it runs again at the next start |
+
+A stage is written only on a running row, in order, and one that cannot be written changes nothing. A claim clears it, so a pending job's old stage is never read. After a crash the next start puts the running jobs back before it listens, so they read `Queued`. The progress bar is at 5% while preparing, at `10 + 80 * (n - 1) / m` percent at batch n of m, rounded, and at 95% while publishing: it moves only as batches end. A second scorer's step has no stage of its own: the last batch's stays shown. Cost: up to `m + 3` more statements for a review of m batches, with the UI off too.
+
+**Headers and the cache.** Every answer of the UI's routes carries, exactly, `content-security-policy: default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; font-src 'self'; connect-src 'self'; manifest-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'`, `x-content-type-options: nosniff`, `referrer-policy: same-origin` and `x-frame-options: DENY`, the listener's own 503, 413 and 500 included. The fonts are bundled and no asset is inlined, so the page needs nothing from another origin. A file under `/ui/assets/`, whose name carries a hash, is cached for a year (`cache-control: public, max-age=31536000, immutable`); every other answer, `index.html` and every API answer included, is `no-store`.
+
+**The routes.**
+
+| Route | What it does |
+|---|---|
+| `GET /`, `GET /ui` | Sends the browser to `/ui/` (302) |
+| `GET /ui/...` | A built file. An address that is no file gets `index.html`, so the application's own addresses reload; a missing file under `/ui/assets/` is 404. The path is never decoded, and never joined to a folder |
+| `GET /api/auth/start` | Starts a sign-in |
+| `GET /api/auth/callback` | The way back from GitHub |
+| `POST /api/auth/signout` | Signs out, with the token for changes |
+| `GET /api/me` | The login, the token for changes, `live` or `dry_run`, and the repositories the service has stored a pull request of (in lower case, sorted, at most 200) |
+| `GET /api/activity` | What In review now shows |
+| `GET /api/reviews?repo=&outcome=&q=&before=` | A page of Recent reviews: `repo` an `owner/name`; `outcome` `approved`, `needs_person` or `failed`; `q` the search, at most 100 characters; `before` the run to page from. A parameter written empty reads as absent, and a malformed one is 400 `bad_request` |
+
+The files are served to anyone: they hold no data. Every `/api` route but the two of sign-in needs a session, and without one answers 401 `signed_out`. A method other than a route's own is 405, with `allow`, and any other `/api` address is 404 `not_found`. The three reads answer JSON, and so does each refusal at an `/api` address (400, 401, 403, 404, 405, 500), as `{ "error": "<code>" }`. The two sign-in routes answer with a redirect, but for a start refused as `busy`, which is JSON; sign-out answers 204 with no body. The files' 404 and 405, and the listener's own 503 `busy` and 413, are plain text.
+
+**The log.** One `ui_signin` line for each way back, with `outcome` and `reason`. The outcomes: `ok`; `denied`, when the person refused on GitHub's page; `state`; `github`, when GitHub could not be reached, refused the code, or answered what the service does not take; `not_allowed`; `unverified`; `failed`, when a database step failed. The reason is a short code, such as `oauth_refused`, `github_502` or `not_installed`, or null. One `ui_failed` line, with the route's name (`me`, `activity`, `reviews` or `signout`) and a short code, when a request behind a session fails. One `ui` line at start, with `files`. No line holds a login, a code, a state, a verifier, a token, a cookie, a session id or the client secret: who signed in is read from the database.
+
+**Who is signed in.** In the database (`docker compose exec db psql -U postgres -d visto`):
+
+```sql
+-- who is signed in now
+select login, via, created_at, last_used_at, expires_at from visto_ai.ui_sessions where expires_at > now() order by last_used_at desc;
+-- sign everyone out
+delete from visto_ai.ui_sessions;
+```
+
+`last_used_at` is written at most once a minute. A session whose row is gone reads as signed out at its next request.
+
+**With the UI off,** the service still stores each pull request's title from its deliveries, each review job's stage, and a withdrawal's retry code; nothing is answered, logged or posted that was not. A title, which its author wrote, is stored and shown to everyone let in, escaped. A pull request stored before this release shows `<owner>/<name> #<number>` until its next delivery.
+
+**The migration.** The UI adds one migration, `0014_ui`: the title on `pull_requests`, the stage's five columns and the retry code on `jobs`, and the tables `ui_sessions` and `ui_states`. It is applied whether or not the UI is on, and every row stored before it reads as no title, no stage and no code. A previous release finds a migration it does not know and refuses to start on that database, so it cannot be put back.
+
+**What was tried.** The tests, with GitHub stood in by fakes and the frontend's API stubbed, and one run under Docker in a network with no way out: the previous release, then this one, on one Postgres (the ledger gained `0014_ui`, the old rows read, and the previous release then refused to start); the UI off (`/`, `/ui/` and `/api/me` not found); the refusal of a `ui` block without `publicUrl`, `app.clientId` and `app.clientSecret`, with no value printed; then the UI on, in dry run, behind a stub answering as `github.com` and `api.github.com` with a certificate of its own. In it a real Chromium signed in with PKCE (the stub checked the verifier against the challenge) and landed on `/ui/`; Activity showed rows written by statements in each stage, the withdrawal line, two pages of reviews and their filters and search; the theme held across a reload, and a stored theme was applied before the page's script ran on a system of the other one; sign-out ended the session; a login not listed was refused with its sentence; no content security policy violation was reported; five reads sent at once while the session table was locked left one answered 503 `busy`; and one dry-run review against the stub and a stub model was seen as `Reviewing` `batch 1 of 1`, then in Recent reviews. No log line held a secret, a cookie's value, a code, a state, a token or the login. Not tried: GitHub itself, a sign-in through a team, `127.0.0.1`, and browsers other than Chromium.
+
 ### Running it
 
 - Run one instance per database. A second one stops at once with `another_instance_running`, and the first keeps running. It loads no extension module.
@@ -923,6 +1038,8 @@ A file that cannot be used (invalid YAML, an unknown key, a refused pattern, con
 | `src/approval` | Automatic approval: which threads are closed for it (`threads.ts`), the decision from what is stored and what the pull request is now (`rule.ts`), the audit sample's draw (`audit.ts`), every sentence it writes (`text.ts`), and the withdrawal job (`withdraw.ts`) |
 | `src/extensions` | The contract of an extension module, its loader and its time limit |
 | `src/mcp` | The MCP client: an event-stream reader, one JSON-RPC exchange over Streamable HTTP, and a session that lists and calls tools |
+| `src/ui` | The UI's part of the service: the built files read once and served with their headers (`files.ts`, `headers.ts`), sign-in, sessions and the token for changes (`auth.ts`), the JSON reads (`api.ts`), the shapes of their answers (`api-types.ts`, the one file the frontend reads, as types), and the route that joins them (`route.ts`) |
+| `ui` | The web UI, a package of its own with its own lock file: React, Vite and Tailwind CSS, its components, pages and tests. `npm --prefix ui run build` writes `ui/dist`, which the service serves |
 | `examples` | An example extension module |
 | `src/service.ts`, `src/main.ts` | Starting and stopping the service |
 | `src/config` | Loading and validating configuration |

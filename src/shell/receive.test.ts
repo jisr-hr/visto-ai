@@ -129,6 +129,24 @@ test('an older pull request event is accepted and does not roll the facts back',
   } finally { await db.close(); }
 });
 
+test('a pull request event stores its title, an older event leaves it, and an edit replaces it', async () => {
+  const db = await testDb();
+  try {
+    const title = async (): Promise<string | null | undefined> =>
+      (await db.query<{ title: string | null }>('select title from visto_ai.pull_requests where number = 7'))[0]?.title;
+    const event = (action: 'opened' | 'other', over: Partial<PullRequestFacts>): ForgeEvent => ({ kind: 'pull_request', action, facts: facts(over) });
+    const T = '2026-03-01T10:00:00.000Z';
+    assert.deepEqual(await run(db, read('d-1', event('opened', { title: 'Round prices', updatedAt: T }), 'pull_request', 'opened')), { status: 202, body: 'accepted' });
+    assert.equal(await title(), 'Round prices');
+    assert.deepEqual(await run(db, read('d-2', event('other', { title: 'Old', updatedAt: '2026-03-01T09:00:00.000Z' }), 'pull_request', 'edited')), { status: 202, body: 'accepted' });
+    assert.equal(await title(), 'Round prices');
+    assert.deepEqual(await run(db, read('d-3', event('other', { title: 'Round all prices', updatedAt: '2026-03-01T11:00:00.000Z' }), 'pull_request', 'edited')), { status: 202, body: 'accepted' });
+    assert.equal(await title(), 'Round all prices');
+    // The title is stored, never read back with the facts.
+    assert.deepEqual(await getPullRequest(db, ref), facts({ updatedAt: '2026-03-01T11:00:00.000Z' }));
+  } finally { await db.close(); }
+});
+
 test('a database that fails in the middle stores nothing, answers 503, and logs no message', async () => {
   const real = await testDb();
   try {

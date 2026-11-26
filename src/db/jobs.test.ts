@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { testDb } from './testing.ts';
 import type { Db } from './types.ts';
-import { askGate, askWithdraw, claimJob, deleteFinishedJobs, dropJobIfUnchanged, dueJobs, enqueueJob, finishJob, getJob, requeueJob, reviewJobsOf, unfinishedJobs } from './jobs.ts';
+import { askGate, askWithdraw, claimJob, deleteFinishedJobs, dropJobIfUnchanged, dueJobs, enqueueJob, finishJob, getJob, markStage, requeueJob, reviewJobsOf, unfinishedJobs } from './jobs.ts';
 
 const REF = { service: 'github', owner: 'acme', repo: 'shop', number: 7 } as const;
 const at = (seconds: number): string => new Date(Date.parse('2026-03-01T10:00:00.000Z') + seconds * 1000).toISOString();
@@ -422,5 +422,65 @@ test('the unfinished review jobs of a pull request are listed, never a gate job,
   await enqueueJob(db, gate());
   await enqueueJob(db, job({ ref: { ...REF, number: 8 } }));
   assert.deepEqual((await reviewJobsOf(db, { ...REF, owner: 'Acme' })).map((j) => [j.id, j.status]), [[running, 'running'], [pending, 'pending']]);
+  await db.close();
+});
+
+/** A job's stage as stored: [stage, stage_at, batch, batches, threads_due]. */
+const stageOf = async (db: Db, id: number): Promise<Array<string | number | null>> => {
+  const [r] = await db.query<{ stage: string | null; stage_at: Date | null; batch: number | null; batches: number | null; threads_due: number | null }>(
+    'select stage, stage_at, batch, batches, threads_due from visto_ai.jobs where id = $1', [id]);
+  return [r!.stage, r!.stage_at === null ? null : r!.stage_at.toISOString(), r!.batch, r!.batches, r!.threads_due];
+};
+const NO_STAGE = [null, null, null, null, null];
+
+test("a running job's stage is written with its time, and a job that is not running takes none", async () => {
+  const db = await testDb();
+  const id = (await enqueueJob(db, job()))!;
+  await claimJob(db, id, at(1));
+  assert.deepEqual(await stageOf(db, id), NO_STAGE);
+  assert.equal(await markStage(db, id, { stage: 'reviewing', batch: 2, batches: 3 }, at(5)), true);
+  assert.deepEqual(await stageOf(db, id), ['reviewing', at(5), 2, 3, null]);
+  assert.equal(await markStage(db, id, { stage: 'judging_threads', batch: 1, batches: 2, threadsDue: 3 }, at(6)), true);
+  assert.deepEqual(await stageOf(db, id), ['judging_threads', at(6), 1, 2, 3]);
+  assert.equal(await markStage(db, id, { stage: 'preparing' }, at(7)), true);
+  assert.deepEqual(await stageOf(db, id), ['preparing', at(7), null, null, null]);
+
+  const pending = (await enqueueJob(db, job({ ref: { ...REF, number: 8 } })))!;
+  assert.equal(await markStage(db, pending, { stage: 'reviewing', batch: 1, batches: 1 }, at(8)), false);
+  assert.deepEqual(await stageOf(db, pending), NO_STAGE);
+  assert.equal(await finishJob(db, id, 'done', 'reviewed', at(9)), true);
+  assert.equal(await markStage(db, id, { stage: 'publishing' }, at(10)), false);
+  assert.deepEqual(await stageOf(db, id), ['preparing', at(7), null, null, null]);
+  assert.equal(await markStage(db, 999_999, { stage: 'publishing' }, at(10)), false);
+  await db.close();
+});
+test('a claim clears the stage a start before left', async () => {
+  const db = await testDb();
+  const id = (await enqueueJob(db, job()))!;
+  await claimJob(db, id, at(1));
+  assert.equal(await markStage(db, id, { stage: 'publishing' }, at(2)), true);
+  assert.equal(await requeueJob(db, id, at(3), at(2), false), 'requeued');
+  assert.deepEqual(await stageOf(db, id), ['publishing', at(2), null, null, null]);
+  assert.notEqual(await claimJob(db, id, at(3)), null);
+  assert.deepEqual(await stageOf(db, id), NO_STAGE);
+  // The counts too: a start that left a batch and threads due.
+  assert.equal(await markStage(db, id, { stage: 'judging_threads', batch: 1, batches: 2, threadsDue: 3 }, at(4)), true);
+  assert.equal(await requeueJob(db, id, at(5), at(4), false), 'requeued');
+  assert.notEqual(await claimJob(db, id, at(5)), null);
+  assert.deepEqual(await stageOf(db, id), NO_STAGE);
+  await db.close();
+});
+test('a job put back keeps the code it is given, and one put back without a code has none', async () => {
+  const db = await testDb();
+  const retryCode = async (id: number): Promise<string | null | undefined> =>
+    (await db.query<{ retry_code: string | null }>('select retry_code from visto_ai.jobs where id = $1', [id]))[0]?.retry_code;
+  const id = (await enqueueJob(db, job()))!;
+  assert.equal(await retryCode(id), null);
+  await claimJob(db, id, at(1));
+  assert.equal(await requeueJob(db, id, at(10), at(1), false, 'github_403'), 'requeued');
+  assert.equal(await retryCode(id), 'github_403');
+  await claimJob(db, id, at(10));
+  assert.equal(await requeueJob(db, id, at(20), at(10), false), 'requeued');
+  assert.equal(await retryCode(id), null);
   await db.close();
 });

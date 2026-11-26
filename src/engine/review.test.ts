@@ -21,7 +21,7 @@ import { shownOf } from './score/shown.ts';
 import type { BlockScore, ScoreEntry, ScoreHistory } from './score/types.ts';
 import type {
   ChangedFile, ContextProvider, EarlierThread, McpAnswer, McpServer, McpSession, Memory, MemoryBlocks, MemoryLesson, MemoryLessons, MemoryLine, ModelClient, ModelRequest, ModelResponse, PullRequestInfo, RepoConfig,
-  ReviewDeps, ReviewInput, ReviewResult, ScoreAnswer, ScoreRequest, Scorer, Severity, Source, ToolCall, ToolDefinition, Usage,
+  ReviewDeps, ReviewInput, ReviewProgress, ReviewResult, ScoreAnswer, ScoreRequest, Scorer, Severity, Source, ToolCall, ToolDefinition, Usage,
 } from './types.ts';
 
 const CONTRACT = 'You review pull requests.';
@@ -825,6 +825,115 @@ test('with two calls, each thread keeps the verdict of the call that showed it, 
   assert.deepEqual(d.model.requests.map((q) => q.messages[2]!.content.match(/### Thread T\d/g)), [['### Thread T1'], ['### Thread T2']]);
   assert.deepEqual(r.threadVerdicts?.map((v) => [v.threadId, v.verdict, v.reply]), [['PRRT_1', 'fixed', 'From the call of src/a.ts.'], ['PRRT_2', 'answered', 'From the call of src/b.ts.']]);
   assert.deepEqual(r.audit.filter((e) => e.action === 'verdict_dropped').map((e) => [e.subject, e.reason]), [['T2', 'not_shown'], ['T1', 'not_shown']]);
+});
+
+// The progress of a review's model calls.
+test('the progress is told before the first batch and as each batch ends, with the due threads of the batches not ended', async () => {
+  const withThread: ReviewInput = {
+    ...input, earlier: { head: 'abcdef0', threads: [earlierThread({ quote: 'zzz' })] },
+    // Room for one file with or without its thread, not for two: two batches.
+    limits: { ...input.limits, inputTokensPerCall: fixedTokens(CONTRACT, input.pullRequest, true) + 600 },
+  };
+  const onA = { ...answerOnA, thread_verdicts: [{ thread_id: 'T1', verdict: 'open' }] };
+  const d = deps({ files: [fileA, fileB], answerFor: { ': src/a.ts\n': onA, ': src/b.ts\n': answerOnB } });
+  const told: ReviewProgress[] = [];
+  const r = await review(withThread, { ...d, progress: (p) => { told.push({ ...p }); } });
+  assert.deepEqual([r.status, d.model.requests.length], ['ok', 2]);
+  assert.deepEqual(d.model.requests.map((q) => q.messages[2]!.content.match(/### Thread T\d/g)), [['### Thread T1'], null]);
+  assert.equal(told.length, 3);
+  assert.deepEqual(told.map((t) => [t.batches, t.ended]), [[2, 0], [2, 1], [2, 2]]);
+  assert.deepEqual(told[0], { batches: 2, ended: 0, threadsDue: 1 });
+  assert.ok(told[1]!.threadsDue === 0 || told[1]!.threadsDue === 1);
+  assert.deepEqual(told[2], { batches: 2, ended: 2, threadsDue: 0 });
+  // The batch of the thread ends last: its thread is still due when the other batch ends.
+  const slow = deps({ files: [fileA, fileB], answerFor: { ': src/a.ts\n': onA, ': src/b.ts\n': answerOnB } });
+  const complete = slow.model.complete.bind(slow.model);
+  slow.model.complete = async (request) => {
+    if (request.messages[2]!.content.includes(': src/a.ts\n')) await new Promise((resolve) => { setTimeout(resolve, 20); });
+    return complete(request);
+  };
+  const later: ReviewProgress[] = [];
+  await review(withThread, { ...slow, progress: (p) => { later.push({ ...p }); } });
+  assert.deepEqual(later, [{ batches: 2, ended: 0, threadsDue: 1 }, { batches: 2, ended: 1, threadsDue: 1 }, { batches: 2, ended: 2, threadsDue: 0 }]);
+  // A thread owed no verdict, minor or settled, is not counted: one batch holding a due thread and two that are not.
+  const mixed: ReviewInput = {
+    ...input,
+    earlier: {
+      head: 'abcdef0',
+      threads: [
+        earlierThread({ quote: 'zzz' }),
+        earlierThread({ id: 'PRRT_2', commentId: 'C2', quote: 'zzz', severity: 'minor' }),
+        earlierThread({ id: 'PRRT_3', commentId: 'C3', path: 'src/b.ts', quote: 'zzz', settled: true }),
+      ],
+    },
+  };
+  const one = deps({ files: [fileA, fileB], answers: [onA] });
+  const counted: ReviewProgress[] = [];
+  const all = await review(mixed, { ...one, progress: (p) => { counted.push({ ...p }); } });
+  assert.deepEqual([all.status, one.model.requests.length, all.threadsDue], ['ok', 1, 1]);
+  assert.deepEqual(one.model.requests[0]!.messages[2]!.content.match(/### Thread T\d/g), ['### Thread T1', '### Thread T2', '### Thread T3']);
+  assert.deepEqual(counted, [{ batches: 1, ended: 0, threadsDue: 1 }, { batches: 1, ended: 1, threadsDue: 0 }]);
+});
+
+test('a progress that throws changes nothing, and a review with no batch tells none', async () => {
+  const two = () => deps({ files: [fileA, fileB], answerFor: { 'src/a.ts': answerOnA, 'src/b.ts': answerOnB } });
+  const plain = await review(smallLimits, two());
+  let calls = 0;
+  const throwing = await review(smallLimits, { ...two(), progress: () => { calls += 1; throw new Error('progress_down'); } });
+  assert.equal(calls, 3);
+  assert.deepEqual(throwing, plain);
+  // One that answers a promise that rejects changes nothing either.
+  const rejecting = await review(smallLimits, { ...two(), progress: async () => { throw new Error('progress_down'); } });
+  assert.deepEqual(rejecting, plain);
+  const none: Array<[string, ChangedFile[], ReviewInput]> = [
+    ['no files', [], input],
+    ['nothing reviewable', [binaryNoPatch], input],
+    ['too small', [fileA], { ...input, limits: { ...input.limits, inputTokensPerCall: 10 } }],
+  ];
+  for (const [name, files, given] of none) {
+    const d = deps({ files });
+    const told: ReviewProgress[] = [];
+    await review(given, { ...d, progress: (p) => { told.push(p); } });
+    assert.deepEqual([d.model.requests.length, told], [0, []], name);
+  }
+});
+
+test('a batch that ends adds no turn before its worker takes the next, told or not: a stop that comes just then stops what it stopped before', async () => {
+  // Three batches, two at a time. The calls of the first two are held until both are sent; then the first answers auth `lag` turns of
+  // the microtask queue after the second answers. The second's worker sends the third batch only when the stop comes after it looked.
+  const three = fourFiles.slice(0, 3);
+  const sent = async (lag: number, progress?: ReviewDeps['progress']): Promise<number> => {
+    const answerFor: Record<string, unknown> = Object.fromEntries(three.map((f) => [f.path, okFor(f)]));
+    answerFor['src/a.ts'] = new ProviderError('auth', 'a', 401, null);
+    const d = deps({ files: three, answerFor });
+    const complete = d.model.complete.bind(d.model);
+    let open = (): void => {};
+    const both = new Promise<void>((resolve) => { open = resolve; });
+    let calls = 0;
+    d.model.complete = async (request) => {
+      calls += 1;
+      if (calls === 2) open();
+      if (calls <= 2) {
+        await both;
+        const files = request.messages.find((m) => m.role === 'user' && m.content.includes(ANCHOR_LEGEND))!.content;
+        if (files.includes('src/a.ts')) for (let turn = 0; turn < lag; turn += 1) await Promise.resolve();
+      }
+      return complete(request);
+    };
+    const r = await review(smallLimits, progress === undefined ? d : { ...d, progress });
+    assert.deepEqual(r.failure, { stage: 'model', code: 'auth' }, String(lag));
+    return d.model.requests.length;
+  };
+  const plain: number[] = [];
+  const told: number[] = [];
+  for (let lag = 0; lag < 10; lag += 1) {
+    plain.push(await sent(lag));
+    told.push(await sent(lag, () => {}));
+  }
+  // As the engine sent them before it told any progress (measured on that release): from 3 turns on, the stop comes too late.
+  // An await added on only one side of a model call (src/engine/model/call.ts, `attempt`) also moves the step; the table is then re-measured against the engine before progress existed.
+  assert.deepEqual(plain, [2, 2, 2, 3, 3, 3, 3, 3, 3, 3]);
+  assert.deepEqual(told, plain);
 });
 
 // Scores that hold across reviews.

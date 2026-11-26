@@ -10,7 +10,7 @@ import type { ServiceConfig } from './config/load.ts';
 import type { ModelClient, ReviewDeps, ReviewInput, ReviewResult } from './engine/types.ts';
 import { alertSinksOf, notifiersOf } from './extensions/load.ts';
 import type { LoadedExtension } from './extensions/types.ts';
-import type { AppIdentity, ForgeAccess, ForgeApprovals, ForgeChecks, ForgeWriter, HookDeliveries, PullRequestRef, Source, WebhookReader } from './forge/types.ts';
+import type { AppIdentity, ForgeAccess, ForgeApprovals, ForgeChecks, ForgeSignIn, ForgeWriter, HookDeliveries, PullRequestRef, Source, WebhookReader } from './forge/types.ts';
 import { runWithdrawJob, sweepWithdraw } from './approval/withdraw.ts';
 import type { WithdrawJobDeps } from './approval/withdraw.ts';
 import { gatingOf } from './gate/gating.ts';
@@ -40,6 +40,9 @@ import { runReviewJob } from './shell/review-job.ts';
 import type { ReviewJobDeps } from './shell/review-job.ts';
 import { createRunner } from './shell/runner.ts';
 import { createSpendGuard } from './shell/spend.ts';
+import { createAuth } from './ui/auth.ts';
+import type { UiFiles } from './ui/files.ts';
+import { createUiRoute } from './ui/route.ts';
 
 export interface Listening { close(): Promise<void> }
 export interface ServiceDeps {
@@ -73,6 +76,8 @@ export interface ServiceDeps {
   model: ModelClient;
   /** Fresh random text for data markers. Read only with learning on. */
   token: () => string;
+  /** Sign-in at the git service and the built files; absent: the UI is off whatever the config says. */
+  ui?: { signIn: ForgeSignIn; files: UiFiles };
 }
 export const STOP_WAIT_MS = 10_000;
 export const CLOSE_WAIT_MS = 5_000;
@@ -162,6 +167,8 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps): Pr
     dryRun: config.dryRun, writer: config.dryRun ? dryWriter() : deps.writer, engineDeps: deps.engineDeps, review: deps.review, lineUrl: deps.lineUrl, health, spend,
     commentUrl: deps.commentUrl, canResolve: () => deps.appInfo.canResolve(),
     approvals, onWithdraw: () => { void withdrawRunner.tick(); },
+    // Each review writes its stage on its job, with the UI off too (call 31).
+    stages: true,
     ...(config.dryRun || notifiers.length === 0 ? {} : { notice: { notifiers, reviewUrl: deps.reviewUrl, pullRequestUrl: deps.pullRequestUrl } }),
     ...(extensionHealth === null ? {} : { extensionHealth }),
     ...(mcpHealth === null ? {} : { mcpHealth }),
@@ -307,6 +314,20 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps): Pr
     await askGate(db, job.ref, clock().toISOString(), undefined, { installation: job.installation });
     void gateRunner.tick();
   }
+  // The UI is on with both the file's `ui` and the service's; with either absent nothing of it is made or read (call 31).
+  const ui = config.ui === undefined || deps.ui === undefined ? null : {
+    // Who may open it and the address only: the client secret stays with the adapter.
+    access: { accounts: config.ui.accounts, team: config.ui.team, publicUrl: config.ui.publicUrl },
+    signIn: deps.ui.signIn, files: deps.ui.files,
+  };
+  const uiRoute = ui === null ? null : createUiRoute({
+    auth: createAuth({ db, ui: ui.access, signIn: ui.signIn, checks: deps.checks, clock, log: say }),
+    api: {
+      db, clock, dryRun: config.dryRun, reviewPlaces: config.limits.queueConcurrency, withdrawPlaces: WITHDRAW_CONCURRENCY,
+      holds: (ref) => runner.holds(ref), paused: pauseCode, pullRequestUrl: deps.pullRequestUrl,
+    },
+    files: ui.files, log: say,
+  });
   const { listener, idle } = createListener({
     webhook: (headers, body) => receive({
       db, reader: deps.reader, clock, log: say, settingsFor, onQueued: tickBoth, dryRun: config.dryRun, appId: config.app.id,
@@ -317,6 +338,8 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps): Pr
       log: say,
       ...(extensionHealth === null ? {} : { noted: (name: string, ok: boolean, code: string) => { extensionHealth.noted(name, 'route', ok, code); } }),
     }),
+    // With the UI off, '/', '/ui/...' and '/api/...' are answered as any unknown path.
+    ...(uiRoute === null ? {} : { ui: uiRoute }),
   });
 
   // 1 to 4: the lock, the migrations, the recovery, the listener.
@@ -361,6 +384,9 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps): Pr
     }
   }
 
+  // How many built files are served; 0 when ui/dist was not built (call 17).
+  if (ui !== null) say({ event: 'ui', files: ui.files.size });
+
   if (config.dryRun && notifiers.length + sinks.length > 0) {
     say({ event: 'extensions_quiet', reason: 'dry_run', notifiers: notifiers.length, sinks: sinks.length });
   }
@@ -398,7 +424,8 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps): Pr
 
   async function appCheck(): Promise<void> {
     if (ending) return;
-    const lacking = await deps.appInfo.lacks(config.dryRun, gateUseOf(config), approvalUseOf(config));
+    // With the UI on and a team named, the UI reads its members (call 27); with the UI off nothing of it is asked for.
+    const lacking = await deps.appInfo.lacks(config.dryRun, gateUseOf(config), approvalUseOf(config), ui !== null && ui.access.team !== null);
     if (ending) return;
     if (lacking.length === 0) say({ event: 'app_check', missing: 0 });
     for (const { feature, missing } of lacking) {

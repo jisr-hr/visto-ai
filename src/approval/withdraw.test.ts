@@ -811,3 +811,14 @@ test('a clock that throws when the job is put back changes nothing', async () =>
   assert.equal((await getJob(h.db, job.id))!.status, 'pending');
   assert.deepEqual([lines(h)[0]!['outcome'], lines(h)[0]!['requeued'], lines(h)[0]!['code']], ['put_back', true, 'github_403']);
 });
+test("a withdrawal put back after a failed try keeps that try's code on its row", async () => {
+  const h = await harness({ dismissals: { '501': [new Error('github_403')] } });
+  await posted(h.db, '501');
+  const first = await h.job(0);
+  await h.run(first);
+  assert.deepEqual(await statusOf(h, first), ['pending', null, at(10)]);
+  assert.deepEqual(
+    await h.db.query('select retry_code from visto_ai.jobs where id = $1', [first.id]),
+    [{ retry_code: 'github_403' }]);
+  assert.deepEqual([lines(h)[0]!['outcome'], lines(h)[0]!['code']], ['put_back', 'github_403']);
+});
