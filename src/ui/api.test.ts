@@ -173,6 +173,90 @@ test('the search takes percent, underscore and backslash as themselves, an empty
   await db.close();
 });
 
+/** The db with each statement sent to it recorded, with its parameters. */
+function recording(inner: Db): { db: Db; sent: Array<{ text: string; params: unknown[] }> } {
+  const sent: Array<{ text: string; params: unknown[] }> = [];
+  const db: Db = {
+    query: (text, params) => { sent.push({ text, params: params ?? [] }); return inner.query(text, params); },
+    script: (sql) => inner.script(sql),
+    close: () => inner.close(),
+    transaction: (work) => inner.transaction(work),
+  };
+  return { db, sent };
+}
+const NUL = String.fromCharCode(0);
+
+test('a search or a repository holding a NUL is bad_request, and no statement is sent', async () => {
+  const db = await testDb();
+  const { db: spied, sent } = recording(db);
+  for (const name of ['q', 'repo']) {
+    for (const value of [NUL, `ab${NUL}cd`, `acme/sh${NUL}op`]) {
+      assert.equal(await reviews(deps(spied), new URLSearchParams({ [name]: value })), 'bad_request', `${name} ${JSON.stringify(value)}`);
+    }
+  }
+  assert.deepEqual(sent, []);
+  await db.close();
+});
+
+test('needs_person lists and counts the audit sample too, approved only the approved, failed only the failed', async () => {
+  const db = await testDb();
+  const approved = await run(db, pr(1), { dryRun: false });
+  await markPublished(db, approved, { reviewId: 'rv-1', publishedAt: at(-600), body: 'posted', inlineDropped: false, approved: true, approvalCode: 'approved' });
+  const audit = await run(db, pr(2), { dryRun: false, needsHuman: true });
+  await markPublished(db, audit, { reviewId: 'rv-2', publishedAt: at(-600), body: 'posted', inlineDropped: false, approved: false, approvalCode: 'audit_sample' });
+  await run(db, pr(3), { needsHuman: true });
+  await run(db, pr(4));
+  await run(db, pr(5), { outcome: 'failed', failureStage: 'model', failureCode: 'model_timeout' });
+  await run(db, pr(6), { dryRun: false, needsHuman: true });
+  await run(db, pr(7), { result: { ...RESULT, nothingToDo: true } });
+  const d = deps(db);
+  const asked = async (query: string): Promise<[string[], number]> => {
+    const answer = await reviews(d, new URLSearchParams(query)) as Reviews;
+    return [answer.reviews.map((r) => r.outcome), answer.total];
+  };
+  assert.deepEqual(await asked(''), [['nothing_new', 'not_posted', 'failed', 'reviewed', 'needs_person', 'audit', 'approved'], 7]);
+  assert.deepEqual(await asked('outcome=needs_person'), [['needs_person', 'audit'], 2]);
+  assert.deepEqual(await asked('outcome=approved'), [['approved'], 1]);
+  assert.deepEqual(await asked('outcome=failed'), [['failed'], 1]);
+  await db.close();
+});
+
+test('a number is searched up to 9 digits, before is at most 2147483647, and an owner and a name are at most 100 characters each', async () => {
+  const db = await testDb();
+  const long = { service: 'github', owner: 'o'.repeat(100), repo: 'r'.repeat(100), number: 6 } as const;
+  for (const [ref, title] of [
+    [pr(123456789), 'Round prices before tax'], [pr(1234567890), 'Cache the tax table per region'], [pr(4), 'Bump the schema to 1234567890'],
+    [pr(5), 'Match #* in the paths'], [long, 'Name the long repository'],
+  ] as Array<[PullRequestRef, string]>) {
+    await savePullRequest(db, facts(ref, { title }));
+    await run(db, ref);
+  }
+  const { db: spied, sent } = recording(db);
+  const d = deps(spied);
+  const ask = (params: Record<string, string>): Promise<Reviews | 'bad_request'> => reviews(d, new URLSearchParams(params));
+  /** The numbers found, and the number each statement was given ($5). */
+  const searched = async (q: string): Promise<[number[], unknown[]]> => {
+    sent.length = 0;
+    const answer = await ask({ q });
+    assert.notEqual(answer, 'bad_request', q);
+    return [(answer as Reviews).reviews.map((r) => r.number), sent.map((s) => s.params[4])];
+  };
+  assert.deepEqual(await searched('123456789'), [[4, 123456789], [123456789, 123456789]]);
+  assert.deepEqual(await searched('#123456789'), [[123456789], [123456789, 123456789]]);
+  assert.deepEqual(await searched('1234567890'), [[4], [null, null]]);
+  assert.deepEqual(await searched('#1234567890'), [[], [null, null]]);
+  assert.deepEqual(await searched('#*'), [[5], [null, null]]);
+  assert.deepEqual(await searched('#'), [[5], [null, null]]);
+
+  assert.equal((await ask({ before: '2147483647' }) as Reviews).reviews.length, 5);
+  assert.equal(await ask({ before: '2147483648' }), 'bad_request');
+
+  assert.deepEqual((await ask({ repo: `${'o'.repeat(100)}/${'r'.repeat(100)}` }) as Reviews).reviews.map((r) => r.number), [6]);
+  assert.equal((await ask({ repo: `acme/${'r'.repeat(100)}` }) as Reviews).total, 0);
+  for (const repo of [`acme/${'r'.repeat(101)}`, `${'o'.repeat(101)}/shop`]) assert.equal(await ask({ repo }), 'bad_request', repo);
+  await db.close();
+});
+
 test('a page is 25 runs, next is the 25th when a 26th came, and a run reads as the screens show it', async () => {
   const db = await testDb();
   await savePullRequest(db, facts(pr(128), { title: 'Round prices before tax' }));
@@ -208,6 +292,8 @@ test('a page is 25 runs, next is the 25th when a 26th came, and a run reads as t
   assert.equal(month.total, 26);
   const after = await reviews(deps(db, { clock: () => new Date(Date.parse(at(-761)) + 30 * 86_400_000 + 1) }), new URLSearchParams()) as Reviews;
   assert.equal(after.total, 25);
+  // Exactly 25 runs in the window: one page, and no next.
+  assert.deepEqual([after.reviews.length, after.next], [25, null]);
   await db.close();
 });
 

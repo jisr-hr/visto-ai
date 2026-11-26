@@ -27,6 +27,8 @@ const MAX_RUN_ID = 2147483647;
 const REPOSITORY = /^[a-z0-9_.-]{1,100}\/[a-z0-9_.-]{1,100}$/;
 const NUMBER_QUERY = /^#?(\d{1,9})$/;
 const BEFORE = /^\d{1,10}$/;
+/** Postgres takes no U+0000 in a text: a search holding it is refused before any statement. */
+const NUL = String.fromCharCode(0);
 /** The outcome filters (call 20): `needs_person` takes the audit sample too. */
 const OUTCOMES: ReadonlyMap<string, string[]> = new Map([
   ['approved', ['approved']], ['needs_person', ['needs_person', 'audit']], ['failed', ['failed']],
@@ -114,6 +116,7 @@ function filtersOf(query: URLSearchParams, since: string): ReviewFilters | null 
   if (repository !== null && !REPOSITORY.test(repository)) return null;
   const kinds = outcome === null ? null : OUTCOMES.get(outcome);
   if (kinds === undefined) return null;
+  if (q !== null && q.includes(NUL)) return null;
   const trimmed = q === null ? null : q.trim();
   if (trimmed !== null && trimmed.length > MAX_QUERY) return null;
   const title = trimmed === null || trimmed === '' ? null : trimmed;

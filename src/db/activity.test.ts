@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import type { PullRequestFacts, PullRequestRef } from '../forge/types.ts';
-import { activityJobs, countReviews, recentReviews, waitingWithdrawals } from './activity.ts';
+import { activityJobs, countReviews, knownRepositories, recentReviews, waitingWithdrawals } from './activity.ts';
 import type { ReviewFilters } from './activity.ts';
 import { askGate, askWithdraw, claimJob, enqueueJob, finishJob, markStage, requeueJob } from './jobs.ts';
 import { savePullRequest } from './pull-requests.ts';
@@ -33,11 +33,11 @@ test('the activity reads running review jobs first, then the pending by when the
   const db = await testDb();
   await savePullRequest(db, facts(pr(7), { title: 'Cache the tax table per region' }));
   await savePullRequest(db, facts(pr(8)));
-  // Two running jobs: the one with the higher id started first.
+  // Two running jobs: the one with the higher id started first, though it was due later.
   const later = await enqueue(db, pr(7), { reason: 'synchronize', runAt: at(-200), now: at(-380) });
   await claimJob(db, later, at(-50));
   await markStage(db, later, { stage: 'reviewing', batch: 2, batches: 3 }, at(-40));
-  const earlier = await enqueue(db, pr(12), { runAt: at(-300), now: at(-300) });
+  const earlier = await enqueue(db, pr(12), { runAt: at(-150), now: at(-150) });
   await claimJob(db, earlier, at(-100));
   // Two pending: the one with the lower id may start later.
   const second = await enqueue(db, pr(8), { runAt: at(60), now: at(0) });
@@ -86,6 +86,17 @@ test('the withdrawals waiting are the pending withdraw jobs with a start, with t
     { owner: 'acme', repo: 'shop', number: 7, retry_code: 'github_403', run_at: date(52) },
   ]);
   assert.equal((await waitingWithdrawals(db, 1)).length, 1);
+  await db.close();
+});
+
+test('the repositories known are those a pull request is stored of, each once, sorted by name', async () => {
+  const db = await testDb();
+  for (const ref of [
+    pr(1, 'web'), { service: 'github', owner: 'Zeta', repo: 'API', number: 2 }, pr(3, 'billing'), pr(4, 'web'),
+    { service: 'github', owner: 'beta', repo: 'tools', number: 5 }, pr(6), pr(7, 'billing'),
+  ] as PullRequestRef[]) await savePullRequest(db, facts(ref));
+  assert.deepEqual(await knownRepositories(db, 200), ['acme/billing', 'acme/shop', 'acme/web', 'beta/tools', 'zeta/api']);
+  assert.deepEqual(await knownRepositories(db, 2), ['acme/billing', 'acme/shop']);
   await db.close();
 });
 
