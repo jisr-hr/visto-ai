@@ -38,13 +38,14 @@ Quoted or restated from the conversation of 2026-11-26:
 - **A GitHub account's row is made at its first sign-in**, as a viewer (O-PW-4). An admin may then change its role; the row keeps it for every later sign-in, by login. (As in the first plan, a person is their login: a login freed and registered again by someone else would get the row's role. Recorded in the notes, not changed here.)
 - **The last admin cannot be removed or made a viewer**, by anyone, by any route. With no admin at all (a fresh database), only the command of 4.6 can make one. (The builder's call, from the design's check:) an admin counts toward this rule unless it is a password account that has not yet chosen its own password, so an admin cannot step down in favour of a new admin who has not signed in yet. A GitHub admin counts whatever the file says now, so no role change waits on a GitHub read; the cost: removing a GitHub admin's login from the file while it is the only admin leaves only the command as the way back in.
 - Removing an account deletes its row and ends all of its sessions at once. A removed GitHub account that the file still lets in comes back as a new viewer at its next sign-in.
+- An admin cannot reset their own account in the UI; a reset keeps the role, so the last-admin rule does not refuse it.
 - At most 1,000 accounts.
 
 ### 4.3 Password sign-in (the builder's calls)
 
 - **Creating an account** (admin, in the UI): a name and a role. The service makes a **one-time password** of 20 random characters (from an alphabet without look-alike characters) and answers it **once**; the UI shows it once with a button to copy it, and it is never shown or stored again in clear. It expires 72 hours after it was made.
-- **The first sign-in** with a one-time password does not open a session: the person must choose their own password in the same step (the sign-in page asks for it), and only then is a session made. An expired one-time password is refused; an admin resets it.
-- **A password** is 12 to 128 characters, any characters, no other rule. (as built) A new password must also be well formed (no lone surrogate) and hold no U+0000 (NUL): scrypt pads a short key with zero bytes and writes every lone surrogate as U+FFFD, so either would make two passwords one; a password typed at sign-in is verified whatever it holds. It is stored only as a scrypt hash with its own random salt and its parameters (N = 2^15, r = 8, p = 1, 32 bytes), compared in constant time.
+- **The first sign-in** with a one-time password does not open a session: the person must choose their own password in the same step (the sign-in page asks for it), and only then is a session made. An expired one-time password is refused; an admin resets it. An expired one-time password reads as expired, but only once it was verified.
+- **A password** is 12 to 128 characters, counted as code points, well formed (no lone surrogate) and with no U+0000 (NUL), and no other rule: scrypt pads a short key with zero bytes and writes every lone surrogate as U+FFFD, so either would make two passwords one. A password typed at sign-in is verified whatever it holds. It is stored only as a scrypt hash with its own random salt and its parameters (N = 2^15, r = 8, p = 1, 32 bytes), compared in constant time.
 - **Wrong passwords.** After 5 wrong passwords in a row an account waits 15 minutes before any password is tried again; a right one resets the count. Every refusal answers the same sentence and takes about the same time, whether the name exists, the password is wrong or the account waits (a name that does not exist is checked against a hash made at start, so its time is the same). The cost: someone who knows a name can keep that account waiting; an admin can still reset it.
 - **Changing one's own password** (any password account, in the UI): the current password and the new one. It ends the account's other sessions.
 - **A reset** (admin, in the UI): a new one-time password, answered once, as at creation; it ends all of the account's sessions.
@@ -63,7 +64,7 @@ As built in the first plan (PKCE, the state's cookie, the team read), with two c
 
 ### 4.6 The first admin, and a way back in (the builder's call)
 
-A command run where the service runs, with the service's config (it reads only the database's address):
+A command run where the service runs, with the service's config. It reads the whole config, as the service does, and uses only the database's address:
 
 - make a password account with a role, printing its one-time password once;
 - reset a password account, printing a new one-time password once;
@@ -82,7 +83,7 @@ The look follows the approved mockups (cards, tables, inputs, buttons, badges, b
 
 ### 4.8 What is logged
 
-One JSON line per sign-in (`ui_signin`: the way, the outcome, a short reason), and one per change to an account (`ui_account`: what was done (made, role, reset, removed, password changed) and the new role). As in every plan before, no log line holds a name or a login, and never a password, a one-time password, a hash, a session id or a token; a refused password sign-in logs the outcome only, so a password typed into the name field is never logged. (The builder's call, from the design's check:) who did what to whom is kept in the database instead, in a record of account changes: when, who did it (the name and kind, kept as text so the record outlives a removed account, or "the command"), the change, the account it was made to (name and kind, as text) and the new role. Nothing in it is secret. This plan writes it and the README gives the statement that reads it; a screen for it comes with the Settings plan's record of changes (UI design 4.4).
+One JSON line per sign-in (`ui_signin`: the way, the outcome, a short reason), and one per change to an account (`ui_account`: what was done (made, role, reset, removed, password changed) and the new role). As in every plan before, no log line holds a name or a login, and never a password, a one-time password, a hash, a session id or a token; a refused password sign-in logs the outcome only, so a password typed into the name field is never logged. (The builder's call, from the design's check:) who did what to whom is kept in the database instead, in a record of account changes: when, who did it (the name and kind, kept as text so the record outlives a removed account, or "the command"), the change, the account it was made to (name and kind, as text) and the new role. Nothing in it is secret. This plan writes it and the README gives the statement that reads it; a screen for it comes with the Settings plan's record of changes (UI design 4.4). A GitHub row made at its first sign-in is recorded as made by `sign_in`; a first password is recorded as `password_changed`.
 
 ## 5. What is left to the builder
 

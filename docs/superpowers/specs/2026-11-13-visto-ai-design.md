@@ -681,7 +681,7 @@ One file, owned by whoever runs the deployment and kept in their own git reposit
 - MCP servers and extension modules.
 - The alert webhook.
 - Learning, on or off; off unless written.
-- Who may open the UI: named accounts or one team (`ui`), with the address people open it at and the app's client id and secret, by reference.
+- The UI: the address people open it at (`ui.publicUrl`), and who may sign in through GitHub (accounts or one team, with the app's client id and secret, by reference); accounts and roles live in the database.
 - The audit key, by reference: the secret that keys the audit draw (section 6.5). It is at least 32 characters, and the deployment refuses to start without it while automatic approval is on for some repository with a share above 0.
 - Dry run, for the whole deployment. Reviews are computed and recorded, nothing is written to the git service (no review, reply, note, check, approval or dismissal) and no notifier is called. Capture and learning run as normal. A dry run never counts as an earlier run: not as the last published review, not for scores and not for coverage.
 
@@ -760,7 +760,7 @@ The schema is designed fresh. Identity everywhere is the git service, the reposi
 
 Stage 8 adds a table `learning` for the learning work's own record, and on `human_activity` and `pull_requests` markers of what was learned and of how often learning a pull request failed. The lessons add `judge_calls`, the cost of each call of the judge with the pull request and the reply it was for, and a column for a lesson's text on `memory_records`. Reverts add a column on `pull_requests` for the pull request a description says it reverts, and one on `memory_records` for the pull request a revert took back. `file_scores` and `thread_verdicts` are still not built: their content is in each run's stored result.
 
-`pull_requests` gains the title; `jobs` the stage and a withdrawal's retry code; `ui_sessions` and `ui_states` hold sign-in.
+`pull_requests` gains the title; `jobs` the stage and a withdrawal's retry code; `ui_sessions` and `ui_states` hold sign-in. `ui_accounts` and `ui_account_changes` hold the UI's accounts and the record of their changes; a session names its account.
 
 Finished jobs are deleted after 14 days. Nothing else is pruned in the first version.
 
@@ -845,7 +845,7 @@ Each stage ends with something that can be measured or shown.
 7. **Shadow at the first deployment, then cut-over.** Tracked in that deployment's private repository. From here the first deployment runs on this project: findings, the gate, and the score shown in every review, with automatic approval off and no learned records yet. Capture is already storing the human activity that memory and the live numbers need.
 8. **Memory.** Records, learning, retrieval, and the importer's database output. Both evals are re-run with memory "as of" each case. Until the UI exists, a record can be disabled only in the database. A deployment may leave learning off in configuration until stage 10. Cut in four plans: memory for the score, lessons from replies and reverts, which are built, and the evals with lessons as of each case, which wait for a deployment: a history file holds no finding of this reviewer, so the lessons an eval needs can only be made from a deployment's own database.
 9. **Automatic approval and withdrawal.** Cut in two plans: approval, its record and its withdrawal, which is built, and the audit sample, which is built too.
-10. **UI.** Three screens: score numbers per repository, learned records with their kill switch, recent reviews with failures, feedback and dependency health. Sign-in is through the same app, and access is limited to the accounts or the one team named in the deployment config. With neither named, the UI is off. Cut in three plans (UI design 7), the first in two.
+10. **UI.** Three screens: score numbers per repository, learned records with their kill switch, recent reviews with failures, feedback and dependency health. Sign-in is through the same app, and access is limited to the accounts or the one team named in the deployment config. With neither named, the UI is off. Cut in three plans (UI design 7), the first in two. Password accounts and two roles, admin and viewer, are added beside GitHub sign-in.
 
 Stages 2 and 3 need a case file, read access to the repositories it came from and an OpenRouter key. The owner supplies those. The replay in stage 2 is the first real use of the OpenRouter connection, so it is also where that connection is proven (section 20, item 4).
 

@@ -90,7 +90,7 @@ learning: false
 #   privateKey: { env: APP_PRIVATE_KEY }
 #   # The environment variable that holds the secret set on the app's webhook.
 #   webhookSecret: { env: WEBHOOK_SECRET }
-#   # Only when ui below names who may open the UI: the client id the app's settings page shows, and the variable that holds
+#   # Only when ui below names who may sign in through GitHub: the client id the app's settings page shows, and the variable that holds
 #   # the client secret generated there. Each of the two stays a comment until you remove its inner "# ".
 #   # clientId: Iv1.0123456789abcdef
 #   # clientSecret: { env: APP_CLIENT_SECRET }
@@ -104,14 +104,15 @@ learning: false
 #   # The environment variable that holds the URL (http or https) that gets the alerts: model_error, model_ok, spend_80, spend_limit, cost_unknown, redelivery_failed, feature_off, gate_check_failed, gate_bypass, extension_error, extension_ok, mcp_error, mcp_ok, memory_error, memory_ok, learning_stale, lessons_stale, dismissal_failed and stale_approval_merged.
 #   webhook: { env: ALERT_WEBHOOK_URL }
 
-# Who may open the web UI at <publicUrl>/ui/. With neither accounts nor team written the UI is off, and /ui/ and /api/ answer 404.
-# With either, app.clientId, app.clientSecret and publicUrl must be written too. Sign-in goes through the GitHub App: on its settings
-# page set the callback URL to <publicUrl>/api/auth/callback and generate a client secret. With team, install the app on that
-# organisation with Members read. Everyone let in sees the activity of every repository the app is installed on.
+# The web UI at <publicUrl>/ui/. It is on when publicUrl is written; with none of publicUrl, accounts and team it is off, and /ui/ and
+# /api/ answer 404. Its accounts are made by an admin in Settings, and the first admin by the command npm run accounts (README, The UI).
+# accounts and team name who may also sign in through the GitHub App, as a viewer until an admin says otherwise; with either,
+# app.clientId and app.clientSecret must be written too, and on the app's settings page the callback URL is <publicUrl>/api/auth/callback.
+# With team, install the app on that organisation with Members read. Everyone signed in sees the activity of every repository.
 # ui:
+#   publicUrl: https://visto.example.test
 #   accounts: [octo-lead]
 #   team: acme/reviewers
-#   publicUrl: https://visto.example.test
 
 # The audit sample's key (see auditShare under repositories), named by reference: the secret its draw is keyed with, so that
 # nobody without it can tell beforehand which pull request will be drawn. At least 32 characters, for example the output of
