@@ -136,3 +136,33 @@ test('lacks passes approval on', async () => {
   assert.deepEqual((await info.lacks(false, NOTHING, true)).map((m) => [m.feature, m.missing]), [['approval', 'administration:read']]);
   assert.deepEqual((await info.lacks(false, NOTHING)).map((m) => m.missing), []);
 });
+
+test("with the UI's team named, the app lacks members read when it has not got it, in dry run too", () => {
+  assert.deepEqual(missingFor(FULL, true, undefined, false, true), [{ feature: 'ui', missing: 'members:read' }]);
+  assert.deepEqual(missingFor(FULL, false, undefined, false, true), [{ feature: 'ui', missing: 'members:read' }]);
+  for (const level of ['read', 'write', 'admin']) {
+    const members: AppInfo = { ...FULL, permissions: { ...FULL.permissions, members: level } };
+    assert.deepEqual(missingFor(members, true, undefined, false, true), [], level);
+    assert.deepEqual(missingFor(members, false, undefined, false, true), [], level);
+  }
+});
+test('with no team named, the app lacks what it lacked', () => {
+  const bare: AppInfo = { botLogin: 'visto-test[bot]', permissions: {}, events: [] };
+  for (const info of [bare, FULL, TODAYS]) {
+    for (const dryRun of [true, false]) {
+      for (const gate of [undefined, NOTHING, { check: true, statuses: true, members: true }]) {
+        for (const approval of [undefined, false, true]) {
+          const before = missingFor(info, dryRun, gate, approval);
+          assert.deepEqual(missingFor(info, dryRun, gate, approval, undefined), before);
+          assert.deepEqual(missingFor(info, dryRun, gate, approval, false), before);
+        }
+      }
+    }
+  }
+});
+test("lacks passes the UI's team on", async () => {
+  const { info } = setup([new Response(JSON.stringify({ ...APP, events: FULL.events, permissions: TODAYS.permissions }))]);
+  assert.deepEqual((await info.lacks(true, undefined, undefined, true)).map((m) => [m.feature, m.missing]), [['ui', 'members:read']]);
+  assert.deepEqual((await info.lacks(true, undefined, undefined, false)).map((m) => m.missing), []);
+  assert.deepEqual((await info.lacks(true)).map((m) => m.missing), []);
+});
