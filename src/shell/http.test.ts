@@ -1,18 +1,21 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { Readable } from 'node:stream';
-import { createListener, EXTENSION_BODY_BYTES, EXTENSION_IN_FLIGHT, MAX_BODY_BYTES, MAX_IN_FLIGHT } from './http.ts';
-import type { CheckedAnswer, ExtensionRoute, RequestLike, ResponseLike } from './http.ts';
+import {
+  createListener, EXTENSION_BODY_BYTES, EXTENSION_IN_FLIGHT, MAX_BODY_BYTES, MAX_IN_FLIGHT,
+  UI_API_IN_FLIGHT, UI_BODY_BYTES, UI_FILES_IN_FLIGHT, UI_SIGNIN_IN_FLIGHT,
+} from './http.ts';
+import type { CheckedAnswer, ExtensionRoute, RequestLike, ResponseLike, UiAnswer, UiRequest, UiRoute } from './http.ts';
 import type { RouteRequest } from '../extensions/types.ts';
 import type { HttpAnswer } from './receive.ts';
 
 type Routes = Parameters<typeof createListener>[0];
 
-interface Written { status: number; headers: Record<string, string>; body: string }
+interface Written { status: number; headers: Record<string, string | string[]>; body: string | Buffer }
 function response() {
   const out: { written: Written | null; calls: number } = { written: null, calls: 0 };
   let status = 0;
-  let headers: Record<string, string> = {};
+  let headers: Record<string, string | string[]> = {};
   const res: ResponseLike = {
     writeHead(s, h) { status = s; headers = h; return res; },
     end(body) { out.calls += 1; out.written = { status, headers, body }; return res; },
@@ -533,6 +536,225 @@ test('a route that returns no object is answered 500, and its place is given bac
       listener(request('GET', '/extensions/chat'), res);
       await idle();
       assert.deepEqual([out.written?.status, out.written?.body], [500, 'internal_error'], `shape ${shapes.indexOf(shape)}, request ${n}`);
+    }
+  }
+});
+
+// -- the UI's route group ---------------------------------------------------------------------------------------
+
+const UI_OK: UiAnswer = { status: 200, headers: { 'content-type': 'text/html; charset=utf-8', 'x-ui': 'yes' }, body: Buffer.from('ui') };
+const BUSY = { status: 503, body: 'busy', headers: TEXT };
+/** A fake UI route: records each request; one whose path is held waits for the test, any other is answered at once. */
+function uiRoute(a: UiAnswer = UI_OK) {
+  const seen: UiRequest[] = [];
+  const held: Array<{ request: UiRequest; answer: (a: UiAnswer) => void }> = [];
+  const holding = new Set<string>();
+  const route: UiRoute = (request) => {
+    seen.push(request);
+    if (!holding.has(request.path)) return Promise.resolve(a);
+    return new Promise<UiAnswer>((resolve) => { held.push({ request, answer: resolve }); });
+  };
+  return { route, seen, held, holding };
+}
+/** Waits for `ready`, for at most 100 turns of the event loop. */
+async function until(ready: () => boolean): Promise<void> {
+  for (let n = 0; n < 100 && !ready(); n += 1) await tick();
+  assert.ok(ready(), 'not reached within 100 turns');
+}
+
+test('with a UI route, its paths reach it with their method, path, query, headers and body, and the others do not', async () => {
+  const ui = uiRoute();
+  const chat = readyRoute();
+  const r: Routes = { webhook: async () => ok, extensions: new Map([['chat', chat.route]]), ui: ui.route };
+  const cases = [
+    ['GET', '/', '/', ''], ['GET', '/ui', '/ui', ''], ['GET', '/ui/x?', '/ui/x', ''], ['POST', '/api', '/api', ''],
+    ['GET', '/api/me?x=1', '/api/me', 'x=1'], ['DELETE', '/api/auth/start?a=1?b=%20', '/api/auth/start', 'a=1?b=%20'],
+    ['GET', '/ui/%2e%2e/x', '/ui/%2e%2e/x', ''], ['PUT', '/api/', '/api/', ''],
+  ] as const;
+  for (const [method, url] of cases) {
+    const out = await send(request(method, url, undefined, { 'X-A': ['b', 'c'], 'x-b': undefined, Cookie: 'k=v' }), r);
+    assert.deepEqual(out.written, { status: 200, headers: UI_OK.headers, body: UI_OK.body }, url);
+  }
+  assert.deepEqual(ui.seen.map((s) => ({ ...s, body: s.body.toString() })), cases.map(([method, , path, query]) => ({
+    method, path, query, headers: { 'x-a': 'b', 'x-b': undefined, cookie: 'k=v' }, body: 'abc',
+  })));
+  for (const s of ui.seen) assert.ok(Buffer.isBuffer(s.body));
+  await send(Object.assign(Readable.from([]), { method: undefined, url: '/api/me', headers: {} }), r);
+  assert.deepEqual([ui.seen[cases.length]?.method, ui.seen[cases.length]?.body.length], ['', 0]);
+
+  assert.deepEqual((await send(request('POST', '/webhooks/github'), r)).written, { status: 202, body: 'accepted', headers: TEXT });
+  assert.deepEqual((await send(request('GET', '/webhooks/github'), r)).written, { status: 405, body: 'method_not_allowed', headers: TEXT });
+  assert.deepEqual((await send(request('GET', '/healthz'), r)).written, { status: 200, body: 'ok', headers: TEXT });
+  assert.deepEqual((await send(request('POST', '/extensions/chat/api/me'), r)).written, { status: 200, body: 'fine', headers: MODULE_HEADERS });
+  for (const url of ['/other', '/uix', '/ui-x', '/apis', '/api-x', '/UI/', '/API/me', '/extensions/ui/x', '//ui/', 'ui/', '', '?x=1']) {
+    const { listener, idle } = createListener(r);
+    const { req, asked } = untouched('GET', url);
+    const { res, out } = response();
+    listener(req, res);
+    assert.deepEqual(out.written, { status: 404, body: 'not_found', headers: TEXT }, url);
+    await idle();
+    assert.equal(asked(), 0, url);
+  }
+  assert.equal(ui.seen.length, cases.length + 1);
+  assert.equal(chat.seen.length, 1);
+});
+
+test('the files, the sign-in routes and the rest of the API have places of their own, and one body limit', async () => {
+  assert.equal(UI_BODY_BYTES, 65536);
+  assert.equal(UI_FILES_IN_FLIGHT, 16);
+  assert.equal(UI_SIGNIN_IN_FLIGHT, 2);
+  assert.equal(UI_API_IN_FLIGHT, 4);
+  const ui = uiRoute();
+  const { listener, idle } = createListener({ webhook: async () => ok, ui: ui.route });
+  const at = (method: string, url: string) => { const { res, out } = response(); listener(request(method, url, []), res); return out; };
+  const unread: Array<() => number> = [];
+  const refused = (url: string) => {
+    const { req, asked } = untouched('GET', url, { 'content-length': '0' });
+    const { res, out } = response();
+    listener(req, res);
+    assert.deepEqual(out.written, BUSY, url);
+    unread.push(asked);
+  };
+  const answered = (outs: Array<{ written: Written | null }>) => until(() => outs.every((o) => o.written !== null));
+  const release = () => { for (const h of ui.held.splice(0)) h.answer(UI_OK); };
+
+  // the two sign-in steps
+  ui.holding.add('/api/auth/start');
+  ui.holding.add('/api/auth/callback');
+  const signIns = [at('GET', '/api/auth/start'), at('GET', '/api/auth/callback?code=code-1&state=s')];
+  await until(() => ui.held.length === 2);
+  for (const url of ['/api/auth/start', '/api/auth/callback', '/api/auth/callback?code=code-1']) refused(url);
+  const besideSignIn = [at('GET', '/api/me'), at('GET', '/ui/'), at('POST', '/webhooks/github')];
+  await answered(besideSignIn);
+  assert.deepEqual(besideSignIn.map((o) => o.written?.status), [200, 200, 202]);
+  release();
+  await answered(signIns);
+  assert.deepEqual(signIns.map((o) => o.written?.status), [200, 200]);
+  ui.holding.clear();
+  const signInsAgain = [at('GET', '/api/auth/start'), at('GET', '/api/auth/callback')];
+  await answered(signInsAgain);
+  assert.deepEqual(signInsAgain.map((o) => o.written?.status), [200, 200]);
+
+  // the rest of the API: '/api' and every '/api/...' that is not a sign-in step
+  ui.holding.add('/api/me');
+  ui.holding.add('/api');
+  const reads = [at('GET', '/api/me'), at('GET', '/api/me'), at('GET', '/api/me'), at('GET', '/api')];
+  await until(() => ui.held.length === 4);
+  for (const url of ['/api/me', '/api', '/api/', '/api/auth/signout', '/api/auth/start/x', '/api/reviews?q=1']) refused(url);
+  const besideApi = [at('GET', '/api/auth/start'), at('GET', '/ui/'), at('GET', '/')];
+  await answered(besideApi);
+  assert.deepEqual(besideApi.map((o) => o.written?.status), [200, 200, 200]);
+  release();
+  await answered(reads);
+  ui.holding.clear();
+  const readsAgain = [1, 2, 3, 4].map(() => at('GET', '/api/me'));
+  await answered(readsAgain);
+  assert.deepEqual(readsAgain.map((o) => o.written?.status), [200, 200, 200, 200]);
+
+  // the files: '/', '/ui' and '/ui/...'
+  for (const path of ['/', '/ui', '/ui/x']) ui.holding.add(path);
+  const files = [at('GET', '/'), at('GET', '/ui'), ...Array.from({ length: 14 }, () => at('GET', '/ui/x'))];
+  await until(() => ui.held.length === 16);
+  for (const url of ['/ui/x', '/', '/ui', '/ui/', '/ui/assets/index-a1.js']) refused(url);
+  const besideFiles = [at('GET', '/api/me'), at('GET', '/api/auth/callback'), at('POST', '/webhooks/github')];
+  await answered(besideFiles);
+  assert.deepEqual(besideFiles.map((o) => o.written?.status), [200, 200, 202]);
+  release();
+  await answered(files);
+  assert.equal(files.every((o) => o.written?.status === 200), true);
+  ui.holding.clear();
+  const filesAgain = Array.from({ length: 16 }, () => at('GET', '/ui/x'));
+  await answered(filesAgain);
+  assert.equal(filesAgain.every((o) => o.written?.status === 200), true);
+  await idle();
+  assert.deepEqual(unread.map((asked) => asked()), new Array(unread.length).fill(0));
+
+  // one body limit of 64 KiB, the group's own
+  const declared = response();
+  listener(request('POST', '/api/x', [Buffer.from('a')], { 'content-length': String(UI_BODY_BYTES + 1) }), declared.res);
+  const arriving = response();
+  listener(request('POST', '/ui/x', [Buffer.alloc(UI_BODY_BYTES), Buffer.from('a')]), arriving.res);
+  const before = ui.seen.length;
+  await idle();
+  assert.deepEqual(declared.out.written, { status: 413, body: 'payload_too_large', headers: CLOSE });
+  assert.deepEqual(arriving.out.written, { status: 413, body: 'payload_too_large', headers: CLOSE });
+  assert.equal(ui.seen.length, before);
+  const exact = response();
+  listener(request('POST', '/api/auth/start', [Buffer.alloc(UI_BODY_BYTES)]), exact.res);
+  const hook = response();
+  listener(request('POST', '/webhooks/github', [Buffer.alloc(2 * UI_BODY_BYTES)]), hook.res);
+  await idle();
+  assert.equal(exact.out.written?.status, 200);
+  assert.equal(ui.seen.at(-1)?.body.length, UI_BODY_BYTES);
+  assert.equal(hook.out.written?.status, 202);
+
+  // the limits as given; a place is given back after a 413, a route that rejects or throws, and a stream that fails
+  const paths: string[] = [];
+  const holds: Array<() => void> = [];
+  const HELD = new Set(['/ui/held', '/api/auth/start', '/api/held']);
+  const small = createListener({
+    webhook: async () => ok,
+    ui: (request) => {
+      paths.push(request.path);
+      if (request.path === '/api/fail') return Promise.reject(new Error('secret detail'));
+      if (request.path === '/api/throw') throw new Error('secret detail');
+      if (HELD.has(request.path)) return new Promise<UiAnswer>((resolve) => { holds.push(() => resolve(UI_OK)); });
+      return Promise.resolve(UI_OK);
+    },
+  }, { maxUiBodyBytes: 8, maxUiFilesInFlight: 1, maxUiSignInInFlight: 1, maxUiApiInFlight: 1 });
+  const one = async (req: RequestLike) => { const { res, out } = response(); small.listener(req, res); await small.idle(); return out; };
+  const TOO_LARGE = { status: 413, body: 'payload_too_large', headers: CLOSE };
+  assert.deepEqual((await one(request('POST', '/api/x', [Buffer.from('abcd'), Buffer.from('efghi')]))).written, TOO_LARGE);
+  assert.deepEqual((await one(request('POST', '/api/x', [Buffer.from('a')], { 'content-length': '9' }))).written, TOO_LARGE);
+  assert.equal((await one(request('POST', '/api/x', [Buffer.from('abcdefgh')]))).written?.status, 200);
+  for (const path of ['/api/fail', '/api/throw']) {
+    assert.deepEqual((await one(request('GET', path))).written, { status: 500, body: 'internal_error', headers: TEXT }, path);
+  }
+  async function* broken() { yield Buffer.from('ab'); throw new Error('connection reset'); }
+  assert.equal((await one(Object.assign(Readable.from(broken()), { method: 'POST', url: '/api/x', headers: {} }))).calls, 0);
+  assert.deepEqual(paths, ['/api/x', '/api/fail', '/api/throw']);
+  const first = ['/ui/held', '/api/auth/start', '/api/held'].map((url) => {
+    const { res, out } = response();
+    small.listener(request('GET', url, []), res);
+    return out;
+  });
+  await until(() => holds.length === 3);
+  const others = ['/', '/ui/x', '/api/auth/callback', '/api/me'];
+  for (const url of others) {
+    const { req, asked } = untouched('GET', url);
+    const { res, out } = response();
+    small.listener(req, res);
+    assert.deepEqual(out.written, BUSY, url);
+    assert.equal(asked(), 0, url);
+  }
+  for (const give of holds.splice(0)) give();
+  await small.idle();
+  assert.deepEqual(first.map((o) => o.written?.status), [200, 200, 200]);
+  for (const url of others) assert.equal((await one(request('GET', url, []))).written?.status, 200, url);
+});
+
+test('an answer with several values of one header is written with each', async () => {
+  const cookies = ['a=1', 'b=2'];
+  const answer: UiAnswer = { status: 302, headers: { location: '/ui/', 'set-cookie': cookies }, body: '' };
+  const ui = uiRoute(answer);
+  const out = await send(request('GET', '/api/auth/callback?code=code-1', []), { webhook: async () => ok, ui: ui.route });
+  assert.deepEqual(out.written, { status: 302, headers: { location: '/ui/', 'set-cookie': ['a=1', 'b=2'] }, body: '' });
+  assert.equal(out.written?.headers['set-cookie'], cookies);
+});
+
+test('with no UI route, /, /ui/ and /api/ are not found as before', async () => {
+  const cases: Routes[] = [routes, { webhook: async () => ok, extensions: new Map([['chat', readyRoute().route]]) }];
+  for (const r of cases) {
+    for (const method of ['GET', 'POST']) {
+      for (const url of ['/', '/ui', '/ui/', '/ui/index.html', '/ui/assets/index-a1.js', '/api', '/api/', '/api/me', '/api/auth/start', '/api/auth/callback?code=code-1']) {
+        const { listener, idle } = createListener(r, { maxUiApiInFlight: 0, maxUiFilesInFlight: 0, maxUiSignInInFlight: 0, maxUiBodyBytes: 0 });
+        const { req, asked } = untouched(method, url, { 'content-length': String(5 * 1024 * 1024) });
+        const { res, out } = response();
+        listener(req, res);
+        assert.deepEqual(out.written, { status: 404, body: 'not_found', headers: TEXT }, `${method} ${url}`);
+        await idle();
+        assert.equal(asked(), 0);
+      }
     }
   }
 });
