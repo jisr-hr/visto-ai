@@ -20,6 +20,7 @@ import { createGithubApprovals } from './forge/github/approvals.ts';
 import { createGithubChecks } from './forge/github/checks.ts';
 import { createGithubHookDeliveries } from './forge/github/hook-deliveries.ts';
 import { githubCommentUrl, githubLineUrl, githubPullRequestUrl, githubReviewUrl } from './forge/github/links.ts';
+import { createGithubSignIn } from './forge/github/sign-in.ts';
 import { createGithubWebhookReader } from './forge/github/webhook.ts';
 import { createGithubWriter } from './forge/github/writer.ts';
 import { createMcpServers } from './mcp/client.ts';
@@ -27,6 +28,7 @@ import { startService } from './service.ts';
 import type { Listening } from './service.ts';
 import { createFeedback } from './shell/feedback.ts';
 import type { RequestLike, ResponseLike } from './shell/http.ts';
+import { loadUiFiles } from './ui/files.ts';
 
 // Node's default lets a caller take five minutes to send a request, and each such caller holds one of the 20 places.
 export const REQUEST_TIMEOUT_MS = 30_000;
@@ -245,6 +247,13 @@ export async function main(argv: string[], env: Record<string, string | undefine
       const writer = createGithubWriter({ auth, info, fetch: github });
       const checks = createGithubChecks({ auth, appId: config.app.id, fetch: github });
       const approvals = createGithubApprovals({ auth, fetch: github });
+      // With the UI named in the file: sign-in through the app, which alone is given the client secret, and the built files,
+      // read once here (call 17).
+      const uiConfig = config.ui;
+      const ui = uiConfig === undefined ? undefined : {
+        signIn: createGithubSignIn({ clientId: uiConfig.clientId, clientSecret: uiConfig.clientSecret, auth, fetch: github }),
+        files: loadUiFiles(join(import.meta.dirname, '..', 'ui', 'dist')),
+      };
       // The database object is made before the modules, so the function a module reports feedback through exists when
       // it is set up; it connects when first used, and the service migrates it once it has started.
       const db = postgresDb(config.database.url, log);
@@ -301,6 +310,7 @@ export async function main(argv: string[], env: Record<string, string | undefine
         extensions,
         reviewUrl: githubReviewUrl,
         pullRequestUrl: githubPullRequestUrl,
+        ...(ui === undefined ? {} : { ui }),
         listen: (listener, port) => new Promise<Listening>((resolve, reject) => {
           const listening = createServer(listener);
           server = listening;
