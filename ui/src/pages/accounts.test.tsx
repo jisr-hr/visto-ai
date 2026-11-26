@@ -946,3 +946,21 @@ test('after name_taken, or a make whose answer was lost, the list is read again'
   expect(screen.getByText('5 accounts')).toBeInTheDocument();
   expect(screen.getByRole('form', { name: 'New account' })).toBeInTheDocument();
 });
+
+test('focus goes to Copy after a make that works, and to New account after a confirmed removal', async () => {
+  visit('/ui/settings');
+  const { api } = fakeApi({ accounts: () => Promise.resolve(LIST), makeAccount: () => Promise.resolve(ONE_TIME), removeAccount: () => Promise.resolve() });
+  const user = userEvent.setup();
+  render(<App api={api} />);
+  expect(await screen.findByText('5 accounts')).toBeInTheDocument();
+
+  await user.click(screen.getByRole('button', { name: 'New account' }));
+  await user.type(screen.getByLabelText('Name'), 'octo-viewer');
+  await user.click(screen.getByRole('button', { name: 'Make the account' }));
+  expect(await within(screen.getByRole('status')).findByText(PASSWORD)).toBeInTheDocument();
+  expect(within(screen.getByRole('status')).getByRole('button', { name: 'Copy' })).toHaveFocus();
+
+  await user.click(within(actionsOf('octo-dev')).getByRole('button', { name: 'Remove' }));
+  await user.click(within(actionsOf('octo-dev')).getByRole('button', { name: 'Remove' }));
+  expect(await screen.findByRole('button', { name: 'New account' })).toHaveFocus();
+});

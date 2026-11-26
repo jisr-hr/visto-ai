@@ -62,6 +62,8 @@ const mayBeMade = (error: unknown): boolean =>
 // The ids of a row's name, which describes each of its buttons, and of its Reset password, where Done puts focus back.
 const nameId = (id: number): string => `account-${id}-name`;
 const resetId = (id: number): string => `account-${id}-reset`;
+// The id of the one-time password box's Copy, where focus goes after a make that works.
+const COPY_ID = 'one-time-copy';
 
 /** The lines under a password account's way in: no password chosen yet, an expired one-time password, a wait. */
 function linesOf(account: Account): string[] {
@@ -274,6 +276,8 @@ export function AccountsPage() {
     void send('make', () => api.makeAccount(me.csrf, name, role), (made) => {
       show(made, 'new');
       closeForm();
+      // The button that had focus is gone with the form: it goes to the box's Copy.
+      focusNext.current = () => document.getElementById(COPY_ID);
     });
   }
 
@@ -292,7 +296,10 @@ export function AccountsPage() {
     role: (to) => void send('row', () => api.setRole(me.csrf, account.id, to), () => {}),
     reset: () => void send('row', () => api.resetPassword(me.csrf, account.id), (made) => show(made, account.id)),
     ask: () => setAsking(account.id),
-    remove: () => void send('row', () => api.removeAccount(me.csrf, account.id), () => {}),
+    // The row's Remove is gone with the row: focus goes to New account.
+    remove: () => void send('row', () => api.removeAccount(me.csrf, account.id), () => {
+      focusNext.current = () => newAccount.current;
+    }),
     cancel: () => setAsking(null),
   });
 
@@ -360,7 +367,7 @@ export function AccountsPage() {
               {`Shown once. ${shown.name} signs in with it once, then chooses a password. It expires ${utc(shown.expiresAt)}.`}
             </p>
             <div className="flex flex-wrap gap-2">
-              <Button type="button" onClick={() => void copy(shown.password)}>
+              <Button type="button" id={COPY_ID} onClick={() => void copy(shown.password)}>
                 {shown.copy === 'copied' ? 'Copied' : 'Copy'}
               </Button>
               <Button type="button" onClick={() => done(shown.from)}>

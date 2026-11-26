@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { generateKeyPairSync } from 'node:crypto';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -335,6 +336,24 @@ test('github is refused while the config has GitHub sign-in off, on stderr with 
         assert.deepEqual(await runMainApart(['github', '--role', 'viewer', '--login', 'octo-dev', '--config', file], env), [1, [], ['github sign-in is off']], label);
       }
     }
+  } finally {
+    rmSync(folder, { recursive: true, force: true });
+  }
+});
+
+test('github with GitHub sign-in on but no database is a usage error, exit 2, and nothing is opened', { timeout: 30_000 }, async () => {
+  const folder = mkdtempSync(join(tmpdir(), 'visto-ai-accounts-'));
+  try {
+    const env = { MODEL_KEY: 'model-secret-value', APP_CLIENT_SECRET: 'client-secret-for-tests-only', APP_KEY: generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey.export({ type: 'pkcs8', format: 'pem' }) as string, HOOK: 'hook-secret-for-tests-only' };
+    const text = [
+      'model:', '  apiKey: { env: MODEL_KEY }', '  model: vendor/model-a',
+      'app: { id: 12345, privateKey: { env: APP_KEY }, webhookSecret: { env: HOOK }, clientId: Iv1.0123456789abcdef, clientSecret: { env: APP_CLIENT_SECRET } }',
+      'ui:', '  publicUrl: https://visto.example.test', '  accounts: [octo-lead]', '',
+    ].join('\n');
+    const file = join(folder, 'github-on.yml');
+    writeFileSync(file, text);
+    assert.ok(parseConfig(text, env).database === null);
+    assert.deepEqual(await runMainApart(['github', '--config', file, '--login', 'octo-lead', '--role', 'admin'], env), [2, ['usage: accounts needs a database in the config'], []]);
   } finally {
     rmSync(folder, { recursive: true, force: true });
   }
