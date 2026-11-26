@@ -78,9 +78,12 @@ function anchorsOf(markdown: string): Set<string> {
   return anchors;
 }
 
-const INLINE_LINK = /(!?)\[[^\]]*\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g;
+const INLINE_LINK = /(!?)\[[^\]]*\]\(([^)\s]+)(\s+"[^"]*")?\)/g;
+/** The only same-folder form the website's rewriter turns into a docs address. */
+const SIBLING_PAGE = /^(?:\.\/)?[^/:?]+\.md$/;
 
-function linkProblems(markdown: string, file: string, repoRoot: string, label: string): string[] {
+/** `inGuide` adds what only a guide page must obey: the site's rewriter handles no titles, no other same-folder files and no subfolders. */
+function linkProblems(markdown: string, file: string, repoRoot: string, label: string, inGuide = false): string[] {
   const problems: string[] = [];
   const root = resolve(repoRoot);
   const own = anchorsOf(markdown);
@@ -99,6 +102,14 @@ function linkProblems(markdown: string, file: string, repoRoot: string, label: s
         // keep the raw anchor
       }
       const where = `${label}: line ${number}`;
+      if (inGuide && m[3] !== undefined) {
+        problems.push(`${where}: link "${target}" has a title, which the website's link rewriter does not handle; drop the title`);
+        continue;
+      }
+      if (inGuide && path !== '' && !path.startsWith('../') && !SIBLING_PAGE.test(path)) {
+        problems.push(`${where}: link "${target}" is not a page of the guide (.md in the same folder) or a ../ link out of it; the website's link rewriter leaves it as written`);
+        continue;
+      }
       if (path === '') {
         if (anchor !== '' && !own.has(anchor)) problems.push(`${where}: link "${target}" points at an anchor that is not a heading here`);
         continue;
@@ -192,7 +203,7 @@ function pageProblems(file: string, repoRoot: string): string[] {
       problems.push(`${label}: line ${number}: a line the website reads as a body heading with "# " (its fence reading differs from CommonMark); use ## or deeper, or fence the code the same way`);
     }
   }
-  return [...problems, ...linkProblems(markdown, file, repoRoot, label)];
+  return [...problems, ...linkProblems(markdown, file, repoRoot, label, true)];
 }
 
 function sidebarProblems(dir: string, slugs: string[]): string[] {

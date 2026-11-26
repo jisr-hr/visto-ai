@@ -134,6 +134,31 @@ test('a link out of the guide resolves in the repo', () => {
   assert.match(problems(valid({ 'a.md': page('## One\n\n[x](../../../outside.md)') })).join('\n'), /outside\.md/);
 });
 
+test('a link with a title is refused, naming the file and line', () => {
+  const out = problems(valid({ 'a.md': page('## One\n\n[x](index.md "t")') }));
+  assert.equal(out.length, 1);
+  assert.match(out[0]!, /^a\.md: line \d+: .*title/);
+});
+
+test('a same-folder link to a file that is not a .md page is refused', () => {
+  const out = problems(valid({ 'a.md': page('## One\n\n[x](sidebar.json)') }));
+  assert.equal(out.length, 1);
+  assert.match(out[0]!, /^a\.md: line \d+: .*sidebar\.json/);
+});
+
+test('a link into a subfolder is refused', () => {
+  const b = build(valid({ 'a.md': page('## One\n\n[x](sub/x.md)') }));
+  try {
+    mkdirSync(join(b.dir, 'sub'));
+    writeFileSync(join(b.dir, 'sub', 'x.md'), page('## X'));
+    const out = checkGuide(b.dir, b.root);
+    assert.equal(out.length, 1);
+    assert.match(out[0]!, /^a\.md: line \d+: .*sub\/x\.md/);
+  } finally {
+    b.done();
+  }
+});
+
 test('anchors are checked only for .md targets', () => {
   assert.deepEqual(problems(valid({ 'a.md': page('## One\n\n[x](../../LICENSE#anything)') }), { LICENSE: 'MIT' }), []);
 });
