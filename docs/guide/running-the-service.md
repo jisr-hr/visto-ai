@@ -4,7 +4,7 @@ description: Run one instance per database.
 ---
 
 - Run one instance per database. A second one stops at once with `another_instance_running`, and the first keeps running. It loads no extension module.
-- An extension module that cannot be loaded stops the start: the log has `extension_failed` with the module's name and a code, then `start_failed`, and the process exits with 1 before it listens (see [docs/extensions.md](extension-contract.md)).
+- An extension module that cannot be loaded stops the start: the log has `extension_failed` with the module's name and a code, then `start_failed`, and the process exits with 1 before it listens (see [docs/guide/extension-contract.md](extension-contract.md)).
 - If the database restarts, the service notices that it has lost its lock, exits, and Compose starts it again.
 - Connect to Postgres directly. The lock and the statement timeout do not work through a pooler in transaction mode.
 - Stopping the service (`docker compose stop`) waits up to 10 minutes for the reviews that are running. The Compose file allows 660 seconds for it. A second signal ends it at once.

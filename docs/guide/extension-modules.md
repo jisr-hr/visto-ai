@@ -15,7 +15,7 @@ extensions:
       secret: { env: EXAMPLE_FEEDBACK_SECRET }
 ```
 
-[docs/extensions.md](extension-contract.md) states the contract a module is written against, how it is loaded (under Docker its file must be mounted), and what the service guarantees and what the module must do itself. A module runs inside the service, with its secrets, its database connection and its network; the service does not sandbox it.
+[docs/guide/extension-contract.md](extension-contract.md) states the contract a module is written against, how it is loaded (under Docker its file must be mounted), and what the service guarantees and what the module must do itself. A module runs inside the service, with its secrets, its database connection and its network; the service does not sandbox it.
 
 What an operator sees:
 

@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, readdirSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { checkGuide, checkLinks, slugify } from './check.ts';
@@ -181,4 +182,25 @@ test('slugs trim and use only the text of a link', () => {
 
 test("the repository's guide is valid", () => {
   assert.deepEqual(checkGuide('docs/guide', '.'), []);
+});
+
+test("the README's links resolve", () => {
+  assert.deepEqual(checkLinks('README.md', '.'), []);
+});
+
+test('the README links every page', () => {
+  const readme = readFileSync('README.md', 'utf8');
+  for (const page of readdirSync('docs/guide').filter((f) => f.endsWith('.md'))) {
+    assert.ok(readme.includes(`docs/guide/${page}`), page);
+  }
+});
+
+test('no tracked file outside the history links to a gone README section or to docs/extensions.md', () => {
+  const files = execFileSync('git', ['ls-files', '*.md', '*.yml'], { encoding: 'utf8' })
+    .split('\n')
+    .filter((f) => f && !f.startsWith('docs/superpowers/'));
+  for (const file of files) {
+    assert.deepEqual(checkLinks(file, '.'), [], file);
+    assert.ok(!readFileSync(file, 'utf8').includes('docs/extensions.md'), `${file} names docs/extensions.md`);
+  }
 });

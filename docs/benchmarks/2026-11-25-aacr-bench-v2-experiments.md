@@ -1,6 +1,6 @@
 # AACR-Bench v2, 2026-11-25: placement by quote, a looser bar for minor findings, and a read tool
 
-Three things were measured on the same benchmark as [the first full run](2026-11-24-aacr-bench-v2.md), each taken from a comparison with [alibaba/open-code-review](https://github.com/alibaba/open-code-review): the new placement rules on the code to be merged, and two experiments that are not merged. How to run the benchmark is in the README, under "Benchmark (AACR-Bench)".
+Three things were measured on the same benchmark as [the first full run](2026-11-24-aacr-bench-v2.md), each taken from a comparison with [alibaba/open-code-review](https://github.com/alibaba/open-code-review): the new placement rules on the code to be merged, and two experiments that are not merged. How to run the benchmark is in [the Benchmark page](../guide/benchmark.md).
 
 ## Setup
 

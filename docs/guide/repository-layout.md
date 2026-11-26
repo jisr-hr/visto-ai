@@ -24,5 +24,5 @@ description: What each path in the repository holds.
 | `src/service.ts`, `src/main.ts` | Starting and stopping the service |
 | `src/config` | Loading and validating configuration |
 | `contract` | The rules the model is given |
-| `docs/extensions.md` | The contract an extension module is written against |
+| `docs/guide/extension-contract.md` | The contract an extension module is written against |
 | `docs/superpowers` | The design and the implementation plans |

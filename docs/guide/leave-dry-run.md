@@ -42,4 +42,4 @@ Every attempt at a review, finished or failed, is a row of `visto_ai.review_runs
 docker compose exec db psql -U postgres -d visto -c "select id, owner, repo, number, outcome, cost, body from visto_ai.review_runs order by id desc limit 5"
 ```
 
-`body` is the text that would have been posted (or was posted, out of dry run), `outcome` how the run ended and `cost` what the model calls cost, as recorded (see the daily limit below). The inline comments, and the notes when they are on, are in the `comments` column.
+`body` is the text that would have been posted (or was posted, out of dry run), `outcome` how the run ended and `cost` what the model calls cost, as recorded (see the daily limit in [Running the service](running-the-service.md)). The inline comments, and the notes when they are on, are in the `comments` column.
