@@ -88,6 +88,8 @@ export interface ReviewJobDeps {
   memoryFor?: (ref: PullRequestRef) => Memory;
   /** Told how memory did in each review; absent when learning is off. */
   memoryHealth?: Pick<MemoryHealth, 'noted'>;
+  /** Told how the second scorer did in a review that had one (call 12); absent: nobody is told. */
+  scorerHealth?: { noted(ok: boolean, code: string): void };
   /** The base branch's rule on stale approvals, for the decision at publish; absent: it cannot be read, and nothing is approved. */
   approvals?: ForgeApprovals;
   /** Called after a withdraw job was stored, so that its runner starts it at once. */
@@ -653,6 +655,8 @@ export async function runReviewJob(job: Job, deps: ReviewJobDeps): Promise<void>
 
     // 4. The review.
     let failure: { stage: string; code: string } | null = null;
+    /** The review's engine held a second scorer. */
+    let withScorer = false;
     if (prepareError !== null) {
       failure = { stage: 'prepare', code: codeOf(prepareError) };
     } else if (resumed === null) {
@@ -673,6 +677,7 @@ export async function runReviewJob(job: Job, deps: ReviewJobDeps): Promise<void>
           };
           // With learning on, the review is given its repository's memory, in dry run too; with it off the object is what it was.
           const engine = deps.memoryFor === undefined ? deps.engineDeps(source) : { ...deps.engineDeps(source), memory: deps.memoryFor(job.ref) };
+          withScorer = engine.scorer !== undefined;
           if (deps.dryRun) {
             result = await deps.review(input, stages ? { ...engine, progress } : engine);
           } else {
@@ -762,6 +767,22 @@ export async function runReviewJob(job: Job, deps: ReviewJobDeps): Promise<void>
           const out: unknown = deps.memoryHealth?.noted(failed === undefined, told.code);
           // A health that returns a rejected promise changes nothing either.
           if (typeof out === 'object' && out !== null) Promise.resolve(out).catch(() => {});
+        } catch {
+          // a health that fails changes nothing
+        }
+      }
+      // How the second scorer did, in a review that had one and in dry run too (call 12): the first of its files it failed or did
+      // not ask for, with a short code, is a failure; else a review that made a model call is a success; else nothing is told.
+      if (deps.scorerHealth !== undefined && withScorer) {
+        try {
+          const audit: unknown[] = Array.isArray(result.audit) ? result.audit : [];
+          const missed = audit.find((entry): entry is { reason: string } => {
+            if (typeof entry !== 'object' || entry === null) return false;
+            const { stage, action, reason } = entry as { stage?: unknown; action?: unknown; reason?: unknown };
+            return stage === 'scorer' && (action === 'file_failed' || action === 'file_not_asked') && typeof reason === 'string' && isShortCode(reason);
+          });
+          if (missed !== undefined) deps.scorerHealth.noted(false, missed.reason);
+          else if (result.usage.calls >= 1) deps.scorerHealth.noted(true, 'ok');
         } catch {
           // a health that fails changes nothing
         }

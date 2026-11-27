@@ -41,6 +41,7 @@ import type { ReviewJobDeps } from './shell/review-job.ts';
 import { createRunner } from './shell/runner.ts';
 import type { Settings } from './shell/settings.ts';
 import { createSpendGuard } from './shell/spend.ts';
+import { createStatusStore } from './shell/status-store.ts';
 import { createAccountChanges } from './ui/accounts.ts';
 import { createAuth } from './ui/auth.ts';
 import type { UiFiles } from './ui/files.ts';
@@ -139,7 +140,7 @@ export function approvalsFor(dryRun: boolean, approvals: ForgeApprovals | undefi
  * Takes the lock, migrates, recovers, then listens; the work that follows listening is not waited for.
  * `settled` resolves when the work that follows listening has had its first try: the key check, the app check, with learning on the learning work's start and the judge's row (the first pass is not waited for, and no run of the judge starts), the redelivery attempt and, when that worked, the first beat.
  * `stop` drains the three runners (at most DRAIN_WAIT_MS between them), closes the listener and waits for requests in flight (at most STOP_WAIT_MS),
- * beats once more, waits for alerts, closes the database and releases the lock. It never rejects.
+ * beats once more, waits for alerts and the status store's writes (at most ALERT_TIMEOUT_MS), closes the store, then the database, and releases the lock. It never rejects.
  */
 export async function startService(config: ServiceConfig, deps: ServiceDeps): Promise<{ stop(): Promise<void>; settled: Promise<void> }> {
   const { db, clock } = deps;
@@ -160,18 +161,27 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps): Pr
   // In dry run no module is told of a review or an alert (11.1); its providers and routes still work.
   const notifiers = notifiersOf(deps.extensions);
   const sinks = alertSinksOf(deps.extensions);
+  // Every alert raised and what each dependency was seen to do are stored, in dry run and with the UI off too, on one queue
+  // of writes nothing waits for but the stop (calls 6, 12 and 13).
+  const status = createStatusStore({ db, clock, log: say });
   const { alert, settled: alertsSettled } = createAlerts({
     webhook: config.alerts?.webhook ?? null, fetch: deps.fetch, clock, log: say,
     ...(config.dryRun || sinks.length === 0 ? {} : { sinks }),
+    store: (code, details) => { status.alerted(code, details); },
   });
-  const health = createModelHealth(alert);
-  const extensionHealth = deps.extensions.length === 0 ? null : createExtensionHealth(alert);
-  const mcpHealth = config.mcpServers.length === 0 ? null : createMcpHealth(alert);
+  const health = createModelHealth(alert, (ok, code) => { status.noted({ kind: 'model', name: '', part: '', ok, code }); });
+  const extensionHealth = deps.extensions.length === 0 ? null
+    : createExtensionHealth(alert, (name, part, ok, code) => { status.noted({ kind: 'extension', name, part, ok, code }); });
+  const mcpHealth = config.mcpServers.length === 0 ? null
+    : createMcpHealth(alert, (server, ok, code) => { status.noted({ kind: 'mcp', name: server, part: '', ok, code }); });
   // The daily limit is read at each look.
   const spend = createSpendGuard({ db, limit: () => inForce().limits.spendPerDay, clock, alert });
   // With learning off none of it is made: no pass, no memory, no health (call 17). In dry run it runs (11.1).
   const learning = config.learning ? createLearning({ db, clock, log: say, alert }) : null;
-  const memory = config.learning ? { memoryFor: (ref: PullRequestRef) => recordsMemory(db, ref), memoryHealth: createMemoryHealth(alert) } : null;
+  const memory = config.learning ? {
+    memoryFor: (ref: PullRequestRef) => recordsMemory(db, ref),
+    memoryHealth: createMemoryHealth(alert, (ok, code) => { status.noted({ kind: 'memory', name: '', part: '', ok, code }); }),
+  } : null;
   // Nothing reaches GitHub's approvals in dry run, nor when the service was given none: each call rejects, and nothing is approved or dismissed.
   const approvals = approvalsFor(config.dryRun, deps.approvals);
   const reviewBase: Omit<ReviewJobDeps, 'settingsFor' | 'limits' | 'engineDeps'> = {
@@ -185,6 +195,8 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps): Pr
     ...(extensionHealth === null ? {} : { extensionHealth }),
     ...(mcpHealth === null ? {} : { mcpHealth }),
     ...(memory === null ? {} : memory),
+    // How the second scorer did, told by each review that had one (call 12).
+    scorerHealth: { noted: (ok, code) => { status.noted({ kind: 'scorer', name: '', part: '', ok, code }); } },
     // The audit key goes to the review job and to nothing else.
     ...(config.auditKey === undefined ? {} : { auditKey: config.auditKey }),
   };
@@ -459,6 +471,8 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps): Pr
     // With GitHub sign-in on and a team named, the UI reads its members (call 27); else nothing of it is asked for.
     const lacking = await deps.appInfo.lacks(config.dryRun, gateUseOf(config), approvalUseOf(config), ui !== null && ui.signIn !== null && ui.access.team !== null);
     if (ending) return;
+    // The app's state, then every open feature_off cleared, before what is still missing is raised and stored again (call 10).
+    status.appChecked(lacking);
     if (lacking.length === 0) say({ event: 'app_check', missing: 0 });
     for (const { feature, missing } of lacking) {
       say({ event: 'feature_off', feature, missing });
@@ -524,6 +538,8 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps): Pr
     await guarded('upkeep_failed', 'delete_finished', async () => {
       await deleteFinishedJobs(db, new Date(clock().getTime() - JOB_KEEP_MS).toISOString());
     });
+    // The alerts past keeping (call 11): queued on the status store and not waited for, so a queue backed up never holds the upkeep.
+    if (!ending) status.prune();
     await redeliveryThenBeat('upkeep_failed');
   }
 
@@ -581,11 +597,14 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps): Pr
         say({ event: 'beat_failed', ...why(error) });
       }
     }
+    // The alerts' posts and the status store's writes, within one limit; then the store is closed, so a write told after it
+    // (a review the drain left behind, a late alert) never reaches the closed database (call 13).
     try {
-      await within(ALERT_TIMEOUT_MS, alertsSettled());
+      await within(ALERT_TIMEOUT_MS, Promise.all([alertsSettled(), status.settled()]));
     } catch {
       // settled never rejects
     }
+    status.close();
     try {
       if (await within(CLOSE_WAIT_MS, db.close()) === 'timeout') say({ event: 'database_close_timeout' });
     } catch (error) {

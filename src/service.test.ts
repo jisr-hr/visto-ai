@@ -11,6 +11,7 @@ import { NO_COUNTS, recordEvaluation } from './db/gate.ts';
 import { markPublished, recordRun } from './db/review-runs.ts';
 import type { RunRecord } from './db/review-runs.ts';
 import { markDismissFailed } from './db/approvals.ts';
+import { storeAlert } from './db/status.ts';
 import { settingsVersion } from './db/settings.ts';
 import { dismissMessage } from './approval/text.ts';
 import { beat, readHeartbeat } from './db/heartbeat.ts';
@@ -20,6 +21,7 @@ import type { AppIdentity, FeatureOff, ForgeApprovals, ForgeChecks, ForgeEvent, 
 import type { BlockScore, ModelRequest, ModelResponse, ReviewDeps, ReviewInput, ReviewResult } from './engine/types.ts';
 import { approvalsFor, BEAT_MS, CLOSE_WAIT_MS, DRAIN_WAIT_MS, gateForge, startService, STOP_WAIT_MS, TICK_MS, UPKEEP_MS, WITHDRAW_CONCURRENCY } from './service.ts';
 import type { Listening, ServiceDeps } from './service.ts';
+import { ALERT_TIMEOUT_MS } from './shell/alerts.ts';
 import type { RequestLike, ResponseLike } from './shell/http.ts';
 import { startSettings } from './shell/settings.ts';
 import type { AskedChange, Settings } from './shell/settings.ts';
@@ -184,7 +186,13 @@ async function harness(options: Options = {}) {
   };
 
   const db: Db = {
-    query: (text, params) => (queries.push(text), allQueries.push([text, params ?? []]), options.failQuery !== undefined && text.includes(options.failQuery) ? Promise.reject(new Error('db_down')) : real.query(text, params)),
+    query: (text, params) => {
+      queries.push(text);
+      allQueries.push([text, params ?? []]);
+      if (options.failQuery !== undefined && text.includes(options.failQuery)) return Promise.reject(new Error('db_down'));
+      const wait = h.beforeQuery?.(text);
+      return wait === undefined ? real.query(text, params) : wait.then(() => real.query(text, params));
+    },
     script: (sql) => (options.migrationError === undefined ? real.script(sql) : Promise.reject(options.migrationError)),
     transaction: async (work) => {
       if (h.beforeTransaction !== undefined) await h.beforeTransaction();
@@ -218,6 +226,8 @@ async function harness(options: Options = {}) {
     beforeTransaction: undefined as (() => Promise<void>) | undefined,
     /** Called when the database is being closed, before anything else. */
     beforeClose: undefined as (() => void) | undefined,
+    /** Asked with each statement outside a transaction, once it is counted: a promise it returns is waited for before the statement is sent, and its rejection is the statement's. */
+    beforeQuery: undefined as ((text: string) => Promise<void> | undefined) | undefined,
     /** What the model answers to a request; it rejects when not set. */
     answer: undefined as ((request: ModelRequest) => Promise<ModelResponse>) | undefined,
     releaseReview: () => { releaseReview(); },
@@ -2703,4 +2713,189 @@ test('with the UI on and settings given, an admin saves a setting and the next r
   await h.webhook(pr('opened'), 'd1');
   await h.reviewed();
   assert.equal(h.inputs[0]!.repoConfig.scoreThreshold, 55);
+});
+
+// The status store (the UI plan's Overview, calls 6, 10 to 13).
+
+/** The alerts stored, oldest first. */
+const alertRows = (h: Harness) => h.db.query<{ code: string; key: string; details: unknown; raised_at: Date; cleared_at: Date | null }>(
+  'select code, key, details, raised_at, cleared_at from visto_ai.alerts order by id');
+/** Each dependency's stored state. */
+const healthRows = (h: Harness) => h.db.query<{ kind: string; name: string; part: string; status: string; code: string | null; missing: unknown }>(
+  'select kind, name, part, status, code, missing from visto_ai.dependency_health order by kind, name, part');
+/** A statement of the status store: one that names its tables. */
+const statusStatement = (text: string): boolean => /visto_ai\.(alerts|dependency_health)\b/.test(text);
+const ofStatusStore = (h: Harness) => h.logged.filter((e) => typeof e.event === 'string' && e.event.startsWith('status_store'));
+const LACKS_CHECKS: FeatureOff[] = [{ feature: 'gate', missing: 'checks:write' }];
+
+test('the alerts the service raises are stored, and the start writes the state of the app', async () => {
+  const options: Options = { lacks: LACKS_CHECKS };
+  const h = await harness(options);
+  const first = await h.start();
+  await first.settled;
+  await h.until(async () => (await alertRows(h)).length === 1 && (await healthRows(h)).some((r) => r.kind === 'app'));
+  assert.deepEqual((await alertRows(h)).map((r) => [r.code, r.key, r.details, r.cleared_at]), [['feature_off', 'gate:checks:write', { feature: 'gate', missing: 'checks:write' }, null]]);
+  assert.deepEqual((await healthRows(h)).find((r) => r.kind === 'app'), { kind: 'app', name: '', part: '', status: 'failing', code: 'missing', missing: LACKS_CHECKS });
+  await first.stop();
+  // Started again, with the app lacking nothing: the feature_off cleared at that start, the app working.
+  options.lacks = [];
+  h.now = at(60);
+  const second = await h.start();
+  await second.settled;
+  await h.until(async () => (await alertRows(h))[0]!.cleared_at !== null && (await healthRows(h)).some((r) => r.kind === 'app' && r.status === 'ok'));
+  assert.deepEqual((await alertRows(h)).map((r) => [r.code, r.key, r.cleared_at?.toISOString()]), [['feature_off', 'gate:checks:write', at(60)]]);
+  assert.deepEqual((await healthRows(h)).find((r) => r.kind === 'app'), { kind: 'app', name: '', part: '', status: 'ok', code: null, missing: null });
+  assert.deepEqual(ofStatusStore(h), []);
+});
+
+test('a review notes the model, and the upkeep prunes the alerts past keeping', async () => {
+  // A key check that says nothing tells nothing: the review is the first to tell the model's state.
+  const h = await harness({ keyStatus: 500 });
+  await migrate(h.db, loadMigrations(MIGRATIONS_DIR));
+  await storeAlert(h.db, { code: 'redelivery_failed', key: '', details: { reason: 'github_502' }, at: at(-31 * 86_400), dedupeSince: null });
+  await storeAlert(h.db, { code: 'redelivery_failed', key: '', details: { reason: 'github_502' }, at: at(-29 * 86_400), dedupeSince: null });
+  const service = await h.start();
+  await service.settled;
+  await h.until(async () => (await healthRows(h)).some((r) => r.kind === 'app'));
+  assert.deepEqual((await healthRows(h)).map((r) => r.kind), ['app']);
+  await h.webhook(pr('opened'), 'd1');
+  await h.reviewed();
+  await h.until(async () => (await healthRows(h)).some((r) => r.kind === 'model'));
+  assert.deepEqual((await healthRows(h)).find((r) => r.kind === 'model'), { kind: 'model', name: '', part: '', status: 'ok', code: null, missing: null });
+  await h.runTimer(UPKEEP_MS);
+  await h.until(async () => (await alertRows(h)).length === 1);
+  assert.deepEqual((await alertRows(h)).map((r) => r.raised_at.toISOString()), [at(-29 * 86_400)]);
+  assert.deepEqual(ofStatusStore(h), []);
+});
+
+test('stop waits for the status writes, and nothing is written after the database closes', async (t) => {
+  // A held insert of an alert: the stop waits for it, then closes.
+  const h = await harness({ lacks: LACKS_CHECKS });
+  let release!: () => void;
+  const held = new Promise<void>((done) => { release = done; });
+  let holding = false;
+  h.beforeQuery = (text) => {
+    if (!text.includes('insert into visto_ai.alerts')) return undefined;
+    holding = true;
+    return held;
+  };
+  let statementsAtClose: number | null = null;
+  h.beforeClose = () => { statementsAtClose ??= h.allQueries.length; };
+  const service = await h.start();
+  await service.settled;
+  await h.until(() => holding);
+  let ended = false;
+  const asked = Date.now();
+  const stopping = service.stop().then(() => { ended = true; });
+  for (let i = 0; i < 20; i += 1) await h.flush();
+  assert.deepEqual([ended, h.events.includes('close')], [false, false]);
+  release();
+  await stopping;
+  assert.ok(Date.now() - asked < ALERT_TIMEOUT_MS, 'the stop waited out its limit');
+  assert.equal(h.allQueries.length, statementsAtClose);
+  assert.deepEqual((await alertRows(h)).map((r) => r.code), ['feature_off']);
+
+  // An alert raised after the stop (the judge's usage, with tokens and no cost): no statement after the close.
+  const k = await harness({ learning: true, now: at(86_400) });
+  await queueReplies(k, 2);
+  let answer!: () => void;
+  const answered = new Promise<void>((done) => { answer = done; });
+  k.answer = async () => { await answered; return pushback(0); };
+  let atClose: number | null = null;
+  k.beforeClose = () => { atClose ??= k.allQueries.length; };
+  const other = await k.start();
+  await other.settled;
+  void learnTimer(k).work();
+  await k.until(() => k.modelRequests.length === 1);
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let done = false;
+  void other.stop().then(() => { done = true; });
+  try {
+    for (let i = 0; i < 20 && !done; i += 1) {
+      t.mock.timers.tick(CLOSE_WAIT_MS);
+      await k.flush();
+    }
+    assert.equal(done, true, 'the stop did not end once the mocked time had passed');
+  } finally {
+    // The judge's answer comes once the database is closed.
+    answer();
+    for (let i = 0; i < 20 && !done; i += 1) {
+      t.mock.timers.tick(CLOSE_WAIT_MS);
+      await k.flush();
+    }
+  }
+  t.mock.timers.reset();
+  await k.until(() => lessonsLine(k).length === 1);
+  assert.deepEqual(alertsOf(k, 'cost_unknown'), [{ event: 'alert', code: 'cost_unknown' }]);
+  assert.equal(k.allQueries.length, atClose);
+  assert.deepEqual(ofStatusStore(k), []);
+});
+
+test('status writes that fail change nothing: a review is published, a webhook answered, the upkeep run and the stop clean', async () => {
+  const h = await harness({ dryRun: false, lacks: LACKS_CHECKS });
+  h.beforeQuery = (text) => (statusStatement(text) ? Promise.reject(new Error('db_down')) : undefined);
+  const service = await h.start();
+  await service.settled;
+  assert.deepEqual(await h.webhook(pr('opened'), 'd1'), { status: 202, body: 'accepted' });
+  await h.published();
+  await h.until(async () => (await unfinishedJobs(h.db)).length === 0);
+  assert.deepEqual(h.writes.filter((w) => w[0] === 'publishReview'), [['publishReview', 'h1']]);
+  const old = (await enqueueJob(h.db, job({ ref: { ...REF, number: 9 } })))!;
+  await finishJob(h.db, old, 'done', 'reviewed', at(-15 * 86_400));
+  h.fetched.length = 0;
+  await h.runTimer(UPKEEP_MS);
+  assert.deepEqual([h.fetched.some((u) => u.endsWith('/key')), await getJob(h.db, old)], [true, null]);
+  await service.stop();
+  assert.deepEqual(h.events.slice(-2), ['close', 'release']);
+  assert.equal(h.logged.some((e) => e.event === 'upkeep_failed' || e.event === 'start_step_failed'), false);
+  const failed = ofStatusStore(h);
+  assert.ok(failed.length > 0);
+  assert.deepEqual([...new Set(failed.map((e) => `${String(e.event)} ${String(e.reason)}`))], ['status_store_failed db_down']);
+  assert.deepEqual(new Set(failed.map((e) => e.what)), new Set(['alert', 'health', 'clear', 'prune']));
+  h.beforeQuery = undefined;
+  assert.deepEqual([await alertRows(h), await healthRows(h)], [[], []]);
+});
+
+test('status writes that never end change nothing either, and the stop waits for them ALERT_TIMEOUT_MS at most', async (t) => {
+  const h = await harness({ dryRun: false, lacks: LACKS_CHECKS });
+  // Never let go while the test holds; only a stop that waits without its limit is let go, so that it fails rather than hangs.
+  let letGo!: () => void;
+  const hung = new Promise<void>((done) => { letGo = done; });
+  h.beforeQuery = (text) => (statusStatement(text) ? hung : undefined);
+  const service = await h.start();
+  await service.settled;
+  assert.deepEqual(await h.webhook(pr('opened'), 'd1'), { status: 202, body: 'accepted' });
+  await h.published();
+  await h.until(async () => (await unfinishedJobs(h.db)).length === 0);
+  assert.deepEqual(h.writes.filter((w) => w[0] === 'publishReview'), [['publishReview', 'h1']]);
+  const old = (await enqueueJob(h.db, job({ ref: { ...REF, number: 9 } })))!;
+  await finishJob(h.db, old, 'done', 'reviewed', at(-15 * 86_400));
+  h.fetched.length = 0;
+  await h.runTimer(UPKEEP_MS);
+  assert.deepEqual([h.fetched.some((u) => u.endsWith('/key')), await getJob(h.db, old)], [true, null]);
+  let statementsAtClose: number | null = null;
+  h.beforeClose = () => { statementsAtClose ??= h.allQueries.length; };
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let ended = false;
+  void service.stop().then(() => { ended = true; });
+  try {
+    for (let i = 0; i < 50 && !h.events.includes('close'); i += 1) await h.flush();
+    assert.deepEqual([h.events.includes('listener-close'), h.events.includes('close')], [true, false]);
+    for (let i = 0; i < 20 && !ended; i += 1) {
+      t.mock.timers.tick(ALERT_TIMEOUT_MS);
+      await h.flush();
+    }
+    assert.equal(ended, true, 'the stop did not end once the mocked time had passed');
+  } finally {
+    if (!ended) letGo();
+    for (let i = 0; i < 20 && !ended; i += 1) {
+      t.mock.timers.tick(CLOSE_WAIT_MS);
+      await h.flush();
+    }
+  }
+  t.mock.timers.reset();
+  assert.deepEqual(h.events.slice(-2), ['close', 'release']);
+  await h.flush();
+  assert.equal(h.allQueries.length, statementsAtClose);
+  assert.equal(h.logged.some((e) => e.event === 'upkeep_failed' || e.event === 'start_step_failed'), false);
 });
