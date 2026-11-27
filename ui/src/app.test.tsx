@@ -3,23 +3,26 @@ import { userEvent } from '@testing-library/user-event';
 import { afterEach, expect, test, vi } from 'vitest';
 import { createApi, RequestFailed, usePoll } from './api.ts';
 import type { Api } from './api.ts';
-import type { Account, Accounts, Activity, Me, OneTime, Reviews, SignInStep } from './api-types.ts';
+import type { Account, Accounts, Activity, Me, OneTime, Reviews, SettingsSave, SignInStep } from './api-types.ts';
 import { App } from './app.tsx';
 
-// The page of a screen still to come, as it is, which also keeps the API the app gave the pages: no page calls every method
-// yet, so a test calls each of them on it.
 const shown = vi.hoisted(() => ({ api: null as Api | null }));
-vi.mock('./pages/later.tsx', async (importOriginal) => {
-  const real = await importOriginal<typeof import('./pages/later.tsx')>();
+
+// The Overview, as it is, keeps the API the app gave the pages: no page calls every method yet, so a test calls each of them on it.
+vi.mock('./pages/overview.tsx', async (importOriginal) => {
+  const real = await importOriginal<typeof import('./pages/overview.tsx')>();
   const { useApp } = await import('./context.tsx');
-  function Later(props: { title: string }) {
+  function OverviewPage() {
     shown.api = useApp().api;
-    return real.Later(props);
+    return real.OverviewPage();
   }
-  return { Later };
+  return { ...real, OverviewPage };
 });
 
 const NOW = '2026-03-01T10:00:00.000Z';
+const MEMORY_SUB = 'What the service learned from people, reverts and replies, told to later reviews as context';
+const REPOSITORIES_SUB = 'How well the score tells what needs a person, measured from what people did';
+const SAVE: SettingsSave = { version: 14, changes: [{ scope: 'global', path: 'learning', value: true }] };
 const ME: Me = { name: 'octo-lead', kind: 'github', role: 'admin', csrf: 'csrf-token-for-tests', mode: 'live', repositories: ['acme/billing', 'acme/infra', 'acme/shop', 'acme/web'] };
 const ACTIVITY: Activity = { now: NOW, places: { reviews: 2, withdrawals: 2 }, paused: null, jobs: [], withdrawals: [] };
 const REVIEWS: Reviews = { now: NOW, windowDays: 30, total: 0, reviews: [], next: null };
@@ -80,6 +83,54 @@ function fakeApi(over: Partial<Api> = {}) {
       calls.push(['removeAccount', csrf, id]);
       return over.removeAccount ? over.removeAccount(csrf, id) : Promise.reject(new RequestFailed(500, 'not_expected'));
     },
+    review: (run) => {
+      calls.push(['review', run]);
+      return over.review ? over.review(run) : Promise.reject(new RequestFailed(404, 'not_found'));
+    },
+    pullReviews: (repository, number) => {
+      calls.push(['pullReviews', repository, number]);
+      return over.pullReviews ? over.pullReviews(repository, number) : Promise.resolve({ now: NOW, total: 0, reviews: [] });
+    },
+    settings: () => {
+      calls.push(['settings']);
+      return over.settings ? over.settings() : Promise.reject(new RequestFailed(500, 'not_expected'));
+    },
+    saveSettings: (csrf, save) => {
+      calls.push(['saveSettings', csrf, save]);
+      return over.saveSettings ? over.saveSettings(csrf, save) : Promise.reject(new RequestFailed(500, 'not_expected'));
+    },
+    settingChanges: (before) => {
+      calls.push(['settingChanges', before]);
+      return over.settingChanges ? over.settingChanges(before) : Promise.reject(new RequestFailed(500, 'not_expected'));
+    },
+    settingsExport: () => {
+      calls.push(['settingsExport']);
+      return over.settingsExport ? over.settingsExport() : Promise.reject(new RequestFailed(500, 'not_expected'));
+    },
+    overview: (days) => {
+      calls.push(['overview', days]);
+      return over.overview ? over.overview(days) : Promise.reject(new RequestFailed(500, 'not_expected'));
+    },
+    health: () => {
+      calls.push(['health']);
+      return over.health ? over.health() : Promise.reject(new RequestFailed(500, 'not_expected'));
+    },
+    repositories: () => {
+      calls.push(['repositories']);
+      return over.repositories ? over.repositories() : Promise.reject(new RequestFailed(500, 'not_expected'));
+    },
+    quality: (repository, window) => {
+      calls.push(['quality', repository, window]);
+      return over.quality ? over.quality(repository, window) : Promise.reject(new RequestFailed(500, 'not_expected'));
+    },
+    memory: (query) => {
+      calls.push(['memory', query]);
+      return over.memory ? over.memory(query) : Promise.reject(new RequestFailed(500, 'not_expected'));
+    },
+    switchMemory: (csrf, id, on) => {
+      calls.push(['switchMemory', csrf, id, on]);
+      return over.switchMemory ? over.switchMemory(csrf, id, on) : Promise.reject(new RequestFailed(500, 'not_expected'));
+    },
   };
   return { api, calls };
 }
@@ -137,28 +188,28 @@ test('a service that cannot be reached says so, and Try again reads again', asyn
   expect(calls.filter(([name]) => name === 'me')).toHaveLength(3);
 });
 
-test('each sidebar entry leads to its page, the coming ones say so, and an unknown path is not found', async () => {
+test('each sidebar entry leads to its page, and an unknown path is not found', async () => {
   const { api } = fakeApi();
   const user = userEvent.setup();
   at('/ui/repositories');
   const { unmount } = render(<App api={api} />);
 
   expect(await screen.findByRole('heading', { level: 1, name: 'Repositories' })).toBeInTheDocument();
-  expect(screen.getByText('Coming in a later plan.')).toBeInTheDocument();
+  expect(screen.getByText(REPOSITORIES_SUB)).toBeInTheDocument();
   const nav = screen.getByRole('navigation', { name: 'Main' });
   const current = (): string[] => within(nav).queryAllByRole('link', { current: 'page' }).map((link) => link.textContent ?? '');
   expect(current()).toEqual(['Repositories']);
 
   const pages = [
-    ['Overview', '/ui/', 'Overview'],
-    ['Memory', '/ui/memory', 'Memory'],
-    ['Repositories', '/ui/repositories', 'Repositories'],
+    ['Overview', '/ui/', 'Overview', 'Last 30 days'],
+    ['Memory', '/ui/memory', 'Memory', MEMORY_SUB],
+    ['Repositories', '/ui/repositories', 'Repositories', REPOSITORIES_SUB],
   ] as const;
-  for (const [entry, path, heading] of pages) {
+  for (const [entry, path, heading, subLine] of pages) {
     await user.click(within(nav).getByRole('link', { name: entry }));
     expect(window.location.pathname).toBe(path);
     expect(screen.getByRole('heading', { level: 1, name: heading })).toBeInTheDocument();
-    expect(screen.getByText('Coming in a later plan.')).toBeInTheDocument();
+    expect(screen.getByText(subLine)).toBeInTheDocument();
     expect(current()).toEqual([entry]);
   }
   await user.click(within(nav).getByRole('link', { name: 'Activity' }));
@@ -169,8 +220,8 @@ test('each sidebar entry leads to its page, the coming ones say so, and an unkno
 
   at('/ui/reviews/9001');
   const review = render(<App api={api} />);
-  expect(await screen.findByRole('heading', { level: 1, name: 'Review' })).toBeInTheDocument();
-  expect(screen.getByText('Coming in a later plan.')).toBeInTheDocument();
+  expect(await screen.findByRole('heading', { level: 1, name: 'Review not found' })).toBeInTheDocument();
+  expect(screen.getByText('No review is stored under this number.')).toBeInTheDocument();
   expect(within(screen.getByRole('navigation', { name: 'Main' })).getByRole('link', { current: 'page' })).toHaveTextContent('Activity');
   review.unmount();
 
@@ -238,6 +289,18 @@ test('a 401 from any method of the API the pages are given shows the sign-in pag
     ['setRole', (api) => api.setRole(ME.csrf, 3, 'admin'), ['setRole', ME.csrf, 3, 'admin']],
     ['resetPassword', (api) => api.resetPassword(ME.csrf, 3), ['resetPassword', ME.csrf, 3]],
     ['removeAccount', (api) => api.removeAccount(ME.csrf, 3), ['removeAccount', ME.csrf, 3]],
+    ['review', (api) => api.review(9001), ['review', 9001]],
+    ['pullReviews', (api) => api.pullReviews('acme/shop', 128), ['pullReviews', 'acme/shop', 128]],
+    ['settings', (api) => api.settings(), ['settings']],
+    ['saveSettings', (api) => api.saveSettings(ME.csrf, SAVE), ['saveSettings', ME.csrf, SAVE]],
+    ['settingChanges', (api) => api.settingChanges(8977), ['settingChanges', 8977]],
+    ['settingsExport', (api) => api.settingsExport(), ['settingsExport']],
+    ['overview', (api) => api.overview(30), ['overview', 30]],
+    ['health', (api) => api.health(), ['health']],
+    ['repositories', (api) => api.repositories(), ['repositories']],
+    ['quality', (api) => api.quality('acme/shop', 30), ['quality', 'acme/shop', 30]],
+    ['memory', (api) => api.memory({}), ['memory', {}]],
+    ['switchMemory', (api) => api.switchMemory('t', 7, false), ['switchMemory', 't', 7, false]],
   ];
   // Every method there is.
   expect(each.map(([name]) => name).sort()).toEqual(Object.keys(createApi()).sort());
@@ -734,4 +797,27 @@ test('a read in flight is not asked again when the page is hidden and shown agai
   await act(async () => answer('first'));
   expect(screen.getByRole('paragraph').textContent).toBe('first');
   expect(reads).toBe(1);
+});
+
+test('the reads of one review ask their own paths, and a refusal carries its code', async () => {
+  const seen: [string, RequestInit | undefined][] = [];
+  const answers: (() => Response)[] = [];
+  const fetchFn = ((input: RequestInfo | URL, init?: RequestInit) => {
+    seen.push([String(input), init]);
+    const next = answers.shift();
+    return next ? Promise.resolve(next()) : Promise.reject(new TypeError('Failed to fetch'));
+  }) as typeof fetch;
+  const api = createApi(fetchFn);
+  const jsonOf = (status: number, value: unknown) => () =>
+    new Response(JSON.stringify(value), { status, headers: { 'content-type': 'application/json' } });
+  const get = { method: 'GET', credentials: 'same-origin', headers: { accept: 'application/json' } };
+  const list = { now: NOW, total: 0, reviews: [] };
+
+  answers.push(jsonOf(200, list), jsonOf(404, { error: 'not_found' }));
+  expect(await api.pullReviews('acme/shop', 128)).toEqual(list);
+  await expect(api.review(9001)).rejects.toEqual(new RequestFailed(404, 'not_found'));
+  expect(seen).toEqual([
+    ['/api/pulls/acme/shop/128/reviews', get],
+    ['/api/reviews/9001', get],
+  ]);
 });

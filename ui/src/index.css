@@ -6,17 +6,21 @@
 @import "@fontsource/jetbrains-mono/400.css";
 @import "@fontsource/jetbrains-mono/500.css";
 
-/* The mockup's tokens (Activity.dc.html, .app and .app.dark), value for value. */
+/*
+ * The mockup's tokens (Activity.dc.html, .app and .app.dark), recoloured to the project icon (assets/icon.svg): its deep
+ * green, mint and pale ground, as the website uses them. The light theme's accent is a darker green, since the icon's mint
+ * on white is too faint for text. Every text colour holds a contrast of 4.5 to 1 or more on the grounds it is drawn on.
+ */
 :root {
-  --bg: #F6F7F9;
+  --bg: #F3F6F4;
   --card: #FFFFFF;
-  --border: #E4E7EC;
-  --text: #101828;
-  --muted: #5B6474;
-  --subtle: #F1F3F6;
-  --accent: #4F46E5;
-  --accent-soft: #EEF0FF;
-  --accent-text: #3730A3;
+  --border: #E3E8E6;
+  --text: #0E211D;
+  --muted: #4A5C55;
+  --subtle: #ECF1EE;
+  --accent: #047857;
+  --accent-soft: #ECFDF5;
+  --accent-text: #065F46;
   --on-accent: #FFFFFF;
   --ok: #067647;
   --ok-bg: #ECFDF3;
@@ -26,22 +30,22 @@
   --bad-bg: #FEF3F2;
   --info: #175CD3;
   --info-bg: #EFF8FF;
-  --shadow: 0 1px 2px rgba(16,24,40,.06);
+  --shadow: 0 1px 2px rgba(14,33,29,.06);
 }
 
 /* A page with neither class follows the system before any script runs (call 18). */
 @media (prefers-color-scheme: dark) {
   :root:not(.light) {
-    --bg: #0F1218;
-    --card: #171B23;
-    --border: #272E39;
-    --text: #E7EBF1;
-    --muted: #9BA5B4;
-    --subtle: #1E242E;
-    --accent: #818CF8;
-    --accent-soft: rgba(129,140,248,.15);
-    --accent-text: #B4BCFC;
-    --on-accent: #0F1218;
+    --bg: #07110E;
+    --card: #0E211D;
+    --border: #24352F;
+    --text: #E8F2EE;
+    --muted: #8CA198;
+    --subtle: #15302A;
+    --accent: #34D399;
+    --accent-soft: rgba(52,211,153,.14);
+    --accent-text: #6EE7B7;
+    --on-accent: #062018;
     --ok: #4ADE80;
     --ok-bg: rgba(74,222,128,.12);
     --warn: #FBBF24;
@@ -56,16 +60,16 @@
 
 /* A stored choice of dark wins on any system. */
 :root.dark {
-  --bg: #0F1218;
-  --card: #171B23;
-  --border: #272E39;
-  --text: #E7EBF1;
-  --muted: #9BA5B4;
-  --subtle: #1E242E;
-  --accent: #818CF8;
-  --accent-soft: rgba(129,140,248,.15);
-  --accent-text: #B4BCFC;
-  --on-accent: #0F1218;
+  --bg: #07110E;
+  --card: #0E211D;
+  --border: #24352F;
+  --text: #E8F2EE;
+  --muted: #8CA198;
+  --subtle: #15302A;
+  --accent: #34D399;
+  --accent-soft: rgba(52,211,153,.14);
+  --accent-text: #6EE7B7;
+  --on-accent: #062018;
   --ok: #4ADE80;
   --ok-bg: rgba(74,222,128,.12);
   --warn: #FBBF24;

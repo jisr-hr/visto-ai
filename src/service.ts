@@ -39,11 +39,14 @@ import { runRedelivery } from './shell/redelivery.ts';
 import { runReviewJob } from './shell/review-job.ts';
 import type { ReviewJobDeps } from './shell/review-job.ts';
 import { createRunner } from './shell/runner.ts';
+import type { Settings } from './shell/settings.ts';
 import { createSpendGuard } from './shell/spend.ts';
+import { createStatusStore } from './shell/status-store.ts';
 import { createAccountChanges } from './ui/accounts.ts';
 import { createAuth } from './ui/auth.ts';
 import type { UiFiles } from './ui/files.ts';
 import { createPasswordAuth } from './ui/password-auth.ts';
+import { createQualityCache } from './ui/quality.ts';
 import type { PasswordCost } from './ui/passwords.ts';
 import { createUiRoute } from './ui/route.ts';
 
@@ -66,7 +69,10 @@ export interface ServiceDeps {
   sleep: (ms: number) => Promise<void>;
   /** A repeating timer. Returns its cancel. `work` never rejects; what it returns is there for a test to wait on. */
   every: (ms: number, work: () => Promise<void>) => () => void;
-  engineDeps: (source: Source) => ReviewDeps;
+  /** Absent: the settings are `config`, which never changes. Given: `config` is `settings.atStart`. */
+  settings?: Settings;
+  /** The engine's dependencies for one review, from the settings it runs on (the service always gives them). */
+  engineDeps: (source: Source, settings?: ServiceConfig) => ReviewDeps;
   review: (input: ReviewInput, deps: ReviewDeps) => Promise<ReviewResult>;
   lineUrl: ReviewJobDeps['lineUrl'];
   commentUrl: ReviewJobDeps['commentUrl'];
@@ -135,7 +141,7 @@ export function approvalsFor(dryRun: boolean, approvals: ForgeApprovals | undefi
  * Takes the lock, migrates, recovers, then listens; the work that follows listening is not waited for.
  * `settled` resolves when the work that follows listening has had its first try: the key check, the app check, with learning on the learning work's start and the judge's row (the first pass is not waited for, and no run of the judge starts), the redelivery attempt and, when that worked, the first beat.
  * `stop` drains the three runners (at most DRAIN_WAIT_MS between them), closes the listener and waits for requests in flight (at most STOP_WAIT_MS),
- * beats once more, waits for alerts, closes the database and releases the lock. It never rejects.
+ * beats once more, waits for alerts and the status store's writes (at most ALERT_TIMEOUT_MS), closes the store, then the database, and releases the lock. It never rejects.
  */
 export async function startService(config: ServiceConfig, deps: ServiceDeps): Promise<{ stop(): Promise<void>; settled: Promise<void> }> {
   const { db, clock } = deps;
@@ -147,30 +153,41 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps): Pr
       // nothing to do
     }
   }
-  const settingsFor = (name: string) => repoSettingsFor(config, name);
+  // What reviews and events read (call 19): the settings in force, or the config given, which never changes. The start-time
+  // settings (dry run, learning, the concurrency, the model's endpoint, time limit and tool choice, the scorer) and every
+  // setting that is not editable keep being read from `config`, which is what the settings in force hold for them too.
+  const given = deps.settings;
+  const inForce = given === undefined ? (): ServiceConfig => config : (): ServiceConfig => given.inForce();
+  const settingsFor = (name: string) => repoSettingsFor(inForce(), name);
   // In dry run no module is told of a review or an alert (11.1); its providers and routes still work.
   const notifiers = notifiersOf(deps.extensions);
   const sinks = alertSinksOf(deps.extensions);
+  // Every alert raised and what each dependency was seen to do are stored, in dry run and with the UI off too, on one queue
+  // of writes nothing waits for but the stop (calls 6, 12 and 13).
+  const status = createStatusStore({ db, clock, log: say });
   const { alert, settled: alertsSettled } = createAlerts({
     webhook: config.alerts?.webhook ?? null, fetch: deps.fetch, clock, log: say,
     ...(config.dryRun || sinks.length === 0 ? {} : { sinks }),
+    store: (code, details) => { status.alerted(code, details); },
   });
-  const health = createModelHealth(alert);
-  const extensionHealth = deps.extensions.length === 0 ? null : createExtensionHealth(alert);
-  const mcpHealth = config.mcpServers.length === 0 ? null : createMcpHealth(alert);
-  const spend = createSpendGuard({ db, limit: config.limits.spendPerDay, clock, alert });
+  const health = createModelHealth(alert, (ok, code) => { status.noted({ kind: 'model', name: '', part: '', ok, code }); });
+  const extensionHealth = deps.extensions.length === 0 ? null
+    : createExtensionHealth(alert, (name, part, ok, code) => { status.noted({ kind: 'extension', name, part, ok, code }); });
+  const mcpHealth = config.mcpServers.length === 0 ? null
+    : createMcpHealth(alert, (server, ok, code) => { status.noted({ kind: 'mcp', name: server, part: '', ok, code }); });
+  // The daily limit is read at each look.
+  const spend = createSpendGuard({ db, limit: () => inForce().limits.spendPerDay, clock, alert });
   // With learning off none of it is made: no pass, no memory, no health (call 17). In dry run it runs (11.1).
   const learning = config.learning ? createLearning({ db, clock, log: say, alert }) : null;
-  const memory = config.learning ? { memoryFor: (ref: PullRequestRef) => recordsMemory(db, ref), memoryHealth: createMemoryHealth(alert) } : null;
+  const memory = config.learning ? {
+    memoryFor: (ref: PullRequestRef) => recordsMemory(db, ref),
+    memoryHealth: createMemoryHealth(alert, (ok, code) => { status.noted({ kind: 'memory', name: '', part: '', ok, code }); }),
+  } : null;
   // Nothing reaches GitHub's approvals in dry run, nor when the service was given none: each call rejects, and nothing is approved or dismissed.
   const approvals = approvalsFor(config.dryRun, deps.approvals);
-  const reviewDeps: ReviewJobDeps = {
-    db, forge: deps.forge, clock, log: say, sleep: deps.sleep, settingsFor,
-    limits: {
-      inputTokensPerCall: config.limits.inputTokensPerCall, batchesPerReview: config.limits.batchesPerReview,
-      modelTimeoutSeconds: config.model.timeoutSeconds,
-    },
-    dryRun: config.dryRun, writer: config.dryRun ? dryWriter() : deps.writer, engineDeps: deps.engineDeps, review: deps.review, lineUrl: deps.lineUrl, health, spend,
+  const reviewBase: Omit<ReviewJobDeps, 'settingsFor' | 'limits' | 'engineDeps'> = {
+    db, forge: deps.forge, clock, log: say, sleep: deps.sleep,
+    dryRun: config.dryRun, writer: config.dryRun ? dryWriter() : deps.writer, review: deps.review, lineUrl: deps.lineUrl, health, spend,
     commentUrl: deps.commentUrl, canResolve: () => deps.appInfo.canResolve(),
     approvals, onWithdraw: () => { void withdrawRunner.tick(); },
     // Each review writes its stage on its job, with the UI off too (call 31).
@@ -179,9 +196,21 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps): Pr
     ...(extensionHealth === null ? {} : { extensionHealth }),
     ...(mcpHealth === null ? {} : { mcpHealth }),
     ...(memory === null ? {} : memory),
+    // How the second scorer did, told by each review that had one (call 12).
+    scorerHealth: { noted: (ok, code) => { status.noted({ kind: 'scorer', name: '', part: '', ok, code }); } },
     // The audit key goes to the review job and to nothing else.
     ...(config.auditKey === undefined ? {} : { auditKey: config.auditKey }),
   };
+  /**
+   * A review job's dependencies on the settings `c`, given when its runner starts it, so that it keeps them to its end (call 20):
+   * its repository settings, its limits and its engine (main makes the model client and the scorer from them).
+   */
+  const reviewDepsAt = (c: ServiceConfig): ReviewJobDeps => ({
+    ...reviewBase,
+    settingsFor: (name) => repoSettingsFor(c, name),
+    limits: { inputTokensPerCall: c.limits.inputTokensPerCall, batchesPerReview: c.limits.batchesPerReview, modelTimeoutSeconds: c.model.timeoutSeconds },
+    engineDeps: (source) => deps.engineDeps(source, c),
+  });
   // gate_check_failed is raised once for each reason in a run of the service.
   const raisedGate = new Set<string>();
   const gateAlert: Alert = (code, details) => {
@@ -223,7 +252,7 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps): Pr
   const runner = createRunner({
     db, kind: 'review', concurrency: config.limits.queueConcurrency, clock, log: say,
     mayStart: mayStartReview,
-    run: (job) => runReviewJob(job, reviewDeps),
+    run: (job) => runReviewJob(job, reviewDepsAt(inForce())),
     onLeft: reviewLeft,
   });
   const gateDeps: GateJobDeps = {
@@ -328,6 +357,8 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps): Pr
     signIn: githubSignInOn(config.ui) ? deps.ui.signIn : null, files: deps.ui.files,
     cost: deps.ui.passwordCost,
   };
+  // One cache of score quality, so one computation at a time for the service; the stop stops it before the database closes.
+  const qualityCache = createQualityCache({ clock, log: say });
   const uiRoute = ui === null ? null : createUiRoute({
     auth: createAuth({ db, ui: ui.access, signIn: ui.signIn, checks: deps.checks, clock, log: say }),
     passwords: createPasswordAuth({ db, clock, log: say, ...(ui.cost === undefined ? {} : { cost: ui.cost }) }),
@@ -337,6 +368,22 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps): Pr
       holds: (ref) => runner.holds(ref), paused: pauseCode, pullRequestUrl: deps.pullRequestUrl,
     },
     files: ui.files, ui: { publicUrl: ui.access.publicUrl, github: ui.signIn !== null }, log: say,
+    // The dependencies are the ones it started with.
+    insight: {
+      db, clock, inForce,
+      started: {
+        dryRun: config.dryRun, learning: config.learning, scorer: config.scorer !== null,
+        extensions: deps.extensions.map((e) => ({ name: e.name, parts: (['context', 'notify', 'alert', 'route'] as const).filter((p) => e.parts[p] !== undefined) })),
+        mcpServers: config.mcpServers.map((m) => m.name),
+      },
+      quality: qualityCache,
+    },
+    ...(deps.settings === undefined ? {} : {
+      settings: {
+        db, clock, settings: deps.settings, log: say,
+        access: { publicUrl: ui.access.publicUrl, github: ui.signIn !== null, accounts: ui.access.accounts, team: ui.access.team },
+      },
+    }),
   });
   const { listener, idle } = createListener({
     webhook: (headers, body) => receive({
@@ -437,6 +484,8 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps): Pr
     // With GitHub sign-in on and a team named, the UI reads its members (call 27); else nothing of it is asked for.
     const lacking = await deps.appInfo.lacks(config.dryRun, gateUseOf(config), approvalUseOf(config), ui !== null && ui.signIn !== null && ui.access.team !== null);
     if (ending) return;
+    // The app's state, then every open feature_off cleared, before what is still missing is raised and stored again (call 10).
+    status.appChecked(lacking);
     if (lacking.length === 0) say({ event: 'app_check', missing: 0 });
     for (const { feature, missing } of lacking) {
       say({ event: 'feature_off', feature, missing });
@@ -502,6 +551,8 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps): Pr
     await guarded('upkeep_failed', 'delete_finished', async () => {
       await deleteFinishedJobs(db, new Date(clock().getTime() - JOB_KEEP_MS).toISOString());
     });
+    // The alerts past keeping (call 11): queued on the status store and not waited for, so a queue backed up never holds the upkeep.
+    if (!ending) status.prune();
     await redeliveryThenBeat('upkeep_failed');
   }
 
@@ -517,6 +568,9 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps): Pr
 
   async function stopOnce(): Promise<void> {
     ending = true;
+    // No computation of score quality starts from now on, a request waiting for one is answered, and the one under way ends
+    // before its next statement; it is waited for before the database closes.
+    const qualityStopped = qualityCache.stop();
     learning?.stop();
     nightly?.stop();
     for (const cancel of cancels) {
@@ -559,10 +613,18 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps): Pr
         say({ event: 'beat_failed', ...why(error) });
       }
     }
+    // The alerts' posts and the status store's writes, within one limit; then the store is closed, so a write told after it
+    // (a review the drain left behind, a late alert) never reaches the closed database (call 13).
     try {
-      await within(ALERT_TIMEOUT_MS, alertsSettled());
+      await within(ALERT_TIMEOUT_MS, Promise.all([alertsSettled(), status.settled()]));
     } catch {
       // settled never rejects
+    }
+    status.close();
+    try {
+      await within(CLOSE_WAIT_MS, qualityStopped);
+    } catch {
+      // the stop never rejects
     }
     try {
       if (await within(CLOSE_WAIT_MS, db.close()) === 'timeout') say({ event: 'database_close_timeout' });

@@ -51,3 +51,19 @@ test('an alert that throws changes nothing, and a reason that is no short code i
   health.noted('docs', false, 'Not A Code');
   assert.deepEqual(alerts, [['mcp_error', { server: 'docs', reason: 'internal_error' }]]);
 });
+
+test('the health tells its note of what it was told, every time, and a note that throws changes nothing', () => {
+  const alerts: unknown[][] = [];
+  const notes: unknown[][] = [];
+  const health = createMcpHealth((code, details) => { alerts.push([code, details]); }, (...args) => { notes.push(args); });
+  health.noted('docs', false, 'call_timeout');
+  health.noted('docs', false, 'call_timeout');
+  health.noted('docs', true, 'ok');
+  assert.deepEqual(notes, [['docs', false, 'call_timeout'], ['docs', false, 'call_timeout'], ['docs', true, 'ok']]);
+  assert.deepEqual(alerts, [['mcp_error', { server: 'docs', reason: 'call_timeout' }], ['mcp_ok', { server: 'docs' }]]);
+  const after: unknown[][] = [];
+  const throwing = createMcpHealth((code) => { after.push([code]); }, () => { throw new Error('note'); });
+  assert.doesNotThrow(() => throwing.noted('docs', false, 'call_timeout'));
+  assert.doesNotThrow(() => throwing.noted('docs', true, 'ok'));
+  assert.deepEqual(after, [['mcp_error'], ['mcp_ok']]);
+});

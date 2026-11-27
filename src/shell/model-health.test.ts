@@ -78,3 +78,22 @@ test('a different failure is a new alert', () => {
   health.reviewed('no_credit', t(10));
   assert.deepEqual(alerts.map((a) => (a[1] as { reason: string }).reason), ['auth', 'no_credit']);
 });
+test('the model health tells its note of its state after each check and review, and a check that says nothing tells nothing', () => {
+  const notes: Array<[boolean, string | null]> = [];
+  const h = createModelHealth(() => {}, (ok, code) => { notes.push([ok, code]); });
+  h.checked('auth', t(0));
+  h.checked('unknown', t(1));
+  h.checked('ok', t(2));
+  assert.deepEqual(notes, [[false, 'auth'], [true, null]]);
+  notes.length = 0;
+  h.reviewed('no_credit', t(10));
+  h.checked('ok', t(11));
+  h.reviewed(null, t(12));
+  assert.deepEqual(notes, [[false, 'no_credit'], [false, 'no_credit'], [true, null]]);
+  const throwing = createModelHealth((code, details) => { alerts.push([code, details ?? {}]); }, () => { throw new Error('note'); });
+  assert.doesNotThrow(() => throwing.reviewed('auth', t(0)));
+  assert.equal(throwing.paused(t(1)), true);
+  assert.doesNotThrow(() => throwing.checked('ok', t(2)));
+  assert.doesNotThrow(() => throwing.reviewed(null, t(3)));
+  assert.deepEqual(alerts.map((a) => a[0]), ['model_error', 'model_ok']);
+});

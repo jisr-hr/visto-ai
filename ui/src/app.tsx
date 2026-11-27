@@ -9,11 +9,14 @@ import type { Api } from './api.ts';
 import type { Me } from './api-types.ts';
 import { Layout, REVIEW_PATH } from './components/layout.tsx';
 import { Button } from './components/ui/button.tsx';
-import { AccountsPage } from './pages/accounts.tsx';
 import { ActivityPage } from './pages/activity.tsx';
-import { Later } from './pages/later.tsx';
+import { MemoryPage } from './pages/memory.tsx';
 import { NotFound } from './pages/not-found.tsx';
+import { OverviewPage } from './pages/overview.tsx';
 import { PasswordPage } from './pages/password.tsx';
+import { RepositoriesPage } from './pages/repositories.tsx';
+import { ReviewNotFound, ReviewPage, runOfPath } from './pages/review.tsx';
+import { SettingsPage } from './pages/settings.tsx';
 import { SignIn } from './pages/sign-in.tsx';
 import { navigate, useLocation } from './router.tsx';
 
@@ -31,25 +34,31 @@ function ToOverview() {
   return null;
 }
 
+/** A review's page, or its not-found page for an address whose run is not a run (call 20). */
+function ReviewOf({ path }: { path: string }) {
+  const run = runOfPath(path);
+  return run === null ? <ReviewNotFound /> : <ReviewPage run={run} />;
+}
+
 /** The page of the path; Settings is an admin's, Change password a password account's, and the not-found page to anyone else. */
 function Page({ path, me }: { path: string; me: Me }) {
   switch (path) {
     case '/ui/':
-      return <Later title="Overview" />;
+      return <OverviewPage />;
     case '/ui/activity':
       return <ActivityPage />;
     case '/ui/repositories':
-      return <Later title="Repositories" />;
+      return <RepositoriesPage />;
     case '/ui/memory':
-      return <Later title="Memory" />;
+      return <MemoryPage />;
     case '/ui/settings':
-      return me.role === 'admin' ? <AccountsPage /> : <NotFound />;
+      return me.role === 'admin' ? <SettingsPage /> : <NotFound />;
     case '/ui/password':
       return me.kind === 'password' ? <PasswordPage /> : <NotFound />;
     case '/ui/signin':
       return <ToOverview />;
     default:
-      return REVIEW_PATH.test(path) ? <Later title="Review" /> : <NotFound />;
+      return REVIEW_PATH.test(path) ? <ReviewOf path={path} /> : <NotFound />;
   }
 }
 
@@ -119,6 +128,18 @@ export function App({ api }: { api: Api }) {
       setRole: (csrf, id, role) => watch(api.setRole(csrf, id, role)),
       resetPassword: (csrf, id) => watch(api.resetPassword(csrf, id)),
       removeAccount: (csrf, id) => watch(api.removeAccount(csrf, id)),
+      review: (run) => watch(api.review(run)),
+      pullReviews: (repository, number) => watch(api.pullReviews(repository, number)),
+      settings: () => watch(api.settings()),
+      saveSettings: (csrf, save) => watch(api.saveSettings(csrf, save)),
+      settingChanges: (before) => watch(api.settingChanges(before)),
+      settingsExport: () => watch(api.settingsExport()),
+      overview: (days) => watch(api.overview(days)),
+      health: () => watch(api.health()),
+      repositories: () => watch(api.repositories()),
+      quality: (repository, window) => watch(api.quality(repository, window)),
+      memory: (query) => watch(api.memory(query)),
+      switchMemory: (csrf, id, on) => watch(api.switchMemory(csrf, id, on)),
     };
   }, [api]);
 

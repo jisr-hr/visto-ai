@@ -175,12 +175,12 @@ test('before any script, the CSS follows the system', () => {
   const notLight = inMedia.indexOf(':root:not(.light)');
   expect(notLight).toBeGreaterThanOrEqual(0);
   const followed = declarations(blockAt(inMedia, notLight));
-  expect(followed).toContain('--bg: #0F1218');
+  expect(followed).toContain('--bg: #07110E');
 
   const dark = css.indexOf(':root.dark');
   expect(dark).toBeGreaterThanOrEqual(0);
   const chosen = declarations(blockAt(css, dark));
-  expect(chosen).toContain('--bg: #0F1218');
+  expect(chosen).toContain('--bg: #07110E');
   expect(chosen).toEqual(followed);
   expect(chosen).toHaveLength(19);
 });

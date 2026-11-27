@@ -34,7 +34,7 @@ const OUTCOMES: ReadonlyMap<string, string[]> = new Map([
   ['approved', ['approved']], ['needs_person', ['needs_person', 'audit']], ['failed', ['failed']],
 ]);
 /** The reasons whose requester the page shows, a /review's or a /done's (call 13); a re-run's, which GitHub decided, is not. */
-const REQUESTER_SHOWN: ReadonlySet<string> = new Set(['command', 'command_retry', 'done', 'done_retry']);
+export const REQUESTER_SHOWN: ReadonlySet<string> = new Set(['command', 'command_retry', 'done', 'done_retry']);
 /** The stages a running review job writes on its row (call 14). */
 const RUNNING_STAGES: ReadonlySet<string> = new Set(['preparing', 'reviewing', 'judging_threads', 'publishing']);
 

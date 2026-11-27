@@ -453,7 +453,7 @@ This label is a floor. A block that needed a person but was waved through looks 
 
 **Noise.** The model does not score the same code the same way twice. Every backtest on a new case file, and after every change of model or contract, is run twice. It reports, for each threshold, the share of blocks and the share of pull requests whose two scores fall on opposite sides of it. A difference in Safety or Benefit smaller than that band means nothing.
 
-**Live.** After install, every score and every later human action is stored, and the UI shows the three numbers per repository over a rolling window, with the counts behind them. Benefit and Focus use each pull request's last run before it was merged or closed. A new repository starts with no numbers; they build up from the first pull requests a person reviews.
+**Live.** After install, every score and every later human action is stored, and the UI shows the three numbers per repository over a rolling window, with the counts behind them. Benefit and Focus use each pull request's last run before it was merged or closed. A new repository starts with no numbers; they build up from the first pull requests a person reviews. The live strict label reads each block's hash at the pull request's last review, since the diff at the merge is not stored.
 
 Whether the numbers justify switching approval on is the team's decision. The tool shows them and does not decide.
 
@@ -673,13 +673,13 @@ All configuration is typed and validated at start-up. An unknown key, a bad valu
 
 ### 11.1 Deployment config
 
-One file, owned by whoever runs the deployment and kept in their own git repository. It holds:
+One file, owned by whoever runs the deployment and kept in their own git repository. Once the service has started, the editable part (UI design 4.1) lives in its database, kept in step with this file at each start. It holds:
 
 - The app's identity (id, key and webhook secret, by reference).
 - The model: endpoint and key (by reference), model, the request fragment for each effort level, fallbacks, request extras (body fields and headers), prices per token for an endpoint that reports no cost, and how the answer is asked for (`forced` or `auto`).
 - The second scorer (section 6.7), optional: endpoint and key (by reference), model and time limit.
 - Limits and cost guards (section 12).
-- Repository defaults and per-repository overrides: primary branches, ignored authors, base filter, how a new head is reviewed (D4), the gate block, and the score block (threshold, automatic approval, audit share, the thread rule for approval, and inline notes).
+- Repository defaults and per-repository overrides: primary branches, ignored authors, base filter, how a new head is reviewed (D4), the gate block, and the score block (threshold, automatic approval, audit share, the thread rule for approval, and inline notes). The base filter reads `*` or an empty list as every branch; the gate's branches read `*` as a branch's name.
 - MCP servers and extension modules.
 - The alert webhook.
 - Learning, on or off; off unless written.
@@ -762,7 +762,7 @@ The schema is designed fresh. Identity everywhere is the git service, the reposi
 
 Stage 8 adds a table `learning` for the learning work's own record, and on `human_activity` and `pull_requests` markers of what was learned and of how often learning a pull request failed. The lessons add `judge_calls`, the cost of each call of the judge with the pull request and the reply it was for, and a column for a lesson's text on `memory_records`. Reverts add a column on `pull_requests` for the pull request a description says it reverts, and one on `memory_records` for the pull request a revert took back. `file_scores` and `thread_verdicts` are still not built: their content is in each run's stored result.
 
-`pull_requests` gains the title; `jobs` the stage and a withdrawal's retry code; `ui_sessions` and `ui_states` hold sign-in. `ui_accounts` and `ui_account_changes` hold the UI's accounts and the record of their changes; a session names its account.
+`pull_requests` gains the title; `jobs` the stage and a withdrawal's retry code; `ui_sessions` and `ui_states` hold sign-in. `ui_accounts` and `ui_account_changes` hold the UI's accounts and the record of their changes; a session names its account. `settings`, `settings_file` and `setting_changes` hold the editable part, the file's at the last start, and the record of changes. `alerts` and `dependency_health` hold the alerts raised and each dependency's state; `memory_records` gains who switched a record last and when.
 
 Finished jobs are deleted after 14 days. Nothing else is pruned in the first version.
 
@@ -845,7 +845,7 @@ Each stage ends with something that can be measured or shown.
 5. **Gate.**
 6. **Extensions and MCP tools,** including feedback routes.
 7. **Shadow at the first deployment, then cut-over.** Tracked in that deployment's private repository. From here the first deployment runs on this project: findings, the gate, and the score shown in every review, with automatic approval off and no learned records yet. Capture is already storing the human activity that memory and the live numbers need.
-8. **Memory.** Records, learning, retrieval, and the importer's database output. Both evals are re-run with memory "as of" each case. Until the UI exists, a record can be disabled only in the database. A deployment may leave learning off in configuration until stage 10. Cut in four plans: memory for the score, lessons from replies and reverts, which are built, and the evals with lessons as of each case, which wait for a deployment: a history file holds no finding of this reviewer, so the lessons an eval needs can only be made from a deployment's own database.
+8. **Memory.** Records, learning, retrieval, and the importer's database output. Both evals are re-run with memory "as of" each case. An admin switches a record off or on in the UI's Memory screen, or in the database. A deployment may leave learning off in configuration until stage 10. Cut in four plans: memory for the score, lessons from replies and reverts, which are built, and the evals with lessons as of each case, which wait for a deployment: a history file holds no finding of this reviewer, so the lessons an eval needs can only be made from a deployment's own database.
 9. **Automatic approval and withdrawal.** Cut in two plans: approval, its record and its withdrawal, which is built, and the audit sample, which is built too.
 10. **UI.** Three screens: score numbers per repository, learned records with their kill switch, recent reviews with failures, feedback and dependency health. The UI is on when the deployment config writes its address (`ui.publicUrl`), and off with no address, account or team written. Sign-in is by password, with accounts of the UI's own, and also through the same app when the config names accounts or one team, which then limit who may sign in that way. Cut in three plans (UI design 7), the first in two. Password accounts and two roles, admin and viewer, are added beside GitHub sign-in.
 

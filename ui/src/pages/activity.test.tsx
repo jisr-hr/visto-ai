@@ -70,6 +70,54 @@ function fakeApi(over: Partial<Api> = {}) {
       calls.push(['removeAccount', csrf, id]);
       return over.removeAccount ? over.removeAccount(csrf, id) : Promise.reject(new RequestFailed(500, 'not_expected'));
     },
+    review: (run) => {
+      calls.push(['review', run]);
+      return over.review ? over.review(run) : Promise.reject(new RequestFailed(404, 'not_found'));
+    },
+    pullReviews: (repository, number) => {
+      calls.push(['pullReviews', repository, number]);
+      return over.pullReviews ? over.pullReviews(repository, number) : Promise.resolve({ now: NOW, total: 0, reviews: [] });
+    },
+    settings: () => {
+      calls.push(['settings']);
+      return over.settings ? over.settings() : Promise.reject(new RequestFailed(500, 'not_expected'));
+    },
+    saveSettings: (csrf, save) => {
+      calls.push(['saveSettings', csrf, save]);
+      return over.saveSettings ? over.saveSettings(csrf, save) : Promise.reject(new RequestFailed(500, 'not_expected'));
+    },
+    settingChanges: (before) => {
+      calls.push(['settingChanges', before]);
+      return over.settingChanges ? over.settingChanges(before) : Promise.reject(new RequestFailed(500, 'not_expected'));
+    },
+    settingsExport: () => {
+      calls.push(['settingsExport']);
+      return over.settingsExport ? over.settingsExport() : Promise.reject(new RequestFailed(500, 'not_expected'));
+    },
+    overview: (days) => {
+      calls.push(['overview', days]);
+      return over.overview ? over.overview(days) : Promise.reject(new RequestFailed(500, 'not_expected'));
+    },
+    health: () => {
+      calls.push(['health']);
+      return over.health ? over.health() : Promise.reject(new RequestFailed(500, 'not_expected'));
+    },
+    repositories: () => {
+      calls.push(['repositories']);
+      return over.repositories ? over.repositories() : Promise.reject(new RequestFailed(500, 'not_expected'));
+    },
+    quality: (repository, window) => {
+      calls.push(['quality', repository, window]);
+      return over.quality ? over.quality(repository, window) : Promise.reject(new RequestFailed(500, 'not_expected'));
+    },
+    memory: (query) => {
+      calls.push(['memory', query]);
+      return over.memory ? over.memory(query) : Promise.reject(new RequestFailed(500, 'not_expected'));
+    },
+    switchMemory: (csrf, id, on) => {
+      calls.push(['switchMemory', csrf, id, on]);
+      return over.switchMemory ? over.switchMemory(csrf, id, on) : Promise.reject(new RequestFailed(500, 'not_expected'));
+    },
   };
   const queries = (): unknown[] => calls.filter(([name]) => name === 'reviews').map(([, query]) => query);
   return { api, calls, queries };
@@ -529,7 +577,7 @@ test('recent reviews show each outcome, score, findings, mode, cost, time taken 
   const user = userEvent.setup();
   await user.click(link);
   expect(window.location.pathname).toBe('/ui/reviews/9001');
-  expect(screen.getByRole('heading', { level: 1, name: 'Review' })).toBeInTheDocument();
+  expect(await screen.findByRole('heading', { level: 1, name: 'Review not found' })).toBeInTheDocument();
 });
 
 test('the outcome, the repository and the search are sent to the server, and paging goes forward and back', async () => {

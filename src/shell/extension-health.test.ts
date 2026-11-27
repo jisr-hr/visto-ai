@@ -59,3 +59,19 @@ test('a reason that is no short code is not passed on', () => {
   health.noted('tickets', 'route', false, 'Error at https://tickets.example.test');
   assert.deepEqual(alerts, [['extension_error', { extension: 'tickets', part: 'route', reason: 'internal_error' }]]);
 });
+
+test('the health tells its note of what it was told, every time, and a note that throws changes nothing', () => {
+  const alerts: unknown[][] = [];
+  const notes: unknown[][] = [];
+  const health = createExtensionHealth((code, details) => { alerts.push([code, details]); }, (...args) => { notes.push(args); });
+  health.noted('example', 'notify', false, 'timeout');
+  health.noted('example', 'notify', false, 'timeout');
+  health.noted('example', 'notify', true, 'ok');
+  assert.deepEqual(notes, [['example', 'notify', false, 'timeout'], ['example', 'notify', false, 'timeout'], ['example', 'notify', true, 'ok']]);
+  assert.deepEqual(alerts, [['extension_error', { extension: 'example', part: 'notify', reason: 'timeout' }], ['extension_ok', { extension: 'example', part: 'notify' }]]);
+  const after: unknown[][] = [];
+  const throwing = createExtensionHealth((code) => { after.push([code]); }, () => { throw new Error('note'); });
+  assert.doesNotThrow(() => throwing.noted('example', 'notify', false, 'timeout'));
+  assert.doesNotThrow(() => throwing.noted('example', 'notify', true, 'ok'));
+  assert.deepEqual(after, [['extension_error'], ['extension_ok']]);
+});
