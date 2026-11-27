@@ -45,13 +45,13 @@ export async function runOf(db: Db, id: number): Promise<RunRow | null> {
 
 export interface CommentRow { comment_id: string; path: string; side: string; line: number | null; severity: string; quote: string }
 
-/** The findings a run posted as inline comments, in the order stored; never its notes. */
-export async function runComments(db: Db, run: number): Promise<CommentRow[]> {
+/** The findings a run posted as inline comments, in the order stored; never its notes. The pull request is in the filter so its index is used. */
+export async function runComments(db: Db, ref: PullRequestRef, run: number): Promise<CommentRow[]> {
   return db.query<CommentRow>(
     `select comment_id, path, side, line, severity, quote from visto_ai.review_comments
-     where run = $1 and severity in ('blocker', 'major', 'minor')
+     where service = $1 and owner = $2 and repo = $3 and number = $4 and run = $5 and severity in ('blocker', 'major', 'minor')
      order by id`,
-    [run]);
+    [ref.service, ref.owner, ref.repo, ref.number, run]);
 }
 
 export interface ThreadEventRow { reply_to: string; kind: 'thread_resolved' | 'thread_unresolved'; author: string; at: Date }

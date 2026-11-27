@@ -17,7 +17,7 @@ const REVIEW: OneReview = {
     url: 'https://github.example.test/acme/shop/pull/128',
   },
   head: '3f9c2e1a7b04', askedBy: { reason: 'synchronize', login: null }, mode: 'incremental', posting: 'published', failure: null,
-  startedAt: at(-641), finishedAt: at(-720), publishedAt: at(-719),
+  startedAt: at(-761), finishedAt: at(-720), publishedAt: at(-719),
   approval: { decision: 'not_approved', code: 'needs_human', text: 'a part of this change is at or above 70%, so a person should review it.' },
   gate: { mode: 'enforce', state: 'blocked', code: null, blocking: 1 }, threshold: 70,
   files: [], filesCut: 0, read: { files: 4, reviewed: 2 }, findings: [], findingsCut: 0, counts: { blocker: 0, major: 1, minor: 0 },

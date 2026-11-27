@@ -177,6 +177,14 @@ test('a failed run, a run not posted, one with nothing new, and one posted with 
   await db.close();
 });
 
+test('the reason a job ran is answered only as a short code', async () => {
+  const db = await testDb();
+  await savePullRequest(db, facts());
+  const odd = await recordRun(db, run({ job: await job(db, 'Not A Code', null) }));
+  assert.equal((await ok(review(deps(db), odd))).askedBy.reason, 'unknown');
+  await db.close();
+});
+
 test('the paragraph is read only for a run that was decided, and only with the lead of its decision', async () => {
   const db = await testDb();
   await savePullRequest(db, facts());

@@ -1,6 +1,10 @@
 // The two answers of the One review screen (UI design 3.3 and 3.4; calls 5 to 17 and 24): one review, and the reviews of a pull
 // request. Each is built field by field from an allowlist, out of the reads of src/db/review-page.ts and the readers of
-// review-result.ts and threads.ts: nothing a person wrote, no quote, id of another system or text of the stored result leaves here.
+// review-result.ts and threads.ts. What leaves (call 16): findings and score reasons (the model's text), feedback reasons (text a
+// person wrote) and logins of GitHub's shape, the pull request's author and branches, and a resolver's login. What never leaves:
+// the config, a secret, the body but its paragraph, comments as posted, the summary, the audit, quotes, acceptance rows, providers,
+// replies in threads, a skip's actor and reason, the judge's verdicts, memory records, a reason written on another pull request,
+// and GitHub's id of a review, comment, thread, installation or delivery, or the base commit.
 import {
   approvalsUpTo, gateAt, laterVerdicts, pendingWithdrawal, pullRuns, runComments, runFeedback, runOf, threadEvents,
 } from '../db/review-page.ts';
@@ -57,7 +61,7 @@ function approvalEntry(row: ApprovalRow, retry: Date | null): ApprovalEntry {
 async function threadsOf(deps: ApiDeps, row: RunRow, ref: PullRequestRef, placed: readonly ReadFinding[]): Promise<Map<ReadFinding, ReviewFinding['thread']>> {
   const threads = new Map<ReadFinding, ReviewFinding['thread']>();
   if (!row.published) return threads;
-  const ids = commentsOf(placed, await runComments(deps.db, row.id));
+  const ids = commentsOf(placed, await runComments(deps.db, ref, row.id));
   const present = ids.filter((id): id is string => id !== null);
   const signals = present.length > 0
     ? signalsOf(await threadEvents(deps.db, ref, present), await laterVerdicts(deps.db, ref, row.id, present))
@@ -89,7 +93,7 @@ export async function review(deps: ApiDeps, run: number): Promise<OneReview | nu
   const files = filesOf(row.result);
   const shown = all.slice(0, FINDINGS_SHOWN);
   const reasons: FeedbackReason[] = feedback.reasons.map((r) => ({ reason: r.reason, login: FEEDBACK_LOGIN.test(r.login) ? r.login : null }));
-  const reason = row.job_reason ?? (isShortCode(row.trigger) ? row.trigger : 'unknown');
+  const reason = row.job_reason !== null ? codeOrUnknown(row.job_reason) : (isShortCode(row.trigger) ? row.trigger : 'unknown');
   return {
     now: deps.clock().toISOString(), run: row.id, ordinal: row.ordinal, runs: row.runs,
     pullRequest: {

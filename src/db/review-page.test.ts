@@ -104,7 +104,10 @@ test("the comments of a run are its findings', in the order stored, never its no
     { commentId: 'c-2', path: 'src/price.ts', side: 'RIGHT', line: 20, severity: 'note', quote: 'note text', blockHash: 'h' },
     { commentId: 'c-3', path: 'src/tax.ts', side: 'LEFT', line: null, severity: 'minor', quote: 'tax()' },
   ]);
-  assert.deepEqual(await runComments(db, id), [
+  const other = await recordRun(db, run());
+  await recordComments(db, other, REF, [{ commentId: 'c-4', path: 'src/price.ts', side: 'RIGHT', line: 1, severity: 'major', quote: 'x' }]);
+  await recordComments(db, id, { ...REF, number: REF.number + 1 }, [{ commentId: 'c-5', path: 'src/price.ts', side: 'RIGHT', line: 2, severity: 'major', quote: 'y' }]);
+  assert.deepEqual(await runComments(db, REF, id), [
     { comment_id: 'c-1', path: 'src/price.ts', side: 'RIGHT', line: 12, severity: 'major', quote: 'round(x)' },
     { comment_id: 'c-3', path: 'src/tax.ts', side: 'LEFT', line: null, severity: 'minor', quote: 'tax()' },
   ]);
