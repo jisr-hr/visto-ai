@@ -1,0 +1,48 @@
+# Jisr fork only: every push to main (a fork sync included) builds the image into our ECR.
+# ArgoCD Image Updater in dev-infra-management picks up the newest dev_* tag and rolls it out.
+name: deploy-dev
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+concurrency:
+  group: deploy-dev
+  cancel-in-progress: false
+jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+
+  image:
+    needs: ci
+    if: github.repository == 'jisr-hr/visto-ai'
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::205569277996:role/ecr_github_cicd_dev
+          aws-region: ap-south-1
+      - id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+      - uses: docker/setup-buildx-action@v3
+      - name: Work out the tag
+        id: tag
+        # The ECR repo is IMMUTABLE, so the run number and attempt keep re-runs from colliding.
+        run: echo "tag=dev_$(node -p 'require("./package.json").version')_${{ github.run_number }}_${{ github.run_attempt }}" >> "$GITHUB_OUTPUT"
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.ecr.outputs.registry }}/visto-ai:${{ steps.tag.outputs.tag }}
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - run: echo "::notice::Pushed visto-ai:${{ steps.tag.outputs.tag }}"
