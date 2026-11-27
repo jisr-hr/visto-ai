@@ -111,7 +111,9 @@ export function Layout({ api, me, onSignedOut, children }: { api: Api; me: Me; o
   return (
     <AppContext.Provider value={value}>
       <div className="flex min-h-screen flex-wrap bg-bg font-sans text-text">
-        <aside className="flex max-w-full shrink grow basis-[232px] flex-col gap-6 border-r border-border bg-card px-3.5 py-5">
+        {/* Beside the page (from 820 pixels wide, past the 792 where the two wrap, scrollbar included) the sidebar stays in view
+            while the page scrolls; stacked above it on a narrow screen, it scrolls away with the page. */}
+        <aside className="flex max-w-full shrink grow basis-[232px] flex-col gap-6 border-r border-border bg-card px-3.5 py-5 min-[820px]:sticky min-[820px]:top-0 min-[820px]:h-screen min-[820px]:self-start min-[820px]:overflow-y-auto">
           <Brand />
           <nav aria-label="Main" className="flex flex-col gap-0.5">
             {ENTRIES.filter((entry) => entry.admin !== true || me.role === 'admin').map((entry) => {
