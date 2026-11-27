@@ -3,14 +3,15 @@ import { readFileSync } from 'node:fs';
 import { createServer as createHttpServer } from 'node:http';
 import type { Server } from 'node:http';
 import { dirname, join, resolve } from 'node:path';
-import { ConfigError, contractFile, githubSignInOn, loadConfig, serviceConfig } from './config/load.ts';
+import { ConfigError, contractFile, githubSignInOn, parseDocument, readYaml, serviceConfig } from './config/load.ts';
 import type { DeploymentConfig, McpServerConfig } from './config/load.ts';
+import { loadMigrations, MIGRATIONS_DIR, migrate } from './db/migrate.ts';
 import { postgresDb, takeInstanceLock } from './db/postgres.ts';
 import type { InstanceLock } from './db/types.ts';
 import { createModelClient } from './engine/model/client.ts';
 import { review } from './engine/review.ts';
 import { createJevScorer } from './engine/scorer/jev.ts';
-import type { McpServer, ReviewDeps } from './engine/types.ts';
+import type { McpServer, ModelClient, ReviewDeps, Scorer } from './engine/types.ts';
 import { contextProvidersOf, errorNameOf, loadExtensions } from './extensions/load.ts';
 import type { LoadedExtension } from './extensions/types.ts';
 import { createGithubAccess } from './forge/github/access.ts';
@@ -28,6 +29,8 @@ import { startService } from './service.ts';
 import type { Listening } from './service.ts';
 import { createFeedback } from './shell/feedback.ts';
 import type { RequestLike, ResponseLike } from './shell/http.ts';
+import { startSettings } from './shell/settings.ts';
+import type { Settings } from './shell/settings.ts';
 import { loadUiFiles } from './ui/files.ts';
 
 // Node's default lets a caller take five minutes to send a request, and each such caller holds one of the 20 places.
@@ -68,6 +71,24 @@ export function engineBase(
     // Opened for each review, in dry run too: a call only reads.
     ...mcpServersOf(config.mcpServers, fetchFn),
   };
+}
+
+/** The model client and, with a scorer, the scorer of `config`; made for each review. */
+export function clientsFor(
+  config: DeploymentConfig, io: { fetch: typeof fetch; sleep: (ms: number) => Promise<void> },
+): { model: ModelClient; scorer?: Scorer } {
+  return {
+    model: createModelClient(config.model, io),
+    ...(config.scorer === null ? {} : { scorer: createJevScorer(config.scorer, io) }),
+  };
+}
+
+/**
+ * Whether the start's sync is told the UI is on (call 13): the file writes `ui.publicUrl`. A file that passed has `ui` exactly
+ * then (GitHub sign-in needs the address too), and the service turns the UI on from the same `ui`.
+ */
+export function uiOnOf(config: DeploymentConfig): boolean {
+  return config.ui !== undefined;
 }
 
 /**
@@ -139,6 +160,40 @@ export async function lockThenLoad(takeLock: () => Promise<InstanceLock | null>,
   }
 }
 
+/**
+ * The steps after the instance lock, in this order: the migrations, the settings of this start, then the engine's base from them.
+ * A step that rejects or throws releases the lock and closes the database, each once and each failure of those swallowed, and its
+ * error is passed on; no step after it runs.
+ */
+export async function afterLock<B>(lock: InstanceLock, db: { close(): Promise<void> }, steps: {
+  migrate: () => Promise<unknown>; settings: () => Promise<Settings>; base: (settings: Settings) => B;
+}): Promise<{ settings: Settings; base: B }> {
+  try {
+    await steps.migrate();
+    const settings = await steps.settings();
+    return { settings, base: steps.base(settings) };
+  } catch (error) {
+    try {
+      await lock.release();
+    } catch {
+      // the step's failure is the one to report
+    }
+    try {
+      await db.close();
+    } catch {
+      // the step's failure is the one to report
+    }
+    throw error;
+  }
+}
+
+/** A start that failed: each issue of a ConfigError as `config: <issue>`, then `start_failed`; any other error `start_failed` alone. */
+export function startFailed(error: unknown, out: (line: string) => void): void {
+  // Issues name keys and variables, never values; a clash's sentence names the settings saved in the UI.
+  if (error instanceof ConfigError) for (const issue of error.issues) out(`config: ${issue}`);
+  out('start_failed');
+}
+
 export function createServer(listener: (req: RequestLike, res: ResponseLike) => void): Server {
   return createHttpServer({ requestTimeout: REQUEST_TIMEOUT_MS, headersTimeout: HEADERS_TIMEOUT_MS }, listener);
 }
@@ -204,12 +259,16 @@ export function runUntilSignal(
 export async function main(argv: string[], env: Record<string, string | undefined>, out: (line: string) => void): Promise<number> {
   let config;
   let configDir: string;
+  /** config.yml's document as read at this start: checked alone here, then synced with the database after the lock. */
+  let file: unknown;
   try {
     const path = configPath(argv);
     // A module's relative path starts at the folder of the config file.
     configDir = dirname(resolve(path));
     try {
-      config = serviceConfig(loadConfig(path, env));
+      file = readYaml(readFileSync(path, 'utf8'));
+      // The file alone, as before: one that fails is refused here, and nothing of the settings is touched.
+      config = serviceConfig(parseDocument(file, env));
     } catch (error) {
       const fileError = error instanceof Error && typeof (error as NodeJS.ErrnoException).code === 'string' && typeof (error as NodeJS.ErrnoException).syscall === 'string';
       if (fileError) throw new UsageError('usage: cannot read --config');
@@ -239,8 +298,7 @@ export async function main(argv: string[], env: Record<string, string | undefine
       // A key that cannot be read throws here and fails the start.
       const auth = createAppAuth({ appId: config.app.id, privateKey: config.app.privateKey, fetch: github, clock });
       const info = createAppInfo({ auth, fetch: github });
-      const base = engineBase(config, { fetch, sleep, clock, log });
-      // Every adapter is made before the lock is taken: from the lock on, nothing throws before the service holds it.
+      // Every adapter is made before the lock is taken: from the lock on, a step that fails releases it (afterLock).
       const reader = createGithubWebhookReader(config.app.webhookSecret);
       const forge = createGithubAccess({ auth, fetch: github });
       const hooks = createGithubHookDeliveries({ auth, fetch: github });
@@ -278,9 +336,19 @@ export async function main(argv: string[], env: Record<string, string | undefine
         throw error;
       }
       guardRejections(extensions, log, (handler) => { process.on('unhandledRejection', handler); });
+      // Before anything reads a setting (call 13): the migrations, then the sync of the file with the database (a clash refuses
+      // the start), then the engine's base from the settings this start runs on.
+      const { settings, base } = await afterLock(lock, db, {
+        migrate: () => migrate(db, loadMigrations(MIGRATIONS_DIR)),
+        settings: () => startSettings({
+          // The environment is given to the check only, never stored.
+          db, file, check: (document) => serviceConfig(parseDocument(document, env)), clock, log, uiOn: uiOnOf(config),
+        }),
+        base: (started) => engineBase(started.atStart, { fetch, sleep, clock, log }),
+      });
       const providers = contextProvidersOf(extensions);
       const engine = { ...base, ...(providers.length === 0 ? {} : { contextProviders: providers }) };
-      return await startService(config, {
+      return await startService(settings.atStart, {
         db,
         reader,
         clock,
@@ -300,9 +368,12 @@ export async function main(argv: string[], env: Record<string, string | undefine
           timer.unref();
           return () => { clearInterval(timer); };
         },
-        engineDeps: (source) => ({ source, ...engine }),
-        // The judge's calls go through the client the reviews use, with its fallbacks, prices and request extras.
-        model: base.model,
+        settings,
+        // Each review's model client and scorer are made from the settings it runs on (call 19).
+        engineDeps: (source, c) => ({ source, ...engine, ...clientsFor(c ?? settings.atStart, { fetch, sleep }) }),
+        // The judge's calls go through a client made as the reviews' are, with its fallbacks, prices and request extras, from
+        // the settings in force at each call.
+        model: { complete: (request) => clientsFor(settings.inForce(), { fetch, sleep }).model.complete(request) },
         token: base.token,
         review,
         lineUrl: githubLineUrl,
@@ -326,7 +397,7 @@ export async function main(argv: string[], env: Record<string, string | undefine
         }),
       });
     } catch (error) {
-      out('start_failed');
+      startFailed(error, out);
       throw error;
     }
   }, signals, (exitCode) => process.exit(exitCode), log);

@@ -59,3 +59,12 @@ test('a run with tokens and no cost is alerted once', () => {
   guard.noteRun({ inputTokens: 10, outputTokens: 1, cost: 0 });
   assert.deepEqual(alerts, [['cost_unknown', {}]]);
 });
+test('a limit given as a function is read at each look', async () => {
+  let limit = 50;
+  const guard = createSpendGuard({ db, limit: () => limit, clock: () => new Date('2026-03-01T10:00:00.000Z'), alert });
+  await cost('2026-03-01T09:00:00.000Z', 40);
+  assert.equal(await guard.level(), 'warn');
+  limit = 30;
+  assert.equal(await guard.level(), 'limit');
+  assert.deepEqual(alerts, [['spend_80', { spent: 40, limit: 50 }], ['spend_limit', { spent: 40, limit: 30 }]]);
+});

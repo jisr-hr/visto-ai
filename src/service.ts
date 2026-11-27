@@ -39,6 +39,7 @@ import { runRedelivery } from './shell/redelivery.ts';
 import { runReviewJob } from './shell/review-job.ts';
 import type { ReviewJobDeps } from './shell/review-job.ts';
 import { createRunner } from './shell/runner.ts';
+import type { Settings } from './shell/settings.ts';
 import { createSpendGuard } from './shell/spend.ts';
 import { createAccountChanges } from './ui/accounts.ts';
 import { createAuth } from './ui/auth.ts';
@@ -66,7 +67,10 @@ export interface ServiceDeps {
   sleep: (ms: number) => Promise<void>;
   /** A repeating timer. Returns its cancel. `work` never rejects; what it returns is there for a test to wait on. */
   every: (ms: number, work: () => Promise<void>) => () => void;
-  engineDeps: (source: Source) => ReviewDeps;
+  /** Absent: the settings are `config`, which never changes. Given: `config` is `settings.atStart`. */
+  settings?: Settings;
+  /** The engine's dependencies for one review, from the settings it runs on (the service always gives them). */
+  engineDeps: (source: Source, settings?: ServiceConfig) => ReviewDeps;
   review: (input: ReviewInput, deps: ReviewDeps) => Promise<ReviewResult>;
   lineUrl: ReviewJobDeps['lineUrl'];
   commentUrl: ReviewJobDeps['commentUrl'];
@@ -147,7 +151,12 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps): Pr
       // nothing to do
     }
   }
-  const settingsFor = (name: string) => repoSettingsFor(config, name);
+  // What reviews and events read (call 19): the settings in force, or the config given, which never changes. The start-time
+  // settings (dry run, learning, the concurrency, the model's endpoint, time limit and tool choice, the scorer) and every
+  // setting that is not editable keep being read from `config`, which is what the settings in force hold for them too.
+  const given = deps.settings;
+  const inForce = given === undefined ? (): ServiceConfig => config : (): ServiceConfig => given.inForce();
+  const settingsFor = (name: string) => repoSettingsFor(inForce(), name);
   // In dry run no module is told of a review or an alert (11.1); its providers and routes still work.
   const notifiers = notifiersOf(deps.extensions);
   const sinks = alertSinksOf(deps.extensions);
@@ -158,19 +167,16 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps): Pr
   const health = createModelHealth(alert);
   const extensionHealth = deps.extensions.length === 0 ? null : createExtensionHealth(alert);
   const mcpHealth = config.mcpServers.length === 0 ? null : createMcpHealth(alert);
-  const spend = createSpendGuard({ db, limit: config.limits.spendPerDay, clock, alert });
+  // The daily limit is read at each look.
+  const spend = createSpendGuard({ db, limit: () => inForce().limits.spendPerDay, clock, alert });
   // With learning off none of it is made: no pass, no memory, no health (call 17). In dry run it runs (11.1).
   const learning = config.learning ? createLearning({ db, clock, log: say, alert }) : null;
   const memory = config.learning ? { memoryFor: (ref: PullRequestRef) => recordsMemory(db, ref), memoryHealth: createMemoryHealth(alert) } : null;
   // Nothing reaches GitHub's approvals in dry run, nor when the service was given none: each call rejects, and nothing is approved or dismissed.
   const approvals = approvalsFor(config.dryRun, deps.approvals);
-  const reviewDeps: ReviewJobDeps = {
-    db, forge: deps.forge, clock, log: say, sleep: deps.sleep, settingsFor,
-    limits: {
-      inputTokensPerCall: config.limits.inputTokensPerCall, batchesPerReview: config.limits.batchesPerReview,
-      modelTimeoutSeconds: config.model.timeoutSeconds,
-    },
-    dryRun: config.dryRun, writer: config.dryRun ? dryWriter() : deps.writer, engineDeps: deps.engineDeps, review: deps.review, lineUrl: deps.lineUrl, health, spend,
+  const reviewBase: Omit<ReviewJobDeps, 'settingsFor' | 'limits' | 'engineDeps'> = {
+    db, forge: deps.forge, clock, log: say, sleep: deps.sleep,
+    dryRun: config.dryRun, writer: config.dryRun ? dryWriter() : deps.writer, review: deps.review, lineUrl: deps.lineUrl, health, spend,
     commentUrl: deps.commentUrl, canResolve: () => deps.appInfo.canResolve(),
     approvals, onWithdraw: () => { void withdrawRunner.tick(); },
     // Each review writes its stage on its job, with the UI off too (call 31).
@@ -182,6 +188,16 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps): Pr
     // The audit key goes to the review job and to nothing else.
     ...(config.auditKey === undefined ? {} : { auditKey: config.auditKey }),
   };
+  /**
+   * A review job's dependencies on the settings `c`, given when its runner starts it, so that it keeps them to its end (call 20):
+   * its repository settings, its limits and its engine (main makes the model client and the scorer from them).
+   */
+  const reviewDepsAt = (c: ServiceConfig): ReviewJobDeps => ({
+    ...reviewBase,
+    settingsFor: (name) => repoSettingsFor(c, name),
+    limits: { inputTokensPerCall: c.limits.inputTokensPerCall, batchesPerReview: c.limits.batchesPerReview, modelTimeoutSeconds: c.model.timeoutSeconds },
+    engineDeps: (source) => deps.engineDeps(source, c),
+  });
   // gate_check_failed is raised once for each reason in a run of the service.
   const raisedGate = new Set<string>();
   const gateAlert: Alert = (code, details) => {
@@ -223,7 +239,7 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps): Pr
   const runner = createRunner({
     db, kind: 'review', concurrency: config.limits.queueConcurrency, clock, log: say,
     mayStart: mayStartReview,
-    run: (job) => runReviewJob(job, reviewDeps),
+    run: (job) => runReviewJob(job, reviewDepsAt(inForce())),
     onLeft: reviewLeft,
   });
   const gateDeps: GateJobDeps = {
