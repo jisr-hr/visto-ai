@@ -101,6 +101,8 @@ export interface SettingsView {
   now: string; version: number;
   global: Record<string, Setting>; defaults: Record<string, Setting>; repositories: RepositorySettings[];
   scorer: { on: boolean; waits: boolean };
+  /** Where the keys are sent: set in config.yml only (no admin can change it here); `scorer` null while the file writes no scorer. */
+  endpoints: { model: string; scorer: string | null };
   secrets: SecretState[];
   access: { publicUrl: string; github: boolean; accounts: string[]; team: string | null };
 }

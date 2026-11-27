@@ -83,11 +83,18 @@ test('the view holds every setting with its value, whether it is written and whe
   assert.equal(view.now, at(30));
   assert.equal(view.version, 4);
   assert.deepEqual(view.access, ACCESS);
+  assert.deepEqual(view.endpoints, { model: 'https://openrouter.ai/api/v1', scorer: null });
+  assert.ok(!('model.baseUrl' in view.global) && !('scorer.baseUrl' in view.global));
   // The version is the record's length after more saves.
   await saveNow(d, [{ scope: 'global', path: 'limits.spendPerDay', value: 40 }]);
   const after = await settingsView(d);
   assert.equal(after.version, 5);
   assert.deepEqual(after.global['limits.spendPerDay']!.source, { by: 'ui', name: 'octo-admin', at: at(0) });
+});
+
+test("the endpoints are the file's, shown as they are written and never as settings", async () => {
+  const d = await deps(SCORER_YAML.replace('  model: vendor/model-a', '  baseUrl: https://model.example.test/v1\n  model: vendor/model-a'));
+  assert.deepEqual((await settingsView(d)).endpoints, { model: 'https://model.example.test/v1', scorer: 'https://openrouter.ai/api/alpha' });
 });
 
 test("a start-time setting saved waits for the restart, and the scorer's being on too", async () => {
@@ -135,12 +142,13 @@ test("no answer holds a secret's value or a field the screen does not show", asy
   const d = await deps(SCORER_YAML);
   await saveNow(d, [{ scope: 'defaults', path: 'score.threshold', value: 65 }]);
   const view = await settingsView(d);
-  assert.deepEqual(Object.keys(view), ['now', 'version', 'global', 'defaults', 'repositories', 'scorer', 'secrets', 'access']);
+  assert.deepEqual(Object.keys(view), ['now', 'version', 'global', 'defaults', 'repositories', 'scorer', 'endpoints', 'secrets', 'access']);
   for (const setting of [...Object.values(view.global), ...Object.values(view.defaults), ...Object.values(view.repositories[0]!.settings)]) {
     assert.deepEqual(Object.keys(setting), ['written', 'value', 'source', 'restart', 'waits']);
     if (setting.source !== null) assert.deepEqual(Object.keys(setting.source), ['by', 'name', 'at']);
   }
   assert.deepEqual(Object.keys(view.repositories[0]!), ['name', 'settings']);
+  assert.deepEqual(Object.keys(view.endpoints), ['model', 'scorer']);
   assert.deepEqual(Object.keys(view.access), ['publicUrl', 'github', 'accounts', 'team']);
   assert.deepEqual(view.secrets.map((s) => [s.kind, s.variable]), [
     ['model_key', 'OPENROUTER_API_KEY'], ['scorer_key', 'SCORER_API_KEY'], ['app_private_key', 'APP_PRIVATE_KEY'], ['webhook_secret', 'WEBHOOK_SECRET'],
@@ -180,6 +188,8 @@ test('a save whose body is not of its shape is null, and one of its shape is rea
   const bad: Array<Record<string, unknown>> = [
     one({ scope: 'defaults', path: 'nope' }),
     one({ scope: 'global', path: 'score.threshold' }),
+    one({ scope: 'global', path: 'model.baseUrl', value: 'https://elsewhere.example.test/v1' }),
+    one({ scope: 'global', path: 'scorer.baseUrl', value: 'https://elsewhere.example.test/v1' }),
     one({ scope: 'Acme/Shop', path: 'newHead' }),
     one({ scope: 'acme', path: 'newHead' }),
     one({ scope: 'defaults', path: 'newHead', extra: 1 }),

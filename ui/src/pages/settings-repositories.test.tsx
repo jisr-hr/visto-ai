@@ -49,6 +49,7 @@ function viewOf(over: { defaults?: Record<string, Setting>; shop?: Record<string
       { name: 'acme/web', settings: {} },
     ],
     scorer: { on: false, waits: false },
+    endpoints: { model: 'https://llm.example.test/v1', scorer: null },
     secrets: over.secrets ?? [{ kind: 'audit_key', of: null, variable: 'AUDIT_KEY' }],
     access: { publicUrl: 'https://visto.example.test', github: true, accounts: [], team: null },
   };

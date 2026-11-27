@@ -74,6 +74,7 @@ export async function settingsView(deps: SettingsApiDeps): Promise<SettingsView>
     defaults: section(DEFAULTS, REPOSITORY_PATHS),
     repositories: names.map((name) => ({ name, settings: section(name, REPOSITORY_PATHS) })),
     scorer: { on: scorerOn(saved), waits: scorerOn(saved) !== scorerOn(settings.startEditable) },
+    endpoints: { model: settings.atStart.model.baseUrl, scorer: settings.saved().config.scorer?.baseUrl ?? null },
     secrets: secretsOf(settings.file).map((secret) => ({ kind: secret.kind, of: secret.of, variable: secret.variable })),
     access: {
       publicUrl: deps.access.publicUrl, github: deps.access.github, accounts: [...deps.access.accounts], team: deps.access.team,

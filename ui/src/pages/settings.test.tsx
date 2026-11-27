@@ -24,7 +24,6 @@ const GLOBAL: Record<string, Setting> = {
   'limits.queueConcurrency': written(2, FILE, { restart: true }),
   'limits.inputTokensPerCall': byDefault(200000),
   'limits.batchesPerReview': byDefault(6),
-  'model.baseUrl': written('https://llm.example.test/v1', FILE, { restart: true }),
   'model.model': written('vendor/model-a'),
   'model.fallbacks': written(['vendor/model-b']),
   'model.effort.default': written({}),
@@ -35,7 +34,6 @@ const GLOBAL: Record<string, Setting> = {
   'model.extraBody': byDefault({}),
   'model.extraHeaders': byDefault({}),
   'scorer.model': written('vendor/decision-model', FILE, { restart: true }),
-  'scorer.baseUrl': written('https://scorer.example.test/v1', FILE, { restart: true }),
   'scorer.timeoutSeconds': written(120),
 };
 
@@ -47,6 +45,7 @@ function viewOf(over: { version?: number; global?: Record<string, Setting>; acce
     defaults: {},
     repositories: [],
     scorer: over.scorer ?? { on: true, waits: true },
+    endpoints: { model: 'https://llm.example.test/v1', scorer: 'https://scorer.example.test/v1' },
     secrets: [
       { kind: 'model_key', of: null, variable: 'OPENROUTER_API_KEY' },
       { kind: 'scorer_key', of: null, variable: 'SCORER_API_KEY' },
@@ -202,7 +201,7 @@ test('Settings shows its header, its sections and their rows as drawn, with wher
 
 test('a setting read once at start is marked, and one saved that waits for a restart says so', async () => {
   await open();
-  for (const label of ['Dry run', 'Learning', 'Reviews at once', 'Endpoint', 'How the answer is asked for', 'Time limit per call']) {
+  for (const label of ['Dry run', 'Learning', 'Reviews at once', 'How the answer is asked for', 'Time limit per call']) {
     const badge = within(rowOf(label)).getByText('Needs a restart');
     expect(classes(badge)).toEqual(words('inline-flex items-center gap-1.5 whitespace-nowrap rounded-full px-2 py-0.5 text-xs leading-5 font-medium bg-subtle text-muted'));
   }
@@ -347,8 +346,12 @@ test("the model's rows read and write their values", async () => {
   const discard = (): Promise<void> => user.click(screen.getByRole('button', { name: 'Discard' }));
 
   // Read.
-  expect(screen.getByLabelText('Endpoint')).toHaveValue('https://llm.example.test/v1');
-  expect(screen.getByLabelText('Endpoint')).toHaveClass('font-mono', 'w-full');
+  // The endpoints are read-only text, set in config.yml: no field, no restart badge.
+  expect(screen.queryByLabelText('Endpoint')).toBeNull();
+  expect(within(rowOf('Endpoint')).getByText('https://llm.example.test/v1')).toHaveClass('font-mono');
+  expect(within(rowOf('Endpoint')).getByText(/Set in config\.yml\./)).toBeInTheDocument();
+  expect(within(rowOf('Endpoint')).queryByRole('textbox')).toBeNull();
+  expect(within(rowOf('Endpoint')).queryByText('Needs a restart')).toBeNull();
   expect(screen.getByLabelText('Model', { selector: 'input' })).toHaveValue('vendor/model-a');
   expect(screen.getByRole('combobox', { name: 'Default' })).toHaveValue('none');
   expect(within(screen.getByRole('combobox', { name: 'Default' })).getAllByRole('option').map((o) => o.textContent)).toEqual(['Provider default', 'Low', 'Medium', 'High']);
@@ -362,7 +365,9 @@ test("the model's rows read and write their values", async () => {
   expect(screen.getByLabelText('Input')).toHaveClass('w-[100px]');
   expect(screen.getByLabelText('Scorer model')).toHaveValue('vendor/decision-model');
   expect(screen.getByLabelText('Scorer model')).toBeEnabled();
-  expect(screen.getByLabelText('Second scorer endpoint')).toHaveValue('https://scorer.example.test/v1');
+  expect(screen.queryByLabelText('Second scorer endpoint')).toBeNull();
+  expect(within(rowOf('Second scorer endpoint')).getByText('https://scorer.example.test/v1')).toHaveClass('font-mono');
+  expect(within(rowOf('Second scorer endpoint')).queryByRole('textbox')).toBeNull();
   expect(screen.getByLabelText('Second scorer time limit')).toHaveValue(120);
   expect(screen.getByRole('switch', { name: 'Second scorer' })).toHaveAttribute('aria-checked', 'true');
 
@@ -412,22 +417,22 @@ test("the model's rows read and write their values", async () => {
   expect(screen.getByRole('button', { name: 'Save changes' })).toBeDisabled();
   expect(screen.queryByText('Not valid JSON.')).toBeNull();
 
-  // The scorer off writes the three scorer settings not written, and the page does not show the old value as the default.
+  // The scorer off writes the two scorer settings not written, and the page does not show the old value as the default.
   await user.click(screen.getByRole('switch', { name: 'Second scorer' }));
   expect(screen.getByRole('switch', { name: 'Second scorer' })).toHaveAttribute('aria-checked', 'false');
   expect(screen.getByLabelText('Scorer model')).toBeDisabled();
   expect(screen.getByLabelText('Scorer model')).toHaveValue('');
   expect(screen.queryByDisplayValue('vendor/decision-model')).toBeNull();
-  expect(screen.queryByLabelText('Second scorer endpoint')).toBeNull();
+  expect(screen.queryByText('Second scorer endpoint')).toBeNull();
   expect(screen.queryByLabelText('Second scorer time limit')).toBeNull();
   expect(within(rowOf('Second scorer')).getByText('Not written')).toBeInTheDocument();
   expect(await changesAfter()).toEqual([
-    { scope: 'global', path: 'scorer.baseUrl' }, { scope: 'global', path: 'scorer.model' }, { scope: 'global', path: 'scorer.timeoutSeconds' },
+    { scope: 'global', path: 'scorer.model' }, { scope: 'global', path: 'scorer.timeoutSeconds' },
   ]);
   // On again with nothing typed writes an empty model.
   await user.click(screen.getByRole('switch', { name: 'Second scorer' }));
   expect(screen.getByLabelText('Scorer model')).toBeEnabled();
-  expect(screen.getByLabelText('Second scorer endpoint')).toBeInTheDocument();
+  expect(screen.getByText('Second scorer endpoint')).toBeInTheDocument();
 });
 
 test('an effort written otherwise reads as written in config.yml, and a scorer off to on writes the typed model', async () => {
@@ -436,7 +441,6 @@ test('an effort written otherwise reads as written in config.yml, and a scorer o
     global: {
       'model.effort.default': written({ reasoning: { effort: 'high', summary: 'auto' } }),
       'scorer.model': byDefault(''),
-      'scorer.baseUrl': byDefault(''),
       'scorer.timeoutSeconds': byDefault(120),
     },
     scorer: { on: false, waits: false },
@@ -451,7 +455,7 @@ test('an effort written otherwise reads as written in config.yml, and a scorer o
   expect(within(screen.getByRole('combobox', { name: 'Elevated' })).queryByRole('option', { name: 'As written in config.yml' })).toBeNull();
   expect(screen.getByRole('switch', { name: 'Second scorer' })).toHaveAttribute('aria-checked', 'false');
   expect(screen.getByLabelText('Scorer model')).toBeDisabled();
-  expect(screen.queryByLabelText('Second scorer endpoint')).toBeNull();
+  expect(screen.queryByText('Second scorer endpoint')).toBeNull();
   await user.click(screen.getByRole('switch', { name: 'Second scorer' }));
   await user.type(screen.getByLabelText('Scorer model'), 'vendor/decision-model');
   await user.click(screen.getByRole('button', { name: 'Save changes' }));
@@ -664,12 +668,11 @@ test('the scorer off and on again, with the view having it on, is no change', as
   const user = userEvent.setup();
   await open();
   await user.click(screen.getByRole('switch', { name: 'Second scorer' }));
-  expect(screen.getByText('3 unsaved changes')).toBeInTheDocument();
+  expect(screen.getByText('2 unsaved changes')).toBeInTheDocument();
   await user.click(screen.getByRole('switch', { name: 'Second scorer' }));
   expect(screen.getByText('No unsaved changes')).toBeInTheDocument();
   expect(screen.getByLabelText('Scorer model')).toHaveValue('vendor/decision-model');
-  expect(screen.getByLabelText('Second scorer endpoint')).toHaveValue('https://scorer.example.test/v1');
-  expect(within(rowOf('Second scorer endpoint')).getByText('From config.yml at the start of 2026-03-01 09:00 UTC')).toBeInTheDocument();
+  expect(within(rowOf('Second scorer endpoint')).getByText('https://scorer.example.test/v1')).toBeInTheDocument();
 });
 
 test('the two efforts each say where they came from', async () => {

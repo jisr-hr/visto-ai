@@ -43,7 +43,7 @@ test('the editable part of a file is every setting it writes, by scope and path,
   const e = editableOf(doc);
   const global = keysOf(e).filter((k) => k.startsWith('global:'));
   assert.deepEqual(global, [
-    'dryRun', 'learning', 'limits.batchesPerReview', 'limits.inputTokensPerCall', 'limits.queueConcurrency', 'limits.spendPerDay', 'model.baseUrl',
+    'dryRun', 'learning', 'limits.batchesPerReview', 'limits.inputTokensPerCall', 'limits.queueConcurrency', 'limits.spendPerDay',
     'model.effort.default', 'model.effort.elevated', 'model.extraBody', 'model.extraHeaders', 'model.fallbacks', 'model.model', 'model.prices',
     'model.timeoutSeconds', 'model.toolChoice',
   ].map((p) => `global:${p}`).sort());
@@ -66,13 +66,14 @@ test('an override key is lower-cased, and one that names no repository is droppe
 });
 
 test('the lists, the start-time paths and the keys of a scope are as the design has them', () => {
-  assert.equal(GLOBAL_PATHS.length, 19);
+  assert.equal(GLOBAL_PATHS.length, 17);
   assert.equal(REPOSITORY_PATHS.length, 16);
   assert.ok([...AT_START].every((p) => GLOBAL_PATHS.includes(p)));
-  assert.equal(AT_START.size, 7);
+  assert.equal(AT_START.size, 5);
   assert.equal(settingKey('acme/shop.js', 'gate.mode'), 'acme/shop.js:gate.mode');
   assert.deepEqual(keyParts('acme/shop.js:gate.mode'), { scope: 'acme/shop.js', path: 'gate.mode' });
   assert.ok(isSetting(GLOBAL, 'dryRun') && !isSetting(GLOBAL, 'newHead') && !isSetting(GLOBAL, 'model.apiKey'));
+  for (const path of ['model.baseUrl', 'scorer.baseUrl']) assert.ok(!isSetting(GLOBAL, path) && !GLOBAL_PATHS.includes(path) && !AT_START.has(path), path);
   assert.ok(isSetting(DEFAULTS, 'newHead') && !isSetting(DEFAULTS, 'dryRun') && isSetting('acme/web', 'gate.mode') && !isSetting('Acme/Web', 'gate.mode'));
   assert.ok(REPOSITORY_SCOPE.test('acme/shop.js') && !REPOSITORY_SCOPE.test('acme'));
   assert.equal(filePathOf(GLOBAL, 'learning'), 'learning');
@@ -100,6 +101,16 @@ test('a document with its editable part put back checks as the file does, and ke
   assert.deepEqual(asked.scorer, { model: 'vendor/other', apiKey: { env: 'SCORER_API_KEY' } });
   const kept = withEditable({ model: { apiKey: { env: 'OPENROUTER_API_KEY' }, model: 'x' } }, new Map([['global:model.model', 'y']])) as { model: Record<string, unknown> };
   assert.deepEqual(kept.model, { apiKey: { env: 'OPENROUTER_API_KEY' }, model: 'y' });
+  // The endpoints are the file's alone: kept from it, and never taken from the editable part.
+  const withUrls = { model: { baseUrl: 'https://model.example.test/v1', apiKey: { env: 'OPENROUTER_API_KEY' }, model: 'x' }, scorer: { baseUrl: 'https://scorer.example.test/v1', apiKey: { env: 'SCORER_API_KEY' }, model: 's' } };
+  const asked2 = withEditable(withUrls, new Map<string, SettingValue>([
+    ['global:model.model', 'y'], ['global:model.baseUrl', 'https://elsewhere.example.test/v1'], ['global:scorer.model', 's2'], ['global:scorer.baseUrl', 'https://elsewhere.example.test/v1'],
+  ])) as { model: Record<string, unknown>; scorer: Record<string, unknown> };
+  assert.equal(asked2.model.baseUrl, 'https://model.example.test/v1');
+  assert.equal(asked2.scorer.baseUrl, 'https://scorer.example.test/v1');
+  const noScorer = withEditable(withUrls, new Map<string, SettingValue>([['global:model.model', 'y']])) as { model: Record<string, unknown>; scorer?: unknown };
+  assert.equal(noScorer.model.baseUrl, 'https://model.example.test/v1');
+  assert.ok(!('scorer' in noScorer));
   const apiKeyAttempt = withEditable({ model: { apiKey: { env: 'OPENROUTER_API_KEY' } } }, new Map([['global:model.apiKey', 'sk-inline']])) as { model: Record<string, unknown> };
   assert.deepEqual(apiKeyAttempt.model, { apiKey: { env: 'OPENROUTER_API_KEY' } });
 });
@@ -109,14 +120,14 @@ test('the settings in force keep the ones read at start until the next start, an
     ['global:dryRun', true], ['global:limits.queueConcurrency', 2], ['global:model.model', 'start-model'], ['defaults:score.threshold', 70],
   ]);
   const saved: Editable = new Map<string, SettingValue>([
-    ['global:dryRun', false], ['global:learning', true], ['global:limits.queueConcurrency', 5], ['global:model.baseUrl', 'https://saved.example.test/v1'],
+    ['global:dryRun', false], ['global:learning', true], ['global:limits.queueConcurrency', 5],
     ['global:model.model', 'saved-model'], ['global:model.toolChoice', 'auto'], ['global:model.timeoutSeconds', 99], ['defaults:score.threshold', 80],
     ['acme/shop:gate.mode', 'shadow'],
   ]);
   const force = inForceEditable(atStart, saved);
   assert.equal(force.get('global:dryRun'), true);
   assert.equal(force.get('global:limits.queueConcurrency'), 2);
-  for (const p of ['learning', 'model.baseUrl', 'model.toolChoice', 'model.timeoutSeconds']) assert.ok(AT_START.has(p) && !force.has(`global:${p}`), p);
+  for (const p of ['learning', 'model.toolChoice', 'model.timeoutSeconds']) assert.ok(AT_START.has(p) && !force.has(`global:${p}`), p);
   assert.equal(force.get('global:model.model'), 'saved-model');
   assert.equal(force.get('defaults:score.threshold'), 80);
   assert.equal(force.get('acme/shop:gate.mode'), 'shadow');
