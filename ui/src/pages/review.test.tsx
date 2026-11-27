@@ -215,8 +215,8 @@ test("why it approved or not is said with the paragraph's words and the merge ga
 
   async function shows(over: Over, title: string): Promise<HTMLElement> {
     const view = open(fakeApi(over).api);
-    await screen.findByText(title);
-    const element = banner();
+    const element = await screen.findByRole('region', { name: 'Approval' });
+    within(element).getByText(title);
     // Hand the view back through a cleanup the next call makes.
     cleanup = view.unmount;
     return element;
@@ -481,4 +481,196 @@ test('empty and cut lists say so', async () => {
   open(one1.api);
   await act(() => vi.advanceTimersByTimeAsync(0));
   expect(within(scores()).getByText('1 more file is not shown.')).toBeInTheDocument();
+});
+
+const card = (name: string): HTMLElement => screen.getByRole('region', { name });
+/** The `dd` that follows the `dt` of the given words, inside a card. */
+const fact = (name: string, term: string): HTMLElement => {
+  const dt = within(card(name)).getByText(term, { selector: 'dt' });
+  return dt.nextElementSibling as HTMLElement;
+};
+async function shown(parts: Partial<OneReview>) {
+  vi.useFakeTimers();
+  const view = open(fakeApi(withParts(parts)).api);
+  await act(() => vi.advanceTimersByTimeAsync(0));
+  return view;
+}
+
+test('this review says who asked, the mode and files read, how it ended, how long it took and when it was posted', async () => {
+  const one = await shown({ startedAt: at(-761), finishedAt: at(-720), publishedAt: at(-720) });
+  const here = (term: string): HTMLElement => fact('This review', term);
+  expect(here('Asked by')).toHaveTextContent('A push');
+  expect(here('Mode')).toHaveTextContent('Incremental, 2 of 4 files read');
+  expect(within(here('Outcome')).getByText('Published')).toHaveClass('bg-ok-bg', 'text-ok');
+  expect(here('Took')).toHaveTextContent('41 s');
+  expect(here('Posted')).toHaveTextContent('12 min ago');
+  expect(card('This review').querySelector('dl')).toHaveClass('grid', 'text-sm');
+  one.unmount();
+  const asked = await shown({ askedBy: { reason: 'command', login: 'octo-dev' } });
+  expect(within(fact('This review', 'Asked by')).getByText('/review')).toHaveClass('font-mono');
+  expect(fact('This review', 'Asked by')).toHaveTextContent('/review by octo-dev');
+  asked.unmount();
+  const auto = await shown({ askedBy: { reason: 'automatic', login: null } });
+  expect(fact('This review', 'Asked by')).toHaveTextContent('Automatic');
+  auto.unmount();
+  const hand = await shown({ askedBy: { reason: 'manual', login: null } });
+  expect(fact('This review', 'Asked by')).toHaveTextContent('By hand');
+  hand.unmount();
+  const dry = await shown({ posting: 'dry_run', publishedAt: null });
+  expect(within(fact('This review', 'Outcome')).getByText('Dry run')).toHaveClass('bg-warn-bg', 'text-warn');
+  expect(fact('This review', 'Posted')).toHaveTextContent('Not posted');
+  dry.unmount();
+  const failed = await shown({ posting: 'failed', publishedAt: null, failure: { stage: 'model', code: 'model_timeout' } });
+  const outcome = fact('This review', 'Outcome');
+  expect(within(outcome).getByText('Failed')).toHaveClass('bg-bad-bg', 'text-bad');
+  expect(within(outcome).getByText('model_timeout')).toHaveClass('font-mono', 'text-muted');
+  failed.unmount();
+  const notPosted = await shown({ posting: 'not_posted', publishedAt: null });
+  expect(within(fact('This review', 'Outcome')).getByText('Not posted')).toHaveClass('bg-subtle', 'text-muted');
+  notPosted.unmount();
+  const nothing = await shown({ posting: 'nothing_new', publishedAt: null });
+  expect(within(fact('This review', 'Outcome')).getByText('Nothing new')).toHaveClass('bg-subtle');
+  nothing.unmount();
+  const none = await shown({ mode: 'full', read: { files: 0, reviewed: 0 } });
+  expect(fact('This review', 'Mode').textContent).toBe('Full');
+  none.unmount();
+  await shown({ mode: 'full', read: { files: 1, reviewed: 1 } });
+  expect(fact('This review', 'Mode')).toHaveTextContent('Full, 1 of 1 file read');
+});
+
+test('usage shows the models, the calls, the tokens with their thousands and the cost', async () => {
+  const one = await shown({});
+  expect(within(fact('Usage', 'Model')).getByText('vendor/model-a')).toHaveClass('font-mono');
+  expect(fact('Usage', 'Calls')).toHaveTextContent('3');
+  expect(fact('Usage', 'Input tokens')).toHaveTextContent('38,412');
+  expect(fact('Usage', 'Cached')).toHaveTextContent('21,900');
+  expect(fact('Usage', 'Output tokens')).toHaveTextContent('2,118');
+  expect(fact('Usage', 'Cost')).toHaveTextContent('$0.084');
+  one.unmount();
+  await shown({ usage: { models: [], calls: 0, inputTokens: 0, cachedTokens: 0, outputTokens: 0, cost: 0 } });
+  expect(fact('Usage', 'Model')).toHaveTextContent('None');
+});
+
+const HEAD2 = '9a1e5c07b3d2';
+test("the approval record shows this review's code and each approval up to it with its withdrawal", async () => {
+  const failedEntry = { run: 8990, ordinal: 2, head: HEAD2, state: 'withdrawal_failed' as const, code: 'github_403', retryAt: at(52), stoodAtMerge: false };
+  const one = await shown({ approvals: [failedEntry] });
+  const record = card('Approval record');
+  expect(within(record).getByText('needs_human')).toHaveClass('bg-warn-bg', 'text-warn');
+  expect(record).toHaveTextContent('Approval of review 2, head 9a1e5c07b3d2');
+  expect(within(record).getByText(HEAD2)).toHaveClass('font-mono');
+  expect(within(record).getByText('Withdrawal failed')).toHaveClass('bg-bad-bg', 'text-bad');
+  expect(record).toHaveTextContent('Dismissing it failed (github_403). Tried again in 52 s.');
+  expect(within(record).getByText('github_403')).toHaveClass('font-mono');
+  one.unmount();
+  const noCode = await shown({ approvals: [{ ...failedEntry, code: null, retryAt: null }] });
+  expect(card('Approval record')).toHaveTextContent('Dismissing it failed. Trying again now.');
+  expect(card('Approval record').textContent).not.toContain('()');
+  noCode.unmount();
+  const noRetry = await shown({ approvals: [{ ...failedEntry, retryAt: null }] });
+  expect(card('Approval record')).toHaveTextContent('Dismissing it failed (github_403). Trying again now.');
+  expect(card('Approval record')).not.toHaveTextContent('Tried again');
+  noRetry.unmount();
+  for (const retryAt of [NOW, at(-5)]) {
+    const past = await shown({ approvals: [{ ...failedEntry, retryAt }] });
+    expect(card('Approval record')).toHaveTextContent('Dismissing it failed (github_403). Trying again now.');
+    expect(card('Approval record')).not.toHaveTextContent('Tried again');
+    past.unmount();
+  }
+  const audit = await shown({ approval: { decision: 'not_approved', code: 'audit_sample', text: null } });
+  expect(within(card('Approval record')).getByText('audit_sample')).toHaveClass('bg-accent-soft', 'text-accent-text');
+  audit.unmount();
+  const approved = await shown({ approval: { decision: 'approved', code: null, text: null } });
+  expect(within(card('Approval record')).getByText('approved')).toHaveClass('bg-ok-bg', 'text-ok');
+  approved.unmount();
+  const dry = await shown({ approval: { decision: 'dry_run', code: null, text: null } });
+  expect(within(card('Approval record')).getByText('Not decided in dry run')).toHaveClass('bg-subtle', 'text-muted');
+  dry.unmount();
+  for (const decision of ['not_decided', 'failed'] as const) {
+    const quiet = await shown({ approval: { decision, code: null, text: null } });
+    expect(within(card('Approval record')).getByText('None')).toHaveClass('bg-subtle');
+    quiet.unmount();
+  }
+  const notPosted = await shown({ approval: { decision: 'not_posted', code: null, text: null } });
+  expect(within(card('Approval record')).getByText('Not posted')).toHaveClass('bg-subtle');
+  notPosted.unmount();
+  const nothing = await shown({ approval: { decision: 'nothing_new', code: null, text: null } });
+  expect(within(card('Approval record')).getByText('Nothing new')).toHaveClass('bg-subtle');
+  nothing.unmount();
+  const mine = await shown({
+    approvals: [
+      { run: 9001, ordinal: 3, head: '3f9c2e1a7b04', state: 'stands', code: null, retryAt: null, stoodAtMerge: true },
+      { run: 8990, ordinal: 2, head: HEAD2, state: 'withdrawn', code: null, retryAt: null, stoodAtMerge: false },
+      { run: 8977, ordinal: 1, head: 'aaaaaaaaaaaa', state: 'dismissed_on_github', code: null, retryAt: null, stoodAtMerge: false },
+    ],
+  });
+  const rec = card('Approval record');
+  expect(rec).toHaveTextContent('Approval of this review, head 3f9c2e1a7b04');
+  expect(within(rec).getByText('Stands')).toHaveClass('bg-ok-bg', 'text-ok');
+  expect(within(rec).getByText('Withdrawn')).toHaveClass('bg-subtle', 'text-muted');
+  expect(within(rec).getByText('Dismissed on GitHub')).toHaveClass('bg-subtle', 'text-muted');
+  expect(within(rec).getByText('It stood when the pull request was merged.')).toHaveClass('text-[13px]', 'text-muted');
+  expect(within(rec).queryAllByText(/stood when/)).toHaveLength(1);
+  mine.unmount();
+});
+
+test('each dependency of the review is shown with its status and code', async () => {
+  const one = await shown({
+    dependencies: [
+      { kind: 'model', name: null, status: 'ok', code: null, count: null },
+      { kind: 'memory', name: null, status: 'ok', code: null, count: 2 },
+      { kind: 'mcp', name: 'docs', status: 'error', code: 'mcp_timeout', count: null },
+      { kind: 'extension', name: 'example', status: 'ok', code: null, count: null },
+      { kind: 'lessons', name: null, status: 'empty', code: 'no_lessons', count: 0 },
+      { kind: 'extension', name: 'other', status: 'skipped', code: null, count: null },
+    ],
+  });
+  const deps = card('Dependencies on this review');
+  expect(deps).toHaveTextContent('Review model');
+  expect(deps).toHaveTextContent('Memory, 2 records shown');
+  expect(deps).toHaveTextContent('MCP server docs (mcp_timeout)');
+  expect(within(deps).getByText('mcp_timeout')).toHaveClass('font-mono');
+  expect(deps).toHaveTextContent('Extension example');
+  expect(deps).toHaveTextContent('Lessons, 0 shown (no_lessons)');
+  expect(within(deps).getAllByText('Working')[0]).toHaveClass('bg-ok-bg', 'text-ok');
+  expect(within(deps).getByText('Failed')).toHaveClass('bg-bad-bg', 'text-bad');
+  expect(within(deps).getByText('Nothing to add')).toHaveClass('bg-subtle', 'text-muted');
+  expect(within(deps).getByText('Skipped')).toHaveClass('bg-subtle', 'text-muted');
+  one.unmount();
+  const single = await shown({ dependencies: [{ kind: 'memory', name: null, status: 'ok', code: null, count: 1 }] });
+  expect(card('Dependencies on this review')).toHaveTextContent('Memory, 1 record shown');
+  single.unmount();
+  const unknown = await shown({ dependencies: [{ kind: 'memory', name: null, status: 'skipped', code: null, count: null }] });
+  expect(card('Dependencies on this review').textContent).toContain('MemorySkipped');
+  unknown.unmount();
+  await shown({ dependencies: [] });
+  expect(within(card('Dependencies on this review')).getByText('None recorded.')).toHaveClass('text-muted');
+});
+
+test('the feedback shows its counts and the reasons people gave, and says when there is none', async () => {
+  const one = await shown({
+    feedback: {
+      helpful: 2, notHelpful: 1,
+      reasons: [
+        { reason: 'Repeats the earlier thread.', login: 'octo-guest' },
+        { reason: 'Too noisy.', login: null },
+      ],
+    },
+  });
+  const box = card('Feedback');
+  expect(within(box).getByText('2 helpful')).toHaveClass('bg-ok-bg', 'text-ok');
+  expect(within(box).getByText('1 not helpful')).toHaveClass('bg-bad-bg', 'text-bad');
+  const first = within(box).getByText('Repeats the earlier thread.');
+  expect(first.tagName).toBe('BDI');
+  const quote = first.closest('blockquote')!;
+  expect(quote).toHaveTextContent('Repeats the earlier thread. octo-guest');
+  expect(within(quote).getByText('octo-guest')).toHaveClass('text-muted');
+  const second = within(box).getByText('Too noisy.').closest('blockquote')!;
+  expect(second.querySelector('.text-muted')).toBeNull();
+  expect(second.textContent).toBe('Too noisy.');
+  expect(within(box).queryByText('No feedback on this review.')).toBeNull();
+  one.unmount();
+  await shown({});
+  expect(within(card('Feedback')).getByText('No feedback on this review.')).toHaveClass('text-muted');
+  expect(within(card('Feedback')).queryByText(/helpful/)).toBeNull();
 });

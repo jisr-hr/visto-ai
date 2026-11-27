@@ -4,7 +4,7 @@
 import { Fragment, useEffect, useId, useState } from 'react';
 import type { ReactElement, ReactNode } from 'react';
 import { usePoll } from '../api.ts';
-import type { GateShown, OneReview, ReviewFile, ReviewFinding } from '../api-types.ts';
+import type { ApprovalEntry, GateShown, OneReview, Posting, ReviewDependency, ReviewFile, ReviewFinding } from '../api-types.ts';
 import { PageHeader } from '../components/layout.tsx';
 import { AlertIcon } from '../components/icons.tsx';
 import { Badge } from '../components/ui/badge.tsx';
@@ -13,9 +13,9 @@ import { Button } from '../components/ui/button.tsx';
 import { Select } from '../components/ui/select.tsx';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../components/ui/table.tsx';
 import { useApp } from '../context.tsx';
-import { ago, codeSpans, plural, sentence } from '../format.ts';
+import { ago, codeSpans, count, money, plural, sentence, took } from '../format.ts';
 import { Link, navigate } from '../router.tsx';
-import { CARD, CARD_TITLE, MONO, SCORE, scoreTone } from './activity.tsx';
+import { AskedBy, CARD, CARD_TITLE, MODES, MONO, SCORE, scoreTone } from './activity.tsx';
 
 const LARGEST_RUN = 2147483647;
 const RUN_DIGITS = /^[1-9][0-9]{0,9}$/;
@@ -488,6 +488,240 @@ function FindingsCard({ review }: { review: OneReview }): ReactElement {
   );
 }
 
+function SideCard({ title, gap, children }: { title: string; gap: string; children: ReactNode }): ReactElement {
+  const id = useId();
+  return (
+    <section aria-labelledby={id} className={`${CARD} flex flex-col ${gap} px-5 py-[18px]`}>
+      <h2 id={id} className={CARD_TITLE}>
+        {title}
+      </h2>
+      {children}
+    </section>
+  );
+}
+
+const FACTS = 'm-0 grid grid-cols-[minmax(0,1fr)_auto] gap-x-4 gap-y-2.5 text-sm';
+const FACT_TERM = 'text-muted';
+const FACT_VALUE = 'm-0 text-right font-medium';
+const ROWS = 'flex flex-col gap-2.5 text-sm';
+const ROW = 'flex justify-between gap-2.5';
+const NOTE = 'text-[13px] text-muted';
+
+function askedOf(review: OneReview): ReactNode {
+  const { reason, login } = review.askedBy;
+  if (reason === 'automatic') return 'Automatic';
+  if (reason === 'manual') return 'By hand';
+  return <AskedBy reason={reason} login={login} />;
+}
+
+function outcomeOf(review: OneReview): ReactNode {
+  const posting: Posting = review.posting;
+  switch (posting) {
+    case 'published':
+      return <Badge tone="ok">Published</Badge>;
+    case 'not_posted':
+      return <Badge tone="muted">Not posted</Badge>;
+    case 'dry_run':
+      return <Badge tone="warn">Dry run</Badge>;
+    case 'nothing_new':
+      return <Badge tone="muted">Nothing new</Badge>;
+    default: {
+      const code = review.failure?.code ?? null;
+      return (
+        <>
+          <Badge tone="bad">Failed</Badge>
+          {code === null ? null : <>{' '}<span className={`${MONO} text-muted`}>{code}</span></>}
+        </>
+      );
+    }
+  }
+}
+
+function ThisReviewCard({ review }: { review: OneReview }): ReactElement {
+  const { read } = review;
+  const mode = MODES.get(review.mode) ?? review.mode;
+  const readText = read.files > 0 ? `, ${read.reviewed} of ${plural(read.files, 'file', 'files')} read` : '';
+  return (
+    <SideCard title="This review" gap="gap-3.5">
+      <dl className={FACTS}>
+        <dt className={FACT_TERM}>Asked by</dt>
+        <dd className={FACT_VALUE}>{askedOf(review)}</dd>
+        <dt className={FACT_TERM}>Mode</dt>
+        <dd className={FACT_VALUE}>{`${mode}${readText}`}</dd>
+        <dt className={FACT_TERM}>Outcome</dt>
+        <dd className={FACT_VALUE}>{outcomeOf(review)}</dd>
+        <dt className={FACT_TERM}>Took</dt>
+        <dd className={FACT_VALUE}>{took(Date.parse(review.finishedAt) - Date.parse(review.startedAt))}</dd>
+        <dt className={FACT_TERM}>Posted</dt>
+        <dd className={FACT_VALUE}>{review.publishedAt === null ? 'Not posted' : ago(review.publishedAt, review.now)}</dd>
+      </dl>
+    </SideCard>
+  );
+}
+
+function UsageCard({ review }: { review: OneReview }): ReactElement {
+  const { usage } = review;
+  return (
+    <SideCard title="Usage" gap="gap-3.5">
+      <dl className={FACTS}>
+        <dt className={FACT_TERM}>Model</dt>
+        <dd className={FACT_VALUE}>{usage.models.length === 0 ? 'None' : mono(usage.models.join(', '))}</dd>
+        <dt className={FACT_TERM}>Calls</dt>
+        <dd className={FACT_VALUE}>{count(usage.calls)}</dd>
+        <dt className={FACT_TERM}>Input tokens</dt>
+        <dd className={FACT_VALUE}>{count(usage.inputTokens)}</dd>
+        <dt className={FACT_TERM}>Cached</dt>
+        <dd className={FACT_VALUE}>{count(usage.cachedTokens)}</dd>
+        <dt className={FACT_TERM}>Output tokens</dt>
+        <dd className={FACT_VALUE}>{count(usage.outputTokens)}</dd>
+        <dt className={FACT_TERM}>Cost</dt>
+        <dd className={FACT_VALUE}>{money(usage.cost)}</dd>
+      </dl>
+    </SideCard>
+  );
+}
+
+function decisionBadge(review: OneReview): ReactElement {
+  const { decision, code } = review.approval;
+  switch (decision) {
+    case 'approved':
+      return <Badge tone="ok">{code ?? 'approved'}</Badge>;
+    case 'not_approved':
+      return <Badge tone={code === 'audit_sample' ? 'accent' : 'warn'}>{code ?? 'not_approved'}</Badge>;
+    case 'dry_run':
+      return <Badge tone="muted">Not decided in dry run</Badge>;
+    case 'not_posted':
+      return <Badge tone="muted">Not posted</Badge>;
+    case 'nothing_new':
+      return <Badge tone="muted">Nothing new</Badge>;
+    default:
+      return <Badge tone="muted">None</Badge>;
+  }
+}
+
+const WITHDRAWAL: Readonly<Record<ApprovalEntry['state'], { tone: BadgeTone; label: string }>> = {
+  stands: { tone: 'ok', label: 'Stands' },
+  withdrawn: { tone: 'muted', label: 'Withdrawn' },
+  dismissed_on_github: { tone: 'muted', label: 'Dismissed on GitHub' },
+  withdrawal_failed: { tone: 'bad', label: 'Withdrawal failed' },
+};
+
+function ApprovalItem({ entry, review }: { entry: ApprovalEntry; review: OneReview }): ReactElement {
+  const word = WITHDRAWAL[entry.state];
+  let retry: string | null = null;
+  if (entry.state === 'withdrawal_failed') {
+    const wait = entry.retryAt === null ? 0 : Date.parse(entry.retryAt) - Date.parse(review.now);
+    retry = wait > 0 ? ` Tried again in ${took(wait)}.` : ' Trying again now.';
+  }
+  return (
+    <>
+      <div className={`${ROW} items-start`}>
+        <span>
+          {entry.run === review.run ? 'Approval of this review, head ' : `Approval of review ${entry.ordinal}, head `}
+          {mono(entry.head)}
+        </span>
+        <Badge tone={word.tone}>{word.label}</Badge>
+      </div>
+      {retry === null ? null : (
+        <span className={NOTE}>
+          {'Dismissing it failed'}
+          {entry.code === null ? null : <>{' ('}{mono(entry.code)}{')'}</>}
+          {'.'}
+          {retry}
+        </span>
+      )}
+      {entry.stoodAtMerge ? <span className={NOTE}>It stood when the pull request was merged.</span> : null}
+    </>
+  );
+}
+
+function ApprovalRecordCard({ review }: { review: OneReview }): ReactElement {
+  return (
+    <SideCard title="Approval record" gap="gap-3">
+      <div className={ROWS}>
+        <div className={ROW}>
+          <span>This review</span>
+          {decisionBadge(review)}
+        </div>
+        {review.approvals.map((entry, i) => (
+          <ApprovalItem key={`${entry.run} ${i}`} entry={entry} review={review} />
+        ))}
+      </div>
+    </SideCard>
+  );
+}
+
+function dependencyName(dep: ReviewDependency): string {
+  switch (dep.kind) {
+    case 'model':
+      return 'Review model';
+    case 'memory':
+      return dep.count === null ? 'Memory' : `Memory, ${plural(dep.count, 'record', 'records')} shown`;
+    case 'lessons':
+      return `Lessons, ${dep.count ?? 0} shown`;
+    case 'mcp':
+      return `MCP server ${dep.name ?? ''}`.trimEnd();
+    default:
+      return `Extension ${dep.name ?? ''}`.trimEnd();
+  }
+}
+
+const DEPENDENCY_STATUS: Readonly<Record<ReviewDependency['status'], { tone: BadgeTone; label: string }>> = {
+  ok: { tone: 'ok', label: 'Working' },
+  empty: { tone: 'muted', label: 'Nothing to add' },
+  skipped: { tone: 'muted', label: 'Skipped' },
+  error: { tone: 'bad', label: 'Failed' },
+};
+
+function DependenciesCard({ review }: { review: OneReview }): ReactElement {
+  return (
+    <SideCard title="Dependencies on this review" gap="gap-3">
+      {review.dependencies.length === 0 ? (
+        <span className={`${NOTE} text-sm`}>None recorded.</span>
+      ) : (
+        <div className={ROWS}>
+          {review.dependencies.map((dep, i) => {
+            const status = DEPENDENCY_STATUS[dep.status];
+            return (
+              <div key={i} className={ROW}>
+                <span>
+                  {dependencyName(dep)}
+                  {dep.code === null ? null : <span className="text-muted">{withCode(dep.code)}</span>}
+                </span>
+                <Badge tone={status.tone} dot>
+                  {status.label}
+                </Badge>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </SideCard>
+  );
+}
+
+function FeedbackCard({ review }: { review: OneReview }): ReactElement {
+  const { helpful, notHelpful, reasons } = review.feedback;
+  return (
+    <SideCard title="Feedback" gap="gap-3">
+      {helpful === 0 && notHelpful === 0 ? (
+        <span className="text-sm text-muted">No feedback on this review.</span>
+      ) : (
+        <div className="flex gap-2.5">
+          <Badge tone="ok">{`${helpful} helpful`}</Badge>
+          <Badge tone="bad">{`${notHelpful} not helpful`}</Badge>
+        </div>
+      )}
+      {reasons.map((entry, i) => (
+        <blockquote key={i} className="m-0 rounded-lg bg-subtle px-3 py-2.5 text-[13px] leading-normal">
+          <bdi>{entry.reason}</bdi>
+          {entry.login === null ? null : <>{' '}<span className="text-muted">{entry.login}</span></>}
+        </blockquote>
+      ))}
+    </SideCard>
+  );
+}
+
 export function ReviewPage({ run }: { run: number }): ReactElement {
   const { api } = useApp();
   const [tries, setTries] = useState(0);
@@ -547,7 +781,13 @@ export function ReviewPage({ run }: { run: number }): ReactElement {
           <ScoresCard review={data} />
           <FindingsCard review={data} />
         </div>
-        <div className="flex min-w-0 grow basis-[300px] flex-col gap-5"></div>
+        <div className="flex min-w-0 grow basis-[300px] flex-col gap-5">
+          <ThisReviewCard review={data} />
+          <UsageCard review={data} />
+          <ApprovalRecordCard review={data} />
+          <DependenciesCard review={data} />
+          <FeedbackCard review={data} />
+        </div>
       </div>
     </>
   );
