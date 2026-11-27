@@ -86,12 +86,24 @@ function Mode({ me }: { me: Me }) {
  * The frame of a signed-in person. It reads the activity every 5 seconds (not while the page is hidden) and puts it, with the
  * API and who is signed in, in the app's context. Signing out sends the token for changes; a failure leaves the person here.
  */
-export function Layout({ api, me, onSignedOut, children }: { api: Api; me: Me; onSignedOut: () => void; children: ReactNode }) {
+export function Layout({
+  api,
+  me,
+  readMe,
+  onSignedOut,
+  children,
+}: {
+  api: Api;
+  me: Me;
+  readMe?: () => void;
+  onSignedOut: () => void;
+  children: ReactNode;
+}) {
   const { path } = useLocation();
   const polled = usePoll(() => api.activity(), ACTIVITY_MS, 'activity');
   const value = useMemo<AppContextValue>(
-    () => ({ api, me, activity: polled.data, activityFailed: polled.failed }),
-    [api, me, polled.data, polled.failed],
+    () => ({ api, me, activity: polled.data, activityFailed: polled.failed, ...(readMe === undefined ? {} : { readMe }) }),
+    [api, me, readMe, polled.data, polled.failed],
   );
   const running = polled.data === null ? 0 : reviewCounts(polled.data.jobs).running;
   const theme = useSyncExternalStore(subscribeTheme, shownTheme);

@@ -34,7 +34,7 @@ const GLOBAL: Record<string, Setting> = {
   'model.prices': written({ inputPerMillion: 1, cachedInputPerMillion: 0.1, outputPerMillion: 4 }),
   'model.extraBody': byDefault({}),
   'model.extraHeaders': byDefault({}),
-  'scorer.model': written('vendor/decision-model', FILE, { restart: true }),
+  'scorer.model': written('vendor/decision-model'),
   'scorer.timeoutSeconds': written(120),
 };
 
@@ -65,7 +65,7 @@ const VIEW = viewOf();
 function fakeApi(over: Partial<Api> = {}) {
   const calls: unknown[][] = [];
   const api: Api = {
-    me: () => Promise.resolve(ME),
+    me: over.me ?? (() => Promise.resolve(ME)),
     activity: () => Promise.resolve(ACTIVITY),
     reviews: () => Promise.resolve(REVIEWS),
     signOut: () => Promise.resolve(),
@@ -343,11 +343,26 @@ test('a change to a setting read at start says that saving restarts the service,
   expect(screen.getByText('Saving this restarts the service.')).toBeInTheDocument();
 });
 
+test('switching the second scorer off or on says that saving restarts the service, and changing its model does not', async () => {
+  const user = userEvent.setup();
+  const { api } = fakeApi();
+  visit('/ui/settings');
+  render(<App api={api} />);
+  await screen.findByRole('region', { name: 'Model' });
+  await user.clear(screen.getByLabelText('Scorer model'));
+  await user.type(screen.getByLabelText('Scorer model'), 'vendor/decision-model-2');
+  expect(screen.queryByText('Saving this restarts the service.')).toBeNull();
+  await user.click(screen.getByRole('switch', { name: LABELS['scorer.model']! }));
+  expect(screen.getByText('Saving this restarts the service.')).toBeInTheDocument();
+});
+
 test('a save that restarts the service says so, waits for it to come back, then reads the settings again', async () => {
   vi.useFakeTimers();
   const back: SettingsView = { ...viewOf({ version: 15, global: { learning: written(true, UI, { restart: true }) } }), started: '2026-03-01T10:05:00.000Z' };
   let reads = 0;
+  let mes = 0;
   const { api } = fakeApi({
+    me: () => Promise.resolve(++mes === 1 ? ME : { ...ME, mode: 'dry_run' }),
     settings: () => {
       reads += 1;
       // The first read, then two the restart leaves unanswered, one while the old start still drains, then the new start.
@@ -373,6 +388,10 @@ test('a save that restarts the service says so, waits for it to come back, then 
   await act(() => vi.advanceTimersByTimeAsync(RESTART_POLL_MS));
   expect(reads).toBe(5);
   expect(screen.getByRole('status')).toHaveTextContent('The service restarted. The saved settings are in force.');
+  // Who is signed in is read again: the sidebar's mode is the new start's.
+  await act(() => vi.advanceTimersByTimeAsync(0));
+  expect(mes).toBe(2);
+  expect(within(screen.getByRole('complementary')).getByText('Dry run')).toBeInTheDocument();
   // Back: nothing more is read for the restart.
   await act(() => vi.advanceTimersByTimeAsync(RESTART_POLL_MS * 3));
   expect(reads).toBe(5);
@@ -383,7 +402,8 @@ test('a restart that does not come back within its limit says to read the servic
   vi.useFakeTimers();
   let reads = 0;
   const { api } = fakeApi({
-    settings: () => (++reads === 1 ? Promise.resolve(VIEW) : Promise.reject(new TypeError('Failed to fetch'))),
+    // After the first read, one that fails, then one that never answers.
+    settings: () => (++reads === 1 ? Promise.resolve(VIEW) : reads === 2 ? Promise.reject(new TypeError('Failed to fetch')) : new Promise<SettingsView>(() => {})),
     saveSettings: () => Promise.resolve({ kind: 'saved', view: viewOf({ version: 15 }), restarting: true }),
   });
   visit('/ui/settings');
@@ -392,7 +412,7 @@ test('a restart that does not come back within its limit says to read the servic
   fireEvent.click(screen.getByRole('switch', { name: 'Learning' }));
   fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
   await act(() => vi.advanceTimersByTimeAsync(0));
-  await act(() => vi.advanceTimersByTimeAsync(RESTART_LATE_MS + RESTART_POLL_MS));
+  await act(() => vi.advanceTimersByTimeAsync(RESTART_LATE_MS));
   expect(screen.getByRole('status')).toHaveTextContent(
     'Saved, but the service has not come back after 15 minutes. Its logs say why; this page reads the settings again when you reload it.',
   );

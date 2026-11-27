@@ -372,7 +372,7 @@ function Nav() {
 }
 
 export function SettingsPage() {
-  const { api, me } = useApp();
+  const { api, me, readMe } = useApp();
   // The latest read of the settings; a failed one drops what was shown.
   const [read, setRead] = useState<{ view: SettingsView | null; failed: boolean }>({ view: null, failed: false });
   const [reads, setReads] = useState(0);
@@ -388,22 +388,24 @@ export function SettingsPage() {
   const inFlight = useRef(false);
 
   // After a save that restarts the service: asked again every few seconds, a failure or the same start kept waiting, until
-  // a read comes from a newer start or the limit has passed.
+  // a read comes from a newer start or the limit has passed. The limit has a timer of its own, so a read that never answers
+  // does not hold the page past it. Once back, who is signed in is read again: the sidebar's mode is the new start's.
   useEffect(() => {
     if (restart?.phase !== 'waiting') return;
     const from = restart.from;
-    const began = Date.now();
     let live = true;
     let timer: ReturnType<typeof setTimeout> | undefined;
+    const late = setTimeout(() => {
+      if (!live) return;
+      live = false;
+      clearTimeout(timer);
+      setRestart({ phase: 'late' });
+    }, RESTART_LATE_MS);
     const again = (): void => {
       if (live) timer = setTimeout(ask, RESTART_POLL_MS);
     };
     function ask(): void {
       if (!live) return;
-      if (Date.now() - began >= RESTART_LATE_MS) {
-        setRestart({ phase: 'late' });
-        return;
-      }
       api.settings().then((view) => {
         if (!live) return;
         if (view.started === from) {
@@ -413,14 +415,16 @@ export function SettingsPage() {
         setRead({ view, failed: false });
         setRecorded((n) => n + 1);
         setRestart({ phase: 'back' });
+        readMe?.();
       }, again);
     }
     again();
     return () => {
       live = false;
       clearTimeout(timer);
+      clearTimeout(late);
     };
-  }, [api, restart]);
+  }, [api, readMe, restart]);
 
   useEffect(() => {
     let live = true;
