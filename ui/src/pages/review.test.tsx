@@ -151,7 +151,7 @@ test('the header shows the title, the pull request, its author, branches and hea
   open(bare.api);
   expect(await screen.findByRole('heading', { level: 1, name: 'acme/shop #128' })).toBeInTheDocument();
   expect(screen.getAllByText('acme/shop #128')).toHaveLength(3);
-  expect(screen.queryByText(/ by /)).toBeNull();
+  expect(screen.queryByText(/^acme\/shop #128 by /)).toBeNull();
   expect(screen.queryByRole('link', { name: 'Open on GitHub' })).toBeNull();
 });
 
@@ -279,4 +279,206 @@ test("why it approved or not is said with the paragraph's words and the merge ga
   element = await again(withApproval({ decision: 'not_decided', ...none }, null), 'No approval decided');
   expect(element).not.toHaveTextContent("merge gate's check");
   cleanup();
+});
+
+const FILE: OneReview['files'][number] = {
+  path: 'src/cart/price.ts', score: 74, notReviewed: null, source: null, reason: 'Changes the amount every order total is built from.',
+  category: null, blocks: 2, highest: { side: 'RIGHT', first: 38, last: 51 }, kept: null, raisedFrom: null,
+};
+const FINDING: OneReview['findings'][number] = {
+  kind: 'placed', severity: 'major', path: 'src/cart/price.ts', side: 'RIGHT', line: 42, body: 'Rounding each line before tax can move a total.',
+  thread: { state: 'open', by: null },
+};
+function withParts(parts: Partial<OneReview>): Over {
+  return { review: (run) => Promise.resolve({ ...REVIEW, run, ...parts }) };
+}
+const scores = (): HTMLElement => screen.getByRole('region', { name: 'Scores by file' });
+const findingsCard = (): HTMLElement => screen.getByRole('region', { name: 'Findings' });
+const rowOf = (path: string): HTMLElement => screen.getByText(path).closest('tr')!;
+
+test('scores by file show each score with its colour, its blocks and why', async () => {
+  vi.useFakeTimers();
+  const files: OneReview['files'] = [
+    FILE,
+    { ...FILE, path: 'src/cart/tax.ts', score: 58, blocks: 1, kept: 'earlier_run', reason: 'Reads the rounded amount.' },
+    { ...FILE, path: 'src/cart/price.test.ts', score: 12, source: 'whole_file', blocks: 1, highest: null, reason: 'Tests only.' },
+    { ...FILE, path: 'src/cart/whole.ts', score: 20, source: 'whole_file', blocks: 1, highest: null, reason: '' },
+    { ...FILE, path: '.github/workflows/ci.yml', score: 100, source: 'builtin_floor', blocks: 3, highest: null, reason: '' },
+    { ...FILE, path: 'src/cart/other.ts', score: 30, blocks: 1, kept: 'other_pull_request', category: 'calculation', reason: '' },
+    { ...FILE, path: 'src/cart/nocat.ts', score: 30, blocks: 1, kept: 'other_pull_request', category: null, reason: '' },
+    { ...FILE, path: 'src/cart/old.ts', score: 10, blocks: 1, highest: { side: 'LEFT', first: 40, last: 40 }, reason: 'Removed code.' },
+    { ...FILE, path: 'src/cart/blank.ts', score: 10, blocks: 1, reason: '' },
+    { ...FILE, path: 'src/cart/raised.ts', score: 80, blocks: 1, raisedFrom: 55, reason: 'Money.' },
+    { ...FILE, path: 'src/cart/none.ts', score: 5, blocks: 0, highest: null, reason: 'Nothing.' },
+    { ...FILE, path: 'src/cart/many.ts', score: 5, blocks: 3, highest: { side: 'LEFT', first: 3, last: 3 }, kept: 'earlier_run', reason: 'x.' },
+    { ...FILE, path: 'src/cart/single.ts', score: 5, blocks: 1, highest: { side: 'RIGHT', first: 8, last: 8 }, reason: 'x.' },
+  ];
+  const { api } = fakeApi(withParts({ files }));
+  open(api);
+  await act(() => vi.advanceTimersByTimeAsync(0));
+  const card = scores();
+  expect(within(card).getByRole('heading', { level: 2, name: 'Scores by file' })).toBeInTheDocument();
+  expect(within(card).getByText('Threshold 70%')).toBeInTheDocument();
+  expect(within(card).getAllByRole('columnheader').map((cell) => cell.textContent)).toEqual(['File', 'Score', 'Why']);
+  const price = rowOf('src/cart/price.ts');
+  expect(within(price).getByText('src/cart/price.ts')).toHaveClass('font-mono');
+  expect(within(price).getByText('2 blocks, the highest at lines 38 to 51')).toBeInTheDocument();
+  expect(within(price).getByText('74%')).toHaveClass('bg-bad-bg', 'text-bad');
+  expect(within(price).getByText('Changes the amount every order total is built from.')).toBeInTheDocument();
+  expect(within(rowOf('src/cart/tax.ts')).getByText('58%')).toHaveClass('bg-info-bg');
+  expect(within(rowOf('src/cart/tax.ts')).getByText('1 block, kept from an earlier review')).toBeInTheDocument();
+  const tests = rowOf('src/cart/price.test.ts');
+  expect(within(tests).getByText('12%')).toHaveClass('bg-ok-bg');
+  expect(within(tests).getByText('Whole file')).toBeInTheDocument();
+  expect(within(tests).getByText('Tests only.')).toBeInTheDocument();
+  expect(within(rowOf('src/cart/whole.ts')).getByText('Scored as a whole file.')).toBeInTheDocument();
+  expect(within(rowOf('.github/workflows/ci.yml')).getByText("It changes the reviewer's own file, code owners or CI.")).toBeInTheDocument();
+  const other = rowOf('src/cart/other.ts');
+  expect(within(other).getByText('1 block, scored on another pull request')).toBeInTheDocument();
+  expect(within(other).getByText('calculation')).toHaveClass('font-mono');
+  expect(other).toHaveTextContent('Scored on another pull request as calculation.');
+  expect(rowOf('src/cart/nocat.ts')).toHaveTextContent('Scored on another pull request.');
+  expect(within(rowOf('src/cart/old.ts')).getByText('1 block, at old line 40')).toBeInTheDocument();
+  expect(within(rowOf('src/cart/blank.ts')).getByText('No reason given.')).toHaveClass('text-muted');
+  expect(rowOf('src/cart/raised.ts')).toHaveTextContent('Money. 55% was given; a block this file lost had scored 80%.');
+  expect(rowOf('src/cart/none.ts').querySelector('.mt-1')).toBeNull();
+  expect(within(rowOf('src/cart/many.ts')).getByText('3 blocks, the highest at old line 3, kept from an earlier review')).toBeInTheDocument();
+  expect(within(rowOf('src/cart/single.ts')).getByText('1 block, at line 8')).toBeInTheDocument();
+});
+
+test('files not reviewed say why and what they counted as', async () => {
+  vi.useFakeTimers();
+  const base = { ...FILE, blocks: 0, highest: null, reason: '' };
+  const files: OneReview['files'] = [
+    { ...base, path: 'package-lock.json', score: 100, notReviewed: 'too_large' },
+    { ...base, path: 'secret.env', score: null, notReviewed: 'secret_file' },
+    { ...base, path: 'odd.txt', score: 100, notReviewed: 'later_reason' },
+    { ...base, path: 'a.bin', score: null, notReviewed: 'no_diff' },
+    { ...base, path: 'b.ts', score: null, notReviewed: 'over_batch_limit' },
+    { ...base, path: 'c.ts', score: null, notReviewed: 'batch_failed' },
+    { ...base, path: 'd.ts', score: 40, source: 'weird_source' },
+  ];
+  const { api } = fakeApi(withParts({ files }));
+  open(api);
+  await act(() => vi.advanceTimersByTimeAsync(0));
+  const lock = rowOf('package-lock.json');
+  expect(within(lock).getByText('Not reviewed')).toHaveClass('bg-subtle', 'text-muted');
+  expect(within(lock).queryByText('100%')).toBeNull();
+  expect(lock).toHaveTextContent('Its diff is too large to send to the model. Counted as 100%.');
+  expect(lock.querySelectorAll('td')[2]).toHaveClass('text-muted');
+  expect(rowOf('secret.env')).toHaveTextContent('It may hold secrets, so it is never sent to the model.');
+  expect(rowOf('secret.env')).not.toHaveTextContent('Counted');
+  expect(within(rowOf('odd.txt')).getByText('later_reason')).toHaveClass('font-mono');
+  expect(rowOf('odd.txt')).toHaveTextContent('later_reason Counted as 100%.');
+  expect(rowOf('a.bin')).toHaveTextContent('GitHub shows no diff for it, so it was not read.');
+  expect(rowOf('b.ts')).toHaveTextContent('It did not fit in the batches one review may send.');
+  expect(rowOf('c.ts')).toHaveTextContent('The model call that held it failed.');
+  expect(within(rowOf('d.ts')).getByText('weird_source')).toHaveClass('font-mono');
+  const sources: Array<[string, string]> = [
+    ['team_floor', 'A path the team marked as always needing a person.'],
+    ['team_file_invalid', "The repository's .visto-ai.yml cannot be used, so every file needs a person."],
+    ['hidden_characters', 'A changed line holds invisible or direction-changing characters.'],
+    ['not_scored', 'Not read, or left without a score.'],
+    ['rule_rename', 'Renamed within its folder, so it is scored by rule.'],
+    ['rule_asset', 'An image or a font, so it is scored by rule.'],
+  ];
+  expect(sources).toHaveLength(6);
+  const more = fakeApi(withParts({ files: sources.map(([source], i) => ({ ...base, path: `s${i}.ts`, score: 1, source })) }));
+  const second = open(more.api);
+  await act(() => vi.advanceTimersByTimeAsync(0));
+  sources.forEach(([, text], i) => expect(rowOf(`s${i}.ts`)).toHaveTextContent(text));
+  second.unmount();
+});
+
+test('findings show their severity, place, thread state and text', async () => {
+  vi.useFakeTimers();
+  const findings: OneReview['findings'] = [
+    FINDING,
+    { ...FINDING, severity: 'minor', path: 'src/cart/tax.ts', line: 18, body: 'The name `amount` no longer says which amount it is.', thread: { state: 'resolved', by: 'octo-dev' } },
+    { ...FINDING, severity: 'blocker', path: 'a.ts', side: 'LEFT', line: 3, body: 'Old.', thread: { state: 'resolved', by: null } },
+    { ...FINDING, path: 'b.ts', body: 'b', thread: { state: 'fixed', by: null } },
+    { ...FINDING, path: 'c.ts', body: 'c', thread: { state: 'answered', by: null } },
+    { ...FINDING, path: 'd.ts', body: 'd', thread: { state: 'no_thread', by: null } },
+    { ...FINDING, path: 'e.ts', body: 'e', thread: { state: 'not_posted', by: null } },
+    { ...FINDING, path: 'f.ts', body: 'f', kind: 'unplaced', thread: { state: 'none', by: null } },
+    { ...FINDING, path: 'g.ts', body: 'g', kind: 'unchanged', thread: { state: 'none', by: null } },
+    { ...FINDING, path: 'h.ts', body: 'h', kind: 'beyond_diff', thread: { state: 'none', by: null } },
+  ];
+  const { api } = fakeApi(withParts({ findings, counts: { blocker: 0, major: 1, minor: 1 } }));
+  open(api);
+  await act(() => vi.advanceTimersByTimeAsync(0));
+  const card = findingsCard();
+  expect(within(card).getByRole('heading', { level: 2, name: 'Findings' })).toBeInTheDocument();
+  expect(within(card).getByText('1 major, 1 minor')).toBeInTheDocument();
+  const first = within(card).getByText('Rounding each line before tax can move a total.').closest('div')!;
+  expect(within(first).getByText('Major')).toHaveClass('bg-bad-bg', 'text-bad');
+  expect(within(first).getByText('src/cart/price.ts:42')).toHaveClass('font-mono');
+  expect(within(first).getByText('Thread open')).toHaveClass('bg-warn-bg', 'ml-auto');
+  const minor = within(card).getByText('Minor').closest('div')!;
+  expect(within(minor).getByText('Minor')).toHaveClass('bg-subtle');
+  expect(within(minor).getByText('Resolved by octo-dev')).toHaveClass('bg-ok-bg');
+  expect(within(card).getByText('amount')).toHaveClass('font-mono');
+  const blocker = within(card).getByText('Blocker').closest('div')!;
+  expect(within(blocker).getByText('Blocker')).toHaveClass('bg-bad-bg');
+  expect(blocker).toHaveTextContent('a.ts:3 (old file)');
+  expect(within(blocker).getByText('Resolved')).toHaveClass('bg-ok-bg');
+  expect(within(card).getByText('Fixed in a later review')).toHaveClass('bg-ok-bg');
+  expect(within(card).getByText('Answered in its thread')).toHaveClass('bg-info-bg');
+  expect(within(card).getByText('No thread recorded')).toHaveClass('bg-subtle');
+  expect(within(card).getByText('Not posted')).toHaveClass('bg-subtle');
+  expect(within(card).getByText('Not on the diff')).toHaveClass('bg-subtle');
+  expect(within(card).getByText('On unchanged code')).toHaveClass('bg-subtle');
+  expect(within(card).getByText('Beyond the diff')).toHaveClass('bg-subtle');
+  expect(within(card).getByText('Rounding each line before tax can move a total.')).toHaveClass('whitespace-pre-line');
+});
+
+test('earlier threads and dropped duplicates are counted under the findings', async () => {
+  vi.useFakeTimers();
+  const foot = (): HTMLElement | null => findingsCard().querySelector('.border-t');
+  const first = fakeApi(withParts({ earlier: { cleared: 2, open: 1, unjudged: 0, discussed: 1 } }));
+  const one = open(first.api);
+  await act(() => vi.advanceTimersByTimeAsync(0));
+  expect(foot()).toHaveTextContent('Earlier threads: 2 cleared, 1 still open');
+  expect(foot()).not.toHaveTextContent('could not be judged');
+  expect(within(foot()!).getByText('2 cleared').tagName).toBe('STRONG');
+  expect(within(foot()!).getByText('1 finding dropped as already discussed')).toBeInTheDocument();
+  one.unmount();
+  const second = fakeApi(withParts({ earlier: { cleared: 0, open: 0, unjudged: 2, discussed: 3 } }));
+  const two = open(second.api);
+  await act(() => vi.advanceTimersByTimeAsync(0));
+  expect(foot()).toHaveTextContent('Earlier threads: 0 cleared, 0 still open, 2 could not be judged');
+  expect(within(foot()!).getByText('3 findings dropped as already discussed')).toBeInTheDocument();
+  two.unmount();
+  const third = fakeApi(withParts({ earlier: { cleared: 0, open: 0, unjudged: 0, discussed: 0 } }));
+  open(third.api);
+  await act(() => vi.advanceTimersByTimeAsync(0));
+  expect(foot()).toBeNull();
+});
+
+test('empty and cut lists say so', async () => {
+  vi.useFakeTimers();
+  const empty = fakeApi(withParts({ counts: { blocker: 0, major: 0, minor: 0 } }));
+  const one = open(empty.api);
+  await act(() => vi.advanceTimersByTimeAsync(0));
+  expect(within(scores()).getByText('No file was scored.')).toBeInTheDocument();
+  expect(within(findingsCard()).getByText('No findings.')).toHaveClass('text-sm', 'text-muted');
+  expect(within(findingsCard()).getByText('None')).toBeInTheDocument();
+  one.unmount();
+  const failed = fakeApi(withParts({ failure: { stage: 'model', code: null }, approval: { decision: 'failed', code: null, text: null }, posting: 'failed', threshold: null }));
+  const two = open(failed.api);
+  await act(() => vi.advanceTimersByTimeAsync(0));
+  expect(within(scores()).getByText('The review did not finish, so no file was scored.')).toBeInTheDocument();
+  expect(within(findingsCard()).getByText('The review did not finish.')).toBeInTheDocument();
+  expect(within(scores()).queryByText(/Threshold/)).toBeNull();
+  two.unmount();
+  const cut = fakeApi(withParts({ files: [FILE], filesCut: 3, findings: [FINDING], findingsCut: 1 }));
+  const three = open(cut.api);
+  await act(() => vi.advanceTimersByTimeAsync(0));
+  expect(within(scores()).getByText('3 more files are not shown.')).toHaveClass('px-5', 'py-3', 'text-[13px]', 'text-muted');
+  expect(within(findingsCard()).getByText('1 more finding is not shown.')).toHaveClass('text-[13px]', 'text-muted');
+  three.unmount();
+  const one1 = fakeApi(withParts({ files: [FILE], filesCut: 1 }));
+  open(one1.api);
+  await act(() => vi.advanceTimersByTimeAsync(0));
+  expect(within(scores()).getByText('1 more file is not shown.')).toBeInTheDocument();
 });

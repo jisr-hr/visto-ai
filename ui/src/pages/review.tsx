@@ -4,15 +4,18 @@
 import { Fragment, useEffect, useId, useState } from 'react';
 import type { ReactElement, ReactNode } from 'react';
 import { usePoll } from '../api.ts';
-import type { GateShown, OneReview } from '../api-types.ts';
+import type { GateShown, OneReview, ReviewFile, ReviewFinding } from '../api-types.ts';
 import { PageHeader } from '../components/layout.tsx';
 import { AlertIcon } from '../components/icons.tsx';
+import { Badge } from '../components/ui/badge.tsx';
+import type { BadgeTone } from '../components/ui/badge.tsx';
 import { Button } from '../components/ui/button.tsx';
 import { Select } from '../components/ui/select.tsx';
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../components/ui/table.tsx';
 import { useApp } from '../context.tsx';
 import { ago, codeSpans, plural, sentence } from '../format.ts';
 import { Link, navigate } from '../router.tsx';
-import { MONO } from './activity.tsx';
+import { CARD, CARD_TITLE, MONO, SCORE, scoreTone } from './activity.tsx';
 
 const LARGEST_RUN = 2147483647;
 const RUN_DIGITS = /^[1-9][0-9]{0,9}$/;
@@ -261,6 +264,230 @@ function Header({ review, selector }: { review: OneReview; selector: ReactNode }
   );
 }
 
+const CARD_HEADER = 'flex flex-wrap items-baseline justify-between gap-3 px-5 pb-3 pt-[18px]';
+
+/** `line <a>` or `lines <a> to <b>`, with `old ` before it on the side LEFT. */
+function linesOf(highest: NonNullable<ReviewFile['highest']>): string {
+  const old = highest.side === 'LEFT' ? 'old ' : '';
+  return highest.first === highest.last ? `${old}line ${highest.first}` : `${old}lines ${highest.first} to ${highest.last}`;
+}
+
+/** The sub-line under a file's path (rule 2); null when there is none. */
+function subLineOf(file: ReviewFile): string | null {
+  if (file.notReviewed !== null) return null;
+  if (file.source !== null) return 'Whole file';
+  const kept =
+    file.kept === 'earlier_run' ? ', kept from an earlier review' : file.kept === 'other_pull_request' ? ', scored on another pull request' : '';
+  if (file.highest === null) return file.blocks === 0 ? null : plural(file.blocks, 'block', 'blocks');
+  if (file.blocks === 1) return `1 block${kept === '' ? `, at ${linesOf(file.highest)}` : kept}`;
+  return `${file.blocks} blocks, the highest at ${linesOf(file.highest)}${kept}`;
+}
+
+const NOT_REVIEWED: ReadonlyMap<string, string> = new Map([
+  ['no_diff', 'GitHub shows no diff for it, so it was not read.'],
+  ['too_large', 'Its diff is too large to send to the model.'],
+  ['over_batch_limit', 'It did not fit in the batches one review may send.'],
+  ['batch_failed', 'The model call that held it failed.'],
+  ['secret_file', 'It may hold secrets, so it is never sent to the model.'],
+]);
+
+const SOURCES: ReadonlyMap<string, string> = new Map([
+  ['builtin_floor', "It changes the reviewer's own file, code owners or CI."],
+  ['team_floor', 'A path the team marked as always needing a person.'],
+  ['team_file_invalid', "The repository's .visto-ai.yml cannot be used, so every file needs a person."],
+  ['hidden_characters', 'A changed line holds invisible or direction-changing characters.'],
+  ['not_scored', 'Not read, or left without a score.'],
+  ['rule_rename', 'Renamed within its folder, so it is scored by rule.'],
+  ['rule_asset', 'An image or a font, so it is scored by rule.'],
+]);
+
+/** The why of a file (rule 2 and the table of texts) and whether it is shown muted. */
+function whyOf(file: ReviewFile): { muted: boolean; body: ReactNode } {
+  if (file.notReviewed !== null) {
+    const known = NOT_REVIEWED.get(file.notReviewed);
+    return {
+      muted: true,
+      body: (
+        <>
+          {known ?? mono(file.notReviewed)}
+          {file.score === null ? null : ` Counted as ${file.score}%.`}
+        </>
+      ),
+    };
+  }
+  if (file.source !== null) {
+    if (file.source === 'whole_file') return { muted: false, body: file.reason === '' ? 'Scored as a whole file.' : file.reason };
+    return { muted: false, body: SOURCES.get(file.source) ?? mono(file.source) };
+  }
+  let body: ReactNode;
+  if (file.kept === 'other_pull_request') {
+    body = file.category === null ? 'Scored on another pull request.' : <>{'Scored on another pull request as '}{mono(file.category)}{'.'}</>;
+  } else {
+    body = file.reason === '' ? 'No reason given.' : file.reason;
+  }
+  const empty = file.kept !== 'other_pull_request' && file.reason === '';
+  return {
+    muted: empty,
+    body: (
+      <>
+        {body}
+        {file.raisedFrom === null || file.score === null ? null : ` ${file.raisedFrom}% was given; a block this file lost had scored ${file.score}%.`}
+      </>
+    ),
+  };
+}
+
+function FileRow({ file, threshold }: { file: ReviewFile; threshold: number | null }): ReactElement {
+  const sub = subLineOf(file);
+  const why = whyOf(file);
+  let score: ReactNode;
+  if (file.notReviewed !== null) score = <Badge tone="muted">Not reviewed</Badge>;
+  else if (file.score === null) score = <span className="text-muted">None</span>;
+  else score = <span className={`${SCORE} ${scoreTone(file.score, threshold)}`}>{`${file.score}%`}</span>;
+  return (
+    <TableRow>
+      <TableCell className="align-top">
+        <span className={MONO}>{file.path}</span>
+        {sub === null ? null : <div className="mt-1 text-xs text-muted">{sub}</div>}
+      </TableCell>
+      <TableCell className="align-top">{score}</TableCell>
+      <TableCell className={`align-top text-[13px] ${why.muted ? 'text-muted' : ''}`}>{why.body}</TableCell>
+    </TableRow>
+  );
+}
+
+function ScoresCard({ review }: { review: OneReview }): ReactElement {
+  const id = useId();
+  const failed = review.failure !== null;
+  return (
+    <section aria-labelledby={id} className={CARD}>
+      <div className={CARD_HEADER}>
+        <h2 id={id} className={CARD_TITLE}>
+          Scores by file
+        </h2>
+        {review.threshold === null ? null : <span className="text-[13px] text-muted">{`Threshold ${review.threshold}%`}</span>}
+      </div>
+      <div className="overflow-x-auto">
+        <Table>
+          <TableHeader>
+            <tr>
+              <TableHead scope="col">File</TableHead>
+              <TableHead scope="col">Score</TableHead>
+              <TableHead scope="col">Why</TableHead>
+            </tr>
+          </TableHeader>
+          <TableBody>
+            {review.files.length === 0 ? (
+              <TableRow>
+                <TableCell colSpan={3} className="align-top text-muted">
+                  {failed ? 'The review did not finish, so no file was scored.' : 'No file was scored.'}
+                </TableCell>
+              </TableRow>
+            ) : (
+              review.files.map((file, i) => <FileRow key={`${file.path} ${i}`} file={file} threshold={review.threshold} />)
+            )}
+          </TableBody>
+        </Table>
+      </div>
+      {review.filesCut > 0 ? (
+        <p className="m-0 px-5 py-3 text-[13px] text-muted">{`${plural(review.filesCut, 'more file is', 'more files are')} not shown.`}</p>
+      ) : null}
+    </section>
+  );
+}
+
+const SEVERITY: Readonly<Record<ReviewFinding['severity'], { tone: BadgeTone; label: string }>> = {
+  blocker: { tone: 'bad', label: 'Blocker' },
+  major: { tone: 'bad', label: 'Major' },
+  minor: { tone: 'muted', label: 'Minor' },
+};
+
+function threadOf(finding: ReviewFinding): { tone: BadgeTone; label: string } {
+  const { state, by } = finding.thread;
+  switch (state) {
+    case 'open':
+      return { tone: 'warn', label: 'Thread open' };
+    case 'resolved':
+      return { tone: 'ok', label: by === null ? 'Resolved' : `Resolved by ${by}` };
+    case 'fixed':
+      return { tone: 'ok', label: 'Fixed in a later review' };
+    case 'answered':
+      return { tone: 'info', label: 'Answered in its thread' };
+    case 'no_thread':
+      return { tone: 'muted', label: 'No thread recorded' };
+    case 'not_posted':
+      return { tone: 'muted', label: 'Not posted' };
+    default:
+      return {
+        tone: 'muted',
+        label: finding.kind === 'unchanged' ? 'On unchanged code' : finding.kind === 'beyond_diff' ? 'Beyond the diff' : 'Not on the diff',
+      };
+  }
+}
+
+function FindingItem({ finding }: { finding: ReviewFinding }): ReactElement {
+  const severity = SEVERITY[finding.severity];
+  const thread = threadOf(finding);
+  return (
+    <div className="flex flex-col gap-2 rounded-[10px] border border-border px-4 py-3.5">
+      <div className="flex flex-wrap items-center gap-2">
+        <Badge tone={severity.tone}>{severity.label}</Badge>
+        <span>
+          {mono(`${finding.path}:${finding.line}`)}
+          {finding.side === 'LEFT' ? ' (old file)' : null}
+        </span>
+        <Badge tone={thread.tone} className="ml-auto">
+          {thread.label}
+        </Badge>
+      </div>
+      <p className="m-0 whitespace-pre-line text-sm leading-normal">
+        <Spans text={finding.body} />
+      </p>
+    </div>
+  );
+}
+
+function FindingsCard({ review }: { review: OneReview }): ReactElement {
+  const id = useId();
+  const { counts, earlier } = review;
+  const named: string[] = [];
+  if (counts.blocker > 0) named.push(`${counts.blocker} blocker`);
+  if (counts.major > 0) named.push(`${counts.major} major`);
+  if (counts.minor > 0) named.push(`${counts.minor} minor`);
+  const threads = earlier.cleared !== 0 || earlier.open !== 0 || earlier.unjudged !== 0;
+  return (
+    <section aria-labelledby={id} className={`${CARD} flex flex-col gap-3.5 px-5 py-[18px]`}>
+      <div className="flex flex-wrap items-baseline justify-between gap-3">
+        <h2 id={id} className={CARD_TITLE}>
+          Findings
+        </h2>
+        <span className="text-[13px] text-muted">{named.length === 0 ? 'None' : named.join(', ')}</span>
+      </div>
+      {review.findings.length === 0 ? (
+        <p className="m-0 text-sm text-muted">{review.failure !== null ? 'The review did not finish.' : 'No findings.'}</p>
+      ) : (
+        review.findings.map((finding, i) => <FindingItem key={i} finding={finding} />)
+      )}
+      {review.findingsCut > 0 ? (
+        <p className="m-0 text-[13px] text-muted">{`${plural(review.findingsCut, 'more finding is', 'more findings are')} not shown.`}</p>
+      ) : null}
+      {threads || earlier.discussed > 0 ? (
+        <div className="flex flex-wrap gap-x-5 gap-y-2 border-t border-border pt-3 text-[13px] text-muted">
+          {threads ? (
+            <span>
+              {'Earlier threads: '}
+              <strong className="font-semibold text-text">{`${earlier.cleared} cleared`}</strong>
+              {`, ${earlier.open} still open`}
+              {earlier.unjudged > 0 ? `, ${earlier.unjudged} could not be judged` : null}
+            </span>
+          ) : null}
+          {earlier.discussed > 0 ? <span>{`${plural(earlier.discussed, 'finding', 'findings')} dropped as already discussed`}</span> : null}
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
 export function ReviewPage({ run }: { run: number }): ReactElement {
   const { api } = useApp();
   const [tries, setTries] = useState(0);
@@ -315,6 +542,13 @@ export function ReviewPage({ run }: { run: number }): ReactElement {
       <Breadcrumb last={`${pull.repository} #${pull.number}`} />
       <Header review={data} selector={own === null ? null : <Selector review={data} list={own} />} />
       <ApprovalBanner review={data} />
+      <div className="flex flex-wrap items-start gap-5">
+        <div className="flex min-w-0 grow-[2] basis-[560px] flex-col gap-5">
+          <ScoresCard review={data} />
+          <FindingsCard review={data} />
+        </div>
+        <div className="flex min-w-0 grow basis-[300px] flex-col gap-5"></div>
+      </div>
     </>
   );
 }
