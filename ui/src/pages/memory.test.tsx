@@ -101,6 +101,14 @@ test('the records show their kind, text, place, source, dates and state', async 
   expect(screen.getByText(/Nothing learned can lower a score\.$/)).toBeInTheDocument();
 });
 
+test('a record whose times the server could not write reads Unknown when made and Never when it expires', async () => {
+  const { api } = fakeApi({ memory: () => Promise.resolve(view({ records: [record({ id: 9, kind: 'human_signal', text: 'Rounds after tax', createdAt: null, expiresAt: null })], total: 1 })) });
+  open(api);
+  const row = within(await screen.findByRole('switch').then((cell) => cell.closest('tr') as HTMLElement));
+  expect(row.getByText('Unknown')).toBeInTheDocument();
+  expect(row.getByText('Never')).toBeInTheDocument();
+});
+
 test('a person commenting with no words is said, and a login is shown as text', async () => {
   const { api } = fakeApi({ memory: () => Promise.resolve(view({ records: [record({ id: 9, kind: 'human_signal', text: '', by: '<b>x</b>' })], total: 1 })) });
   open(api);

@@ -97,8 +97,9 @@ function RecordRow({ record, admin, busy, onSwitch }: { record: MemoryRecordShow
           fromOf(record)
         )}
       </TableCell>
-      <TableCell className={DATE}>{shortDay(record.createdAt.slice(0, 10))}</TableCell>
-      <TableCell className={DATE}>{shortDay(record.expiresAt.slice(0, 10))}</TableCell>
+      {/* A time the server could not write (one an operator set to infinity) is said, never a failure of the page. */}
+      <TableCell className={DATE}>{record.createdAt === null ? 'Unknown' : shortDay(record.createdAt.slice(0, 10))}</TableCell>
+      <TableCell className={DATE}>{record.expiresAt === null ? 'Never' : shortDay(record.expiresAt.slice(0, 10))}</TableCell>
       <TableCell>
         <div className="flex items-center gap-2.5">
           <Switch

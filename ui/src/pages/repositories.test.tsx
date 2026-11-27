@@ -36,7 +36,7 @@ const row = (threshold: number, current: boolean, blocks: [number, number], file
 
 function quality(over: Partial<Quality> = {}): Quality {
   return {
-    repository: 'acme/shop', window: 30, threshold: 70, pullRequests: 127, unreadable: 0, cut: { pulls: false, comments: false, runs: false },
+    repository: 'acme/shop', window: 30, threshold: 70, closed: 127, pullRequests: 127, unreadable: 0, cut: { pulls: false, comments: false, runs: false },
     rows: [
       row(20, false, [0, 74], [0, 71], [8, 127], [5753, 9412]),
       row(70, true, [3, 74], [5, 71], [52, 127], [1694, 9412]),
@@ -116,7 +116,7 @@ test('a tab and the window choose what is read, and ?repo= opens that repository
   expect(calls.filter(([name]) => name === 'quality')).toEqual([['quality', 'acme/web', 30]]);
 
   await user.click(within(tabs).getByRole('tab', { name: 'acme/shop' }));
-  expect(window.location.search).toBe('?repo=acme/shop');
+  expect(window.location.search).toBe('?repo=acme%2Fshop');
   expect(within(tabs).getByRole('tab', { name: 'acme/shop' })).toHaveAttribute('aria-selected', 'true');
   expect(calls.filter(([name]) => name === 'quality')).toEqual([['quality', 'acme/web', 30], ['quality', 'acme/shop', 30]]);
 
@@ -152,7 +152,10 @@ test('the blocks stepped in on and the feedback are listed, and their absence sa
   expect(within(feedback).getByText('86%')).toBeInTheDocument();
   expect(within(feedback).getByText('helpful, 31 of 36 answers')).toBeInTheDocument();
   expect(within(feedback).getByText('Reasons given when not helpful')).toBeInTheDocument();
-  expect(within(feedback).getByText('Repeats a settled thread (3), too long (1)')).toBeInTheDocument();
+  // Each reason is a person's text, in a <bdi> of its own.
+  const reasons = within(feedback).getByText('Repeats a settled thread').parentElement!;
+  expect(reasons.textContent).toBe('Repeats a settled thread (3), too long (1)');
+  expect([...reasons.querySelectorAll('bdi')].map((one) => one.textContent)).toEqual(['Repeats a settled thread', 'too long']);
 
   answer = ready({ feedback: { helpful: 1, notHelpful: 0, reasons: [] } });
   await user.selectOptions(screen.getByRole('combobox', { name: 'Window' }), 'Last 90 days');
@@ -250,11 +253,28 @@ test('too few labels, a cut, unreadable runs and no repository are said', async 
   expect(screen.getByText('Some comments or runs were past what one measure reads, and were left out.')).toBeInTheDocument();
   expect(screen.getByText('1 pull request left out: their stored scores could not be read.')).toBeInTheDocument();
 
-  answer = ready({ pullRequests: 0, unreadable: 3, rows: [row(70, true, [0, 0], [0, 0], [0, 0], [0, 0])] });
+  // Closed, but none measured: the unreadable ones are said, and not that none closed.
+  answer = ready({ closed: 3, pullRequests: 0, unreadable: 3, rows: [row(70, true, [0, 0], [0, 0], [0, 0], [0, 0])] });
   await user.selectOptions(screen.getByRole('combobox', { name: 'Window' }), 'Last 90 days');
-  expect(await screen.findByText('No pull request closed in this window.')).toBeInTheDocument();
-  expect(screen.getByText('3 pull requests left out: their stored scores could not be read.')).toBeInTheDocument();
+  expect(await screen.findByText('3 pull requests left out: their stored scores could not be read.')).toBeInTheDocument();
+  expect(screen.queryByText('No pull request closed in this window.')).toBeNull();
   expect(screen.queryByText(/newest 300/)).toBeNull();
+
+  answer = ready({ closed: 0, pullRequests: 0, rows: [row(70, true, [0, 0], [0, 0], [0, 0], [0, 0])] });
+  await user.selectOptions(screen.getByRole('combobox', { name: 'Window' }), 'Since install');
+  expect(await screen.findByText('No pull request closed in this window.')).toBeInTheDocument();
+});
+
+test('two blocks of one file of one pull request are both listed, each its own row', async () => {
+  const errors = vi.spyOn(console, 'error');
+  const twice = { path: 'src/cart/discount.ts', number: 119, score: 55 };
+  const { api } = fakeApi({ repositories: () => Promise.resolve(LIST), quality: () => Promise.resolve(ready({ stepped: [twice, { ...twice, score: 48 }, twice] })) });
+  open(api);
+  const blocks = (await screen.findByRole('heading', { level: 2, name: 'Blocks a person stepped in on, under the threshold' })).closest('[data-slot="card"]') as HTMLElement;
+  expect(within(blocks).getAllByText('src/cart/discount.ts')).toHaveLength(3);
+  expect(within(blocks).getAllByText('scored 55%')).toHaveLength(2);
+  expect(errors.mock.calls.some((call) => String(call[0]).includes('same key'))).toBe(false);
+  errors.mockRestore();
 });
 
 test('with no repository reviewed, it says so and reads no quality', async () => {

@@ -2,7 +2,7 @@
 // to 29): one tab for each repository reviewed, and for the one shown, at a window, the live score quality: the headline numbers at
 // the repository's threshold, the numbers at each threshold, the blocks a person stepped in on, and the reviewers' feedback. The
 // list is read once, the quality once for each repository and window, and again every few seconds while the server measures it.
-import { useEffect, useState } from 'react';
+import { Fragment, useEffect, useState } from 'react';
 import type { ReactNode } from 'react';
 import { usePoll } from '../api.ts';
 import type { Measure, Quality, QualityAnswer, QualityRow, QualityWindow } from '../api-types.ts';
@@ -90,12 +90,12 @@ function Headline({ quality }: { quality: Quality }) {
 }
 
 function Notes({ quality }: { quality: Quality }) {
-  const { cut, unreadable, pullRequests } = quality;
+  const { cut, unreadable, closed } = quality;
   const lines: string[] = [];
   if (cut.pulls) lines.push(`Measured on the newest ${PULLS_READ} pull requests closed in this window.`);
   if (cut.comments || cut.runs) lines.push('Some comments or runs were past what one measure reads, and were left out.');
   if (unreadable > 0) lines.push(`${plural(unreadable, 'pull request', 'pull requests')} left out: their stored scores could not be read.`);
-  if (pullRequests === 0) lines.push('No pull request closed in this window.');
+  if (closed === 0) lines.push('No pull request closed in this window.');
   if (lines.length === 0) return null;
   return (
     <div className="flex flex-col gap-1">
@@ -177,8 +177,9 @@ function Stepped({ quality }: { quality: Quality }) {
         <span className="text-sm text-muted">None in this window.</span>
       ) : (
         <div className="flex flex-col gap-2.5 text-sm">
-          {quality.stepped.map((block) => (
-            <div key={`${block.number} ${block.path}`} className="flex flex-wrap justify-between gap-2.5">
+          {quality.stepped.map((block, i) => (
+            // A file of a pull request can hold two such blocks, or one labelled at two heads: the place in the list keeps them apart.
+            <div key={`${i} ${block.number} ${block.path}`} className="flex flex-wrap justify-between gap-2.5">
               <span>
                 <span className={MONO}>{block.path}</span> <Muted>{`#${block.number}`}</Muted>
               </span>
@@ -210,7 +211,18 @@ function Feedback({ quality }: { quality: Quality }) {
           </div>
           <div className="flex flex-col gap-1.5 text-[13px]">
             <Muted>Reasons given when not helpful</Muted>
-            <span>{reasons.length === 0 ? 'None given.' : sentence(reasons.map((one) => `${one.reason} (${one.count})`).join(', '))}</span>
+            {/* Each reason is a person's text, in a <bdi> of its own, as on the page of one review. */}
+            <span>
+              {reasons.length === 0
+                ? 'None given.'
+                : reasons.map((one, i) => (
+                    <Fragment key={i}>
+                      {i === 0 ? null : ', '}
+                      <bdi>{i === 0 ? sentence(one.reason) : one.reason}</bdi>
+                      {` (${one.count})`}
+                    </Fragment>
+                  ))}
+            </span>
           </div>
         </>
       )}
@@ -316,7 +328,7 @@ export function RepositoriesPage() {
                 role="tab"
                 aria-selected={name === repository}
                 className={`${TAB}${name === repository ? ' border-accent text-text' : ''}`}
-                onClick={() => navigate(`/ui/repositories?repo=${name}`, true)}
+                onClick={() => navigate(`/ui/repositories?repo=${encodeURIComponent(name)}`, true)}
               >
                 {name}
               </button>

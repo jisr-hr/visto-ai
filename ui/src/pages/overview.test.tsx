@@ -367,6 +367,17 @@ test('alerts list the open ones then the recent ones, and say when there is none
   expect(classes(screen.getByText('No alert in the last 7 days.'))).toEqual(words('text-sm text-muted'));
   second.unmount();
 
+  // The answer holds the 50 newest open alerts: at 50 the badge says there may be more.
+  const fifty: Health = { ...HEALTH, open: Array.from({ length: 50 }, (_, i) => alert(100 + i, 'mcp_error', { server: `server-${i}`, reason: 'mcp_timeout' }, true)) };
+  const { api: many } = fakeApi({ overview: () => Promise.resolve(OVERVIEW), health: () => Promise.resolve(fifty) });
+  const third = open(many);
+  expect(classes(await screen.findByText('50+ open'))).toEqual(words(badge, tones.bad));
+  third.unmount();
+  const { api: almost } = fakeApi({ overview: () => Promise.resolve(OVERVIEW), health: () => Promise.resolve({ ...fifty, open: fifty.open.slice(1) }) });
+  const fourth = open(almost);
+  expect(await screen.findByText('49 open')).toBeInTheDocument();
+  fourth.unmount();
+
   const { api: failed } = fakeApi({ overview: () => Promise.resolve(OVERVIEW), health: () => Promise.reject(new RequestFailed(500, 'internal_error')) });
   open(failed);
   expect(await screen.findByText('The alerts could not be read.')).toBeInTheDocument();
@@ -393,7 +404,7 @@ test('score quality by repository shows each number with its count, and too few 
     'Repository', 'Threshold', 'Safety (lower is better)', 'Benefit', 'Focus', 'Reverts', 'Automatic approval',
   ]);
   expect(within(section).getByRole('link', { name: 'All numbers' })).toHaveAttribute('href', '/ui/repositories');
-  expect(screen.getByRole('link', { name: 'acme/shop' })).toHaveAttribute('href', '/ui/repositories?repo=acme/shop');
+  expect(screen.getByRole('link', { name: 'acme/shop' })).toHaveAttribute('href', '/ui/repositories?repo=acme%2Fshop');
 
   const shop = cellsOf('acme/shop');
   expect(shop.map((cell) => cell.textContent)).toEqual(['acme/shop', '70%', '4% 3 of 74 blocks', '41% 52 of 127', '18% of lines', '2 (0 approved)', 'On, strict, 5% audit']);

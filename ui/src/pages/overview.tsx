@@ -27,6 +27,8 @@ export const HEALTH_MS = 15000;
 export const ENOUGH_LABELS = 10;
 /** The recent alerts shown after the open ones. */
 const RECENT_SHOWN = 5;
+/** The open alerts the server answers at most: at this many there may be more. */
+const OPEN_SHOWN = 50;
 
 const PERIODS: readonly SegmentedOption<`${WindowDays}`>[] = [
   { value: '7', label: '7 days' },
@@ -171,7 +173,11 @@ function Alerts({ health, failed }: { health: Health | null; failed: boolean }) 
     <Card className="flex min-w-0 grow basis-[320px] flex-col gap-3.5 p-5">
       <div className="flex items-center justify-between gap-3">
         <h2 className={CARD_TITLE}>Alerts</h2>
-        {health === null ? null : health.open.length > 0 ? <Badge tone="bad">{`${health.open.length} open`}</Badge> : <Badge tone="muted">None open</Badge>}
+        {health === null ? null : health.open.length > 0 ? (
+          <Badge tone="bad">{health.open.length >= OPEN_SHOWN ? `${OPEN_SHOWN}+ open` : `${health.open.length} open`}</Badge>
+        ) : (
+          <Badge tone="muted">None open</Badge>
+        )}
       </div>
       {health === null ? (
         failed ? <span className="text-sm text-muted">The alerts could not be read.</span> : null
@@ -212,7 +218,7 @@ function QualityRow({ row }: { row: OverviewQuality }) {
   return (
     <TableRow hover>
       <TableCell>
-        <Link to={`/ui/repositories?repo=${row.repository}`} className="font-medium">
+        <Link to={`/ui/repositories?repo=${encodeURIComponent(row.repository)}`} className="font-medium">
           {row.repository}
         </Link>
       </TableCell>
