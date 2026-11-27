@@ -72,10 +72,11 @@ Each is reversible and listed for the owner.
 
 - **In the database, editable in the UI:** `dryRun`, `learning`, `limits`, the model's non-secret fields (endpoint, model, fallbacks, effort, extra body and headers that are not secret references, prices, time limit, how the answer is asked for), the second scorer's non-secret fields and its threshold, and the repository defaults and every override (branches, ignored authors, "Reviewed on every push", how a new commit is reviewed, threshold, inline notes, the merge gate, automatic approval, the thread rule, the audit share).
 - **In `config.yml` only, shown read-only:** what the service needs before it reaches the database or that holds a secret by reference: `app` (id, key, webhook secret, client id and secret), `database`, `server`, `alerts`, `auditKey`, `extensions`, `mcpServers`, and `ui` (who may open it). Secret values are never shown; the UI shows each secret's variable name and whether it is set.
+- **As built:** the second scorer is on while one of its keys is in the database; its key stays in `config.yml`. An override key that names no repository (not `<owner>/<name>`) is not copied.
 
 ### 4.2 One validation
 
-A save is the whole set of editable settings, merged with the file-only part, checked by the same schema and the same checks across fields that check the file today (an enabled gate names a branch, the audit key is set when approval draws, and the rest). A save that fails is refused with each issue next to its field, and nothing is stored. The service never runs on settings it would refuse at start.
+A save is the whole set of editable settings, merged with the file-only part, checked by the same schema and the same checks across fields that check the file today (an enabled gate names a branch, the audit key is set when approval draws, and the rest). A save that fails is refused with each issue next to its field, and nothing is stored. The service never runs on settings it would refuse at start. **As built:** a save is a list of changes against the version the page read; a save after another is refused and sent again; both the settings saved and those in force until the next start are checked.
 
 ### 4.3 Keeping the file and the database in sync (O-UI-3)
 
@@ -85,8 +86,9 @@ At each start, for each editable setting, the service compares the file's value 
 - **Not changed in the file:** the database keeps its value, so a change made in the UI survives a restart.
 - **A file that fails validation** stops the start, as today, and nothing is copied.
 - **The first start** with no stored settings copies every setting from the file.
+- **As built, while the UI is off:** each start copies the file's editable part whole, every difference recorded as made by `config.yml`.
 
-Each value on the Settings page says where it came from ("From `config.yml` at the start of <time>", or "Changed in the UI by <login>, <time>"). The page gives the current settings as a `config.yml` section to copy back into the file. The UI never writes the file.
+Each value on the Settings page says where it came from ("From `config.yml` at the start of <time>", or "Changed in the UI by <login>, <time>"). The page gives the current settings as a `config.yml` section to copy back into the file. The UI never writes the file. **As built:** the sync runs after the migrations, before anything reads a setting, in one transaction; a start refused for a clash copies nothing, and says which settings came from the UI.
 
 ### 4.4 The record of changes
 
@@ -97,7 +99,7 @@ Every change, from the UI or from the file at a start, is a row: when, who (`con
 - **At the next review**, with no restart: the repository settings, the limits read for each review (tokens per call, batches per review, the daily spend limit), and the model's and scorer's fields read at each call.
 - **At the next start:** settings the service reads once when it starts (dry run, learning, the queue's concurrency, the model's endpoint and time limit, how the answer is asked for, the second scorer's endpoint). The UI marks them, and after such a change shows "Takes effect when the service restarts" until it has.
 
-A review already running keeps the settings it started with.
+A review already running keeps the settings it started with. **As built:** whether the second scorer is on is read at the next start too; a merge gate switched on applies at each pull request's next event, and its sweep of checks and the app's permission checks (the gate's, and automatic approval's Administration read) at the next start.
 
 ## 5. The API, in outline
 
@@ -111,7 +113,7 @@ All under `/api/`, all answers JSON, all behind a session but the sign-in routes
 - `GET /api/settings`, `PUT /api/settings`, `GET /api/settings/changes`, `GET /api/settings/export`.
 - `GET /api/health` (dependency statuses and open alerts).
 
-The plans fix the shapes. Every list is paged and bounded. `GET /api/activity` also lists the withdrawals waiting to try again; `GET /api/reviews` reads the last 30 days, 25 a page; `GET /api/me` holds the repositories the service has seen. `GET /api/reviews/{run}` reads one run with its threads, approvals, gate state at its head and feedback; `GET /api/pulls/{owner}/{repo}/{number}/reviews` lists the newest 200 runs of a pull request.
+The plans fix the shapes. **As built:** `GET /api/settings/changes` pages 50 at a time; `PUT /api/settings` answers 409 when another save came first and 422 with each issue. Every list is paged and bounded. `GET /api/activity` also lists the withdrawals waiting to try again; `GET /api/reviews` reads the last 30 days, 25 a page; `GET /api/me` holds the repositories the service has seen. `GET /api/reviews/{run}` reads one run with its threads, approvals, gate state at its head and feedback; `GET /api/pulls/{owner}/{repo}/{number}/reviews` lists the newest 200 runs of a pull request.
 
 ## 6. Testing
 
@@ -122,7 +124,7 @@ The plans fix the shapes. Every list is paged and bounded. `GET /api/activity` a
 ## 7. The cut into plans
 
 1. **The frame:** the `ui/` application and its build, serving it, the API's route group, sign-in, sessions and access, the layout with its sidebar and theme switch, Activity (with the stage of a running review and pull request titles) and One review. It ends with a signed-in person seeing what runs and opening a review. Cut in two plans, both built: sign-in, serving, the layout and Activity, and the One review screen.
-2. **Settings:** the settings tables, the sync at start, validation, saving, the record of changes, the export, applying at the next review and marking what waits for a restart, `*` in "Reviewed on every push", and the Settings screen.
+2. **Settings:** the settings tables, the sync at start, validation, saving, the record of changes, the export, applying at the next review and marking what waits for a restart, `*` in "Reviewed on every push", and the Settings screen. Built in one plan.
 3. **The rest:** alerts and dependency health stored, spend and reviews per day, feedback read, live score quality, the kill switch, and the Overview, Repositories and Memory screens.
 
 Each plan is reviewed before it is built, built task by task with a review of each task, ends with a run under Docker and a review of the whole branch, and is merged through a pull request, as in the stages before.

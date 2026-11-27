@@ -673,13 +673,13 @@ All configuration is typed and validated at start-up. An unknown key, a bad valu
 
 ### 11.1 Deployment config
 
-One file, owned by whoever runs the deployment and kept in their own git repository. It holds:
+One file, owned by whoever runs the deployment and kept in their own git repository. Once the service has started, the editable part (UI design 4.1) lives in its database, kept in step with this file at each start. It holds:
 
 - The app's identity (id, key and webhook secret, by reference).
 - The model: endpoint and key (by reference), model, the request fragment for each effort level, fallbacks, request extras (body fields and headers), prices per token for an endpoint that reports no cost, and how the answer is asked for (`forced` or `auto`).
 - The second scorer (section 6.7), optional: endpoint and key (by reference), model and time limit.
 - Limits and cost guards (section 12).
-- Repository defaults and per-repository overrides: primary branches, ignored authors, base filter, how a new head is reviewed (D4), the gate block, and the score block (threshold, automatic approval, audit share, the thread rule for approval, and inline notes).
+- Repository defaults and per-repository overrides: primary branches, ignored authors, base filter, how a new head is reviewed (D4), the gate block, and the score block (threshold, automatic approval, audit share, the thread rule for approval, and inline notes). The base filter reads `*` or an empty list as every branch; the gate's branches read `*` as a branch's name.
 - MCP servers and extension modules.
 - The alert webhook.
 - Learning, on or off; off unless written.
@@ -762,7 +762,7 @@ The schema is designed fresh. Identity everywhere is the git service, the reposi
 
 Stage 8 adds a table `learning` for the learning work's own record, and on `human_activity` and `pull_requests` markers of what was learned and of how often learning a pull request failed. The lessons add `judge_calls`, the cost of each call of the judge with the pull request and the reply it was for, and a column for a lesson's text on `memory_records`. Reverts add a column on `pull_requests` for the pull request a description says it reverts, and one on `memory_records` for the pull request a revert took back. `file_scores` and `thread_verdicts` are still not built: their content is in each run's stored result.
 
-`pull_requests` gains the title; `jobs` the stage and a withdrawal's retry code; `ui_sessions` and `ui_states` hold sign-in. `ui_accounts` and `ui_account_changes` hold the UI's accounts and the record of their changes; a session names its account.
+`pull_requests` gains the title; `jobs` the stage and a withdrawal's retry code; `ui_sessions` and `ui_states` hold sign-in. `ui_accounts` and `ui_account_changes` hold the UI's accounts and the record of their changes; a session names its account. `settings`, `settings_file` and `setting_changes` hold the editable part, the file's at the last start, and the record of changes.
 
 Finished jobs are deleted after 14 days. Nothing else is pruned in the first version.
 
