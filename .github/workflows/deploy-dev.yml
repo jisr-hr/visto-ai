@@ -14,7 +14,8 @@ jobs:
 
   image:
     needs: ci
-    if: github.repository == 'jisr-hr/visto-ai'
+    # A manual dispatch can pick any branch; only main may feed the dev image stream.
+    if: github.repository == 'jisr-hr/visto-ai' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
       id-token: write
