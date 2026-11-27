@@ -2,8 +2,9 @@
 // group (UI design 3.1, 3.2 and 5; calls 12, 13, 17, 23, 27 and 30; the password design 4.1, 4.3 and 4.5, calls 19 to 21), and the
 // two routes of the page of one review, GET /api/reviews/<run> and GET /api/pulls/<owner>/<repo>/<number>/reviews (the plan "The
 // UI, One Review", calls 18 and 19). Every answer is built by headers.ts or files.ts. No log line holds a name, a login, a password
-// or a hash, and no answer but the accounts' and the two review routes (whose logins, texts and limits are call 16's) holds a name
-// or a login; the one-time password is in the answer of the route that made it only.
+// or a hash. A name or a login is in the accounts' answers, in `/api/me` (the signed-in name), in Activity's rows (the requester's
+// login) and in the two review routes' (whose logins, texts and limits are call 16's), and in no other; the one-time password is
+// in the answer of the route that made it only.
 import { codeOf } from '../shell/codes.ts';
 import type { UiAnswer, UiRequest, UiRoute } from '../shell/http.ts';
 import { accountOf } from './accounts.ts';
