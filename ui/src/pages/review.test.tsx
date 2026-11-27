@@ -564,14 +564,15 @@ test("the approval record shows this review's code and each approval up to it wi
   expect(within(record).getByText('github_403')).toHaveClass('font-mono');
   one.unmount();
   const noCode = await shown({ approvals: [{ ...failedEntry, code: null, retryAt: null }] });
-  expect(card('Approval record')).toHaveTextContent('Dismissing it failed. Trying again now.');
+  expect(card('Approval record')).toHaveTextContent('Dismissing it failed.');
   expect(card('Approval record').textContent).not.toContain('()');
+  expect(card('Approval record')).not.toHaveTextContent('again');
   noCode.unmount();
   const noRetry = await shown({ approvals: [{ ...failedEntry, retryAt: null }] });
-  expect(card('Approval record')).toHaveTextContent('Dismissing it failed (github_403). Trying again now.');
-  expect(card('Approval record')).not.toHaveTextContent('Tried again');
+  expect(card('Approval record')).toHaveTextContent('Dismissing it failed (github_403).');
+  expect(card('Approval record')).not.toHaveTextContent('again');
   noRetry.unmount();
-  for (const retryAt of [NOW, at(-5)]) {
+  for (const retryAt of [NOW, at(-5), new Date(Date.parse(NOW) + 400).toISOString()]) {
     const past = await shown({ approvals: [{ ...failedEntry, retryAt }] });
     expect(card('Approval record')).toHaveTextContent('Dismissing it failed (github_403). Trying again now.');
     expect(card('Approval record')).not.toHaveTextContent('Tried again');
@@ -605,6 +606,8 @@ test("the approval record shows this review's code and each approval up to it wi
     ],
   });
   const rec = card('Approval record');
+  const order = [...rec.querySelectorAll('[data-slot="badge"]')].map((b) => b.textContent);
+  expect(order).toEqual(['needs_human', 'Stands', 'Withdrawn', 'Dismissed on GitHub']);
   expect(rec).toHaveTextContent('Approval of this review, head 3f9c2e1a7b04');
   expect(within(rec).getByText('Stands')).toHaveClass('bg-ok-bg', 'text-ok');
   expect(within(rec).getByText('Withdrawn')).toHaveClass('bg-subtle', 'text-muted');
@@ -632,6 +635,7 @@ test('each dependency of the review is shown with its status and code', async ()
   expect(within(deps).getByText('mcp_timeout')).toHaveClass('font-mono');
   expect(deps).toHaveTextContent('Extension example');
   expect(deps).toHaveTextContent('Lessons, 0 shown (no_lessons)');
+  expect(deps.querySelectorAll('[data-slot="badge"] > .rounded-full')).toHaveLength(6);
   expect(within(deps).getAllByText('Working')[0]).toHaveClass('bg-ok-bg', 'text-ok');
   expect(within(deps).getByText('Failed')).toHaveClass('bg-bad-bg', 'text-bad');
   expect(within(deps).getByText('Nothing to add')).toHaveClass('bg-subtle', 'text-muted');
@@ -643,6 +647,9 @@ test('each dependency of the review is shown with its status and code', async ()
   const unknown = await shown({ dependencies: [{ kind: 'memory', name: null, status: 'skipped', code: null, count: null }] });
   expect(card('Dependencies on this review').textContent).toContain('MemorySkipped');
   unknown.unmount();
+  const lessons = await shown({ dependencies: [{ kind: 'lessons', name: null, status: 'ok', code: null, count: null }] });
+  expect(card('Dependencies on this review').textContent).toContain('LessonsWorking');
+  lessons.unmount();
   await shown({ dependencies: [] });
   expect(within(card('Dependencies on this review')).getByText('None recorded.')).toHaveClass('text-muted');
 });

@@ -4,7 +4,7 @@
 import { Fragment, useEffect, useId, useState } from 'react';
 import type { ReactElement, ReactNode } from 'react';
 import { usePoll } from '../api.ts';
-import type { ApprovalEntry, GateShown, OneReview, Posting, ReviewDependency, ReviewFile, ReviewFinding } from '../api-types.ts';
+import type { ApprovalEntry, GateShown, OneReview, ReviewDependency, ReviewFile, ReviewFinding } from '../api-types.ts';
 import { PageHeader } from '../components/layout.tsx';
 import { AlertIcon } from '../components/icons.tsx';
 import { Badge } from '../components/ui/badge.tsx';
@@ -515,8 +515,7 @@ function askedOf(review: OneReview): ReactNode {
 }
 
 function outcomeOf(review: OneReview): ReactNode {
-  const posting: Posting = review.posting;
-  switch (posting) {
+  switch (review.posting) {
     case 'published':
       return <Badge tone="ok">Published</Badge>;
     case 'not_posted':
@@ -525,7 +524,7 @@ function outcomeOf(review: OneReview): ReactNode {
       return <Badge tone="warn">Dry run</Badge>;
     case 'nothing_new':
       return <Badge tone="muted">Nothing new</Badge>;
-    default: {
+    case 'failed': {
       const code = review.failure?.code ?? null;
       return (
         <>
@@ -608,10 +607,10 @@ const WITHDRAWAL: Readonly<Record<ApprovalEntry['state'], { tone: BadgeTone; lab
 
 function ApprovalItem({ entry, review }: { entry: ApprovalEntry; review: OneReview }): ReactElement {
   const word = WITHDRAWAL[entry.state];
-  let retry: string | null = null;
-  if (entry.state === 'withdrawal_failed') {
-    const wait = entry.retryAt === null ? 0 : Date.parse(entry.retryAt) - Date.parse(review.now);
-    retry = wait > 0 ? ` Tried again in ${took(wait)}.` : ' Trying again now.';
+  let retry = '';
+  if (entry.state === 'withdrawal_failed' && entry.retryAt !== null) {
+    const wait = Date.parse(entry.retryAt) - Date.parse(review.now);
+    retry = Math.round(wait / 1000) > 0 ? ` Tried again in ${took(wait)}.` : ' Trying again now.';
   }
   return (
     <>
@@ -622,7 +621,7 @@ function ApprovalItem({ entry, review }: { entry: ApprovalEntry; review: OneRevi
         </span>
         <Badge tone={word.tone}>{word.label}</Badge>
       </div>
-      {retry === null ? null : (
+      {entry.state !== 'withdrawal_failed' ? null : (
         <span className={NOTE}>
           {'Dismissing it failed'}
           {entry.code === null ? null : <>{' ('}{mono(entry.code)}{')'}</>}
@@ -658,7 +657,7 @@ function dependencyName(dep: ReviewDependency): string {
     case 'memory':
       return dep.count === null ? 'Memory' : `Memory, ${plural(dep.count, 'record', 'records')} shown`;
     case 'lessons':
-      return `Lessons, ${dep.count ?? 0} shown`;
+      return dep.count === null ? 'Lessons' : `Lessons, ${dep.count} shown`;
     case 'mcp':
       return `MCP server ${dep.name ?? ''}`.trimEnd();
     default:
@@ -677,7 +676,7 @@ function DependenciesCard({ review }: { review: OneReview }): ReactElement {
   return (
     <SideCard title="Dependencies on this review" gap="gap-3">
       {review.dependencies.length === 0 ? (
-        <span className={`${NOTE} text-sm`}>None recorded.</span>
+        <span className="text-sm text-muted">None recorded.</span>
       ) : (
         <div className={ROWS}>
           {review.dependencies.map((dep, i) => {
