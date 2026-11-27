@@ -537,7 +537,7 @@ test('recent reviews show each outcome, score, findings, mode, cost, time taken 
   const user = userEvent.setup();
   await user.click(link);
   expect(window.location.pathname).toBe('/ui/reviews/9001');
-  expect(screen.getByRole('heading', { level: 1, name: 'Review' })).toBeInTheDocument();
+  expect(await screen.findByRole('heading', { level: 1, name: 'Review not found' })).toBeInTheDocument();
 });
 
 test('the outcome, the repository and the search are sent to the server, and paging goes forward and back', async () => {

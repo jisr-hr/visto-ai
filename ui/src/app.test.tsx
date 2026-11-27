@@ -177,8 +177,8 @@ test('each sidebar entry leads to its page, the coming ones say so, and an unkno
 
   at('/ui/reviews/9001');
   const review = render(<App api={api} />);
-  expect(await screen.findByRole('heading', { level: 1, name: 'Review' })).toBeInTheDocument();
-  expect(screen.getByText('Coming in a later plan.')).toBeInTheDocument();
+  expect(await screen.findByRole('heading', { level: 1, name: 'Review not found' })).toBeInTheDocument();
+  expect(screen.getByText('No review is stored under this number.')).toBeInTheDocument();
   expect(within(screen.getByRole('navigation', { name: 'Main' })).getByRole('link', { current: 'page' })).toHaveTextContent('Activity');
   review.unmount();
 

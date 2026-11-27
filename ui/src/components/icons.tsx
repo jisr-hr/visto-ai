@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react';
+import type { ReactElement, ReactNode } from 'react';
 
 // The mockup's icons (Activity.dc.html, lines 52 to 67): strokes in the text's colour on a 24 by 24 box, hidden from
 // assistive technology. The sign-out icon is ours (call 24), drawn the same way.
@@ -96,6 +96,16 @@ export function SignOutIcon() {
       <path d="M15 4h3a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3" />
       <path d="M10 17l-5-5 5-5" />
       <path d="M5 12h11" />
+    </Icon>
+  );
+}
+
+/** The mockup's alert circle (Review.dc.html, line 78), at the helper's size. */
+export function AlertIcon(): ReactElement {
+  return (
+    <Icon size={18}>
+      <circle cx="12" cy="12" r="9" />
+      <path d="M12 8v5M12 16.5v.01" />
     </Icon>
   );
 }
