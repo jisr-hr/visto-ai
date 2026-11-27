@@ -19,6 +19,17 @@ vi.mock('./pages/later.tsx', async (importOriginal) => {
   return { Later };
 });
 
+// The Overview, as it is, keeps the API the app gave the pages in the same way (it replaced the page still to come at /ui/).
+vi.mock('./pages/overview.tsx', async (importOriginal) => {
+  const real = await importOriginal<typeof import('./pages/overview.tsx')>();
+  const { useApp } = await import('./context.tsx');
+  function OverviewPage() {
+    shown.api = useApp().api;
+    return real.OverviewPage();
+  }
+  return { ...real, OverviewPage };
+});
+
 const NOW = '2026-03-01T10:00:00.000Z';
 const SAVE: SettingsSave = { version: 14, changes: [{ scope: 'global', path: 'learning', value: true }] };
 const ME: Me = { name: 'octo-lead', kind: 'github', role: 'admin', csrf: 'csrf-token-for-tests', mode: 'live', repositories: ['acme/billing', 'acme/infra', 'acme/shop', 'acme/web'] };
@@ -186,7 +197,7 @@ test('a service that cannot be reached says so, and Try again reads again', asyn
   expect(calls.filter(([name]) => name === 'me')).toHaveLength(3);
 });
 
-test('each sidebar entry leads to its page, the coming ones say so, and an unknown path is not found', async () => {
+test('each sidebar entry leads to its page, and an unknown path is not found', async () => {
   const { api } = fakeApi();
   const user = userEvent.setup();
   at('/ui/repositories');
@@ -199,15 +210,15 @@ test('each sidebar entry leads to its page, the coming ones say so, and an unkno
   expect(current()).toEqual(['Repositories']);
 
   const pages = [
-    ['Overview', '/ui/', 'Overview'],
-    ['Memory', '/ui/memory', 'Memory'],
-    ['Repositories', '/ui/repositories', 'Repositories'],
+    ['Overview', '/ui/', 'Overview', 'Last 30 days'],
+    ['Memory', '/ui/memory', 'Memory', 'Coming in a later plan.'],
+    ['Repositories', '/ui/repositories', 'Repositories', 'Coming in a later plan.'],
   ] as const;
-  for (const [entry, path, heading] of pages) {
+  for (const [entry, path, heading, subLine] of pages) {
     await user.click(within(nav).getByRole('link', { name: entry }));
     expect(window.location.pathname).toBe(path);
     expect(screen.getByRole('heading', { level: 1, name: heading })).toBeInTheDocument();
-    expect(screen.getByText('Coming in a later plan.')).toBeInTheDocument();
+    expect(screen.getByText(subLine)).toBeInTheDocument();
     expect(current()).toEqual([entry]);
   }
   await user.click(within(nav).getByRole('link', { name: 'Activity' }));

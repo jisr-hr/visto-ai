@@ -285,7 +285,11 @@ function SecretLine({ secret }: { secret: SecretState }) {
           </>
         )}
       </span>
-      {secret.variable === null ? <Badge tone="muted">Not set</Badge> : <Badge tone="ok">Set</Badge>}
+      {secret.variable === null ? (
+        <Badge tone="muted">{secret.kind === 'alert_webhook' ? 'Not set, alerts are shown here only' : 'Not set'}</Badge>
+      ) : (
+        <Badge tone="ok">Set</Badge>
+      )}
     </div>
   );
 }

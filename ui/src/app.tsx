@@ -12,6 +12,7 @@ import { Button } from './components/ui/button.tsx';
 import { ActivityPage } from './pages/activity.tsx';
 import { Later } from './pages/later.tsx';
 import { NotFound } from './pages/not-found.tsx';
+import { OverviewPage } from './pages/overview.tsx';
 import { PasswordPage } from './pages/password.tsx';
 import { ReviewNotFound, ReviewPage, runOfPath } from './pages/review.tsx';
 import { SettingsPage } from './pages/settings.tsx';
@@ -42,7 +43,7 @@ function ReviewOf({ path }: { path: string }) {
 function Page({ path, me }: { path: string; me: Me }) {
   switch (path) {
     case '/ui/':
-      return <Later title="Overview" />;
+      return <OverviewPage />;
     case '/ui/activity':
       return <ActivityPage />;
     case '/ui/repositories':

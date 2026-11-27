@@ -498,8 +498,8 @@ test('the secrets show only their variable and whether it is set, and Access sho
   expect(row('Model key')).toHaveTextContent('Model key OPENROUTER_API_KEY');
   expect(within(row('Model key')).getByText('Set')).toBeInTheDocument();
   expect(classes(within(row('Model key')).getByText('OPENROUTER_API_KEY'))).toEqual(words('font-mono text-[12.5px] text-muted'));
-  expect(row('Alert webhook')).toHaveTextContent(/^Alert webhookNot set$/);
-  expect(classes(within(row('Alert webhook')).getByText('Not set'))).toEqual(words('inline-flex items-center gap-1.5 whitespace-nowrap rounded-full px-2 py-0.5 text-xs leading-5 font-medium bg-subtle text-muted'));
+  expect(row('Alert webhook')).toHaveTextContent(/^Alert webhookNot set, alerts are shown here only$/);
+  expect(classes(within(row('Alert webhook')).getByText('Not set, alerts are shown here only'))).toEqual(words('inline-flex items-center gap-1.5 whitespace-nowrap rounded-full px-2 py-0.5 text-xs leading-5 font-medium bg-subtle text-muted'));
   expect(row('Extension example, option secret')).toHaveTextContent('EXAMPLE_SECRET');
   expect(row('MCP server docs')).toHaveTextContent('DOCS_TOKEN');
   expect(within(secrets).getAllByText('Set')).toHaveLength(4);
