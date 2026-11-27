@@ -140,9 +140,9 @@ test('a setting not overridden comes from the defaults, and one overridden says 
   expect(classes(over)).toEqual(words('text-xs font-medium text-accent-text'));
   expect(within(primary).getByText('From config.yml at the start of 2026-03-01 09:00 UTC')).toBeInTheDocument();
   expect(within(rowOf('Ignored authors')).getByText('From the defaults')).toBeInTheDocument();
-  expect(within(rowOf('Ignored authors')).queryByRole('button', { name: 'Use the default' })).toBeNull();
+  expect(within(rowOf('Ignored authors')).queryByRole('button', { name: /^Use the default/ })).toBeNull();
 
-  const use = within(primary).getByRole('button', { name: 'Use the default' });
+  const use = within(primary).getByRole('button', { name: 'Use the default for Primary branches' });
   expect(use).toHaveClass('min-h-7', 'px-2', 'text-xs');
   await user.click(use);
   expect(within(rowOf('Primary branches')).getByText('main')).toBeInTheDocument();
@@ -156,7 +156,7 @@ test('a setting not overridden comes from the defaults, and one overridden says 
 
 test('Reviewed on every push shows every branch as *, and says what the merge gate does beside it', async () => {
   const user = userEvent.setup();
-  await open();
+  const { sent } = await open(viewOf(), { saveSettings: () => Promise.resolve({ kind: 'saved', view: viewOf() }) });
   const row = rowOf('Reviewed on every push');
   const control = (): HTMLElement => within(rowOf('Reviewed on every push')).getByText('*', { selector: '[data-slot="setting-control"] span' }).closest('[data-slot="setting-control"]') as HTMLElement;
   expect(within(control()).getByText('*')).toBeInTheDocument();
@@ -167,6 +167,8 @@ test('Reviewed on every push shows every branch as *, and says what the merge ga
   await user.keyboard('trunk{Enter}');
   expect(within(rowOf('Reviewed on every push')).getByText('trunk')).toBeInTheDocument();
   expect(within(rowOf('Reviewed on every push')).queryByText('*', { selector: '[data-slot="setting-control"] span' })).toBeNull();
+  await user.click(screen.getByRole('button', { name: 'Save changes' }));
+  expect(sent()[0]![2]).toEqual({ version: 14, changes: [{ scope: 'defaults', path: 'baseBranches', value: ['trunk'] }] });
 });
 
 test("the merge gate's rows show while it is on, with what each mode does", async () => {
@@ -175,7 +177,8 @@ test("the merge gate's rows show while it is on, with what each mode does", asyn
   const gate = screen.getByRole('switch', { name: 'Merge gate' });
   expect(gate).toHaveAttribute('aria-checked', 'false');
   expect(screen.getByText('How it works', { selector: 'strong' })).toBeInTheDocument();
-  expect(screen.getAllByRole('listitem')).toHaveLength(4);
+  const box = gate.closest('div')!.parentElement!.parentElement!;
+  expect(within(box).getAllByRole('listitem')).toHaveLength(4);
   for (const label of ['Gated branches', 'Check name', 'Required checks']) expect(screen.queryByText(label, { selector: 'label, strong' })).toBeNull();
 
   await user.click(gate);
@@ -247,7 +250,7 @@ test('an audit key not set is said', async () => {
 
 test('the threshold writes a whole number and says whether it overrides the default', async () => {
   const user = userEvent.setup();
-  await open();
+  const { sent } = await open(viewOf(), { saveSettings: () => Promise.resolve({ kind: 'saved', view: viewOf() }) });
   expect(screen.queryByText(/From the defaults: 70%/)).toBeNull();
   expect(screen.queryByText(/Overrides the default of/)).toBeNull();
   await user.click(option(/acme\/web/));
@@ -262,6 +265,8 @@ test('the threshold writes a whole number and says whether it overrides the defa
   expect(within(rowOf('Threshold')).getByText('60%')).toBeInTheDocument();
   expect(screen.getByText('Overrides the default of 70%')).toBeInTheDocument();
   expect(screen.getByText('1 unsaved change')).toBeInTheDocument();
+  await user.click(screen.getByRole('button', { name: 'Save changes' }));
+  expect(sent()[0]![2]).toEqual({ version: 14, changes: [{ scope: 'acme/web', path: 'score.threshold', value: 60 }] });
 });
 
 test('a repository is added by its name, and refused in another shape', async () => {
@@ -296,9 +301,55 @@ test('a repository whose save was refused says so in the list, and its issue sta
   const issues: SettingIssue[] = [{ scope: 'acme/shop', path: 'gate.branches', message: 'A branch name is not valid.' }];
   await open(viewOf(), { saveSettings: () => Promise.resolve({ kind: 'invalid', issues }) });
   await user.click(option(/acme\/shop/));
-  await user.click(within(rowOf('Primary branches')).getByRole('button', { name: 'Use the default' }));
+  await user.click(within(rowOf('Primary branches')).getByRole('button', { name: 'Use the default for Primary branches' }));
   await user.click(screen.getByRole('button', { name: 'Save changes' }));
   const shop = await screen.findByRole('option', { name: /acme\/shop/ });
   expect(within(shop).getByText('1 issue')).toHaveClass('bg-bad-bg', 'text-bad');
   expect(rowOf('Gated branches')).toHaveTextContent('A branch name is not valid.');
+});
+
+test('the heading switches show their override and can go back to the default', async () => {
+  const user = userEvent.setup();
+  const { sent } = await open(viewOf(), { saveSettings: () => Promise.resolve({ kind: 'saved', view: viewOf() }) });
+  await user.click(option(/acme\/shop/));
+  expect(screen.getByText('Overrides Off')).toBeInTheDocument();
+  await user.click(screen.getByRole('button', { name: 'Use the default for Merge gate' }));
+  expect(screen.getByRole('switch', { name: 'Merge gate' })).toHaveAttribute('aria-checked', 'false');
+  await user.click(screen.getByRole('button', { name: 'Save changes' }));
+  expect(sent()[0]![2]).toEqual({ version: 14, changes: [{ scope: 'acme/shop', path: 'gate.enabled' }] });
+  expect(sent()[0]![2]).not.toHaveProperty('changes.0.value');
+});
+
+test('the defaults pane says where the gate switch came from', async () => {
+  await open(viewOf({ defaults: { 'gate.enabled': written(true) } }));
+  expect(screen.getByText('From config.yml at the start of 2026-03-01 09:00 UTC', { selector: 'div.mt-1 span' })).toBeInTheDocument();
+});
+
+test("a repository's pane starts fresh, and one with no setting says it is kept once it overrides one", async () => {
+  const user = userEvent.setup();
+  await open();
+  await user.click(option(/acme\/web/));
+  expect(screen.getByText('It is kept once it overrides a setting.')).toBeInTheDocument();
+  await user.click(within(rowOf('Primary branches')).getByRole('button', { name: 'Add' }));
+  expect(screen.getByRole('textbox', { name: 'Add to Primary branches' })).toBeInTheDocument();
+  await user.click(option(/acme\/shop/));
+  expect(screen.queryByRole('textbox', { name: 'Add to Primary branches' })).toBeNull();
+  expect(screen.queryByText('It is kept once it overrides a setting.')).toBeNull();
+  expect(option(/acme\/shop/)).toHaveClass('hover:bg-accent-soft');
+});
+
+test("the defaults' commit setting says what is not set, and a repository's override of it says what it overrides", async () => {
+  const user = userEvent.setup();
+  await open(viewOf({ shop: { newHead: written('full') } }));
+  expect(within(rowOf('A new commit is reviewed')).getByText('Not set: incremental, and full where the merge gate holds pushes')).toBeInTheDocument();
+  await user.click(option(/acme\/shop/));
+  expect(within(rowOf('A new commit is reviewed')).getByText('Overrides incremental, and full where the merge gate holds pushes')).toBeInTheDocument();
+  expect(within(rowOf('Threshold')).queryByText('Overrides 70%')).toBeNull();
+});
+
+test("a threshold override reads its default with a percent", async () => {
+  const user = userEvent.setup();
+  await open();
+  await user.click(option(/acme\/shop/));
+  expect(within(rowOf('Threshold')).getByText('Overrides 70%')).toBeInTheDocument();
 });

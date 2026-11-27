@@ -100,13 +100,17 @@ export function SourceLine({ form, scope, path, prefix = '' }: { form: Form; sco
 }
 
 /** A repository's setting (call 28): not written, it comes from the defaults; written, it says what it overrides and can take the default back. */
-function OverrideLine({ form, scope, path }: { form: Form; scope: string; path: string }) {
+export function OverrideLine({ form, scope, path }: { form: Form; scope: string; path: string }) {
   if (!form.shown(scope, path).written) return <span className="text-xs text-muted">From the defaults</span>;
+  const under = form.shown(DEFAULTS, path).value;
+  let text = valueText(path, under);
+  if (path === 'newHead' && under === null) text = 'incremental, and full where the merge gate holds pushes';
+  else if (path === 'score.threshold') text = `${text}%`;
   return (
     <>
-      <span className="text-xs font-medium text-accent-text">Overrides {valueText(path, form.shown(DEFAULTS, path).value)}</span>
+      <span className="text-xs font-medium text-accent-text">Overrides {text}</span>
       <SourceLine form={form} scope={scope} path={path} />
-      <Button type="button" className="min-h-7 px-2 text-xs" onClick={() => form.set(scope, path, UNSET)}>
+      <Button type="button" className="min-h-7 px-2 text-xs" aria-label={`Use the default for ${LABELS[path] ?? path}`} onClick={() => form.set(scope, path, UNSET)}>
         Use the default
       </Button>
     </>
@@ -171,7 +175,7 @@ export function Row({
         {children}
         {waits || paths.some((one) => form.shown(scope, one).waits) ? <Badge tone="warn">Takes effect when the service restarts</Badge> : null}
         {scope !== GLOBAL && scope !== DEFAULTS ? (
-          <OverrideLine form={form} scope={scope} path={path} />
+          paths.map((one) => <OverrideLine key={one} form={form} scope={scope} path={one} />)
         ) : (
           paths.map((one) => (
             <SourceLine key={one} form={form} scope={scope} path={one} prefix={paths.length > 1 ? `${one.slice(one.lastIndexOf('.') + 1).replace(/^./, (c) => c.toUpperCase())}: ` : ''} />

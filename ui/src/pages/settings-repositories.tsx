@@ -13,7 +13,7 @@ import { Switch } from '../components/ui/switch.tsx';
 import { plural } from '../format.ts';
 import { cn } from '../lib/utils.ts';
 import { DEFAULTS, overridesOf, REPOSITORY_NAME, repositoryNames } from '../settings-draft.ts';
-import { fieldValue, H2, LABELS, MONO, NumberField, Row, SECTION, TextField, WORD } from './settings-parts.tsx';
+import { fieldValue, H2, LABELS, MONO, NumberField, OverrideLine, Row, SECTION, SourceLine, TextField, WORD } from './settings-parts.tsx';
 import type { Form } from './settings-parts.tsx';
 
 const BOX = 'rounded-[10px] border border-border px-[18px] py-1';
@@ -34,7 +34,7 @@ const RULE_HELP: Readonly<Record<string, string>> = {
     'Strict (recommended): closed when a later review checked the code and found it fixed, or when the thread is resolved and someone other than the author, a member or collaborator of the repository, replied in it after the last review. The author cannot close a finding alone.',
 };
 
-const Mono = ({ children }: { children: ReactNode }) => <span className="font-mono text-[12.5px]">{children}</span>;
+const Mono = ({ children }: { children: ReactNode }) => <span className={MONO}>{children}</span>;
 
 function strings(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : [];
@@ -47,18 +47,24 @@ function List({ form, scope, path, label, add, empty }: { form: Form; scope: str
 
 /** A switch named by its row's label. */
 function Toggle({ form, scope, path, labelId }: { form: Form; scope: string; path: string; labelId: string }) {
-  const on = form.shown(scope, path).value === true;
+  return <Switch checked={form.shown(scope, path).value === true} labelledBy={labelId} onChange={(next) => form.set(scope, path, next)} />;
+}
+
+/** What a heading's switch came from: the override line in a repository, the source in the defaults. */
+function HeadLine({ form, scope, path }: { form: Form; scope: string; path: string }) {
   return (
-    <>
-      <Switch checked={on} labelledBy={labelId} onChange={(next) => form.set(scope, path, next)} />
-      <span className={WORD}>{on ? 'On' : 'Off'}</span>
-    </>
+    <div className="mt-1 flex flex-wrap items-center gap-2.5">
+      {scope === DEFAULTS ? <SourceLine form={form} scope={scope} path={path} /> : <OverrideLine form={form} scope={scope} path={path} />}
+    </div>
   );
 }
 
 function Pane({ form, scope }: { form: Form; scope: string }) {
   const row = { form, scope } as const;
-  const text = (path: string): string => form.shown(scope, path).value as string;
+  const text = (path: string): string => {
+    const value = form.shown(scope, path).value;
+    return typeof value === 'string' ? value : '';
+  };
   const gateOn = form.shown(scope, 'gate.enabled').value === true;
   const approveOn = form.shown(scope, 'score.autoApprove').value === true;
   const headValue = form.shown(scope, 'newHead').value;
@@ -75,6 +81,7 @@ function Pane({ form, scope }: { form: Form; scope: string }) {
         <strong className="text-base">{scope === DEFAULTS ? 'Defaults for all' : scope}</strong>
         <Badge tone="muted">{inRepository ? 'Settings not overridden come from the defaults' : 'Every repository starts from these'}</Badge>
       </div>
+      {inRepository && overridesOf(form.view, form.draft, scope) === 0 ? <p className={`m-0 ${WORD}`}>It is kept once it overrides a setting.</p> : null}
 
       <div className={BOX}>
         <h3 className={H3}>Review</h3>
@@ -157,6 +164,7 @@ function Pane({ form, scope }: { form: Form; scope: string }) {
           </h3>
           <Switch checked={gateOn} labelledBy="r-gate" onChange={(next) => form.set(scope, 'gate.enabled', next)} />
         </div>
+        <HeadLine form={form} scope={scope} path="gate.enabled" />
         <div className={HOW}>
           <strong className="text-[13px] font-semibold">How it works</strong>
           <ol className="m-0 flex flex-col gap-1 pl-[18px]">
@@ -257,6 +265,7 @@ function Pane({ form, scope }: { form: Form; scope: string }) {
           </h3>
           <Switch checked={approveOn} labelledBy="r-approve" onChange={(next) => form.set(scope, 'score.autoApprove', next)} />
         </div>
+        <HeadLine form={form} scope={scope} path="score.autoApprove" />
         {approveOn ? (
           <>
             <div className={HOW}>
@@ -345,7 +354,7 @@ export function RepositoriesSection({ form, issues }: { form: Form; issues: read
       type="button"
       role="option"
       aria-selected={chosen === id}
-      className={cn(REPO, chosen === id && 'bg-accent-soft text-accent-text')}
+      className={cn(REPO, chosen === id && 'bg-accent-soft text-accent-text hover:bg-accent-soft')}
       onClick={() => setChosen(id)}
     >
       <span>{name}</span>
@@ -415,7 +424,7 @@ export function RepositoriesSection({ form, issues }: { form: Form; issues: read
             </Button>
           )}
         </div>
-        <Pane form={form} scope={chosen} />
+        <Pane key={chosen} form={form} scope={chosen} />
       </div>
     </section>
   );
