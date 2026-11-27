@@ -353,6 +353,12 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps): Pr
       holds: (ref) => runner.holds(ref), paused: pauseCode, pullRequestUrl: deps.pullRequestUrl,
     },
     files: ui.files, ui: { publicUrl: ui.access.publicUrl, github: ui.signIn !== null }, log: say,
+    ...(deps.settings === undefined ? {} : {
+      settings: {
+        db, clock, settings: deps.settings, log: say,
+        access: { publicUrl: ui.access.publicUrl, github: ui.signIn !== null, accounts: ui.access.accounts, team: ui.access.team },
+      },
+    }),
   });
   const { listener, idle } = createListener({
     webhook: (headers, body) => receive({

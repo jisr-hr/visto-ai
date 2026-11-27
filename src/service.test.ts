@@ -2649,3 +2649,26 @@ test('without settings the service runs on the config it was given, as before', 
   assert.equal(h.engineSettings.length, 1);
   assert.equal(h.engineSettings[0], config);
 });
+
+test('with the UI on and settings given, an admin saves a setting and the next review reads it', async () => {
+  const h = await harness({ ui: passwordOnly().ui });
+  const settings = await settingsOf(h, `${BASE_YAML}ui:\n  publicUrl: https://visto.example.test\n`);
+  await (await h.start(settings)).settled;
+  await passwordAccountOf(h.db, 'octo-admin', 'admin');
+  const signed = await h.request('POST', '/api/auth/password', Buffer.from(JSON.stringify({ name: 'octo-admin', password: PASSWORD })), FROM_THE_PAGE);
+  assert.equal(signed.status, 200);
+  const cookie = cookieOf(signed.headers['set-cookie']);
+  const { csrf } = JSON.parse((await h.request('GET', '/api/me', Buffer.from(''), { cookie })).body) as Me;
+  const read = await h.request('GET', '/api/settings', Buffer.from(''), { cookie });
+  assert.equal(read.status, 200);
+  const view = JSON.parse(read.body) as { version: number; access: unknown; defaults: Record<string, { value: unknown }> };
+  assert.equal(view.defaults['score.threshold']!.value, 70);
+  assert.deepEqual(view.access, { publicUrl: 'https://visto.example.test', github: false, accounts: [], team: null });
+  const saved = await h.request('PUT', '/api/settings', Buffer.from(JSON.stringify({ version: view.version, changes: [{ scope: 'defaults', path: 'score.threshold', value: 55 }] })),
+    { cookie, 'x-visto-csrf': csrf, 'content-type': 'application/json' });
+  assert.equal(saved.status, 200);
+  assert.equal((JSON.parse(saved.body) as typeof view).defaults['score.threshold']!.value, 55);
+  await h.webhook(pr('opened'), 'd1');
+  await h.reviewed();
+  assert.equal(h.inputs[0]!.repoConfig.scoreThreshold, 55);
+});
