@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Visto AI colour options</title>
+<style>
+body{margin:0;background:#2a2d2c;color:#eee;font:14px Inter,system-ui,sans-serif}
+.page{padding:28px 32px 64px;display:flex;flex-direction:column;gap:40px}
+.page>header h1{margin:0 0 6px;font-size:22px}
+.page>header p{margin:0;color:#b9c0bd;max-width:980px;line-height:1.5}
+.opt h2{margin:0 0 4px;font-size:18px}
+.opt>p{margin:0 0 12px;color:#b9c0bd;max-width:980px;line-height:1.5}
+.pair{display:grid;grid-template-columns:repeat(auto-fit,minmax(620px,1fr));gap:16px}
+.frame{border-radius:12px;overflow:hidden;outline:1px solid #444}
+.app{display:flex;background:var(--bg);color:var(--text);font:14px Inter,system-ui,sans-serif;min-height:520px}
+.app *{box-sizing:border-box}
+.app a{color:var(--accent-text)}
+aside{width:200px;flex:none;background:var(--card);border-right:1px solid var(--border);padding:18px 12px;display:flex;flex-direction:column;gap:18px}
+.brand{display:flex;align-items:center;gap:10px;padding:0 6px}
+.brand svg{border-radius:7px;box-shadow:0 0 0 1px var(--border)}
+.brand small{display:block;color:var(--muted);font-size:12px}
+.nav{display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:8px;color:var(--muted);font-weight:500;min-height:38px}
+.nav.on{background:var(--accent-soft);color:var(--accent-text)}
+.foot{margin-top:auto;display:flex;flex-direction:column;gap:10px}
+.mode{border:1px solid var(--border);border-radius:12px;padding:10px;display:flex;flex-direction:column;gap:6px;font-size:12px;color:var(--muted)}
+main{flex:1;padding:22px 24px;display:flex;flex-direction:column;gap:16px;min-width:0}
+main h1{margin:0;font-size:22px;font-weight:600}
+main .sub{margin:2px 0 0;color:var(--muted);font-size:13px}
+.card{background:var(--card);border:1px solid var(--border);border-radius:12px;box-shadow:var(--shadow);padding:14px 16px}
+.head{display:flex;justify-content:space-between;align-items:center}
+.head strong{font-size:14px}
+.how{margin:12px 0 4px;background:var(--accent-soft);border-radius:8px;padding:10px 12px;font-size:12.5px;line-height:1.5}
+.how strong{display:block;margin-bottom:2px}
+.row{display:flex;gap:16px;padding:12px 0;border-top:1px solid var(--border);align-items:flex-start}
+.row:first-of-type{border-top:0}
+.lbl{flex:1;display:flex;flex-direction:column;gap:3px}
+.lbl strong{font-weight:500;font-size:13.5px}
+.lbl span{font-size:12.5px;color:var(--muted);line-height:1.4}
+.ctl{flex:1;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.from{font-size:12px;color:var(--muted)}
+.switch{position:relative;width:44px;height:26px;border-radius:999px;background:var(--muted);flex:none}
+.switch::after{content:"";position:absolute;top:3px;left:3px;width:20px;height:20px;border-radius:50%;background:var(--card);box-shadow:0 1px 2px rgba(0,0,0,.25)}
+.switch.on{background:var(--accent)}
+.switch.on::after{left:21px}
+.seg{display:inline-flex;padding:3px;border-radius:9px;background:var(--subtle);gap:2px}
+.seg span{color:var(--muted);font-weight:500;font-size:12.5px;padding:5px 11px;border-radius:7px}
+.seg span.on{background:var(--card);color:var(--text);box-shadow:var(--shadow)}
+.input{min-height:34px;width:70px;border:1px solid var(--border);border-radius:8px;background:var(--card);color:var(--text);padding:7px 10px;font-size:13px}
+.badge{display:inline-flex;align-items:center;gap:6px;padding:2px 8px;border-radius:999px;font-size:12px;font-weight:500;line-height:20px;white-space:nowrap}
+.dot{width:6px;height:6px;border-radius:50%;background:currentColor}
+.b-ok{background:var(--ok-bg);color:var(--ok)}.b-warn{background:var(--warn-bg);color:var(--warn)}.b-bad{background:var(--bad-bg);color:var(--bad)}.b-muted{background:var(--subtle);color:var(--muted)}.b-accent{background:var(--accent-soft);color:var(--accent-text)}
+.bar{height:6px;border-radius:999px;background:var(--subtle);overflow:hidden;width:140px}
+.bar i{display:block;height:100%;width:62%;background:var(--accent);border-radius:999px}
+.btns{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.btn{display:inline-flex;align-items:center;min-height:34px;padding:0 14px;border-radius:8px;border:1px solid var(--border);background:var(--card);color:var(--text);font-weight:500;font-size:13px}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--on-accent)}
+.mono{font-family:'JetBrains Mono',ui-monospace,monospace;font-size:12px;color:var(--muted)}
+.ratios{background:#1b1d1c;color:#cfd5d2;font:12px ui-monospace,monospace;padding:8px 12px;display:flex;flex-wrap:wrap;gap:4px 14px;border-top:1px solid #444}
+.ratios .fail{color:#ff8a80}
+.tag{font:600 11px Inter,system-ui;letter-spacing:.06em;text-transform:uppercase;color:#9aa;padding:8px 12px;background:#1b1d1c}
+</style>
+</head>
+<body>
+<div class="page">
+<header>
+<h1>Visto AI colour options</h1>
+<p>Each option shows the same slice of the app in light and dark. Under each frame: contrast ratios (text needs 4.5, the switch and bars need 3 against the card). Today the dark accent is already the logo's green (#34D399); what reads as dark green is the green-tinted surfaces and the tinted panels on them. In light mode today's accent is a deep emerald (#047857). Options A to C use the logo green for every fill (switch, bars, primary button, with dark text on it) in both modes, and keep a deeper green only where green is text on a light ground, since the logo green on white is too faint to read. Red numbers are below the line. In light mode the logo green is 1.92 to 1 against white, so an on switch or a bar reads as pale: the fix, if you want light mode to stay at 3 to 1, is a darker green ring around those fills, or a deeper fill in light mode only.</p>
+</header>
+<div id="options"></div>
+</div>
+<script>
+const LOGO = '#34D399';
+const status = { ok:'#067647', okBg:'#ECFDF3', warn:'#B54708', warnBg:'#FFFAEB', bad:'#B42318', badBg:'#FEF3F2' };
+const statusDark = { ok:'#4ADE80', okBg:'rgba(74,222,128,.12)', warn:'#FBBF24', warnBg:'rgba(251,191,36,.12)', bad:'#F87171', badBg:'rgba(248,113,113,.13)' };
+const OPTIONS = [
+  { id:'now', name:'Today', note:'What ships now, for comparison.',
+    light:{ bg:'#F3F6F4', card:'#FFFFFF', border:'#E3E8E6', text:'#0E211D', muted:'#4A5C55', subtle:'#ECF1EE', accent:'#047857', accentSoft:'#ECFDF5', accentText:'#065F46', onAccent:'#FFFFFF', shadow:'0 1px 2px rgba(14,33,29,.06)' },
+    dark:{ bg:'#07110E', card:'#0E211D', border:'#24352F', text:'#E8F2EE', muted:'#8CA198', subtle:'#15302A', accent:LOGO, accentSoft:'rgba(52,211,153,.14)', accentText:'#6EE7B7', onAccent:'#062018', shadow:'none' } },
+  { id:'a', name:'A. Brand green, lifted', note:'Keeps the green-tinted surfaces but opens them up: a lighter page and card, brighter borders and muted text, and a thinner tint on panels so they stop reading as murky. Light mode moves the fills to the logo green.',
+    light:{ bg:'#F2F6F4', card:'#FFFFFF', border:'#D9E3DF', text:'#0E211D', muted:'#475A53', subtle:'#EAF1EE', accent:LOGO, accentSoft:'#E1F8EE', accentText:'#047857', onAccent:'#052E22', shadow:'0 1px 2px rgba(14,33,29,.06)' },
+    dark:{ bg:'#0B1714', card:'#13231F', border:'#2C413B', text:'#F0F7F4', muted:'#A5BAB2', subtle:'#1C302B', accent:LOGO, accentSoft:'rgba(52,211,153,.10)', accentText:'#6EE7B7', onAccent:'#052E22', shadow:'none' } },
+  { id:'b', name:'B. Graphite with logo green', note:'Neutral grey surfaces, so green appears only where it means something: the switch, the bars, the current entry, the primary button. The highest contrast of the three, and the green stands out most.',
+    light:{ bg:'#F5F6F6', card:'#FFFFFF', border:'#E0E3E2', text:'#111816', muted:'#525B58', subtle:'#EEF0EF', accent:LOGO, accentSoft:'#E3F7EE', accentText:'#047857', onAccent:'#052E22', shadow:'0 1px 2px rgba(17,24,22,.06)' },
+    dark:{ bg:'#0D0F0F', card:'#161919', border:'#2B3030', text:'#EEF1F0', muted:'#A3ACA9', subtle:'#1F2323', accent:LOGO, accentSoft:'rgba(52,211,153,.12)', accentText:'#6EE7B7', onAccent:'#052E22', shadow:'none' } },
+  { id:'c', name:'C. Dim, a softer dark', note:'A lighter dark with a faint green tint, closer to a dimmed editor than to black: less glare between the page and white text, gentler on long sessions. Light mode is the same as A.',
+    light:{ bg:'#F2F6F4', card:'#FFFFFF', border:'#D9E3DF', text:'#0E211D', muted:'#475A53', subtle:'#EAF1EE', accent:LOGO, accentSoft:'#E1F8EE', accentText:'#047857', onAccent:'#052E22', shadow:'0 1px 2px rgba(14,33,29,.06)' },
+    dark:{ bg:'#151C1A', card:'#1D2623', border:'#34423E', text:'#EEF4F1', muted:'#AAB8B3', subtle:'#26322F', accent:LOGO, accentSoft:'rgba(52,211,153,.11)', accentText:'#7FECC0', onAccent:'#052E22', shadow:'none' } },
+];
+
+function rgb(hex){ const n=parseInt(hex.slice(1),16); return [n>>16&255,n>>8&255,n&255]; }
+function lum(hex){ return rgb(hex).map(v=>{v/=255;return v<=.03928?v/12.92:((v+.055)/1.055)**2.4;}).reduce((s,v,i)=>s+v*[.2126,.7152,.0722][i],0); }
+function ratio(a,b){ const [x,y]=[lum(a),lum(b)].sort((p,q)=>q-p); return (x+.05)/(y+.05); }
+// An rgba tint laid over a solid ground, as the browser draws it.
+function over(rgba, ground){ const m=rgba.match(/rgba\((\d+),(\d+),(\d+),([\d.]+)\)/); if(!m) return rgba; const a=+m[4]; const g=rgb(ground);
+  return '#'+[1,2,3].map((i,k)=>Math.round(+m[i]*a+g[k]*(1-a)).toString(16).padStart(2,'0')).join(''); }
+
+function vars(p, dark){ const s=dark?statusDark:status; return `--bg:${p.bg};--card:${p.card};--border:${p.border};--text:${p.text};--muted:${p.muted};--subtle:${p.subtle};--accent:${p.accent};--accent-soft:${p.accentSoft};--accent-text:${p.accentText};--on-accent:${p.onAccent};--shadow:${p.shadow};--ok:${s.ok};--ok-bg:${s.okBg};--warn:${s.warn};--warn-bg:${s.warnBg};--bad:${s.bad};--bad-bg:${s.badBg}`; }
+
+function ratios(p){
+  const soft = over(p.accentSoft, p.card);
+  const items = [
+    ['text / card', ratio(p.text,p.card), 4.5], ['muted / card', ratio(p.muted,p.card), 4.5], ['muted / page', ratio(p.muted,p.bg), 4.5],
+    ['green text / card', ratio(p.accentText,p.card), 4.5], ['green text / tint', ratio(p.accentText,soft), 4.5], ['text / tint', ratio(p.text,soft), 4.5],
+    ['button text / green', ratio(p.onAccent,p.accent), 4.5], ['switch / card', ratio(p.accent,p.card), 3], ['card / page', ratio(p.card,p.bg), 1],
+  ];
+  return items.map(([k,v,min])=>`<span class="${v<min?'fail':''}">${k} ${v.toFixed(2)}</span>`).join('');
+}
+
+const mark = `<svg width="28" height="28" viewBox="0 0 512 512"><rect width="512" height="512" rx="112" fill="#0e211d"/><rect x="108" y="140" width="208" height="56" rx="28" fill="#f3f6f4" fill-opacity="0.32"/><rect x="108" y="228" width="216" height="56" rx="28" fill="#34d399"/><circle cx="376" cy="256" r="28" fill="#f3f6f4"/><rect x="108" y="316" width="144" height="56" rx="28" fill="#f3f6f4" fill-opacity="0.32"/></svg>`;
+
+function frame(p, dark){
+  return `<div class="frame"><div class="tag">${dark?'Dark':'Light'}</div><div class="app" style="${vars(p,dark)}">
+  <aside>
+    <div class="brand">${mark}<div><strong>Visto AI</strong><small>Review service</small></div></div>
+    <nav><div class="nav">Overview</div><div class="nav">Activity <span class="badge b-accent" style="margin-left:auto">2</span></div><div class="nav">Repositories</div><div class="nav">Memory</div><div class="nav on">Settings</div></nav>
+    <div class="foot"><div class="mode"><span class="badge b-ok" style="align-self:start"><span class="dot"></span>Live</span>Posting reviews on 2 repositories.</div>
+    <div style="font-size:12px;padding:0 6px"><div style="font-weight:500;font-size:13px">octo-admin</div><div style="color:var(--muted)">Signed in with a password</div><a href="#">Change password</a></div></div>
+  </aside>
+  <main>
+    <div><h1>Settings</h1><p class="sub">What the service does on every repository, unless a repository says otherwise.</p></div>
+    <div class="card">
+      <div class="head"><strong>Automatic approval</strong><span class="switch on"></span></div>
+      <div class="how"><strong>How it works</strong>Visto AI posts the review as an approval only when every file is reviewed and nothing is at or above the threshold. Any new commit takes the approval back.</div>
+      <div class="row"><div class="lbl"><strong>Thread rule</strong><span>When does a finding count as closed?</span></div><div class="ctl"><span class="seg"><span class="on">Strict</span><span>Gate rule</span></span><span class="from">Changed in the UI by otavio</span></div></div>
+      <div class="row"><div class="lbl"><strong>Audit share</strong><span>Of the pull requests that would be approved, the share sent to a person anyway.</span></div><div class="ctl"><span class="input">5</span>%<span class="badge b-warn"><span class="dot"></span>Audit key not set</span></div></div>
+      <div class="row"><div class="lbl"><strong>A reply clears a blocking finding</strong><span>A person can clear it by replying in its thread and resolving it.</span></div><div class="ctl"><span class="switch on"></span><span class="from">The default</span><span class="switch"></span><span class="from">Off</span></div></div>
+    </div>
+    <div class="card">
+      <div class="head"><strong>Secrets</strong><span class="from">Read from the environment at start.</span></div>
+      <div class="row"><div class="lbl"><strong>Model key <span class="mono">OPENROUTER_API_KEY</span></strong></div><div class="ctl" style="justify-content:flex-end"><span class="badge b-ok">Set</span></div></div>
+      <div class="row"><div class="lbl"><strong>Audit key</strong></div><div class="ctl" style="justify-content:flex-end"><span class="badge b-muted">Not set</span><span class="badge b-bad">Refused</span></div></div>
+      <div class="row"><div class="lbl"><strong>Review progress</strong><span>Batch 1 of 2</span></div><div class="ctl" style="justify-content:flex-end"><span class="bar"><i></i></span></div></div>
+    </div>
+    <div class="btns"><span class="btn primary">Save</span><span class="btn">Discard</span><a href="#">Open on GitHub</a></div>
+  </main></div><div class="ratios">${ratios(p)}</div></div>`;
+}
+
+document.getElementById('options').innerHTML = OPTIONS.map(o=>`<section class="opt" style="margin-bottom:40px"><h2>${o.name}</h2><p>${o.note}</p><div class="pair">${frame(o.light,false)}${frame(o.dark,true)}</div></section>`).join('');
+</script>
+</body>
+</html>
