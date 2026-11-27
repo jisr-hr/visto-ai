@@ -525,7 +525,9 @@ export function SettingsPage() {
             notice.text
           ) : (
             <>
-              <p className="m-0">Not saved. Each issue is shown at its setting:</p>
+              <p className="m-0">
+                {notice.issues.some((issue) => issue.scope !== null && issue.path !== null) ? 'Not saved. Each issue is shown at its setting:' : 'Not saved:'}
+              </p>
               <ul className="m-0 mt-1 pl-5">
                 {notice.issues.map((issue, index) => (
                   <li key={index}>

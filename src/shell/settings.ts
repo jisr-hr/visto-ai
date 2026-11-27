@@ -1,7 +1,7 @@
 // The settings the service runs on: config.yml synced with the database at each start, and a save from the UI, each in one
 // transaction whose first statement is the settings' lock (the UI design 3.4 and 4.2 to 4.5; calls 13 to 17, 22 and 27).
 // Nothing but `check` decides whether settings are good. No log line or error holds a value or a name.
-import { ConfigError } from '../config/load.ts';
+import { AUDIT_KEY_NEEDED, ConfigError } from '../config/load.ts';
 import type { ServiceConfig } from '../config/load.ts';
 import {
   AT_START, GLOBAL, editableOf, filePathOf, inForceEditable, isSetting, keyParts, sameValue, scorerOn, settingKey, settingOfIssue,
@@ -41,8 +41,19 @@ export interface Settings {
 /** How many settings saved in the UI a refused start names. */
 export const CLASH_NAMED = 10;
 
+/**
+ * A save refused for want of the audit key: the key is the file's alone, so the issue says what to write there, which the
+ * start's own line (for whoever reads the log) does not.
+ */
+export const AUDIT_KEY_TO_WRITE = 'Automatic approval with an audit share above 0 needs the audit key, which only config.yml holds, and it writes none. '
+  + 'Add auditKey: { env: AUDIT_KEY } to config.yml, set AUDIT_KEY to at least 32 random characters (for example the output of '
+  + 'openssl rand -hex 32), restart the service, then save again. An audit share of 0 needs no key.';
+
 export function issuesOf(error: ConfigError): SettingIssue[] {
   return error.details.map((detail, i) => {
+    if (detail.path.length === 1 && detail.path[0] === 'auditKey' && detail.message === AUDIT_KEY_NEEDED) {
+      return { scope: null, path: null, message: AUDIT_KEY_TO_WRITE };
+    }
     const setting = settingOfIssue(detail.path);
     return setting === null
       ? { scope: null, path: null, message: error.issues[i] ?? detail.message }

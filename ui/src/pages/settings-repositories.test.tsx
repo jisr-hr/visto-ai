@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, within } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { userEvent } from '@testing-library/user-event';
 import { afterEach, expect, test } from 'vitest';
 import { RequestFailed } from '../api.ts';
@@ -257,6 +257,21 @@ test('an audit key not set is said', async () => {
   await open(viewOf({ secrets: [{ kind: 'audit_key', of: null, variable: null }] }));
   await user.click(screen.getByRole('switch', { name: 'Automatic approval' }));
   expect(within(rowOf('Audit share')).getByText('Audit key not set')).toBeInTheDocument();
+  expect(screen.getByText(/Saving this needs the audit key in config\.yml/)).toHaveTextContent(
+    'Saving this needs the audit key in config.yml: add auditKey: { env: AUDIT_KEY }, set AUDIT_KEY to at least 32 random characters and restart the service. A share of 0 needs no key.',
+  );
+});
+
+test('what the audit key needs is not said with a share of 0, or with the key set', async () => {
+  const user = userEvent.setup();
+  await open(viewOf({ secrets: [{ kind: 'audit_key', of: null, variable: null }], defaults: { 'score.auditShare': written(0) } }));
+  await user.click(screen.getByRole('switch', { name: 'Automatic approval' }));
+  expect(within(rowOf('Audit share')).getByText('Audit key not set')).toBeInTheDocument();
+  expect(screen.queryByText(/Saving this needs the audit key/)).toBeNull();
+  cleanup();
+  await open(viewOf());
+  await user.click(screen.getByRole('switch', { name: 'Automatic approval' }));
+  expect(screen.queryByText(/Saving this needs the audit key/)).toBeNull();
 });
 
 test('the threshold writes a whole number and says whether it overrides the default', async () => {

@@ -203,7 +203,7 @@ function approvalWritten(score: ApprovalKeys | undefined): { approval?: Partial<
   return Object.keys(approval).length === 0 ? {} : { approval };
 }
 
-const AUDIT_KEY_NEEDED = 'must be written while autoApprove is true with an auditShare above 0';
+export const AUDIT_KEY_NEEDED = 'must be written while autoApprove is true with an auditShare above 0';
 
 /**
  * Whether the defaults, or some override merged with them as `repoSettingsFor` merges it, have approval on with a share

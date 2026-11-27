@@ -74,6 +74,9 @@ function Pane({ form, scope }: { form: Form; scope: string }) {
   const mode = text('gate.mode');
   const thread = text('score.approvalThreads');
   const keySet = form.view.secrets.some((secret) => secret.kind === 'audit_key' && secret.variable !== null);
+  const share = form.shown(scope, 'score.auditShare').value;
+  // As the service checks it: approval on with a share above 0 draws the sample, which needs the key the file alone holds.
+  const keyNeeded = approveOn && !keySet && typeof share === 'number' && share > 0;
   const inRepository = scope !== DEFAULTS;
   return (
     <div className="flex min-w-0 shrink grow-[999] basis-[480px] flex-col gap-5">
@@ -314,6 +317,12 @@ function Pane({ form, scope }: { form: Form; scope: string }) {
                 </Badge>
               )}
             </Row>
+            {keyNeeded ? (
+              <p className="mt-1 mb-0 text-[13px] text-warn">
+                Saving this needs the audit key in config.yml: add auditKey: {'{ env: AUDIT_KEY }'}, set AUDIT_KEY to at least 32 random characters and
+                restart the service. A share of 0 needs no key.
+              </p>
+            ) : null}
             <p className="mt-1 mb-2 text-[13px] text-muted">
               It approves only where the base branch&apos;s rules dismiss stale approvals, and never a draft or a pull request from a fork.
             </p>

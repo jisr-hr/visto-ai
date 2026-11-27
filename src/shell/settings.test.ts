@@ -1,14 +1,14 @@
 import test, { afterEach, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { generateKeyPairSync } from 'node:crypto';
-import { ConfigError, parseDocument, readYaml, repoSettingsFor, serviceConfig } from '../config/load.ts';
+import { AUDIT_KEY_NEEDED, ConfigError, parseDocument, readYaml, repoSettingsFor, serviceConfig } from '../config/load.ts';
 import type { ServiceConfig } from '../config/load.ts';
 import { editableOf } from '../config/editable.ts';
 import type { SettingValue } from '../config/editable.ts';
 import { readFileSettings, readSettingChanges, readSettings, settingsVersion } from '../db/settings.ts';
 import { testDb } from '../db/testing.ts';
 import type { Db } from '../db/types.ts';
-import { CLASH_NAMED, issuesOf, startSettings } from './settings.ts';
+import { AUDIT_KEY_TO_WRITE, CLASH_NAMED, issuesOf, startSettings } from './settings.ts';
 import type { AskedChange, SaveOutcome, Settings } from './settings.ts';
 
 const PEM = generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey.export({ type: 'pkcs8', format: 'pem' }) as string;
@@ -548,6 +548,16 @@ test('the file and the changes given are left as they were, and the settings hel
   assert.deepEqual(s.atStart.model.extraBody, { provider: { order: ['vendor'] } });
   assert.equal(s.atStart.limits.spendPerDay, 50);
   assert.equal(s.saved().config.limits.spendPerDay, 50);
+});
+
+test('a save refused for want of the audit key says what to write in config.yml', () => {
+  const error = new ConfigError(
+    [`auditKey: ${AUDIT_KEY_NEEDED}`],
+    [{ path: ['auditKey'], message: AUDIT_KEY_NEEDED }],
+  );
+  assert.deepEqual(issuesOf(error), [{ scope: null, path: null, message: AUDIT_KEY_TO_WRITE }]);
+  assert.match(AUDIT_KEY_TO_WRITE, /auditKey: \{ env: AUDIT_KEY \}/);
+  assert.match(AUDIT_KEY_TO_WRITE, /restart the service/);
 });
 
 test('an issue at a setting is given with its scope and path, and one at no setting with its whole line', () => {

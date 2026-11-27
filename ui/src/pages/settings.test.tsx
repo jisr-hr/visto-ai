@@ -309,6 +309,21 @@ test('a save refused shows each issue at its setting and all of them at the top,
   expect(screen.queryByRole('status')).toBeNull();
 });
 
+test('a save refused only by issues at no setting says so without pointing at the settings', async () => {
+  const user = userEvent.setup();
+  const { api } = fakeApi({
+    saveSettings: () => Promise.resolve({ kind: 'invalid', issues: [{ scope: null, path: null, message: 'The audit key is needed.' }] }),
+  });
+  visit('/ui/settings');
+  render(<App api={api} />);
+  await screen.findByRole('region', { name: 'General' });
+  await user.click(screen.getByRole('switch', { name: 'Learning' }));
+  await user.click(screen.getByRole('button', { name: 'Save changes' }));
+
+  const alert = await screen.findByRole('alert');
+  expect(alert).toHaveTextContent(/^Not saved:The audit key is needed\.$/);
+});
+
 test('a save that met another keeps the changes and reads the settings again', async () => {
   const user = userEvent.setup();
   const second = viewOf({ version: 16, global: { 'limits.batchesPerReview': written(8, UI) } });
