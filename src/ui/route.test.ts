@@ -188,7 +188,7 @@ test('without a session every read is signed_out, and the sign-in routes are ope
 
   // A path the API does not know, or a known one with another method, reads nothing.
   h.statements.length = 0;
-  for (const path of ['/api/nope', '/api', '/api/', '/api/me/', '/api/auth', '/api/ME', '/api/reviews/9001']) {
+  for (const path of ['/api/nope', '/api', '/api/', '/api/me/', '/api/auth', '/api/ME', '/api/reviews/x9']) {
     assert.deepEqual(await h.send('GET', path), error(404, 'not_found'), path);
   }
   for (const [method, path, allow] of [
@@ -688,5 +688,73 @@ test('a handler of the new routes that fails is internal_error, logged with its 
     { name: 'octo-admin', role: 'admin', one_time_until: null }, { name: 'octo-viewer', role: 'viewer', one_time_until: null },
   ]);
   assert.equal((await h.send('GET', '/api/accounts', { cookie: a.cookie })).status, 200);
+  await h.db.close();
+});
+
+/** One run of acme/shop #7 recorded, its pull request saved; the run's id. */
+async function oneRun(h: Harness): Promise<number> {
+  await savePullRequest(h.db, {
+    ref: REF, author: 'octo-dev', authorIsBot: false, baseBranch: 'main', headBranch: 'feature-branch', headSha: HEAD, draft: false,
+    state: 'open', mergedAt: null, closedAt: null, mergeCommit: null, installation: '99', updatedAt: at(0), title: 'Cache the tax table per region',
+  });
+  return recordRun(h.db, {
+    ref: REF, job: null, trigger: 'automatic', mode: 'full', dryRun: true, headSha: HEAD, baseSha: HEAD, baseBranch: 'main',
+    outcome: 'ok', failureStage: null, failureCode: null, needsHuman: false, highestScore: 30, body: '', comments: [],
+    result: { findings: [], verdict: { threshold: 70 } },
+    usage: { calls: 1, inputTokens: 10, outputTokens: 5, cachedTokens: 0, cost: 0.084 }, startedAt: at(-700), finishedAt: at(-659),
+  });
+}
+
+test('one review and the reviews of its pull request are read behind a session, by a viewer too', async () => {
+  const h = await harness();
+  const run = await oneRun(h);
+  for (const path of [`/api/reviews/${run}`, '/api/pulls/acme/shop/7/reviews']) {
+    assert.deepEqual(await h.send('GET', path), error(401, 'signed_out'), path);
+  }
+  const { cookie } = await h.signIn();
+  const one = await h.send('GET', `/api/reviews/${run}`, { cookie });
+  assert.deepEqual([one.status, one.headers], [200, JSON_HEADERS]);
+  const body = JSON.parse(String(one.body)) as { run: number; pullRequest: { repository: string } };
+  assert.deepEqual([body.run, body.pullRequest.repository], [run, 'acme/shop']);
+  const list = await h.send('GET', '/api/pulls/acme/shop/7/reviews', { cookie });
+  assert.deepEqual([list.status, list.headers], [200, JSON_HEADERS]);
+  assert.equal((JSON.parse(String(list.body)) as { total: number }).total, 1);
+  assert.deepEqual(await h.send('GET', '/api/pulls/Acme/Shop/7/reviews', { cookie }), list);
+  assert.deepEqual(await h.send('GET', '/api/reviews/999999', { cookie }), error(404, 'not_found'));
+  await h.db.close();
+});
+
+test('a review path a person types wrongly is not found and reads nothing, and another method is refused', async () => {
+  const h = await harness();
+  const { cookie } = await h.signIn();
+  h.statements.length = 0;
+  for (const path of [
+    '/api/reviews/0', '/api/reviews/007', '/api/reviews/2147483648', '/api/reviews/7x', '/api/reviews/7/', '/api/reviews/',
+    '/api/pulls/acme/shop/128/reviews/', '/api/pulls/acme/shop/0/reviews', '/api/pulls/acme/sh%6fp/128/reviews', '/api/pulls/acme/shop/128',
+    '/api/pulls/a/b/c/1/reviews',
+  ]) {
+    assert.deepEqual(await h.send('GET', path, { cookie }), error(404, 'not_found'), path);
+  }
+  for (const [method, path] of [['POST', '/api/reviews/7'], ['DELETE', '/api/pulls/acme/shop/7/reviews']] as const) {
+    assert.deepEqual(await h.send(method, path, { cookie }), error(405, 'method_not_allowed', { allow: 'GET' }), `${method} ${path}`);
+  }
+  assert.deepEqual(h.statements, []);
+  await h.db.close();
+});
+
+test('a handler of the review routes that fails is internal_error, logged with its route name only', async () => {
+  const h = await harness();
+  const run = await oneRun(h);
+  const { cookie } = await h.signIn();
+  const before = h.logs.length;
+  for (const [path, text] of [[`/api/reviews/${run}`, 'left join visto_ai.jobs j'], ['/api/pulls/acme/shop/7/reviews', 'row_number() over']] as const) {
+    h.failing.text = text;
+    assert.deepEqual(await h.send('GET', path, { cookie }), error(500, 'internal_error'), path);
+  }
+  assert.deepEqual(h.logs.slice(before), [
+    { event: 'ui_failed', route: 'review', reason: 'db_down' },
+    { event: 'ui_failed', route: 'pull_reviews', reason: 'db_down' },
+  ]);
+  h.failing.text = null;
   await h.db.close();
 });
