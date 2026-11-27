@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
 import { generateKeyPairSync } from 'node:crypto';
 import {
-  APPROVAL_OFF, ConfigError, GATE_OFF, approvalOf, approvalUseOf, contractFile, gateUseOf, githubSignInOn, parseConfig, repoConfigFor, repoSettingsFor, serviceConfig,
+  APPROVAL_OFF, ConfigError, GATE_OFF, approvalOf, approvalUseOf, contractFile, gateUseOf, githubSignInOn, parseConfig, parseDocument, readYaml, repoConfigFor, repoSettingsFor, serviceConfig,
 } from './load.ts';
 import type { DeploymentConfig, RepoSettings } from './load.ts';
 
@@ -1197,4 +1197,52 @@ test("the example's ui block, uncommented with the app's client id and secret, r
     accounts: ['octo-lead'], team: 'acme/reviewers', publicUrl: 'https://visto.example.test',
     clientId: 'Iv1.0123456789abcdef', clientSecret: env.APP_CLIENT_SECRET,
   });
+});
+
+test('a document read is checked as its text is, and the check does not change it', () => {
+  for (const [text, env] of [[example(), exampleEnv], [SERVICE_YAML, ENV]] as const) {
+    const doc = readYaml(text);
+    const before = structuredClone(doc);
+    assert.deepEqual(parseDocument(doc, env), parseConfig(text, env));
+    assert.deepEqual(doc, before);
+  }
+  assert.throws(() => readYaml('a: ['), (e: unknown) =>
+    e instanceof ConfigError && e.issues.length === 1 && e.issues[0]!.startsWith('not valid YAML at line 1, column 5 (')
+    && e.details.length === 1 && e.details[0]!.path.length === 0 && e.details[0]!.message === e.issues[0]);
+});
+
+test('each issue carries its place as keys and its text after the place, in the order of the issues', () => {
+  const failure = (text: string, env: Record<string, string | undefined>): ConfigError => {
+    try { parseConfig(text, env); } catch (e) { if (e instanceof ConfigError) return e; throw e; }
+    throw new Error('expected a ConfigError');
+  };
+  const check = (e: ConfigError, path: Array<string | number>, message: string): void => {
+    assert.equal(e.details.length, e.issues.length);
+    assert.deepEqual(e.details[0], { path, message });
+    assert.equal(e.issues[0], `${path.length === 0 ? '(root)' : path.join('.')}: ${message}`);
+  };
+  const limits = failure(minimal + 'limits: { queueConcurrency: 0 }\n', { MODEL_KEY: 'k' });
+  assert.deepEqual(limits.details[0]!.path, ['limits', 'queueConcurrency']);
+  assert.equal(limits.issues[0], `limits.queueConcurrency: ${limits.details[0]!.message}`);
+  assert.equal(limits.details.length, limits.issues.length);
+  check(
+    failure(minimal + 'repositories:\n  overrides:\n    acme/shop.js: { gate: { enabled: true } }\n', { MODEL_KEY: 'k' }),
+    ['repositories', 'overrides', 'acme/shop.js', 'gate', 'branches'], 'must name at least one branch when the gate is enabled',
+  );
+  check(
+    failure(minimal + 'repositories:\n  defaults: { score: { autoApprove: true, auditShare: 5 } }\n', { MODEL_KEY: 'k' }),
+    ['auditKey'], 'must be written while autoApprove is true with an auditShare above 0',
+  );
+  check(
+    failure(withScorer, scorerEnv),
+    ['repositories', 'defaults', 'score', 'threshold'], 'must be written when scorer is set',
+  );
+  check(failure(minimal, {}), ['model', 'apiKey'], 'environment variable MODEL_KEY is not set');
+  check(failure(minimal + 'x: 1\n', { MODEL_KEY: 'k' }), [], 'Unrecognized key: "x" (x)');
+  assert.deepEqual(new ConfigError(['a: b']).details, [{ path: [], message: 'a: b' }]);
+});
+
+test("the gate's branches read * as they do today", () => {
+  const c = parseConfig(minimal + "repositories:\n  defaults:\n    gate: { enabled: true, branches: [main, '*'] }\n", { MODEL_KEY: 'k' });
+  assert.deepEqual(c.repositories.defaults.gate.branches, ['main', '*']);
 });

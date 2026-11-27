@@ -20,7 +20,7 @@ export function skipReason(
   if (pr.draft) return 'draft';
   const author = pr.author.toLowerCase();
   if (settings.ignoredAuthors.some((ignored) => ignored.toLowerCase() === author)) return 'ignored_author';
-  if (settings.baseBranches.length > 0 && !settings.baseBranches.includes(pr.baseBranch)) return 'base_filtered';
+  if (settings.baseBranches.length > 0 && !settings.baseBranches.includes('*') && !settings.baseBranches.includes(pr.baseBranch)) return 'base_filtered';
   if (reviewedOnRequest(gatingOf(settings, pr.baseBranch))) return 'gated';
   return null;
 }

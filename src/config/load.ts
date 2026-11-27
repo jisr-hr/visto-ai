@@ -128,13 +128,28 @@ export type ServiceConfig = DeploymentConfig & {
   app: { id: string; privateKey: string; webhookSecret: string }; database: { url: string };
 };
 
+/** One issue, with its place as keys ([] for one of the whole file) and its text after the place. */
+export interface ConfigIssue { path: Array<string | number>; message: string }
+
 export class ConfigError extends Error {
   issues: string[];
-  constructor(issues: string[]) {
+  /** One per issue, in the same order; without it, each issue with path [] and its whole text. */
+  details: ConfigIssue[];
+  constructor(issues: string[], details?: ConfigIssue[]) {
     super(`invalid configuration:\n${issues.map((i) => `  - ${i}`).join('\n')}`);
     this.name = 'ConfigError';
     this.issues = issues;
+    this.details = details ?? issues.map((message) => ({ path: [], message }));
   }
+}
+
+/** An issue written by hand: its text is its place as dotted keys, then the message. */
+function at(path: Array<string | number>, message: string): ConfigIssue {
+  return { path, message };
+}
+
+function failWith(items: ConfigIssue[]): ConfigError {
+  return new ConfigError(items.map((i) => `${i.path.join('.')}: ${i.message}`), items);
 }
 
 function isHttpUrl(value: string): boolean {
@@ -163,17 +178,17 @@ function writesDefaultThreshold(doc: unknown): boolean {
 const GATE_NEEDS_BRANCH = 'must name at least one branch when the gate is enabled';
 
 /** An enabled gate with no branch gates nothing, which is never what was meant. No issue quotes a value. */
-function gateBranchIssues(repositories: { defaults: { gate: GateSettings }; overrides: Record<string, { gate?: Partial<GateSettings> | undefined }> }): string[] {
+function gateBranchIssues(repositories: { defaults: { gate: GateSettings }; overrides: Record<string, { gate?: Partial<GateSettings> | undefined }> }): ConfigIssue[] {
   const { gate: defaults } = repositories.defaults;
-  const issues: string[] = [];
+  const issues: ConfigIssue[] = [];
   const defaultsBad = defaults.enabled && defaults.branches.length === 0;
-  if (defaultsBad) issues.push(`repositories.defaults.gate.branches: ${GATE_NEEDS_BRANCH}`);
+  if (defaultsBad) issues.push(at(['repositories', 'defaults', 'gate', 'branches'], GATE_NEEDS_BRANCH));
   for (const [name, o] of Object.entries(repositories.overrides)) {
     const merged = { ...defaults, ...definedOnly(o.gate ?? {}) };
     if (!(merged.enabled && merged.branches.length === 0)) continue;
     // Defaults already named as bad cover an override that sets neither key.
     if (defaultsBad && o.gate?.enabled === undefined && o.gate?.branches === undefined) continue;
-    issues.push(`repositories.overrides.${name}.gate.branches: ${GATE_NEEDS_BRANCH}`);
+    issues.push(at(['repositories', 'overrides', name, 'gate', 'branches'], GATE_NEEDS_BRANCH));
   }
   return issues;
 }
@@ -187,7 +202,7 @@ function approvalWritten(score: ApprovalKeys | undefined): { approval?: Partial<
   return Object.keys(approval).length === 0 ? {} : { approval };
 }
 
-const AUDIT_KEY_NEEDED = 'auditKey: must be written while autoApprove is true with an auditShare above 0';
+const AUDIT_KEY_NEEDED = 'must be written while autoApprove is true with an auditShare above 0';
 
 /**
  * Whether the defaults, or some override merged with them as `repoSettingsFor` merges it, have approval on with a share
@@ -217,34 +232,34 @@ function isMapping(value: unknown): value is Record<string, unknown> {
 }
 
 /** Replaces every mapping whose only key is `env` by that variable's value, at any depth. An issue names a key, never a value. */
-function resolveReferences(value: unknown, path: string, env: Record<string, string | undefined>, issues: string[]): unknown {
-  if (Array.isArray(value)) return value.map((item, i) => resolveReferences(item, `${path}.${i}`, env, issues));
+function resolveReferences(value: unknown, path: Array<string | number>, env: Record<string, string | undefined>, issues: ConfigIssue[]): unknown {
+  if (Array.isArray(value)) return value.map((item, i) => resolveReferences(item, [...path, i], env, issues));
   if (!isMapping(value)) return value;
   const keys = Object.keys(value);
   if (keys.length === 1 && keys[0] === 'env') {
     const name = value.env;
     if (typeof name !== 'string' || name === '') {
-      issues.push(`${path}: env must name an environment variable`);
+      issues.push(at(path, 'env must name an environment variable'));
       return null;
     }
     const found = env[name];
     if (found === undefined || found === '') {
-      issues.push(`${path}: environment variable ${name} is not set`);
+      issues.push(at(path, `environment variable ${name} is not set`));
       return null;
     }
     return found;
   }
-  return Object.fromEntries(keys.map((k) => [k, resolveReferences(value[k], `${path}.${k}`, env, issues)]));
+  return Object.fromEntries(keys.map((k) => [k, resolveReferences(value[k], [...path, k], env, issues)]));
 }
 
 function definedOnly<T extends object>(value: T): Partial<T> {
   return Object.fromEntries(Object.entries(value).filter(([, v]) => v !== undefined)) as Partial<T>;
 }
 
-export function parseConfig(yamlText: string, env: Record<string, string | undefined>): DeploymentConfig {
-  let doc: unknown;
+/** The YAML of a config file, read; throws a ConfigError for YAML it cannot read. */
+export function readYaml(text: string): unknown {
   try {
-    doc = parse(yamlText);
+    return parse(text);
   } catch (e) {
     // The library's message quotes source lines, which may hold a secret: report position only.
     const pos = e instanceof YAMLParseError ? e.linePos?.[0] : undefined;
@@ -253,46 +268,56 @@ export function parseConfig(yamlText: string, env: Record<string, string | undef
       pos === undefined ? `not valid YAML${code}` : `not valid YAML at line ${pos.line}, column ${pos.col}${code}`,
     ]);
   }
+}
+
+export function parseConfig(yamlText: string, env: Record<string, string | undefined>): DeploymentConfig {
+  return parseDocument(readYaml(yamlText), env);
+}
+
+/** Every check of parseConfig on a document already read; never changes it. */
+export function parseDocument(doc: unknown, env: Record<string, string | undefined>): DeploymentConfig {
   // Issue messages never echo the offending value, so a secret written inline is not printed.
   const result = configSchema.safeParse(doc ?? {});
   if (!result.success) {
-    throw new ConfigError(
-      result.error.issues.map((i) => {
-        // A key outside printable ASCII is shown escaped, so an issue stays one line.
-        const where = i.path.map((k) => (/^[\x20-\x7E]*$/.test(String(k)) ? String(k) : JSON.stringify(String(k)))).join('.');
-        const unknown = i.code === 'unrecognized_keys' ? ` (${i.keys.join(', ')})` : '';
-        return `${where === '' ? '(root)' : where}: ${i.message}${unknown}`;
-      }),
-    );
+    const details: ConfigIssue[] = [];
+    const texts = result.error.issues.map((i) => {
+      // A key outside printable ASCII is shown escaped, so an issue stays one line.
+      const where = i.path.map((k) => (/^[\x20-\x7E]*$/.test(String(k)) ? String(k) : JSON.stringify(String(k)))).join('.');
+      const unknown = i.code === 'unrecognized_keys' ? ` (${i.keys.join(', ')})` : '';
+      const message = `${i.message}${unknown}`;
+      details.push({ path: i.path.map((k) => (typeof k === 'number' ? k : String(k))), message });
+      return `${where === '' ? '(root)' : where}: ${message}`;
+    });
+    throw new ConfigError(texts, details);
   }
   const raw = result.data;
   // Needed with no key written fails closed, dry run or not: one issue, however many repositories need it.
-  const keyIssues = raw.auditKey === undefined && auditKeyNeeded(raw.repositories) ? [AUDIT_KEY_NEEDED] : [];
+  const keyIssues = raw.auditKey === undefined && auditKeyNeeded(raw.repositories) ? [at(['auditKey'], AUDIT_KEY_NEEDED)] : [];
   // What sign-in needs fails closed the same way: each key missing is named, dry run or not, and no value is quoted.
   const uiIssues = raw.ui !== undefined && githubOn(raw.ui)
     ? [
-      raw.ui.publicUrl === undefined ? `ui.publicUrl: ${UI_NEEDS}` : null,
-      raw.app?.clientId === undefined ? `app.clientId: ${UI_NEEDS}` : null,
-      raw.app?.clientSecret === undefined ? `app.clientSecret: ${UI_NEEDS}` : null,
+      raw.ui.publicUrl === undefined ? at(['ui', 'publicUrl'], UI_NEEDS) : null,
+      raw.app?.clientId === undefined ? at(['app', 'clientId'], UI_NEEDS) : null,
+      raw.app?.clientSecret === undefined ? at(['app', 'clientSecret'], UI_NEEDS) : null,
     ].filter((i) => i !== null)
     : [];
   const writtenIssues = [...gateBranchIssues(raw.repositories), ...keyIssues, ...uiIssues];
-  if (writtenIssues.length > 0) throw new ConfigError(writtenIssues);
+  if (writtenIssues.length > 0) throw failWith(writtenIssues);
   const varName = raw.model.apiKey.env;
   const apiKey = env[varName];
   if (apiKey === undefined || apiKey === '') {
-    throw new ConfigError([`model.apiKey: environment variable ${varName} is not set`]);
+    throw failWith([at(['model', 'apiKey'], `environment variable ${varName} is not set`)]);
   }
   let scorer: ScorerConfig | null = null;
   if (raw.scorer !== undefined) {
     const scorerVar = raw.scorer.apiKey.env;
     const scorerKey = env[scorerVar];
     if (scorerKey === undefined || scorerKey === '') {
-      throw new ConfigError([`scorer.apiKey: environment variable ${scorerVar} is not set`]);
+      throw failWith([at(['scorer', 'apiKey'], `environment variable ${scorerVar} is not set`)]);
     }
     // The schema gives the threshold a default, so only the parsed document tells whether it was written.
     if (!writesDefaultThreshold(doc)) {
-      throw new ConfigError(['repositories.defaults.score.threshold: must be written when scorer is set']);
+      throw failWith([at(['repositories', 'defaults', 'score', 'threshold'], 'must be written when scorer is set')]);
     }
     scorer = { ...raw.scorer, apiKey: scorerKey };
   }
@@ -302,23 +327,23 @@ export function parseConfig(yamlText: string, env: Record<string, string | undef
     const hookVar = raw.app.webhookSecret.env;
     const webhookSecret = env[hookVar];
     if (webhookSecret === undefined || webhookSecret === '') {
-      throw new ConfigError([`app.webhookSecret: environment variable ${hookVar} is not set`]);
+      throw failWith([at(['app', 'webhookSecret'], `environment variable ${hookVar} is not set`)]);
     }
     // Resolved whenever it is written, whatever ui says; it stays out of `app`.
     if (raw.app.clientSecret !== undefined) {
       const secretVar = raw.app.clientSecret.env;
       clientSecret = env[secretVar];
       if (clientSecret === undefined || clientSecret === '') {
-        throw new ConfigError([`app.clientSecret: environment variable ${secretVar} is not set`]);
+        throw failWith([at(['app', 'clientSecret'], `environment variable ${secretVar} is not set`)]);
       }
     }
     const keyVar = raw.app.privateKey.env;
     const keyText = env[keyVar];
     if (keyText === undefined || keyText === '') {
-      throw new ConfigError([`app.privateKey: environment variable ${keyVar} is not set`]);
+      throw failWith([at(['app', 'privateKey'], `environment variable ${keyVar} is not set`)]);
     }
     const privateKey = keyText.replaceAll('\\n', '\n');
-    if (!isRsaPrivateKey(privateKey)) throw new ConfigError(['app.privateKey: must be an RSA private key in PEM form']);
+    if (!isRsaPrivateKey(privateKey)) throw failWith([at(['app', 'privateKey'], 'must be an RSA private key in PEM form')]);
     app = { id: String(raw.app.id), privateKey, webhookSecret };
   }
   let alerts: { webhook: string } | null = null;
@@ -326,10 +351,10 @@ export function parseConfig(yamlText: string, env: Record<string, string | undef
     const urlVar = raw.alerts.webhook.env;
     const webhook = env[urlVar];
     if (webhook === undefined || webhook === '') {
-      throw new ConfigError([`alerts.webhook: environment variable ${urlVar} is not set`]);
+      throw failWith([at(['alerts', 'webhook'], `environment variable ${urlVar} is not set`)]);
     }
     // The URL is a credential of the alert channel, so the message never quotes it.
-    if (!isHttpUrl(webhook)) throw new ConfigError(['alerts.webhook: must be an http or https URL']);
+    if (!isHttpUrl(webhook)) throw failWith([at(['alerts', 'webhook'], 'must be an http or https URL')]);
     alerts = { webhook };
   }
   let database: { url: string } | null = null;
@@ -337,10 +362,10 @@ export function parseConfig(yamlText: string, env: Record<string, string | undef
     const urlVar = raw.database.url.env;
     const url = env[urlVar];
     if (url === undefined || url === '') {
-      throw new ConfigError([`database.url: environment variable ${urlVar} is not set`]);
+      throw failWith([at(['database', 'url'], `environment variable ${urlVar} is not set`)]);
     }
     // The URL holds a password, so the message never quotes it.
-    if (!/^postgres(ql)?:\/\//.test(url) || !URL.canParse(url)) throw new ConfigError(['database.url: must be a postgres URL']);
+    if (!/^postgres(ql)?:\/\//.test(url) || !URL.canParse(url)) throw failWith([at(['database', 'url'], 'must be a postgres URL')]);
     database = { url };
   }
   // Resolved whenever it is written, needed or not.
@@ -349,53 +374,53 @@ export function parseConfig(yamlText: string, env: Record<string, string | undef
     const auditVar = raw.auditKey.env;
     const value = env[auditVar];
     if (value === undefined || value === '') {
-      throw new ConfigError([`auditKey: environment variable ${auditVar} is not set`]);
+      throw failWith([at(['auditKey'], `environment variable ${auditVar} is not set`)]);
     }
     // A short key could be found from the draws an author has seen. Kept as it is, spaces included; the message never quotes it.
-    if (value.length < 32) throw new ConfigError([`auditKey: environment variable ${auditVar} must hold at least 32 characters`]);
+    if (value.length < 32) throw failWith([at(['auditKey'], `environment variable ${auditVar} must hold at least 32 characters`)]);
     auditKey = value;
   }
-  const extensionIssues: string[] = [];
+  const extensionIssues: ConfigIssue[] = [];
   const extensions: ExtensionConfig[] = raw.extensions.map((e, i) => ({
     name: e.name,
     module: e.module,
     // A reference is a value inside options, never options itself, which stays a mapping.
     options: Object.fromEntries(
-      Object.entries(e.options).map(([k, v]) => [k, resolveReferences(v, `extensions.${i}.options.${k}`, env, extensionIssues)]),
+      Object.entries(e.options).map(([k, v]) => [k, resolveReferences(v, ['extensions', i, 'options', k], env, extensionIssues)]),
     ),
   }));
-  if (extensionIssues.length > 0) throw new ConfigError(extensionIssues);
-  const mcpIssues: string[] = [];
+  if (extensionIssues.length > 0) throw failWith(extensionIssues);
+  const mcpIssues: ConfigIssue[] = [];
   const mcpServers: McpServerConfig[] = raw.mcpServers.map((s, i) => ({
     name: s.name,
     url: s.url,
     headers: Object.fromEntries(
       Object.entries(s.headers).map(([header, v]): [string, string] => {
-        const path = `mcpServers.${i}.headers.${header}`;
+        const path = ['mcpServers', i, 'headers', header];
         let value: string;
         if (typeof v === 'string') value = v;
         else {
           const found = env[v.env];
           if (found === undefined || found === '') {
-            mcpIssues.push(`${path}: environment variable ${v.env} is not set`);
+            mcpIssues.push(at(path, `environment variable ${v.env} is not set`));
             return [header, ''];
           }
           value = found;
         }
         // A value read from a variable is held to the same rule as one written here; no issue quotes it.
-        if (!/^[\x20-\x7E]{1,4000}$/.test(value)) mcpIssues.push(`${path}: must be 1 to 4,000 printable ASCII characters`);
+        if (!/^[\x20-\x7E]{1,4000}$/.test(value)) mcpIssues.push(at(path, 'must be 1 to 4,000 printable ASCII characters'));
         return [header, value];
       }),
     ),
     tools: s.tools,
   }));
-  if (mcpIssues.length > 0) throw new ConfigError(mcpIssues);
+  if (mcpIssues.length > 0) throw failWith(mcpIssues);
   const { defaults, overrides } = raw.repositories;
   // Repository names are case-insensitive on the git service, so two such keys name one repository.
   const seen = new Map<string, string>();
   for (const name of Object.keys(overrides)) {
     const other = seen.get(name.toLowerCase());
-    if (other !== undefined) throw new ConfigError([`repositories.overrides: ${other} and ${name} name the same repository`]);
+    if (other !== undefined) throw failWith([at(['repositories', 'overrides'], `${other} and ${name} name the same repository`)]);
     seen.set(name.toLowerCase(), name);
   }
   const { approval: defaultsApproval } = approvalWritten(defaults.score);
