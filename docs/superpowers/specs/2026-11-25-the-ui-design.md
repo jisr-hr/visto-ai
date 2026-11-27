@@ -72,7 +72,7 @@ Each is reversible and listed for the owner.
 
 - **In the database, editable in the UI:** `dryRun`, `learning`, `limits`, the model's non-secret fields (endpoint, model, fallbacks, effort, extra body and headers that are not secret references, prices, time limit, how the answer is asked for), the second scorer's non-secret fields and its threshold, and the repository defaults and every override (branches, ignored authors, "Reviewed on every push", how a new commit is reviewed, threshold, inline notes, the merge gate, automatic approval, the thread rule, the audit share).
 - **In `config.yml` only, shown read-only:** what the service needs before it reaches the database or that holds a secret by reference: `app` (id, key, webhook secret, client id and secret), `database`, `server`, `alerts`, `auditKey`, `extensions`, `mcpServers`, and `ui` (who may open it). Secret values are never shown; the UI shows each secret's variable name and whether it is set.
-- **As built:** the second scorer is on while one of its keys is in the database; its key stays in `config.yml`. An override key that names no repository (not `<owner>/<name>`) is not copied.
+- **As built:** the model's and the second scorer's endpoints (`model.baseUrl`, `scorer.baseUrl`) are not editable: they stay in `config.yml`, shown read only, because the API keys are sent to them and an admin who could change them could send the keys to an address of their choosing. The second scorer is on while one of its keys (`scorer.model`, `scorer.timeoutSeconds`) is in the database; its key stays in `config.yml`. An override key that names no repository (not `<owner>/<name>`) is not copied.
 
 ### 4.2 One validation
 
@@ -97,9 +97,9 @@ Every change, from the UI or from the file at a start, is a row: when, who (`con
 ### 4.5 When a change takes effect
 
 - **At the next review**, with no restart: the repository settings, the limits read for each review (tokens per call, batches per review, the daily spend limit), and the model's and scorer's fields read at each call.
-- **At the next start:** settings the service reads once when it starts (dry run, learning, the queue's concurrency, the model's endpoint and time limit, how the answer is asked for, the second scorer's endpoint). The UI marks them, and after such a change shows "Takes effect when the service restarts" until it has.
+- **At the next start:** settings the service reads once when it starts (dry run, learning, the queue's concurrency, the model's time limit, how the answer is asked for; as built, the endpoints are in the file only). The UI marks them, and after such a change shows "Takes effect when the service restarts" until it has.
 
-A review already running keeps the settings it started with. **As built:** whether the second scorer is on is read at the next start too; a merge gate switched on applies at each pull request's next event, and its sweep of checks and the app's permission checks (the gate's, and automatic approval's Administration read) at the next start.
+A review already running keeps the settings it started with. **As built:** whether the second scorer is on is read at the next start too; a merge gate switched on applies at each pull request's next event, and its sweep of checks, the asking for the waiting reviews' checks when a pause begins, ends or changes (whether the gate is in use is decided at the start), and the app's permission checks (the gate's, and automatic approval's Administration read) at the next start. Every check of the model's key, at the start and at each upkeep, sends the start's headers and endpoint, so a wrong saved header can pause reviews until the next start.
 
 ## 5. The API, in outline
 

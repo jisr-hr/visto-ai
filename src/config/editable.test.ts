@@ -43,7 +43,7 @@ test('the editable part of a file is every setting it writes, by scope and path,
   const e = editableOf(doc);
   const global = keysOf(e).filter((k) => k.startsWith('global:'));
   assert.deepEqual(global, [
-    'dryRun', 'learning', 'limits.batchesPerReview', 'limits.inputTokensPerCall', 'limits.queueConcurrency', 'limits.spendPerDay', 'model.baseUrl',
+    'dryRun', 'learning', 'limits.batchesPerReview', 'limits.inputTokensPerCall', 'limits.queueConcurrency', 'limits.spendPerDay',
     'model.effort.default', 'model.effort.elevated', 'model.extraBody', 'model.extraHeaders', 'model.fallbacks', 'model.model', 'model.prices',
     'model.timeoutSeconds', 'model.toolChoice',
   ].map((p) => `global:${p}`).sort());
@@ -66,13 +66,14 @@ test('an override key is lower-cased, and one that names no repository is droppe
 });
 
 test('the lists, the start-time paths and the keys of a scope are as the design has them', () => {
-  assert.equal(GLOBAL_PATHS.length, 19);
+  assert.equal(GLOBAL_PATHS.length, 17);
   assert.equal(REPOSITORY_PATHS.length, 16);
   assert.ok([...AT_START].every((p) => GLOBAL_PATHS.includes(p)));
-  assert.equal(AT_START.size, 7);
+  assert.equal(AT_START.size, 5);
   assert.equal(settingKey('acme/shop.js', 'gate.mode'), 'acme/shop.js:gate.mode');
   assert.deepEqual(keyParts('acme/shop.js:gate.mode'), { scope: 'acme/shop.js', path: 'gate.mode' });
   assert.ok(isSetting(GLOBAL, 'dryRun') && !isSetting(GLOBAL, 'newHead') && !isSetting(GLOBAL, 'model.apiKey'));
+  for (const path of ['model.baseUrl', 'scorer.baseUrl']) assert.ok(!isSetting(GLOBAL, path) && !GLOBAL_PATHS.includes(path) && !AT_START.has(path), path);
   assert.ok(isSetting(DEFAULTS, 'newHead') && !isSetting(DEFAULTS, 'dryRun') && isSetting('acme/web', 'gate.mode') && !isSetting('Acme/Web', 'gate.mode'));
   assert.ok(REPOSITORY_SCOPE.test('acme/shop.js') && !REPOSITORY_SCOPE.test('acme'));
   assert.equal(filePathOf(GLOBAL, 'learning'), 'learning');
@@ -100,6 +101,16 @@ test('a document with its editable part put back checks as the file does, and ke
   assert.deepEqual(asked.scorer, { model: 'vendor/other', apiKey: { env: 'SCORER_API_KEY' } });
   const kept = withEditable({ model: { apiKey: { env: 'OPENROUTER_API_KEY' }, model: 'x' } }, new Map([['global:model.model', 'y']])) as { model: Record<string, unknown> };
   assert.deepEqual(kept.model, { apiKey: { env: 'OPENROUTER_API_KEY' }, model: 'y' });
+  // The endpoints are the file's alone: kept from it, and never taken from the editable part.
+  const withUrls = { model: { baseUrl: 'https://model.example.test/v1', apiKey: { env: 'OPENROUTER_API_KEY' }, model: 'x' }, scorer: { baseUrl: 'https://scorer.example.test/v1', apiKey: { env: 'SCORER_API_KEY' }, model: 's' } };
+  const asked2 = withEditable(withUrls, new Map<string, SettingValue>([
+    ['global:model.model', 'y'], ['global:model.baseUrl', 'https://elsewhere.example.test/v1'], ['global:scorer.model', 's2'], ['global:scorer.baseUrl', 'https://elsewhere.example.test/v1'],
+  ])) as { model: Record<string, unknown>; scorer: Record<string, unknown> };
+  assert.equal(asked2.model.baseUrl, 'https://model.example.test/v1');
+  assert.equal(asked2.scorer.baseUrl, 'https://scorer.example.test/v1');
+  const noScorer = withEditable(withUrls, new Map<string, SettingValue>([['global:model.model', 'y']])) as { model: Record<string, unknown>; scorer?: unknown };
+  assert.equal(noScorer.model.baseUrl, 'https://model.example.test/v1');
+  assert.ok(!('scorer' in noScorer));
   const apiKeyAttempt = withEditable({ model: { apiKey: { env: 'OPENROUTER_API_KEY' } } }, new Map([['global:model.apiKey', 'sk-inline']])) as { model: Record<string, unknown> };
   assert.deepEqual(apiKeyAttempt.model, { apiKey: { env: 'OPENROUTER_API_KEY' } });
 });
@@ -109,14 +120,14 @@ test('the settings in force keep the ones read at start until the next start, an
     ['global:dryRun', true], ['global:limits.queueConcurrency', 2], ['global:model.model', 'start-model'], ['defaults:score.threshold', 70],
   ]);
   const saved: Editable = new Map<string, SettingValue>([
-    ['global:dryRun', false], ['global:learning', true], ['global:limits.queueConcurrency', 5], ['global:model.baseUrl', 'https://saved.example.test/v1'],
+    ['global:dryRun', false], ['global:learning', true], ['global:limits.queueConcurrency', 5],
     ['global:model.model', 'saved-model'], ['global:model.toolChoice', 'auto'], ['global:model.timeoutSeconds', 99], ['defaults:score.threshold', 80],
     ['acme/shop:gate.mode', 'shadow'],
   ]);
   const force = inForceEditable(atStart, saved);
   assert.equal(force.get('global:dryRun'), true);
   assert.equal(force.get('global:limits.queueConcurrency'), 2);
-  for (const p of ['learning', 'model.baseUrl', 'model.toolChoice', 'model.timeoutSeconds']) assert.ok(AT_START.has(p) && !force.has(`global:${p}`), p);
+  for (const p of ['learning', 'model.toolChoice', 'model.timeoutSeconds']) assert.ok(AT_START.has(p) && !force.has(`global:${p}`), p);
   assert.equal(force.get('global:model.model'), 'saved-model');
   assert.equal(force.get('defaults:score.threshold'), 80);
   assert.equal(force.get('acme/shop:gate.mode'), 'shadow');
@@ -186,9 +197,13 @@ test('the values shown are the settings loaded, in the shape the file writes the
 });
 
 test('the export holds the references the file writes and no secret, and reads back as the same settings', () => {
-  const base = readYaml(example()) as { repositories: { overrides: Record<string, unknown> } };
-  const doc = { ...base, auditKey: { env: 'AUDIT_KEY' }, repositories: { ...base.repositories, overrides: { ...base.repositories.overrides, 'acme/shop.js': { newHead: 'full', gate: { mode: 'shadow' } } } } };
-  const editable = editableOf(doc);
+  // Every block of the file switched on, so that what the export leaves out is there to be left out.
+  let text0 = example();
+  for (const first of ['# scorer:', '# app:', '# ui:', '# auditKey: { env: AUDIT_KEY }', '# extensions:', '# mcpServers:']) text0 = uncomment(text0, first);
+  const base = readYaml(text0) as { repositories: { overrides: Record<string, unknown> } };
+  for (const block of ['scorer', 'app', 'database', 'server', 'alerts', 'ui', 'auditKey', 'extensions', 'mcpServers']) assert.ok(block in base, block);
+  const doc = { ...base, repositories: { ...base.repositories, overrides: { ...base.repositories.overrides, 'acme/shop.js': { newHead: 'full', gate: { mode: 'shadow' } } } } };
+  const editable = withKeys(editableOf(doc), ['global:scorer.model', 'vendor/decision-model']);
   const text = exportText(doc, editable, '2026-03-01 10:00 UTC');
   assert.ok(text.startsWith(
     '# The settings saved in the UI on 2026-03-01 10:00 UTC, as config.yml writes them.\n'
@@ -198,8 +213,20 @@ test('the export holds the references the file writes and no secret, and reads b
   assert.equal(editable.get('acme/shop.js:newHead'), 'full');
   assert.equal(editableOf(readYaml(text)).get('acme/shop.js:gate.mode'), 'shadow');
   assert.ok(text.includes('OPENROUTER_API_KEY'));
-  for (const never of ['model-key-for-tests-only', 'app:', 'database:', 'ui:', 'auditKey', 'AUDIT_KEY']) assert.ok(!text.includes(never), never);
-  assert.deepEqual(Object.keys(readYaml(text) as object), ['dryRun', 'learning', 'limits', 'model', 'repositories']);
+  // The variables of every other block are in the file, and not in the export.
+  const others = secretsOf(doc).filter((r) => !['model_key', 'scorer_key'].includes(r.kind)).map((r) => r.variable).filter((v): v is string => v !== null);
+  assert.ok(others.length >= 5, others.join(','));
+  for (const variable of others) assert.ok(!text.includes(variable), variable);
+  for (const never of ['model-key-for-tests-only', 'app:', 'database:', 'ui:', 'server:', 'alerts:', 'extensions:', 'mcpServers:', 'auditKey', 'AUDIT_KEY']) assert.ok(!text.includes(never), never);
+  assert.deepEqual(Object.keys(readYaml(text) as object), ['dryRun', 'learning', 'limits', 'model', 'scorer', 'repositories']);
+  assert.ok(!text.includes('# scorer:'));
+  // The second scorer off in the saved settings while the file writes its block: the export says to remove the block.
+  const off = exportText(doc, new Map([...editable].filter(([k]) => !k.startsWith('global:scorer.'))), '2026-03-01 10:00 UTC');
+  assert.ok(!('scorer' in (readYaml(off) as object)));
+  assert.equal(off.split('\n').filter((l) => l.startsWith('#')).length, 3);
+  assert.match(off, /^# scorer: not in the saved settings \(the second scorer is off\); remove the scorer block from config\.yml\.$/m);
+  const none = exportText({ model: { apiKey: { env: 'OPENROUTER_API_KEY' }, model: 'x' } }, new Map<string, SettingValue>([['global:model.model', 'x']]), '2026-03-01 10:00 UTC');
+  assert.equal(none.split('\n').filter((l) => l.startsWith('#')).length, 2);
 });
 
 test('the secrets are the references config.yml writes, by variable name, and the ones it does not write have none', () => {
@@ -217,5 +244,12 @@ test('the secrets are the references config.yml writes, by variable name, and th
   assert.deepEqual(literal.filter((r) => r.kind === 'mcp_header'), [{ kind: 'mcp_header', of: 'docs, header X-Ref', variable: 'X_REF' }]);
   const nested = secretsOf({ extensions: [{ name: 'e', module: './m.ts', options: { a: { b: [{ env: 'DEEP' }] } } }] });
   assert.deepEqual(nested.filter((r) => r.kind === 'extension'), [{ kind: 'extension', of: 'e, option a.b.0', variable: 'DEEP' }]);
+  // As load.ts reads them, a reference is a value inside options, never options itself.
+  const whole = secretsOf({ extensions: [{ name: 'e', module: './m.ts', options: { env: 'WHOLE' } }] });
+  assert.deepEqual(whole.filter((r) => r.kind === 'extension'), []);
+  const top = secretsOf({ extensions: [{ name: 'e', module: './m.ts', options: { token: { env: 'TOKEN' }, plain: 'x', env: { env: 'ENV_NAMED' } } }] });
+  assert.deepEqual(top.filter((r) => r.kind === 'extension'), [
+    { kind: 'extension', of: 'e, option token', variable: 'TOKEN' }, { kind: 'extension', of: 'e, option env', variable: 'ENV_NAMED' },
+  ]);
   assert.equal(secretsOf({}).length, 8);
 });

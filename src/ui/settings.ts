@@ -29,6 +29,8 @@ const MAX_INT = 2147483647;
 /** Repositories read from the activity besides those with a row. */
 const KNOWN_SHOWN = 200;
 
+const isMapping = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
+
 /** The value's JSON text from Postgres (keys reordered), parsed and written again with sorted keys, cut at VALUE_SHOWN. */
 function shownText(text: string | null): string | null {
   if (text === null) return null;
@@ -37,6 +39,14 @@ function shownText(text: string | null): string | null {
   // Never cut a surrogate pair in two.
   const cut = /[\uD800-\uDBFF]/.test(whole.charAt(VALUE_SHOWN - 1)) ? VALUE_SHOWN - 1 : VALUE_SHOWN;
   return `${whole.slice(0, cut)}...`;
+}
+
+/** The scorer's address as the file writes it (the schema's default when its block has none); null with no scorer block. */
+const SCORER_DEFAULT_URL = 'https://openrouter.ai/api/alpha';
+function scorerEndpoint(file: unknown): string | null {
+  const block = isMapping(file) ? file.scorer : undefined;
+  if (!isMapping(block)) return null;
+  return typeof block.baseUrl === 'string' ? block.baseUrl : SCORER_DEFAULT_URL;
 }
 
 export async function settingsView(deps: SettingsApiDeps): Promise<SettingsView> {
@@ -74,6 +84,7 @@ export async function settingsView(deps: SettingsApiDeps): Promise<SettingsView>
     defaults: section(DEFAULTS, REPOSITORY_PATHS),
     repositories: names.map((name) => ({ name, settings: section(name, REPOSITORY_PATHS) })),
     scorer: { on: scorerOn(saved), waits: scorerOn(saved) !== scorerOn(settings.startEditable) },
+    endpoints: { model: settings.atStart.model.baseUrl, scorer: scorerEndpoint(settings.file) },
     secrets: secretsOf(settings.file).map((secret) => ({ kind: secret.kind, of: secret.of, variable: secret.variable })),
     access: {
       publicUrl: deps.access.publicUrl, github: deps.access.github, accounts: [...deps.access.accounts], team: deps.access.team,
@@ -81,7 +92,6 @@ export async function settingsView(deps: SettingsApiDeps): Promise<SettingsView>
   };
 }
 
-const isMapping = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
 
 /** Whether a string anywhere in `value`, a key included, holds U+0000 or a lone surrogate (call 18); walked without recursion. */
 function brokenText(value: unknown): boolean {

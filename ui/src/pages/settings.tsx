@@ -30,11 +30,10 @@ const FAILED = 'The settings could not be saved.';
 const BUSY = 'The service is busy. Try again in a moment.';
 const UNREACHABLE = 'The service could not be reached. Try again in a moment.';
 const NAV: ReadonlyArray<readonly [string, string]> = [['general', 'General'], ['model', 'Model'], ['repos', 'Repositories'], ['secrets', 'Secrets'], ['access', 'Access'], ['accounts', 'Accounts'], ['changes', 'Changes'], ['export', 'In config.yml']];
-const SCORER_PATHS = ['scorer.baseUrl', 'scorer.model', 'scorer.timeoutSeconds'] as const;
+const SCORER_PATHS = ['scorer.model', 'scorer.timeoutSeconds'] as const;
 
 /** What the top of the page says of a save that did not go through: the issues, or a sentence. */
 type Notice = { kind: 'issues'; issues: SettingIssue[] } | { kind: 'text'; text: string };
-
 
 function failureOf(error: unknown): string {
   if (error instanceof RequestFailed && error.status === 503) return BUSY;
@@ -70,7 +69,6 @@ function General({ form }: { form: Form }) {
         path="learning"
         id="l-learn"
         label={LABELS.learning!}
-       
         help="Learn from what people do on pull requests: where they stepped in, reverts, and replies to findings."
       >
         <Toggle form={form} path="learning" labelId="l-learn" />
@@ -168,9 +166,9 @@ function ModelSection({ form }: { form: Form }) {
       <h2 id="model-title" className={`${H2} mb-1`}>
         Model
       </h2>
-      <Row {...row} path="model.baseUrl" id="l-url" labelFor="m-url" label={LABELS['model.baseUrl']!} help="An OpenAI-compatible endpoint. Its key is a secret, set in the environment.">
-        <TextField form={form} scope={GLOBAL} path="model.baseUrl" id="m-url" className={`${MONO} w-full`} />
-      </Row>
+      <PlainRow id="l-url" label={LABELS['model.baseUrl']!} help="An OpenAI-compatible endpoint. Its key is a secret, set in the environment. Set in config.yml.">
+        <span className={MONO}>{form.view.endpoints.model}</span>
+      </PlainRow>
       <Row {...row} path="model.model" id="l-model" labelFor="m-model" label={LABELS['model.model']!} help="Tried first for every review.">
         <TextField form={form} scope={GLOBAL} path="model.model" id="m-model" className={MONO} />
       </Row>
@@ -226,17 +224,9 @@ function ModelSection({ form }: { form: Form }) {
       </Row>
       {on ? (
         <>
-          <Row
-            {...row}
-            path="scorer.baseUrl"
-            id="l-surl"
-            labelFor="s-url"
-            label={LABELS['scorer.baseUrl']!}
-           
-            help="The scorer's API. Its key is a secret, set in the environment."
-          >
-            <TextField form={form} scope={GLOBAL} path="scorer.baseUrl" id="s-url" className={`${MONO} w-full`} />
-          </Row>
+          <PlainRow id="l-surl" label={LABELS['scorer.baseUrl']!} help="The scorer's API. Its key is a secret, set in the environment. Set in config.yml.">
+            <span className={MONO}>{form.view.endpoints.scorer ?? 'The default'}</span>
+          </PlainRow>
           <Row {...row} path="scorer.timeoutSeconds" id="l-stime" labelFor="s-time" label={LABELS['scorer.timeoutSeconds']!} help="Seconds, for one scorer call.">
             <NumberField form={form} scope={GLOBAL} path="scorer.timeoutSeconds" id="s-time" className="max-w-[140px]" />
           </Row>
@@ -552,8 +542,13 @@ export function SettingsPage() {
       <Nav />
       {body()}
       <AccountsSection />
-      <ChangesSection reads={recorded} />
-      <ExportSection reads={recorded} />
+      {/* After the settings view has answered (or failed): the page's reads go in turn, as the API answers few at once. */}
+      {read.view !== null || read.failed ? (
+        <>
+          <ChangesSection reads={recorded} />
+          <ExportSection reads={recorded} />
+        </>
+      ) : null}
     </>
   );
 }

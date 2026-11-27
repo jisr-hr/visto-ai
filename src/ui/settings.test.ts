@@ -6,7 +6,7 @@ import type { SettingValue } from '../config/editable.ts';
 import { parseDocument, readYaml, serviceConfig } from '../config/load.ts';
 import type { ServiceConfig } from '../config/load.ts';
 import { savePullRequest } from '../db/pull-requests.ts';
-import { settingsVersion } from '../db/settings.ts';
+import { settingsVersion, writeSetting } from '../db/settings.ts';
 import { testDb } from '../db/testing.ts';
 import type { Db } from '../db/types.ts';
 import { startSettings } from '../shell/settings.ts';
@@ -83,11 +83,54 @@ test('the view holds every setting with its value, whether it is written and whe
   assert.equal(view.now, at(30));
   assert.equal(view.version, 4);
   assert.deepEqual(view.access, ACCESS);
+  assert.deepEqual(view.endpoints, { model: 'https://openrouter.ai/api/v1', scorer: null });
+  assert.ok(!('model.baseUrl' in view.global) && !('scorer.baseUrl' in view.global));
   // The version is the record's length after more saves.
   await saveNow(d, [{ scope: 'global', path: 'limits.spendPerDay', value: 40 }]);
   const after = await settingsView(d);
   assert.equal(after.version, 5);
   assert.deepEqual(after.global['limits.spendPerDay']!.source, { by: 'ui', name: 'octo-admin', at: at(0) });
+});
+
+test("the view reads the version before the rows, and shows a row's own value", async () => {
+  const d = await deps();
+  const seen: string[] = [];
+  const spy: Db = {
+    query: (text, params) => { seen.push(text); return db.query(text, params); },
+    script: (sql) => db.script(sql),
+    transaction: (work) => db.transaction(work),
+    close: () => Promise.resolve(),
+  };
+  // A save between the two reads would give an older version with newer rows: the version is the first statement.
+  await settingsView({ ...d, db: spy });
+  const versionAt = seen.findIndex((t) => t.includes('max(id)'));
+  const rowsAt = seen.findIndex((t) => t.includes('from visto_ai.settings order by'));
+  assert.ok(versionAt !== -1 && rowsAt !== -1 && versionAt < rowsAt, seen.join(' | '));
+  // A row written straight into the table differs from the saved configuration held in memory: the view shows the row.
+  assert.equal(d.settings.saved().config.limits.spendPerDay, 50);
+  await writeSetting(db, { scope: 'global', path: 'limits.spendPerDay', value: 99, by: 'ui', name: 'octo-admin', at: at(5) });
+  const view = await settingsView(d);
+  assert.equal(view.global['limits.spendPerDay']!.value, 99);
+  assert.deepEqual(view.global['limits.spendPerDay']!.source, { by: 'ui', name: 'octo-admin', at: at(5) });
+});
+
+test("the endpoints are the file's, shown as they are written and never as settings", async () => {
+  const d = await deps(SCORER_YAML.replace('  model: vendor/model-a', '  baseUrl: https://model.example.test/v1\n  model: vendor/model-a'));
+  assert.deepEqual((await settingsView(d)).endpoints, { model: 'https://model.example.test/v1', scorer: 'https://openrouter.ai/api/alpha' });
+});
+
+test("the scorer's endpoint is read from the file, whether or not the scorer is on", async () => {
+  // Written in the file while the scorer block is there: shown, and with the default when it writes none.
+  const own = await deps(SCORER_YAML.replace('  model: vendor/scorer-a', '  baseUrl: https://scorer.example.test/v1\n  model: vendor/scorer-a'));
+  assert.equal((await settingsView(own)).endpoints.scorer, 'https://scorer.example.test/v1');
+  // Switched off in the settings, the file still writes it: the view shows it.
+  assert.equal((await saveNow(own, [{ scope: 'global', path: 'scorer.model' }])).kind, 'saved');
+  const off = await settingsView(own);
+  assert.equal(off.scorer.on, false);
+  assert.equal(off.endpoints.scorer, 'https://scorer.example.test/v1');
+  // A file with no scorer block has none, and one with a block and no address has the default.
+  assert.equal((await settingsView(await deps())).endpoints.scorer, null);
+  assert.equal((await settingsView(await deps(SCORER_YAML))).endpoints.scorer, 'https://openrouter.ai/api/alpha');
 });
 
 test("a start-time setting saved waits for the restart, and the scorer's being on too", async () => {
@@ -120,27 +163,28 @@ test('the record is paged newest first, its values cut at 200 characters, and a 
   assert.deepEqual(await settingChanges(d, new URLSearchParams({ before: '' })), first);
   for (const bad of ['x', '-1', '1.5', '2147483648', '12345678901', ' 3']) assert.equal(await settingChanges(d, new URLSearchParams({ before: bad })), 'bad_request', bad);
 
-  await saveNow(d, [{ scope: 'global', path: 'model.extraBody', value: { b: 'x'.repeat(300), a: 1 } }]);
+  await saveNow(d, [{ scope: 'global', path: 'model.extraBody', value: { b: 'x'.repeat(300), aa: 1 } }]);
   const long = await settingChanges(d, new URLSearchParams(''));
   if (long === 'bad_request') throw new Error('bad_request');
   const row = long.changes[0]!;
   assert.equal(row.before, null);
   assert.equal(row.after!.length, 203);
   assert.ok(row.after!.endsWith('...'));
-  // Postgres keeps keys in its own order; the record shows them sorted, parsed and written again.
-  assert.ok(row.after!.startsWith('{"a":1,"b":"xxx'));
+  // Postgres keeps the keys of an object shorter first, then bytewise ('b' before 'aa'); the record shows them sorted, parsed and written again.
+  assert.ok(row.after!.startsWith('{"aa":1,"b":"xxx'));
 });
 
 test("no answer holds a secret's value or a field the screen does not show", async () => {
   const d = await deps(SCORER_YAML);
   await saveNow(d, [{ scope: 'defaults', path: 'score.threshold', value: 65 }]);
   const view = await settingsView(d);
-  assert.deepEqual(Object.keys(view), ['now', 'version', 'global', 'defaults', 'repositories', 'scorer', 'secrets', 'access']);
+  assert.deepEqual(Object.keys(view), ['now', 'version', 'global', 'defaults', 'repositories', 'scorer', 'endpoints', 'secrets', 'access']);
   for (const setting of [...Object.values(view.global), ...Object.values(view.defaults), ...Object.values(view.repositories[0]!.settings)]) {
     assert.deepEqual(Object.keys(setting), ['written', 'value', 'source', 'restart', 'waits']);
     if (setting.source !== null) assert.deepEqual(Object.keys(setting.source), ['by', 'name', 'at']);
   }
   assert.deepEqual(Object.keys(view.repositories[0]!), ['name', 'settings']);
+  assert.deepEqual(Object.keys(view.endpoints), ['model', 'scorer']);
   assert.deepEqual(Object.keys(view.access), ['publicUrl', 'github', 'accounts', 'team']);
   assert.deepEqual(view.secrets.map((s) => [s.kind, s.variable]), [
     ['model_key', 'OPENROUTER_API_KEY'], ['scorer_key', 'SCORER_API_KEY'], ['app_private_key', 'APP_PRIVATE_KEY'], ['webhook_secret', 'WEBHOOK_SECRET'],
@@ -180,6 +224,8 @@ test('a save whose body is not of its shape is null, and one of its shape is rea
   const bad: Array<Record<string, unknown>> = [
     one({ scope: 'defaults', path: 'nope' }),
     one({ scope: 'global', path: 'score.threshold' }),
+    one({ scope: 'global', path: 'model.baseUrl', value: 'https://elsewhere.example.test/v1' }),
+    one({ scope: 'global', path: 'scorer.baseUrl', value: 'https://elsewhere.example.test/v1' }),
     one({ scope: 'Acme/Shop', path: 'newHead' }),
     one({ scope: 'acme', path: 'newHead' }),
     one({ scope: 'defaults', path: 'newHead', extra: 1 }),

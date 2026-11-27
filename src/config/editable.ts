@@ -9,8 +9,8 @@ export const DEFAULTS = 'defaults';
 
 export const GLOBAL_PATHS: readonly string[] = [
   'dryRun', 'learning', 'limits.spendPerDay', 'limits.queueConcurrency', 'limits.inputTokensPerCall', 'limits.batchesPerReview',
-  'model.baseUrl', 'model.model', 'model.fallbacks', 'model.effort.default', 'model.effort.elevated', 'model.toolChoice', 'model.timeoutSeconds',
-  'model.prices', 'model.extraBody', 'model.extraHeaders', 'scorer.baseUrl', 'scorer.model', 'scorer.timeoutSeconds',
+  'model.model', 'model.fallbacks', 'model.effort.default', 'model.effort.elevated', 'model.toolChoice', 'model.timeoutSeconds',
+  'model.prices', 'model.extraBody', 'model.extraHeaders', 'scorer.model', 'scorer.timeoutSeconds',
 ];
 
 export const REPOSITORY_PATHS: readonly string[] = [
@@ -20,7 +20,7 @@ export const REPOSITORY_PATHS: readonly string[] = [
 
 /** Global paths read once when the service starts (call 19); whether the scorer is on is start-time too. */
 export const AT_START: ReadonlySet<string> = new Set([
-  'dryRun', 'learning', 'limits.queueConcurrency', 'model.baseUrl', 'model.timeoutSeconds', 'model.toolChoice', 'scorer.baseUrl',
+  'dryRun', 'learning', 'limits.queueConcurrency', 'model.timeoutSeconds', 'model.toolChoice',
 ]);
 
 /** A repository's scope once lower-cased. */
@@ -112,6 +112,9 @@ export function withEditable(document: unknown, editable: Editable): unknown {
   const copy: Record<string, unknown> = isMapping(document) ? structuredClone(document) : {};
   const modelKey = valueAt(copy, ['model', 'apiKey']);
   const scorerKey = valueAt(copy, ['scorer', 'apiKey']);
+  // The endpoints are file-only: where the keys are sent is for whoever edits config.yml.
+  const modelUrl = valueAt(copy, ['model', 'baseUrl']);
+  const scorerUrl = valueAt(copy, ['scorer', 'baseUrl']);
   for (const key of ['dryRun', 'learning', 'limits', 'repositories', 'model', 'scorer']) delete copy[key];
 
   const byScope = new Map<string, Map<string, SettingValue>>();
@@ -131,8 +134,10 @@ export function withEditable(document: unknown, editable: Editable): unknown {
   };
 
   const block: Record<string, unknown> = {};
+  if (modelUrl !== null) setAt(block, ['model', 'baseUrl'], modelUrl.value);
   if (modelKey !== null) setAt(block, ['model', 'apiKey'], modelKey.value);
   place(block, GLOBAL, GLOBAL_PATHS, []);
+  if (scorerOn(editable) && scorerUrl !== null) setAt(block, ['scorer', 'baseUrl'], scorerUrl.value);
   if (scorerOn(editable) && scorerKey !== null) setAt(block, ['scorer', 'apiKey'], scorerKey.value);
   // The lists' order for the top-level keys, whatever the order the settings were put in.
   for (const top of ['dryRun', 'learning', 'limits', 'model', 'scorer']) if (has(block, top)) copy[top] = block[top];
@@ -240,11 +245,11 @@ export function shownValues(config: DeploymentConfig, repositories: readonly str
     ['dryRun', config.dryRun], ['learning', config.learning],
     ['limits.spendPerDay', limits.spendPerDay], ['limits.queueConcurrency', limits.queueConcurrency],
     ['limits.inputTokensPerCall', limits.inputTokensPerCall], ['limits.batchesPerReview', limits.batchesPerReview],
-    ['model.baseUrl', model.baseUrl], ['model.model', model.model], ['model.fallbacks', model.fallbacks],
+    ['model.model', model.model], ['model.fallbacks', model.fallbacks],
     ['model.effort.default', model.effort.default as SettingValue], ['model.effort.elevated', model.effort.elevated as SettingValue],
     ['model.toolChoice', model.toolChoice], ['model.timeoutSeconds', model.timeoutSeconds], ['model.prices', model.prices],
     ['model.extraBody', model.extraBody as SettingValue], ['model.extraHeaders', model.extraHeaders],
-    ['scorer.baseUrl', scorer?.baseUrl ?? null], ['scorer.model', scorer?.model ?? null], ['scorer.timeoutSeconds', scorer?.timeoutSeconds ?? null],
+    ['scorer.model', scorer?.model ?? null], ['scorer.timeoutSeconds', scorer?.timeoutSeconds ?? null],
   ];
   for (const [path, value] of global) out.set(settingKey(GLOBAL, path), structuredClone(value));
   repositoryValues(DEFAULTS, config.repositories.defaults, out);
@@ -257,8 +262,11 @@ export function exportText(document: unknown, editable: Editable, at: string): s
   const full = withEditable(document, editable) as Record<string, unknown>;
   const picked: Record<string, unknown> = {};
   for (const key of ['dryRun', 'learning', 'limits', 'model', 'scorer', 'repositories']) if (has(full, key)) picked[key] = full[key];
+  // A scorer switched off in the UI is no block here, and a block left in the file keeps scoring (the evals read the file).
+  const scorerGone = isMapping(document) && has(document, 'scorer') && !has(full, 'scorer');
   return `# The settings saved in the UI on ${at}, as config.yml writes them.\n`
     + '# Replace these keys of config.yml with them: a setting changed in the file wins at the next start.\n'
+    + (scorerGone ? '# scorer: not in the saved settings (the second scorer is off); remove the scorer block from config.yml.\n' : '')
     + stringify(picked);
 }
 
@@ -298,7 +306,10 @@ export function secretsOf(document: unknown): SecretRef[] {
     for (const extension of root.extensions) {
       if (!isMapping(extension)) continue;
       const found: Array<{ path: string[]; variable: string }> = [];
-      referencesIn(extension.options, [], found);
+      // As load.ts reads them: a reference is a value inside options, never options itself.
+      if (isMapping(extension.options)) {
+        for (const [option, value] of Object.entries(extension.options)) referencesIn(value, [option], found);
+      }
       for (const { path, variable } of found) out.push({ kind: 'extension', of: `${String(extension.name)}, option ${path.join('.')}`, variable });
     }
   }

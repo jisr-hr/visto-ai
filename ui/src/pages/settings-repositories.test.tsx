@@ -49,6 +49,7 @@ function viewOf(over: { defaults?: Record<string, Setting>; shop?: Record<string
       { name: 'acme/web', settings: {} },
     ],
     scorer: { on: false, waits: false },
+    endpoints: { model: 'https://llm.example.test/v1', scorer: null },
     secrets: over.secrets ?? [{ kind: 'audit_key', of: null, variable: 'AUDIT_KEY' }],
     access: { publicUrl: 'https://visto.example.test', github: true, accounts: [], team: null },
   };
@@ -112,7 +113,11 @@ test('the repositories are listed with their overrides, the defaults first', asy
   const user = userEvent.setup();
   await open();
   const list = screen.getByRole('listbox', { name: 'Repository' });
-  expect(classes(list)).toEqual(words('flex max-w-[260px] shrink grow basis-[200px] flex-col gap-0.5'));
+  expect(classes(list)).toEqual(words('flex flex-col gap-0.5'));
+  expect(classes(list.parentElement)).toEqual(words('flex max-w-[260px] shrink grow basis-[200px] flex-col gap-0.5'));
+  // A listbox holds options only: the button that adds one is beside it.
+  expect(within(list).queryByRole('button')).toBeNull();
+  expect(within(list.parentElement!).getByRole('button', { name: 'Add a repository' })).toBeInTheDocument();
   const options = within(list).getAllByRole('option');
   expect(options.map((one) => one.textContent)).toEqual(['Defaults for allDefaults', 'acme/shop3 overrides', 'acme/webDefaults']);
   expect(options[0]).toHaveAttribute('aria-selected', 'true');
@@ -266,6 +271,8 @@ test('the threshold writes a whole number and says whether it overrides the defa
   expect(slider).toHaveAttribute('max', '100');
   expect(slider).toHaveClass('w-full', 'accent-accent');
   expect(screen.getByText('From the defaults: 70%')).toBeInTheDocument();
+  // Said once: the threshold's own row does not add a second line.
+  expect(within(rowOf('Threshold')).queryAllByText(/From the defaults/)).toHaveLength(1);
   expect(within(rowOf('Threshold')).getByText('70%')).toHaveClass('min-w-12', 'text-right', 'font-semibold');
   fireEvent.change(slider, { target: { value: '60' } });
   expect(within(rowOf('Threshold')).getByText('60%')).toBeInTheDocument();
@@ -281,19 +288,20 @@ test('a repository is added by its name, and refused in another shape', async ()
   await user.click(screen.getByRole('button', { name: 'Add a repository' }));
   const input = screen.getByRole('textbox', { name: 'Repository to add' });
   expect(input).toHaveAttribute('placeholder', 'owner/name');
+  expect(within(screen.getByRole('listbox', { name: 'Repository' })).queryByRole('textbox')).toBeNull();
   await user.type(input, 'acme');
-  await user.click(within(screen.getByRole('listbox', { name: 'Repository' })).getByRole('button', { name: 'Add' }));
+  await user.click(within(screen.getByRole('listbox', { name: 'Repository' }).parentElement!).getByRole('button', { name: 'Add' }));
   expect(screen.getByText('Write it as owner/name.')).toHaveClass('text-[13px]', 'text-bad');
   await user.clear(input);
   await user.type(input, 'Acme/Tools');
-  await user.click(within(screen.getByRole('listbox', { name: 'Repository' })).getByRole('button', { name: 'Add' }));
+  await user.click(within(screen.getByRole('listbox', { name: 'Repository' }).parentElement!).getByRole('button', { name: 'Add' }));
   expect(option(/acme\/tools/)).toHaveAttribute('aria-selected', 'true');
   expect(option(/acme\/tools/)).toHaveTextContent('Defaults');
   expect(screen.queryByRole('textbox', { name: 'Repository to add' })).toBeNull();
 
   await user.click(screen.getByRole('button', { name: 'Add a repository' }));
   await user.type(screen.getByRole('textbox', { name: 'Repository to add' }), 'acme/shop');
-  await user.click(within(screen.getByRole('listbox', { name: 'Repository' })).getByRole('button', { name: 'Add' }));
+  await user.click(within(screen.getByRole('listbox', { name: 'Repository' }).parentElement!).getByRole('button', { name: 'Add' }));
   expect(option(/acme\/shop/)).toHaveAttribute('aria-selected', 'true');
   expect(screen.getAllByRole('option', { name: /acme\/shop/ })).toHaveLength(1);
 

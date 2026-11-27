@@ -143,11 +143,12 @@ export class ConfigError extends Error {
   }
 }
 
-/** An issue written by hand: its text is its place as dotted keys, then the message. */
+/** An issue written by hand: the path of the setting it is about, and the message. */
 function at(path: Array<string | number>, message: string): ConfigIssue {
   return { path, message };
 }
 
+/** The error for issues written by hand: each line is the path as dotted keys, then the message. */
 function failWith(items: ConfigIssue[]): ConfigError {
   return new ConfigError(items.map((i) => `${i.path.join('.')}: ${i.message}`), items);
 }

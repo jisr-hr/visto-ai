@@ -148,6 +148,23 @@ test('the first start copies every setting the file writes, recorded as made by 
   assert.deepEqual(r.atStart, check(rich));
 });
 
+test("the sync never writes the model's or the scorer's endpoint, and the service starts on the file's", async () => {
+  const yaml = `${SCORER_YAML.replace('model: vendor/model-a', 'baseUrl: https://model.example.test/v1\n  model: vendor/model-a')}`
+    .replace('  model: vendor/scorer-a', '  baseUrl: https://scorer.example.test/v1\n  model: vendor/scorer-a');
+  const s = await start(yaml);
+  assert.ok(!(await rows()).some((r) => r.key.includes('baseUrl')));
+  assert.ok(!(await record()).some((r) => r.key.includes('baseUrl')));
+  assert.ok(!(await fileRows()).some((r) => r.key.includes('baseUrl')));
+  assert.equal(s.atStart.model.baseUrl, 'https://model.example.test/v1');
+  assert.equal(s.atStart.scorer?.baseUrl, 'https://scorer.example.test/v1');
+  assert.equal(s.inForce().model.baseUrl, 'https://model.example.test/v1');
+  const saved = await saveNow(s, [set('global', 'model.model', 'vendor/model-b')]);
+  assert.equal(saved.kind, 'saved');
+  assert.equal(s.saved().config.model.baseUrl, 'https://model.example.test/v1');
+  assert.equal(s.saved().config.scorer?.baseUrl, 'https://scorer.example.test/v1');
+  assert.ok(!(await rows()).some((r) => r.key.includes('baseUrl')));
+});
+
 test('a second start with the file unchanged changes and records nothing', async () => {
   for (const yaml of [FILE_YAML, RICH_YAML]) {
     await db.close();
@@ -344,6 +361,9 @@ test('a save is checked whole, refused with each issue at its setting, and store
 
   // A change the route would never send rejects, and writes nothing.
   await assert.rejects(saveNow(s, [set('global', 'model.apiKey', 'x')]), /bad_change/);
+  // The endpoints are config.yml's alone: a save naming one is refused like any path that is no setting.
+  await assert.rejects(saveNow(s, [set('global', 'model.baseUrl', 'https://elsewhere.example.test/v1')]), /bad_change/);
+  await assert.rejects(saveNow(s, [set('global', 'scorer.baseUrl', 'https://elsewhere.example.test/v1')]), /bad_change/);
   await assert.rejects(saveNow(s, [set('Acme/Shop', 'newHead', 'full')]), /bad_change/);
   assert.deepEqual(await state(), scoredBefore);
 });
