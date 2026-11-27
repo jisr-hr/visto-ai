@@ -318,7 +318,7 @@ test('a save refused shows each issue at its setting and all of them at the top,
 test('a save refused only by issues at no setting says so without pointing at the settings', async () => {
   const user = userEvent.setup();
   const { api } = fakeApi({
-    saveSettings: () => Promise.resolve({ kind: 'invalid', issues: [{ scope: null, path: null, message: 'The audit key is needed.' }] }),
+    saveSettings: () => Promise.resolve({ kind: 'invalid', issues: [{ scope: null, path: null, message: 'scorer.apiKey: must be written when scorer is set' }] }),
   });
   visit('/ui/settings');
   render(<App api={api} />);
@@ -327,7 +327,7 @@ test('a save refused only by issues at no setting says so without pointing at th
   await user.click(screen.getByRole('button', { name: 'Save changes' }));
 
   const alert = await screen.findByRole('alert');
-  expect(alert).toHaveTextContent(/^Not saved:The audit key is needed\.$/);
+  expect(alert).toHaveTextContent(/^Not saved:scorer\.apiKey: must be written when scorer is set$/);
 });
 
 test('a change to a setting read at start says that saving restarts the service, and one to another setting does not', async () => {
