@@ -481,7 +481,7 @@ test("a pull request's reads are held to about four megabytes stored: its last r
   assert.deepEqual([fits.read, fits.bytes, fits.cut], [[5, 4, 3, 2, 1], 500, false]);
 });
 
-test('one computation runs at a time in the service, the same key is not queued twice, and a result is kept five minutes', async () => {
+test('one computation runs at a time in the service, the same key is not queued twice, and a result is kept fifteen minutes', async () => {
   const db = await testDb();
   await savePullRequest(db, facts(119, -DAY));
   await scored(db, 119, HEAD_A, -2 * DAY, one('dA', 'h1', 50));
@@ -506,7 +506,7 @@ test('one computation runs at a time in the service, the same key is not queued 
   assert.deepEqual(kinds(h, from).filter((k) => k === 'closedPulls'), ['closedPulls']);
   h.move(QUALITY_CACHE_MS / 1000 - 1);
   from = h.sent.length;
-  assert.deepEqual(await quality(h.deps, 'acme/shop', days('7')), { ...(twice[0] as QualityAnswer), now: at(299) });
+  assert.deepEqual(await quality(h.deps, 'acme/shop', days('7')), { ...(twice[0] as QualityAnswer), now: at(899) });
   assert.equal(h.sent.length, from);
   h.move(1);
   await ready(quality(h.deps, 'acme/shop', days('7')));
