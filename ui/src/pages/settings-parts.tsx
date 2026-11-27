@@ -1,0 +1,230 @@
+// The pieces of the Settings page that every section shares (UI design 4; the mockup Settings.dc.html): the form the sections
+// read and write through, each setting's label, a row with its label, help, control, where its value came from, and the issues
+// a refused save named at it, and the controls that need state of their own (a number, a JSON field).
+import { useState } from 'react';
+import type { ReactNode } from 'react';
+import type { SettingsView, SettingValue } from '../api-types.ts';
+import { Badge } from '../components/ui/badge.tsx';
+import { fieldClasses, Input } from '../components/ui/input.tsx';
+import { utc } from '../format.ts';
+import { cn } from '../lib/utils.ts';
+import { DEFAULTS, GLOBAL, keyOf, numberOrText } from '../settings-draft.ts';
+import type { Draft, Shown, Unset } from '../settings-draft.ts';
+
+/** What every row and control reads and writes: the view, the draft over it, the issues of a refused save, the JSON fields not valid. */
+export interface Form {
+  view: SettingsView;
+  draft: Draft;
+  /** Counts up when the draft is discarded or saved, so a field holding text of its own starts again from the value. */
+  epoch: number;
+  shown(scope: string, path: string): Shown;
+  set(scope: string, path: string, value: SettingValue | Unset): void;
+  issuesAt(scope: string, path: string): string[];
+  setBadJson(key: string, bad: boolean): void;
+}
+
+/** Each path's row label (also how a refused save names it). Repository rows come with the repositories' section. */
+export const LABELS: Readonly<Record<string, string>> = {
+  dryRun: 'Dry run',
+  learning: 'Learning',
+  'limits.spendPerDay': 'Daily spend limit',
+  'limits.queueConcurrency': 'Reviews at once',
+  'limits.inputTokensPerCall': 'Input tokens per call',
+  'limits.batchesPerReview': 'Batches per review',
+  'model.baseUrl': 'Endpoint',
+  'model.model': 'Model',
+  'model.fallbacks': 'Fallbacks',
+  'model.effort.default': 'Effort, default',
+  'model.effort.elevated': 'Effort, elevated',
+  'model.toolChoice': 'How the answer is asked for',
+  'model.timeoutSeconds': 'Time limit per call',
+  'model.prices': 'Prices per million tokens',
+  'model.extraBody': 'Extra body',
+  'model.extraHeaders': 'Extra headers',
+  'scorer.model': 'Second scorer',
+  'scorer.baseUrl': 'Second scorer endpoint',
+  'scorer.timeoutSeconds': 'Second scorer time limit',
+};
+
+/** Where a setting is on the page: General, Model, the defaults, or its repository. */
+export function whereOf(scope: string, path: string): string {
+  if (scope === GLOBAL) return path.startsWith('model.') || path.startsWith('scorer.') ? 'Model' : 'General';
+  return scope === DEFAULTS ? 'Defaults for all' : scope;
+}
+
+// The mockup's pieces, in the theme's tokens.
+export const SECTION = 'flex flex-col rounded-[12px] border border-border bg-card px-6 py-5 shadow-card';
+export const H2 = 'm-0 text-[17px] font-semibold';
+export const MONO = 'font-mono text-[12.5px]';
+export const WORD = 'text-[13px] text-muted';
+const ROW = 'flex flex-wrap items-start gap-x-8 gap-y-3 border-t border-border py-4 first-of-type:border-t-0';
+const LBL = 'flex min-w-0 shrink grow basis-[260px] flex-col gap-1';
+const CTL = 'flex min-w-0 shrink grow basis-[300px] flex-wrap items-center gap-2.5';
+export const CHIP = 'inline-flex items-center gap-1.5 rounded-[7px] bg-subtle py-1 pr-1.5 pl-2.5 font-mono text-[13px]';
+
+/** A value as a field holds it: a number stays a number (so a number field keeps what was typed), text stays text, the rest is empty. */
+export function fieldValue(value: SettingValue): string | number {
+  return typeof value === 'number' || typeof value === 'string' ? value : '';
+}
+
+/** Where a setting's value came from (call 28); nothing for a value the draft sets, and "Not written" for one the draft takes back. */
+export function SourceLine({ form, scope, path }: { form: Form; scope: string; path: string }) {
+  const now = form.shown(scope, path);
+  let text: string | null;
+  if (now.edited) text = now.written ? null : 'Not written';
+  else if (!now.written) text = 'The default';
+  else if (now.source === null) text = null;
+  else if (now.source.by === 'config.yml') text = `From config.yml at the start of ${utc(now.source.at)}`;
+  else text = now.source.name === null ? `Changed in the UI, ${utc(now.source.at)}` : `Changed in the UI by ${now.source.name}, ${utc(now.source.at)}`;
+  return text === null ? null : <span className="text-xs text-muted">{text}</span>;
+}
+
+/**
+ * One setting: its label (a `label` for a field, else a name the control is labelled by), its help, its control, the badges of a
+ * restart, where the value came from, and each issue a refused save named at it. `also` are the paths of other settings the
+ * control writes; their sources and issues show here too.
+ */
+export function Row({
+  id,
+  label,
+  help,
+  labelFor,
+  restart,
+  waits = false,
+  also = [],
+  form,
+  scope,
+  path,
+  children,
+}: {
+  id: string;
+  label: string;
+  help: ReactNode;
+  labelFor?: string;
+  /** The badge beside the label: what a save of this waits for, when it is read once at start. */
+  restart?: string;
+  /** A save of this waits for the restart, over what the setting says of itself. */
+  waits?: boolean;
+  also?: readonly string[];
+  form: Form;
+  scope: string;
+  path: string;
+  children: ReactNode;
+}) {
+  const paths = [path, ...also];
+  const issues = paths.flatMap((one) => form.issuesAt(scope, one));
+  return (
+    <div data-slot="setting-row" className={ROW}>
+      <div data-slot="setting-label" className={LBL}>
+        <div className="flex flex-wrap items-center gap-2">
+          {labelFor === undefined ? (
+            <strong id={id} className="text-sm font-medium">
+              {label}
+            </strong>
+          ) : (
+            <label id={id} htmlFor={labelFor} className="text-sm font-medium">
+              {label}
+            </label>
+          )}
+          {restart === undefined ? null : <Badge tone="muted">{restart}</Badge>}
+        </div>
+        <span className="text-[13px] leading-[1.45] text-muted">{help}</span>
+      </div>
+      <div data-slot="setting-control" className={CTL}>
+        {children}
+        {waits || paths.some((one) => form.shown(scope, one).waits) ? <Badge tone="warn">Takes effect when the service restarts</Badge> : null}
+        {paths.map((one) => (
+          <SourceLine key={one} form={form} scope={scope} path={one} />
+        ))}
+        {issues.map((issue) => (
+          <p key={issue} className="w-full text-[13px] text-bad">
+            {issue}
+          </p>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/** A number field, written as a number while its text is one (the service refuses any other at the field). */
+export function NumberField({ form, scope, path, id, className }: { form: Form; scope: string; path: string; id?: string; className?: string }) {
+  return (
+    <Input
+      id={id}
+      type="number"
+      className={className}
+      value={fieldValue(form.shown(scope, path).value)}
+      onChange={(event) => form.set(scope, path, numberOrText(event.target.value))}
+    />
+  );
+}
+
+/** A row that only tells: a label, its help and what config.yml says (Access). */
+export function PlainRow({ id, label, help, children }: { id: string; label: string; help: ReactNode; children: ReactNode }) {
+  return (
+    <div data-slot="setting-row" className={ROW}>
+      <div data-slot="setting-label" className={LBL}>
+        <strong id={id} className="text-sm font-medium">
+          {label}
+        </strong>
+        <span className="text-[13px] leading-[1.45] text-muted">{help}</span>
+      </div>
+      <div data-slot="setting-control" className={CTL}>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+/** A text field. */
+export function TextField({ form, scope, path, id, className, label, disabled }: { form: Form; scope: string; path: string; id?: string; className?: string; label?: string; disabled?: boolean }) {
+  return (
+    <Input
+      id={id}
+      aria-label={label}
+      className={className}
+      disabled={disabled}
+      value={fieldValue(form.shown(scope, path).value)}
+      onChange={(event) => form.set(scope, path, event.target.value)}
+    />
+  );
+}
+
+/**
+ * A JSON field: what is typed is kept as typed while it is valid, and written as the value it reads as; text that is not JSON writes
+ * nothing, says so, and keeps the page from saving. It starts again from the value when the draft is discarded or saved.
+ */
+function JsonFieldOf({ form, scope, path, id }: { form: Form; scope: string; path: string; id: string }) {
+  const [typed, setTyped] = useState<string | null>(null);
+  const [bad, setBad] = useState(false);
+  const value = form.shown(scope, path).value;
+  const text = typed ?? JSON.stringify(value, null, 2);
+  return (
+    <>
+      <textarea
+        id={id}
+        className={cn(fieldClasses, 'min-h-24 w-full py-2 font-mono text-[12.5px]')}
+        spellCheck={false}
+        value={text}
+        onChange={(event) => {
+          const next = event.target.value;
+          setTyped(next);
+          try {
+            const parsed = JSON.parse(next.trim() === '' ? '{}' : next) as SettingValue;
+            setBad(false);
+            form.setBadJson(keyOf(scope, path), false);
+            form.set(scope, path, parsed);
+          } catch {
+            setBad(true);
+            form.setBadJson(keyOf(scope, path), true);
+          }
+        }}
+      />
+      {bad ? <p className="w-full text-[13px] text-bad">Not valid JSON.</p> : null}
+    </>
+  );
+}
+
+export function JsonField(props: { form: Form; scope: string; path: string; id: string }) {
+  return <JsonFieldOf key={props.form.epoch} {...props} />;
+}

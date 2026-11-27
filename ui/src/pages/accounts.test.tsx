@@ -209,7 +209,7 @@ test('the accounts are listed with how they sign in, their role, their last sign
 
   const title = await screen.findByRole('heading', { level: 1, name: 'Settings' });
   expect(classes(title)).toEqual(words(heading));
-  const sub = screen.getByText('Who may open the service, and what they may do. The other settings come in a later plan.');
+  const sub = screen.getByText('Saved settings apply from the next review. A review already running keeps the settings it started with.');
   expect(sub.tagName).toBe('P');
   expect(classes(sub)).toEqual(words(subLine));
   expect(screen.getAllByRole('heading', { level: 1 })).toEqual([title]);
