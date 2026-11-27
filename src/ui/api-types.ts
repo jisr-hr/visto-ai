@@ -38,3 +38,52 @@ export interface RecentReview {
   mode: 'full' | 'incremental' | 'recheck'; dryRun: boolean; cost: number; tookMs: number; at: string;
 }
 export interface Reviews { now: string; windowDays: number; total: number; reviews: RecentReview[]; next: number | null }
+/** One file of a review, with the score that decides it (the One review design; calls 9, 10 and 14). */
+export interface ReviewFile {
+  path: string;
+  score: number | null;              // the file's final score; null for a path not reviewed that has no score
+  notReviewed: string | null;        // why it was not reviewed (coverage.notReviewed's reason; 'unknown' when it is no short code); null when it was
+  source: string | null;             // the file level's source when it decides the score (call 9; 'unknown' when no short code); null when a block does
+  reason: string;                    // the model's reason for the score that decides; '' when none, or written on another pull request
+  category: string | null;           // the deciding block's category when its score was given on another pull request; else null
+  blocks: number;                    // how many blocks the file has
+  highest: { side: 'LEFT' | 'RIGHT'; first: number; last: number } | null;   // the deciding block's lines; null when the file level decides
+  kept: 'earlier_run' | 'other_pull_request' | null;                           // where the deciding block's score came from
+  raisedFrom: number | null;         // the score the deciding block was given before a floor raised it; null when none did
+}
+export type FindingKind = 'placed' | 'unplaced' | 'unchanged' | 'beyond_diff';
+export type ThreadState = 'none' | 'not_posted' | 'no_thread' | 'open' | 'resolved' | 'fixed' | 'answered';
+export interface ReviewFinding {
+  kind: FindingKind; severity: 'blocker' | 'major' | 'minor'; path: string; side: 'LEFT' | 'RIGHT'; line: number; body: string;
+  thread: { state: ThreadState; by: string | null };   // by: who resolved it, for 'resolved' only
+}
+export type ApprovalDecision = 'approved' | 'not_approved' | 'not_decided' | 'dry_run' | 'not_posted' | 'nothing_new' | 'failed';
+export type Posting = 'published' | 'not_posted' | 'dry_run' | 'nothing_new' | 'failed';
+export interface GateShown { mode: string; state: string; code: string | null; blocking: number }
+export interface ApprovalEntry {
+  run: number; ordinal: number; head: string;
+  state: 'stands' | 'withdrawn' | 'dismissed_on_github' | 'withdrawal_failed';
+  code: string | null; retryAt: string | null; stoodAtMerge: boolean;
+}
+export interface ReviewDependency {
+  kind: 'model' | 'memory' | 'lessons' | 'mcp' | 'extension'; name: string | null;
+  status: 'ok' | 'empty' | 'skipped' | 'error'; code: string | null; count: number | null;
+}
+export interface FeedbackReason { reason: string; login: string | null }   // login: only of GitHub's shape (call 15)
+export interface OneReview {
+  now: string; run: number; ordinal: number; runs: number;
+  pullRequest: { repository: string; number: number; title: string | null; author: string | null; headBranch: string | null; baseBranch: string | null; url: string };
+  head: string; askedBy: { reason: string; login: string | null };
+  mode: 'full' | 'incremental' | 'recheck'; posting: Posting; failure: { stage: string; code: string | null } | null;   // stage 'unknown' when it is no short code
+  startedAt: string; finishedAt: string; publishedAt: string | null;
+  approval: { decision: ApprovalDecision; code: string | null; text: string | null };
+  gate: GateShown | null; threshold: number | null;
+  files: ReviewFile[]; filesCut: number; read: { files: number; reviewed: number };
+  findings: ReviewFinding[]; findingsCut: number; counts: { blocker: number; major: number; minor: number };
+  earlier: { cleared: number; open: number; unjudged: number; discussed: number };
+  usage: { models: string[]; calls: number; inputTokens: number; cachedTokens: number; outputTokens: number; cost: number };
+  approvals: ApprovalEntry[]; dependencies: ReviewDependency[];
+  feedback: { helpful: number; notHelpful: number; reasons: FeedbackReason[] };
+}
+export interface PullReview { run: number; ordinal: number; at: string }
+export interface PullReviews { now: string; total: number; reviews: PullReview[] }
