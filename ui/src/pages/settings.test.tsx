@@ -141,10 +141,10 @@ test('Settings shows its header, its sections and their rows as drawn, with wher
   expect(classes(nav)).toEqual(words('flex flex-wrap gap-2'));
   const links = within(nav).getAllByRole('link');
   expect(links.map((link) => [link.textContent, link.getAttribute('href')])).toEqual([
-    ['General', '#general'], ['Model', '#model'], ['Secrets', '#secrets'], ['Access', '#access'], ['Accounts', '#accounts'],
+    ['General', '#general'], ['Model', '#model'], ['Repositories', '#repos'], ['Secrets', '#secrets'], ['Access', '#access'], ['Accounts', '#accounts'],
   ]);
   for (const link of links) expect(link.className).toContain('min-h-9');
-  const order = ['general', 'model', 'secrets', 'access', 'accounts'].map((id) => document.getElementById(id));
+  const order = ['general', 'model', 'repos', 'secrets', 'access', 'accounts'].map((id) => document.getElementById(id));
   for (const [index, element] of order.entries()) {
     expect(element?.tagName).toBe('SECTION');
     if (index > 0) expect(order[index - 1]!.compareDocumentPosition(element!) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);

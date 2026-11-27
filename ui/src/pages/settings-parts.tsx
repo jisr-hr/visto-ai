@@ -5,10 +5,11 @@ import { useState } from 'react';
 import type { ReactNode } from 'react';
 import type { SettingsView, SettingValue } from '../api-types.ts';
 import { Badge } from '../components/ui/badge.tsx';
+import { Button } from '../components/ui/button.tsx';
 import { fieldClasses, Input } from '../components/ui/input.tsx';
 import { utc } from '../format.ts';
 import { cn } from '../lib/utils.ts';
-import { DEFAULTS, GLOBAL, keyOf, numberOrText } from '../settings-draft.ts';
+import { DEFAULTS, GLOBAL, keyOf, numberOrText, UNSET, valueText } from '../settings-draft.ts';
 import type { Draft, Shown, Unset } from '../settings-draft.ts';
 
 /** What every row and control reads and writes: the view, the draft over it, the issues of a refused save, the JSON fields not valid. */
@@ -23,7 +24,7 @@ export interface Form {
   setBadJson(key: string, bad: boolean): void;
 }
 
-/** Each path's row label (also how a refused save names it). Repository rows come with the repositories' section. */
+/** Each path's row label (also how a refused save names it). */
 export const LABELS: Readonly<Record<string, string>> = {
   dryRun: 'Dry run',
   learning: 'Learning',
@@ -44,6 +45,22 @@ export const LABELS: Readonly<Record<string, string>> = {
   'scorer.model': 'Second scorer',
   'scorer.baseUrl': 'Second scorer endpoint',
   'scorer.timeoutSeconds': 'Second scorer time limit',
+  primaryBranches: 'Primary branches',
+  ignoredAuthors: 'Ignored authors',
+  baseBranches: 'Reviewed on every push',
+  newHead: 'A new commit is reviewed',
+  'score.threshold': 'Threshold',
+  'score.inlineNotes': 'Inline notes',
+  'score.autoApprove': 'Automatic approval',
+  'score.approvalThreads': 'Thread rule',
+  'score.auditShare': 'Audit share',
+  'gate.enabled': 'Merge gate',
+  'gate.branches': 'Gated branches',
+  'gate.checkName': 'Check name',
+  'gate.mode': 'Gate mode',
+  'gate.clearByReply': 'A reply clears a blocking finding',
+  'gate.skipTeam': 'Team that may skip',
+  'gate.requiredChecks': 'Required checks',
 };
 
 /** Where a setting is on the page: General, Model, the defaults, or its repository. */
@@ -72,11 +89,25 @@ export function SourceLine({ form, scope, path }: { form: Form; scope: string; p
   const now = form.shown(scope, path);
   let text: string | null;
   if (now.edited) text = now.written ? null : 'Not written';
-  else if (!now.written) text = 'The default';
+  else if (!now.written) text = scope === DEFAULTS && path === 'newHead' ? 'Not set: incremental, and full where the merge gate holds pushes' : 'The default';
   else if (now.source === null) text = null;
   else if (now.source.by === 'config.yml') text = `From config.yml at the start of ${utc(now.source.at)}`;
   else text = now.source.name === null ? `Changed in the UI, ${utc(now.source.at)}` : `Changed in the UI by ${now.source.name}, ${utc(now.source.at)}`;
   return text === null ? null : <span className="text-xs text-muted">{text}</span>;
+}
+
+/** A repository's setting (call 28): not written, it comes from the defaults; written, it says what it overrides and can take the default back. */
+function OverrideLine({ form, scope, path }: { form: Form; scope: string; path: string }) {
+  if (!form.shown(scope, path).written) return <span className="text-xs text-muted">From the defaults</span>;
+  return (
+    <>
+      <span className="text-xs font-medium text-accent-text">Overrides {valueText(path, form.shown(DEFAULTS, path).value)}</span>
+      <SourceLine form={form} scope={scope} path={path} />
+      <Button type="button" className="min-h-7 px-2 text-xs" onClick={() => form.set(scope, path, UNSET)}>
+        Use the default
+      </Button>
+    </>
+  );
 }
 
 /**
@@ -133,9 +164,11 @@ export function Row({
       <div data-slot="setting-control" className={CTL}>
         {children}
         {waits || paths.some((one) => form.shown(scope, one).waits) ? <Badge tone="warn">Takes effect when the service restarts</Badge> : null}
-        {paths.map((one) => (
-          <SourceLine key={one} form={form} scope={scope} path={one} />
-        ))}
+        {scope !== GLOBAL && scope !== DEFAULTS ? (
+          <OverrideLine form={form} scope={scope} path={path} />
+        ) : (
+          paths.map((one) => <SourceLine key={one} form={form} scope={scope} path={one} />)
+        )}
         {issues.map((issue) => (
           <p key={issue} className="w-full text-[13px] text-bad">
             {issue}

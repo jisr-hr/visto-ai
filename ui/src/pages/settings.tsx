@@ -19,6 +19,7 @@ import { plural } from '../format.ts';
 import { changesOf, effortChoice, effortValue, GLOBAL, numberOrText, shown, UNSET, withChange } from '../settings-draft.ts';
 import type { Draft, EffortChoice, Unset } from '../settings-draft.ts';
 import { AccountsSection } from './accounts.tsx';
+import { RepositoriesSection } from './settings-repositories.tsx';
 import { CHIP, fieldValue, H2, JsonField, LABELS, MONO, NumberField, PlainRow, Row, SECTION, TextField, whereOf, WORD } from './settings-parts.tsx';
 import type { Form } from './settings-parts.tsx';
 
@@ -28,7 +29,7 @@ const CHANGED = 'Settings were saved meanwhile, here or in config.yml at a start
 const FAILED = 'The settings could not be saved.';
 const BUSY = 'The service is busy. Try again in a moment.';
 const UNREACHABLE = 'The service could not be reached. Try again in a moment.';
-const NAV: ReadonlyArray<readonly [string, string]> = [['general', 'General'], ['model', 'Model'], ['secrets', 'Secrets'], ['access', 'Access'], ['accounts', 'Accounts']];
+const NAV: ReadonlyArray<readonly [string, string]> = [['general', 'General'], ['model', 'Model'], ['repos', 'Repositories'], ['secrets', 'Secrets'], ['access', 'Access'], ['accounts', 'Accounts']];
 const SCORER_PATHS = ['scorer.baseUrl', 'scorer.model', 'scorer.timeoutSeconds'] as const;
 
 /** What the top of the page says of a save that did not go through: the issues, or a sentence. */
@@ -477,6 +478,7 @@ export function SettingsPage() {
       <>
         <General form={form} />
         <ModelSection form={form} />
+        <RepositoriesSection form={form} issues={notice?.kind === 'issues' ? notice.issues : []} />
         <Secrets secrets={form.view.secrets} />
         <Access access={form.view.access} />
       </>
