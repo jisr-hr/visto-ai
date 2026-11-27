@@ -14,7 +14,7 @@ import { markDismissFailed } from './db/approvals.ts';
 import { settingsVersion } from './db/settings.ts';
 import { dismissMessage } from './approval/text.ts';
 import { beat, readHeartbeat } from './db/heartbeat.ts';
-import { parseConfig, parseDocument, readYaml, serviceConfig } from './config/load.ts';
+import { parseConfig, parseDocument, readYaml, repoSettingsFor, serviceConfig } from './config/load.ts';
 import type { ServiceConfig } from './config/load.ts';
 import type { AppIdentity, FeatureOff, ForgeApprovals, ForgeChecks, ForgeEvent, ForgeWriter, HookDelivery, LivePullRequest, OwnCheck, PostedComment, PullRequestAction, PullRequestFacts, ReviewThread, Source } from './forge/types.ts';
 import type { BlockScore, ModelRequest, ModelResponse, ReviewDeps, ReviewInput, ReviewResult } from './engine/types.ts';
@@ -2585,6 +2585,38 @@ test('a review reads the settings in force when it starts, and keeps them to its
   assert.deepEqual([h.inputs[1]!.repoConfig.scoreThreshold, h.inputs[1]!.limits.inputTokensPerCall], [55, 50000]);
   assert.equal(h.engineSettings[1], settings.inForce());
   assert.equal((h.engineSettings[1] as ServiceConfig).repositories.defaults.scoreThreshold, 55);
+});
+
+/** A result whose one block of a.ts, line 3, is scored 85 under a threshold of 70: with inline notes on, it is given a note. */
+const flagged = (): ReviewResult => ({
+  ...okResult(),
+  scores: [{
+    path: 'a.ts', previousPath: null, diffHash: 'd', changeSummary: '', changedLines: 1, wholeFile: null, fileLevel: null, finalScore: 85, covered: true,
+    blocks: [{
+      id: 'B1', hunk: 'B1', hunkHash: 'hA', hash: 'hA', changedLines: 1, span: { side: 'RIGHT', first: 3, last: 3 },
+      lines: { old: [], new: [] } as unknown as BlockScore['lines'], entry: { score: 85, category: 'calculation', reason: 'Totals.' },
+    }],
+  }],
+  verdict: { threshold: 70, needsHuman: true, highest: 85 },
+});
+test('a review the model is answering when a save comes publishes what the settings at its start said', async () => {
+  const h = await harness({ holdReview: true, github: true, result: flagged() });
+  const yaml = `${BASE_YAML.replace('dryRun: true\n', 'dryRun: false\n')}repositories:\n  defaults:\n    score: { inlineNotes: true }\n`;
+  const settings = await settingsOf(h, yaml);
+  assert.equal(settings.atStart.dryRun, false);
+  const service = await h.start(settings);
+  await service.settled;
+  await h.webhook(pr('opened'), 'd1');
+  await h.reviewed();
+  // The model has not answered: the notes, read after its answer, are switched off now.
+  await saveNow(h, settings, [{ scope: 'defaults', path: 'score.inlineNotes', value: false }]);
+  assert.equal(repoSettingsFor(settings.inForce(), 'acme/shop').inlineNotes, false);
+  h.releaseReview();
+  await h.published();
+  await h.until(() => h.logged.some((e) => e.event === 'review'));
+  // Posted with the finding's comment and the block's note, as at the review's start.
+  const bodies = h.threads!.map((t) => t.comments[0]!.body);
+  assert.deepEqual([bodies.length, bodies.filter((b) => b.startsWith('**Human review:**')).length], [2, 1]);
 });
 
 test('an event reads the repository settings saved before it', async () => {

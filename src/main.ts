@@ -298,7 +298,8 @@ export async function main(argv: string[], env: Record<string, string | undefine
       // A key that cannot be read throws here and fails the start.
       const auth = createAppAuth({ appId: config.app.id, privateKey: config.app.privateKey, fetch: github, clock });
       const info = createAppInfo({ auth, fetch: github });
-      // Every adapter is made before the lock is taken: from the lock on, a step that fails releases it (afterLock).
+      // Every adapter is made before the lock is taken. After it, a module that does not load (lockThenLoad) and each step of
+      // afterLock (the migrations, the settings, the engine's base) release it and close the database when they fail.
       const reader = createGithubWebhookReader(config.app.webhookSecret);
       const forge = createGithubAccess({ auth, fetch: github });
       const hooks = createGithubHookDeliveries({ auth, fetch: github });
@@ -371,9 +372,9 @@ export async function main(argv: string[], env: Record<string, string | undefine
         settings,
         // Each review's model client and scorer are made from the settings it runs on (call 19).
         engineDeps: (source, c) => ({ source, ...engine, ...clientsFor(c ?? settings.atStart, { fetch, sleep }) }),
-        // The judge's calls go through a client made as the reviews' are, with its fallbacks, prices and request extras, from
-        // the settings in force at each call.
-        model: { complete: (request) => clientsFor(settings.inForce(), { fetch, sleep }).model.complete(request) },
+        // The judge's calls go through a model client made as the reviews' are, with its fallbacks, prices and request extras,
+        // from the settings in force at each call.
+        model: { complete: (request) => createModelClient(settings.inForce().model, { fetch, sleep }).complete(request) },
         token: base.token,
         review,
         lineUrl: githubLineUrl,

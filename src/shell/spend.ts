@@ -26,6 +26,9 @@ export function createSpendGuard(deps: { db: Db; limit: number | (() => number);
       if (today !== day) { day = today; warned = false; limited = false; }
       const spent = await spentSince(deps.db, `${today}T00:00:00.000Z`);
       const limit = limitNow();
+      // A day's spend only grows, so it falls under a level only when the limit was raised: that level is alerted again when reached.
+      if (spent < limit) limited = false;
+      if (spent < WARN_SHARE * limit) warned = false;
       const details = { spent: Math.round(spent * 100) / 100, limit };
       if (spent >= limit) {
         if (!limited) deps.alert('spend_limit', details);
