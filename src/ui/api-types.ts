@@ -158,3 +158,17 @@ export interface DependencyShown {
 }
 export interface AlertShown { id: number; code: string; details: Record<string, string | number | boolean>; raisedAt: string; open: boolean }
 export interface Health { now: string; dependencies: DependencyShown[]; open: AlertShown[]; recent: AlertShown[] }
+
+// -- Memory (the same plan; calls 30 to 33 and 35) ------------------------------------------------------------------------------
+export type MemoryKind = 'human_signal' | 'revert' | 'lesson';
+/** `text`: the excerpt of a person's record, the lesson of a lesson, '' for a revert. `by`: the commenter of a person's record. `reverted`: the pull request a revert undid. */
+export interface MemoryRecordShown {
+  id: number; kind: MemoryKind; repository: string; number: number; text: string; path: string | null; directory: string | null;
+  by: string | null; reverted: number | null; createdAt: string; expiresAt: string; on: boolean;
+}
+export interface MemoryView {
+  now: string; learning: { on: boolean; ranAt: string | null };
+  counts: { signals: number; signalRepositories: number; reverts: number; lessons: number; off: number };
+  total: number; records: MemoryRecordShown[]; next: number | null;
+}
+export interface MemorySwitched { record: MemoryRecordShown }
