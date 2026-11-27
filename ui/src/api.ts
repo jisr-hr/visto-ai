@@ -3,7 +3,7 @@
 // header. An answer that is not ok rejects with its status and its short code. No password, one-time password or name is put in
 // an address, a log or an error: they travel in the body only.
 import { useEffect, useRef, useState } from 'react';
-import type { AccountAnswer, Accounts, Activity, ApiError, Me, OneTime, Reviews, Role, SignInStep, Ways } from './api-types.ts';
+import type { AccountAnswer, Accounts, Activity, ApiError, Me, OneReview, OneTime, PullReviews, Reviews, Role, SignInStep, Ways } from './api-types.ts';
 
 /**
  * A request the API did not answer with success; not `ApiError`, which is the JSON type of the answer it carries. A request
@@ -33,6 +33,8 @@ export interface Api {
   setRole(csrf: string, id: number, role: Role): Promise<AccountAnswer>;
   resetPassword(csrf: string, id: number): Promise<OneTime>;
   removeAccount(csrf: string, id: number): Promise<void>;
+  review(run: number): Promise<OneReview>;
+  pullReviews(repository: string, number: number): Promise<PullReviews>;
 }
 
 const CSRF_HEADER = 'x-visto-csrf';
@@ -118,6 +120,14 @@ export function createApi(fetchFn?: typeof fetch): Api {
     setRole: (csrf, id, role) => post<AccountAnswer>('/api/accounts/role', { id, role }, csrf),
     resetPassword: (csrf, id) => post<OneTime>('/api/accounts/reset', { id }, csrf),
     removeAccount: (csrf, id) => postEmpty('/api/accounts/remove', { id }, csrf),
+    review: (run) => read<OneReview>(`/api/reviews/${run}`),
+    pullReviews(repository, number) {
+      // 'owner/repo' split at its first slash.
+      const slash = repository.indexOf('/');
+      const owner = slash < 0 ? repository : repository.slice(0, slash);
+      const repo = slash < 0 ? '' : repository.slice(slash + 1);
+      return read<PullReviews>(`/api/pulls/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/${number}/reviews`);
+    },
   };
 }
 

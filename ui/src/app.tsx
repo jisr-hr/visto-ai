@@ -119,6 +119,8 @@ export function App({ api }: { api: Api }) {
       setRole: (csrf, id, role) => watch(api.setRole(csrf, id, role)),
       resetPassword: (csrf, id) => watch(api.resetPassword(csrf, id)),
       removeAccount: (csrf, id) => watch(api.removeAccount(csrf, id)),
+      review: (run) => watch(api.review(run)),
+      pullReviews: (repository, number) => watch(api.pullReviews(repository, number)),
     };
   }, [api]);
 

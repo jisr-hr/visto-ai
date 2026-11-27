@@ -93,6 +93,14 @@ function fakeApi(over: Partial<Api> = {}) {
       calls.push(['removeAccount', csrf, id]);
       return notExpected();
     },
+    review: (run) => {
+      calls.push(['review', run]);
+      return over.review ? over.review(run) : Promise.reject(new RequestFailed(404, 'not_found'));
+    },
+    pullReviews: (repository, number) => {
+      calls.push(['pullReviews', repository, number]);
+      return over.pullReviews ? over.pullReviews(repository, number) : Promise.resolve({ now: '2026-03-01T10:00:00.000Z', total: 0, reviews: [] });
+    },
   };
   const sent = (name: string): unknown[][] => calls.filter(([called]) => called === name);
   return { api, calls, sent };

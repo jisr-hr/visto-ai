@@ -58,3 +58,27 @@ export function money(cost: number): string {
 export function plural(n: number, one: string, many: string): string {
   return `${n} ${n === 1 ? one : many}`;
 }
+
+/** A whole number with a comma between each three digits; one below 0 or not finite is 0. */
+export function count(n: number): string {
+  const whole = Number.isFinite(n) ? Math.max(0, Math.round(n)) : 0;
+  return String(whole).replace(/\B(?=(\d{3})+$)/g, ',');
+}
+
+/** The parts of a text: a span between two backticks on one line is code (without them), the rest text; empty parts are dropped. */
+export function codeSpans(text: string): Array<{ code: boolean; text: string }> {
+  const parts: Array<{ code: boolean; text: string }> = [];
+  let last = 0;
+  for (const match of text.matchAll(/`([^`\n]+)`/g)) {
+    if (match.index > last) parts.push({ code: false, text: text.slice(last, match.index) });
+    parts.push({ code: true, text: match[1]! });
+    last = match.index + match[0].length;
+  }
+  if (last < text.length) parts.push({ code: false, text: text.slice(last) });
+  return parts;
+}
+
+/** The text with its first character upper-cased. */
+export function sentence(text: string): string {
+  return text.charAt(0).toUpperCase() + text.slice(1);
+}
