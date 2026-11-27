@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { commentsOf, signalsOf, threadOf, type ThreadSignal } from './threads.ts';
 import type { CommentRow, ThreadEventRow, VerdictRow } from '../db/review-page.ts';
 
-const at = (n: number): Date => new Date(Date.UTC(2026, 0, 1, 0, 0, n));
+const at = (n: number): Date => new Date(Date.UTC(2026, 2, 1, 10, 0, n));
 const finding = (path: string, side: 'LEFT' | 'RIGHT', line: number, severity: 'blocker' | 'major' | 'minor', quote: string) => ({ path, side, line, severity, quote });
 const row = (comment_id: string, path: string, side: string, line: number | null, severity: string, quote: string): CommentRow => ({ comment_id, path, side, line, severity, quote });
 const sig = (n: number, kind: ThreadSignal['kind'], by: string | null, event: boolean): ThreadSignal => ({ at: at(n).toISOString(), kind, by, event });
@@ -48,4 +48,30 @@ test("signals are built from a comment's own events and verdicts, and an unknown
     { at: at(30).toISOString(), kind: 'fixed', by: null, event: false },
   ]);
   assert.deepEqual(map.get('c-2'), [{ at: at(11).toISOString(), kind: 'unresolved', by: null, event: true }]);
+});
+
+test('rule 1: path, quote and a different non-null line each leave a finding without a comment', () => {
+  const f = [finding('a.ts', 'RIGHT', 9, 'major', 'q')];
+  assert.deepEqual(commentsOf(f, [row('c-1', 'b.ts', 'RIGHT', 9, 'major', 'q')]), [null]);
+  assert.deepEqual(commentsOf(f, [row('c-1', 'a.ts', 'RIGHT', 9, 'major', 'other')]), [null]);
+  assert.deepEqual(commentsOf(f, [row('c-1', 'a.ts', 'RIGHT', 12, 'major', 'q')]), [null]);
+});
+
+test('the newest signal decides whatever the order of the list', () => {
+  assert.deepEqual(threadOf([sig(20, 'resolved', 'octo-lead', true), sig(10, 'fixed', null, false)]), { state: 'resolved', by: 'octo-lead' });
+  assert.deepEqual(threadOf([sig(20, 'unresolved', null, true), sig(10, 'fixed', null, false)]), { state: 'open', by: null });
+  assert.deepEqual(threadOf([sig(20, 'fixed', null, false), sig(10, 'resolved', 'octo-lead', true)]), { state: 'fixed', by: null });
+  const events: ThreadEventRow[] = [{ reply_to: 'c-1', kind: 'thread_resolved', author: 'octo-lead', at: at(50) }];
+  const verdicts: VerdictRow[] = [{ run: 2, started_at: at(30), comment_id: 'c-1', verdict: 'fixed' }];
+  assert.deepEqual(threadOf(signalsOf(events, verdicts).get('c-1')!), { state: 'resolved', by: 'octo-lead' });
+});
+
+test('answered and open verdicts are signals, and equal verdicts at one time go to the later', () => {
+  const verdicts: VerdictRow[] = [
+    { run: 2, started_at: at(30), comment_id: 'c-1', verdict: 'answered' },
+    { run: 3, started_at: at(40), comment_id: 'c-1', verdict: 'open' },
+  ];
+  assert.deepEqual(signalsOf([], verdicts).get('c-1')!.map((s) => s.kind), ['answered', 'open']);
+  assert.deepEqual(threadOf([sig(30, 'fixed', null, false), sig(30, 'answered', null, false)]), { state: 'answered', by: null });
+  assert.deepEqual(threadOf([sig(30, 'answered', null, false), sig(30, 'fixed', null, false)]), { state: 'fixed', by: null });
 });

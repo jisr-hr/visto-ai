@@ -10,13 +10,13 @@ export function commentsOf(
   const taken = new Set<number>();
   const found: Array<string | null> = findings.map(() => null);
   const pass = (exact: boolean): void => {
-    findings.forEach((finding, at) => {
-      if (found[at] !== null) return;
-      const index = rows.findIndex((row, i) => !taken.has(i) && row.path === finding.path && row.side === finding.side
+    findings.forEach((finding, index) => {
+      if (found[index] !== null) return;
+      const at = rows.findIndex((row, i) => !taken.has(i) && row.path === finding.path && row.side === finding.side
         && row.severity === finding.severity && row.quote === finding.quote && row.line === (exact ? finding.line : null));
-      if (index < 0) return;
-      taken.add(index);
-      found[at] = rows[index]!.comment_id;
+      if (at < 0) return;
+      taken.add(at);
+      found[index] = rows[at]!.comment_id;
     });
   };
   pass(true);
