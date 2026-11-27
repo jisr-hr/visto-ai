@@ -229,7 +229,7 @@ test('emptying the team that may skip writes null', async () => {
   expect(sent()[0]![2]).toEqual({ version: 14, changes: [{ scope: 'defaults', path: 'gate.skipTeam', value: null }] });
 });
 
-test("automatic approval shows its rules while on, the thread rule's help, and whether the audit key is set", async () => {
+test("automatic approval shows its rules while on, the thread rule's help, and where the audit key comes from", async () => {
   const user = userEvent.setup();
   const { sent } = await open(viewOf(), { saveSettings: () => Promise.resolve({ kind: 'saved', view: viewOf() }) });
   const approve = screen.getByRole('switch', { name: 'Automatic approval' });
@@ -240,7 +240,7 @@ test("automatic approval shows its rules while on, the thread rule's help, and w
   await user.click(screen.getByRole('button', { name: 'Gate rule' }));
   expect(screen.getByText(/^Gate rule: closed when the merge gate would let it pass/)).toBeInTheDocument();
   const share = within(rowOf('Audit share'));
-  expect(share.getByText('Audit key set')).toBeInTheDocument();
+  expect(share.getByText('Audit key from config.yml')).toHaveClass('bg-ok-bg', 'text-ok');
   expect(screen.getByLabelText('Audit share')).toHaveClass('max-w-[120px]');
   expect(
     screen.getByText("It approves only where the base branch's rules dismiss stale approvals, and never a draft or a pull request from a fork."),
@@ -253,26 +253,25 @@ test("automatic approval shows its rules while on, the thread rule's help, and w
   expect(changes.find((one) => one.path === 'score.approvalThreads')?.value).toBe('gate');
 });
 
-test('an audit key not set is said', async () => {
+test('an audit key the file does not write is said to be generated, and nothing says a save needs one', async () => {
   const user = userEvent.setup();
   await open(viewOf({ secrets: [{ kind: 'audit_key', of: null, variable: null }] }));
   await user.click(screen.getByRole('switch', { name: 'Automatic approval' }));
-  expect(within(rowOf('Audit share')).getByText('Audit key not set')).toBeInTheDocument();
-  expect(screen.getByText(/Saving this needs the audit key in config\.yml/)).toHaveTextContent(
-    'Saving this needs the audit key in config.yml: add auditKey: { env: AUDIT_KEY }, set AUDIT_KEY to at least 32 random characters and restart the service. A share of 0 needs no key.',
-  );
+  expect(within(rowOf('Audit share')).getByText('Audit key generated')).toHaveClass('bg-ok-bg', 'text-ok');
+  expect(screen.queryByText(/Audit key not set/)).toBeNull();
+  expect(screen.queryByText(/needs the audit key/)).toBeNull();
 });
 
-test('what the audit key needs is not said with a share of 0, or with the key set', async () => {
+test('the audit key is said the same with a share of 0, and with the key in the file', async () => {
   const user = userEvent.setup();
   await open(viewOf({ secrets: [{ kind: 'audit_key', of: null, variable: null }], defaults: { 'score.auditShare': written(0) } }));
   await user.click(screen.getByRole('switch', { name: 'Automatic approval' }));
-  expect(within(rowOf('Audit share')).getByText('Audit key not set')).toBeInTheDocument();
-  expect(screen.queryByText(/Saving this needs the audit key/)).toBeNull();
+  expect(within(rowOf('Audit share')).getByText('Audit key generated')).toBeInTheDocument();
   cleanup();
-  await open(viewOf());
+  await open(viewOf({ defaults: { 'score.auditShare': written(0) } }));
   await user.click(screen.getByRole('switch', { name: 'Automatic approval' }));
-  expect(screen.queryByText(/Saving this needs the audit key/)).toBeNull();
+  expect(within(rowOf('Audit share')).getByText('Audit key from config.yml')).toBeInTheDocument();
+  expect(screen.queryByText(/needs the audit key/)).toBeNull();
 });
 
 test('the threshold writes a whole number and says whether it overrides the default', async () => {

@@ -1,14 +1,14 @@
 import test, { afterEach, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { generateKeyPairSync } from 'node:crypto';
-import { AUDIT_KEY_NEEDED, ConfigError, parseDocument, readYaml, repoSettingsFor, serviceConfig } from '../config/load.ts';
+import { ConfigError, parseDocument, readYaml, repoSettingsFor, serviceConfig } from '../config/load.ts';
 import type { ServiceConfig } from '../config/load.ts';
 import { editableOf } from '../config/editable.ts';
 import type { SettingValue } from '../config/editable.ts';
 import { readFileSettings, readSettingChanges, readSettings, settingsVersion } from '../db/settings.ts';
 import { testDb } from '../db/testing.ts';
 import type { Db } from '../db/types.ts';
-import { AUDIT_KEY_TO_WRITE, CLASH_NAMED, issuesOf, startSettings } from './settings.ts';
+import { CLASH_NAMED, issuesOf, startSettings } from './settings.ts';
 import type { AskedChange, SaveOutcome, Settings } from './settings.ts';
 
 const PEM = generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey.export({ type: 'pkcs8', format: 'pem' }) as string;
@@ -225,21 +225,20 @@ test('a setting removed from the file goes back to its default, and one the file
 test('settings saved in the UI that clash with the file refuse the start with each issue and the sentence, and nothing is copied', async () => {
   const sentence = (named: string): string => `Saved in the UI: ${named}; with them config.yml does not pass. Changing them in config.yml `
     + '(another value, or removed) settles it: a setting changed in the file wins at the next start.';
-  const withoutKey = FILE_YAML.replace('auditKey: { env: AUDIT_KEY }\n', '');
-  const s = await start();
+  // The file writes the gate's branches and the UI switches the gate on; then the file drops the branches.
+  const withBranches = `${FILE_YAML}repositories:\n  defaults:\n    gate: { branches: [main] }\n`;
+  const branchIssue = 'repositories.defaults.gate.branches: must name at least one branch when the gate is enabled';
+  const s = await start(withBranches);
   now = 10;
-  assert.equal((await saveNow(s, [set('defaults', 'score.autoApprove', true)])).kind, 'saved');
+  assert.equal((await saveNow(s, [set('defaults', 'gate.enabled', true)])).kind, 'saved');
   const before = await state();
   now = 20;
   logs = [];
-  const changed = withoutKey.replace('spendPerDay: 50', 'spendPerDay: 30');
+  const changed = FILE_YAML.replace('spendPerDay: 50', 'spendPerDay: 30');
   assert.doesNotThrow(() => check(readYaml(changed)));
   await assert.rejects(start(changed), (error: unknown) => {
     assert.ok(error instanceof ConfigError);
-    assert.deepEqual(error.issues, [
-      'auditKey: must be written while autoApprove is true with an auditShare above 0',
-      sentence('repositories.defaults.score.autoApprove'),
-    ]);
+    assert.deepEqual(error.issues, [branchIssue, sentence('repositories.defaults.gate.enabled')]);
     assert.equal(error.details.length, error.issues.length);
     return true;
   });
@@ -251,9 +250,9 @@ test('settings saved in the UI that clash with the file refuse the start with ea
   await db.close();
   db = await testDb();
   now = 0;
-  const twelve = await start();
+  const twelve = await start(withBranches);
   const asked = [
-    set('defaults', 'score.autoApprove', true), set('defaults', 'score.threshold', 55), set('defaults', 'score.inlineNotes', false),
+    set('defaults', 'gate.enabled', true), set('defaults', 'score.threshold', 55), set('defaults', 'score.inlineNotes', false),
     set('defaults', 'score.approvalThreads', 'gate'), set('defaults', 'score.auditShare', 10), set('defaults', 'primaryBranches', ['main']),
     set('defaults', 'ignoredAuthors', ['bot']), set('defaults', 'baseBranches', ['main']), set('defaults', 'newHead', 'full'),
     set('defaults', 'gate.checkName', 'Visto'), set('defaults', 'gate.mode', 'shadow'), set('defaults', 'gate.clearByReply', false),
@@ -261,12 +260,12 @@ test('settings saved in the UI that clash with the file refuse the start with ea
   assert.equal(asked.length, CLASH_NAMED + 2);
   assert.deepEqual(await saveNow(twelve, asked), { kind: 'saved', changed: 12, restart: false });
   const named = [
-    'baseBranches', 'gate.checkName', 'gate.clearByReply', 'gate.mode', 'ignoredAuthors', 'newHead', 'primaryBranches', 'score.approvalThreads',
-    'score.auditShare', 'score.autoApprove',
+    'baseBranches', 'gate.checkName', 'gate.clearByReply', 'gate.enabled', 'gate.mode', 'ignoredAuthors', 'newHead', 'primaryBranches',
+    'score.approvalThreads', 'score.auditShare',
   ].map((p) => `repositories.defaults.${p}`).join(', ');
-  await assert.rejects(start(withoutKey), (error: unknown) => {
+  await assert.rejects(start(FILE_YAML), (error: unknown) => {
     assert.ok(error instanceof ConfigError);
-    assert.deepEqual(error.issues, ['auditKey: must be written while autoApprove is true with an auditShare above 0', sentence(`${named}, and 2 more`)]);
+    assert.deepEqual(error.issues, [branchIssue, sentence(`${named}, and 2 more`)]);
     return true;
   });
 
@@ -511,8 +510,10 @@ test("no row, log line or error holds a secret's value", async () => {
     seen.push(JSON.stringify(await saveNow(s, changes)));
   }
   now = 20;
-  await assert.rejects(start(SCORER_YAML.replace('auditKey: { env: AUDIT_KEY }\n', '')), (error: unknown) => {
+  // A start refused with settings saved in the UI: its issue and the sentence naming them.
+  await assert.rejects(start(SCORER_YAML.replace('spendPerDay: 50', 'spendPerDay: 50\n  queueConcurrency: 0')), (error: unknown) => {
     assert.ok(error instanceof ConfigError);
+    assert.match(error.issues.at(-1)!, /^Saved in the UI: /);
     seen.push(error.message, JSON.stringify(error.issues), JSON.stringify(error.details), JSON.stringify(issuesOf(error)));
     return true;
   });
@@ -562,16 +563,6 @@ test('the file and the changes given are left as they were, and the settings hel
   assert.deepEqual(s.atStart.model.extraBody, { provider: { order: ['vendor'] } });
   assert.equal(s.atStart.limits.spendPerDay, 50);
   assert.equal(s.saved().config.limits.spendPerDay, 50);
-});
-
-test('a save refused for want of the audit key says what to write in config.yml', () => {
-  const error = new ConfigError(
-    [`auditKey: ${AUDIT_KEY_NEEDED}`],
-    [{ path: ['auditKey'], message: AUDIT_KEY_NEEDED }],
-  );
-  assert.deepEqual(issuesOf(error), [{ scope: null, path: null, message: AUDIT_KEY_TO_WRITE }]);
-  assert.match(AUDIT_KEY_TO_WRITE, /auditKey: \{ env: AUDIT_KEY \}/);
-  assert.match(AUDIT_KEY_TO_WRITE, /restart the service/);
 });
 
 test('an issue at a setting is given with its scope and path, and one at no setting with its whole line', () => {

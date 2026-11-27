@@ -9,7 +9,7 @@ The top-level `extensions` block names extension modules, each with a name, a pa
 
 The top-level key `learning` switches memory on for every repository of the deployment, or off for all: memory for the score, lessons and reverts. It is `false` when not written, and is no key of a repository (see [Memory](memory.md)). The number a description says a pull request reverts is stored either way.
 
-The top-level key `auditKey` names, by reference, the secret the audit sample of automatic approval is drawn with: at least 32 characters, needed while a repository has `autoApprove` true with an `auditShare` above 0, and read, so needed in the environment, whenever it is written (see "The audit key" under [Automatic approval](automatic-approval.md)).
+The top-level key `auditKey` names, by reference, the secret the audit sample of automatic approval is drawn with: at least 32 characters, and read, so needed in the environment, whenever it is written. It is optional: with none written, the service generates the key at its first start and keeps it in its database, and a key written later wins (see "The audit key" under [Automatic approval](automatic-approval.md)).
 
 The top-level `mcpServers` block names MCP servers, each with a name, an address, headers (a secret by reference) and the tools the model may be offered (see [MCP tools](mcp-tools.md)).
 
