@@ -134,3 +134,27 @@ export type QualityState = 'ready' | 'computing' | 'failed';
 /** `quality` only when `state` is ready. */
 export interface QualityAnswer { now: string; state: QualityState; quality: Quality | null }
 export interface Repositories { now: string; repositories: string[] }
+
+// -- the Overview and dependency health (the same plan; calls 14 to 18 and 22) -------------------------------------------------
+export interface OverviewQuality {
+  repository: string; threshold: number; state: QualityState;   // the numbers and reverts only when ready
+  safety: Measure | null; benefit: Measure | null; focus: Measure | null; reverts: { merged: number; approved: number } | null;
+  approval: ApprovalShort;
+}
+export interface Overview {
+  now: string; days: WindowDays; repositories: number;
+  reviews: { total: number; published: number; dryRun: number; failed: number; nothingNew: number; notPosted: number };
+  spend: { today: number; limit: number };
+  approvals: { approved: number; audited: number };
+  perDay: Array<{ day: string; published: number; failed: number; other: number; cost: number }>;   // oldest first; day 'YYYY-MM-DD', UTC
+  quality: OverviewQuality[]; qualityCut: number;
+}
+export type DependencyKind = 'model' | 'scorer' | 'memory' | 'extension' | 'mcp' | 'app';
+export type DependencyStatus = 'working' | 'failing' | 'unknown';
+export interface DependencyPart { part: 'context' | 'notify' | 'alert' | 'route'; status: DependencyStatus; code: string | null; since: string | null }
+export interface DependencyShown {
+  kind: DependencyKind; name: string | null; model: string | null; status: DependencyStatus; code: string | null;
+  since: string | null; seenAt: string | null; parts: DependencyPart[]; missing: Array<{ feature: string; missing: string }>;
+}
+export interface AlertShown { id: number; code: string; details: Record<string, string | number | boolean>; raisedAt: string; open: boolean }
+export interface Health { now: string; dependencies: DependencyShown[]; open: AlertShown[]; recent: AlertShown[] }
