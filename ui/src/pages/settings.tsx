@@ -26,6 +26,21 @@ import type { Form } from './settings-parts.tsx';
 
 const SUB = 'Saved settings apply from the next review. A review already running keeps the settings it started with.';
 const CHANGED = 'Settings were saved meanwhile, here or in config.yml at a start. They were read again, and your changes are kept: save again.';
+/** While the service restarts after a save, how often the page asks whether it is back, and for how long at most. */
+export const RESTART_POLL_MS = 3000;
+export const RESTART_LATE_MS = 15 * 60_000;
+type Restart = { phase: 'waiting'; from: string } | { phase: 'back' } | { phase: 'late' };
+const RESTART_SAID: Record<Restart['phase'], { text: string; tone: string }> = {
+  waiting: {
+    text: 'Saved. The service is restarting to apply it: the reviews running now finish first, then it starts again on the saved settings. This page reads them again once it is back.',
+    tone: 'bg-info-bg text-info',
+  },
+  back: { text: 'The service restarted. The saved settings are in force.', tone: 'bg-ok-bg text-ok' },
+  late: {
+    text: 'Saved, but the service has not come back after 15 minutes. Its logs say why; this page reads the settings again when you reload it.',
+    tone: 'bg-warn-bg text-warn',
+  },
+};
 const FAILED = 'The settings could not be saved.';
 const BUSY = 'The service is busy. Try again in a moment.';
 const UNREACHABLE = 'The service could not be reached. Try again in a moment.';
@@ -366,7 +381,43 @@ export function SettingsPage() {
   const [sending, setSending] = useState(false);
   const [badJson, setBadJson] = useState<ReadonlySet<string>>(new Set());
   const [epoch, setEpoch] = useState(0);
+  const [restart, setRestart] = useState<Restart | null>(null);
   const inFlight = useRef(false);
+
+  // After a save that restarts the service: asked again every few seconds, a failure or the same start kept waiting, until
+  // a read comes from a newer start or the limit has passed.
+  useEffect(() => {
+    if (restart?.phase !== 'waiting') return;
+    const from = restart.from;
+    const began = Date.now();
+    let live = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const again = (): void => {
+      if (live) timer = setTimeout(ask, RESTART_POLL_MS);
+    };
+    function ask(): void {
+      if (!live) return;
+      if (Date.now() - began >= RESTART_LATE_MS) {
+        setRestart({ phase: 'late' });
+        return;
+      }
+      api.settings().then((view) => {
+        if (!live) return;
+        if (view.started === from) {
+          again();
+          return;
+        }
+        setRead({ view, failed: false });
+        setRecorded((n) => n + 1);
+        setRestart({ phase: 'back' });
+      }, again);
+    }
+    again();
+    return () => {
+      live = false;
+      clearTimeout(timer);
+    };
+  }, [api, restart]);
 
   useEffect(() => {
     let live = true;
@@ -447,7 +498,8 @@ export function SettingsPage() {
         // What was typed while the request was out is kept: an entry the draft still holds as it was sent was saved.
         setDraft((last) => new Map([...last].filter(([key, value]) => sentDraft.get(key) !== value)));
         if (badNow.current.size === 0) setEpoch((n) => n + 1);
-        setSaved(true);
+        setRestart(answer.restarting === true ? { phase: 'waiting', from: answer.view.started } : null);
+        setSaved(answer.restarting !== true);
         setRecorded((n) => n + 1);
       } else {
         setNotice({ kind: 'issues', issues: answer.issues });
@@ -468,6 +520,11 @@ export function SettingsPage() {
   }
 
   const unsaved = unsavedCount === 0 ? 'No unsaved changes' : plural(unsavedCount, 'unsaved change', 'unsaved changes');
+  // As the service decides it: a change to a setting read at start, or the second scorer switched on or off.
+  const restartOnSave =
+    view !== null &&
+    (changes.some((change) => change.scope === GLOBAL && view.global[change.path]?.restart === true) ||
+      SCORER_PATHS.some((path) => shown(view, draft, GLOBAL, path).written) !== view.scorer.on);
   const body = (): ReactNode => {
     if (form === null) {
       if (read.failed) {
@@ -504,21 +561,32 @@ export function SettingsPage() {
       <PageHeader title="Settings" sub={SUB}>
         {view === null ? null : (
           <div className="flex flex-wrap items-center gap-2.5">
-            {saved ? (
+            {saved && restart === null ? (
               <span role="status" className="text-[13px] text-muted">
                 Saved.
               </span>
             ) : null}
+            {changes.length > 0 && restartOnSave ? <span className="text-[13px] text-warn">Saving this restarts the service.</span> : null}
             <span className="text-[13px] text-muted">{unsaved}</span>
             <Button type="button" disabled={unsavedCount === 0} onClick={discard}>
               Discard
             </Button>
-            <Button type="button" variant="primary" disabled={changes.length === 0 || sending || badJson.size > 0} onClick={() => void save()}>
+            <Button
+              type="button"
+              variant="primary"
+              disabled={changes.length === 0 || sending || badJson.size > 0 || restart?.phase === 'waiting'}
+              onClick={() => void save()}
+            >
               {sending ? 'Saving' : 'Save changes'}
             </Button>
           </div>
         )}
       </PageHeader>
+      {restart === null ? null : (
+        <div role="status" className={`rounded-[12px] border border-border px-5 py-3 text-sm ${RESTART_SAID[restart.phase].tone}`}>
+          {RESTART_SAID[restart.phase].text}
+        </div>
+      )}
       {notice === null ? null : (
         <div role="alert" className="rounded-[12px] border border-border bg-bad-bg px-5 py-3 text-sm text-bad">
           {notice.kind === 'text' ? (

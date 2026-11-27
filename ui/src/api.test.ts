@@ -25,11 +25,13 @@ test('the settings calls send what the service reads and read what it answers', 
   const exported: SettingsExport = { text: 'learning: true\n' };
 
   answers.push(
-    jsonOf(200, VIEW), jsonOf(200, VIEW), jsonOf(422, { error: 'invalid', issues }), jsonOf(409, { error: 'changed' }), jsonOf(422, { error: 'too_long' }),
+    jsonOf(200, VIEW), jsonOf(200, VIEW), jsonOf(200, { ...VIEW, restarting: true }), jsonOf(422, { error: 'invalid', issues }), jsonOf(409, { error: 'changed' }), jsonOf(422, { error: 'too_long' }),
     jsonOf(200, changes), jsonOf(200, changes), jsonOf(200, exported),
   );
   expect(await api.settings()).toEqual(VIEW);
-  expect(await api.saveSettings('tok', SAVE)).toEqual({ kind: 'saved', view: VIEW });
+  expect(await api.saveSettings('tok', SAVE)).toEqual({ kind: 'saved', view: VIEW, restarting: false });
+  // The view keeps none of the answer's own field.
+  expect(await api.saveSettings('tok', SAVE)).toEqual({ kind: 'saved', view: VIEW, restarting: true });
   expect(await api.saveSettings('tok', SAVE)).toEqual({ kind: 'invalid', issues });
   await expect(api.saveSettings('tok', SAVE)).rejects.toEqual(new RequestFailed(409, 'changed'));
   await expect(api.saveSettings('tok', SAVE)).rejects.toEqual(new RequestFailed(422, 'too_long'));
@@ -43,7 +45,7 @@ test('the settings calls send what the service reads and read what it answers', 
   };
   expect(seen).toEqual([
     ['/api/settings', get],
-    ['/api/settings', put], ['/api/settings', put], ['/api/settings', put], ['/api/settings', put],
+    ['/api/settings', put], ['/api/settings', put], ['/api/settings', put], ['/api/settings', put], ['/api/settings', put],
     ['/api/settings/changes?before=8977', get],
     ['/api/settings/changes', get],
     ['/api/settings/export', get],

@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, within } from '@testing-library/react';
 import { userEvent } from '@testing-library/user-event';
 import { afterEach, expect, test, vi } from 'vitest';
 import { RequestFailed } from '../api.ts';
@@ -6,6 +6,7 @@ import type { Api } from '../api.ts';
 import type { Activity, Me, Reviews, Setting, SettingSource, SettingsView, SettingValue } from '../api-types.ts';
 import { App } from '../app.tsx';
 import { LABELS, whereOf } from './settings-parts.tsx';
+import { RESTART_LATE_MS, RESTART_POLL_MS } from './settings.tsx';
 
 const NOW = '2026-03-01T10:00:00.000Z';
 const ME: Me = { name: 'octo-admin', kind: 'password', role: 'admin', csrf: 'csrf-1', mode: 'live', repositories: ['acme/shop'] };
@@ -143,7 +144,10 @@ const section = (name: string): HTMLElement => screen.getByRole('region', { name
 
 const SUB = 'Saved settings apply from the next review. A review already running keeps the settings it started with.';
 
-afterEach(() => visit('/'));
+afterEach(() => {
+  vi.useRealTimers();
+  visit('/');
+});
 
 async function open(over: Partial<Api> = {}) {
   visit('/ui/settings');
@@ -323,6 +327,78 @@ test('a save refused only by issues at no setting says so without pointing at th
 
   const alert = await screen.findByRole('alert');
   expect(alert).toHaveTextContent(/^Not saved:The audit key is needed\.$/);
+});
+
+test('a change to a setting read at start says that saving restarts the service, and one to another setting does not', async () => {
+  const user = userEvent.setup();
+  const { api } = fakeApi();
+  visit('/ui/settings');
+  render(<App api={api} />);
+  await screen.findByRole('region', { name: 'General' });
+  await user.clear(screen.getByLabelText('Daily spend limit'));
+  await user.type(screen.getByLabelText('Daily spend limit'), '45');
+  expect(screen.queryByText('Saving this restarts the service.')).toBeNull();
+  await user.click(screen.getByRole('switch', { name: 'Learning' }));
+  expect(screen.getByText('Saving this restarts the service.')).toBeInTheDocument();
+});
+
+test('a save that restarts the service says so, waits for it to come back, then reads the settings again', async () => {
+  vi.useFakeTimers();
+  const back: SettingsView = { ...viewOf({ version: 15, global: { learning: written(true, UI, { restart: true }) } }), started: '2026-03-01T10:05:00.000Z' };
+  let reads = 0;
+  const { api } = fakeApi({
+    settings: () => {
+      reads += 1;
+      // The first read, then two the restart leaves unanswered, one while the old start still drains, then the new start.
+      if (reads === 2 || reads === 3) return Promise.reject(new TypeError('Failed to fetch'));
+      return Promise.resolve(reads < 5 ? VIEW : back);
+    },
+    saveSettings: () => Promise.resolve({ kind: 'saved', view: viewOf({ version: 15, global: { learning: written(true, UI, { restart: true, waits: true }) } }), restarting: true }),
+  });
+  visit('/ui/settings');
+  render(<App api={api} />);
+  await act(() => vi.advanceTimersByTimeAsync(0));
+  fireEvent.click(screen.getByRole('switch', { name: 'Learning' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+  await act(() => vi.advanceTimersByTimeAsync(0));
+  expect(screen.getByRole('status')).toHaveTextContent(
+    'Saved. The service is restarting to apply it: the reviews running now finish first, then it starts again on the saved settings. This page reads them again once it is back.',
+  );
+  expect(screen.getByRole('button', { name: 'Save changes' })).toBeDisabled();
+  expect(reads).toBe(1);
+  await act(() => vi.advanceTimersByTimeAsync(RESTART_POLL_MS * 3));
+  expect(reads).toBe(4);
+  expect(screen.getByRole('status')).toHaveTextContent(/^Saved\. The service is restarting/);
+  await act(() => vi.advanceTimersByTimeAsync(RESTART_POLL_MS));
+  expect(reads).toBe(5);
+  expect(screen.getByRole('status')).toHaveTextContent('The service restarted. The saved settings are in force.');
+  // Back: nothing more is read for the restart.
+  await act(() => vi.advanceTimersByTimeAsync(RESTART_POLL_MS * 3));
+  expect(reads).toBe(5);
+  vi.useRealTimers();
+});
+
+test('a restart that does not come back within its limit says to read the service\'s logs, and stops asking', async () => {
+  vi.useFakeTimers();
+  let reads = 0;
+  const { api } = fakeApi({
+    settings: () => (++reads === 1 ? Promise.resolve(VIEW) : Promise.reject(new TypeError('Failed to fetch'))),
+    saveSettings: () => Promise.resolve({ kind: 'saved', view: viewOf({ version: 15 }), restarting: true }),
+  });
+  visit('/ui/settings');
+  render(<App api={api} />);
+  await act(() => vi.advanceTimersByTimeAsync(0));
+  fireEvent.click(screen.getByRole('switch', { name: 'Learning' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+  await act(() => vi.advanceTimersByTimeAsync(0));
+  await act(() => vi.advanceTimersByTimeAsync(RESTART_LATE_MS + RESTART_POLL_MS));
+  expect(screen.getByRole('status')).toHaveTextContent(
+    'Saved, but the service has not come back after 15 minutes. Its logs say why; this page reads the settings again when you reload it.',
+  );
+  const asked = reads;
+  await act(() => vi.advanceTimersByTimeAsync(RESTART_POLL_MS * 3));
+  expect(reads).toBe(asked);
+  vi.useRealTimers();
 });
 
 test('a save that met another keeps the changes and reads the settings again', async () => {
