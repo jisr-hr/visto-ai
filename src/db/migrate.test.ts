@@ -356,3 +356,25 @@ test('0016_settings follows 0015_accounts and makes the three tables of settings
   }
   await db.close();
 });
+test('0017_overview adds the alerts, dependency health and who switched a record, and every record stored before reads as never switched', async () => {
+  const ledger = await testDb();
+  const names = (await ledger.query<{ name: string }>('select name from visto_ai.schema_migrations order by name')).map((r) => r.name);
+  assert.equal(names.indexOf('0017_overview'), names.indexOf('0016_settings') + 1);
+  await ledger.close();
+  const db = await pgliteDb();
+  const all = loadMigrations(MIGRATIONS_DIR);
+  await migrate(db, all.filter((m) => m.name < '0017_overview'));
+  await db.query(
+    `insert into visto_ai.memory_records (service, owner, repo, kind, source_ref, created_at, expires_at, number, path, directory, excerpt)
+     values ('github', 'acme', 'shop', 'human_signal', '7:h1:src/a.ts', '2026-03-01T10:00:00Z', '2026-06-01T10:00:00Z', 7, 'src/a.ts', 'src', 'x')`);
+  assert.deepEqual(await migrate(db, all.filter((m) => m.name <= '0017_overview')), ['0017_overview']);
+  assert.deepEqual(await db.query('select count(*)::int as n from visto_ai.alerts'), [{ n: 0 }]);
+  assert.deepEqual(await db.query('select count(*)::int as n from visto_ai.dependency_health'), [{ n: 0 }]);
+  assert.deepEqual(
+    await db.query("select indexname from pg_indexes where schemaname = 'visto_ai' and tablename = 'alerts' order by indexname"),
+    [{ indexname: 'alerts_open' }, { indexname: 'alerts_pkey' }, { indexname: 'alerts_raised' }, { indexname: 'alerts_withdrawal' }]);
+  assert.deepEqual(
+    await db.query('select source_ref, status, switched_at, switched_by from visto_ai.memory_records'),
+    [{ source_ref: '7:h1:src/a.ts', status: 'active', switched_at: null, switched_by: null }]);
+  await db.close();
+});

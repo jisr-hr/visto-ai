@@ -6,20 +6,22 @@ import type { Api } from './api.ts';
 import type { Account, Accounts, Activity, Me, OneTime, Reviews, SettingsSave, SignInStep } from './api-types.ts';
 import { App } from './app.tsx';
 
-// The page of a screen still to come, as it is, which also keeps the API the app gave the pages: no page calls every method
-// yet, so a test calls each of them on it.
 const shown = vi.hoisted(() => ({ api: null as Api | null }));
-vi.mock('./pages/later.tsx', async (importOriginal) => {
-  const real = await importOriginal<typeof import('./pages/later.tsx')>();
+
+// The Overview, as it is, keeps the API the app gave the pages: no page calls every method yet, so a test calls each of them on it.
+vi.mock('./pages/overview.tsx', async (importOriginal) => {
+  const real = await importOriginal<typeof import('./pages/overview.tsx')>();
   const { useApp } = await import('./context.tsx');
-  function Later(props: { title: string }) {
+  function OverviewPage() {
     shown.api = useApp().api;
-    return real.Later(props);
+    return real.OverviewPage();
   }
-  return { Later };
+  return { ...real, OverviewPage };
 });
 
 const NOW = '2026-03-01T10:00:00.000Z';
+const MEMORY_SUB = 'What the service learned from people, reverts and replies, told to later reviews as context';
+const REPOSITORIES_SUB = 'How well the score tells what needs a person, measured from what people did';
 const SAVE: SettingsSave = { version: 14, changes: [{ scope: 'global', path: 'learning', value: true }] };
 const ME: Me = { name: 'octo-lead', kind: 'github', role: 'admin', csrf: 'csrf-token-for-tests', mode: 'live', repositories: ['acme/billing', 'acme/infra', 'acme/shop', 'acme/web'] };
 const ACTIVITY: Activity = { now: NOW, places: { reviews: 2, withdrawals: 2 }, paused: null, jobs: [], withdrawals: [] };
@@ -105,6 +107,30 @@ function fakeApi(over: Partial<Api> = {}) {
       calls.push(['settingsExport']);
       return over.settingsExport ? over.settingsExport() : Promise.reject(new RequestFailed(500, 'not_expected'));
     },
+    overview: (days) => {
+      calls.push(['overview', days]);
+      return over.overview ? over.overview(days) : Promise.reject(new RequestFailed(500, 'not_expected'));
+    },
+    health: () => {
+      calls.push(['health']);
+      return over.health ? over.health() : Promise.reject(new RequestFailed(500, 'not_expected'));
+    },
+    repositories: () => {
+      calls.push(['repositories']);
+      return over.repositories ? over.repositories() : Promise.reject(new RequestFailed(500, 'not_expected'));
+    },
+    quality: (repository, window) => {
+      calls.push(['quality', repository, window]);
+      return over.quality ? over.quality(repository, window) : Promise.reject(new RequestFailed(500, 'not_expected'));
+    },
+    memory: (query) => {
+      calls.push(['memory', query]);
+      return over.memory ? over.memory(query) : Promise.reject(new RequestFailed(500, 'not_expected'));
+    },
+    switchMemory: (csrf, id, on) => {
+      calls.push(['switchMemory', csrf, id, on]);
+      return over.switchMemory ? over.switchMemory(csrf, id, on) : Promise.reject(new RequestFailed(500, 'not_expected'));
+    },
   };
   return { api, calls };
 }
@@ -162,28 +188,28 @@ test('a service that cannot be reached says so, and Try again reads again', asyn
   expect(calls.filter(([name]) => name === 'me')).toHaveLength(3);
 });
 
-test('each sidebar entry leads to its page, the coming ones say so, and an unknown path is not found', async () => {
+test('each sidebar entry leads to its page, and an unknown path is not found', async () => {
   const { api } = fakeApi();
   const user = userEvent.setup();
   at('/ui/repositories');
   const { unmount } = render(<App api={api} />);
 
   expect(await screen.findByRole('heading', { level: 1, name: 'Repositories' })).toBeInTheDocument();
-  expect(screen.getByText('Coming in a later plan.')).toBeInTheDocument();
+  expect(screen.getByText(REPOSITORIES_SUB)).toBeInTheDocument();
   const nav = screen.getByRole('navigation', { name: 'Main' });
   const current = (): string[] => within(nav).queryAllByRole('link', { current: 'page' }).map((link) => link.textContent ?? '');
   expect(current()).toEqual(['Repositories']);
 
   const pages = [
-    ['Overview', '/ui/', 'Overview'],
-    ['Memory', '/ui/memory', 'Memory'],
-    ['Repositories', '/ui/repositories', 'Repositories'],
+    ['Overview', '/ui/', 'Overview', 'Last 30 days'],
+    ['Memory', '/ui/memory', 'Memory', MEMORY_SUB],
+    ['Repositories', '/ui/repositories', 'Repositories', REPOSITORIES_SUB],
   ] as const;
-  for (const [entry, path, heading] of pages) {
+  for (const [entry, path, heading, subLine] of pages) {
     await user.click(within(nav).getByRole('link', { name: entry }));
     expect(window.location.pathname).toBe(path);
     expect(screen.getByRole('heading', { level: 1, name: heading })).toBeInTheDocument();
-    expect(screen.getByText('Coming in a later plan.')).toBeInTheDocument();
+    expect(screen.getByText(subLine)).toBeInTheDocument();
     expect(current()).toEqual([entry]);
   }
   await user.click(within(nav).getByRole('link', { name: 'Activity' }));
@@ -269,6 +295,12 @@ test('a 401 from any method of the API the pages are given shows the sign-in pag
     ['saveSettings', (api) => api.saveSettings(ME.csrf, SAVE), ['saveSettings', ME.csrf, SAVE]],
     ['settingChanges', (api) => api.settingChanges(8977), ['settingChanges', 8977]],
     ['settingsExport', (api) => api.settingsExport(), ['settingsExport']],
+    ['overview', (api) => api.overview(30), ['overview', 30]],
+    ['health', (api) => api.health(), ['health']],
+    ['repositories', (api) => api.repositories(), ['repositories']],
+    ['quality', (api) => api.quality('acme/shop', 30), ['quality', 'acme/shop', 30]],
+    ['memory', (api) => api.memory({}), ['memory', {}]],
+    ['switchMemory', (api) => api.switchMemory('t', 7, false), ['switchMemory', 't', 7, false]],
   ];
   // Every method there is.
   expect(each.map(([name]) => name).sort()).toEqual(Object.keys(createApi()).sort());

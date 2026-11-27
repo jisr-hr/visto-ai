@@ -68,6 +68,30 @@ function fakeApi(over: Over = {}) {
       calls.push(['settingsExport']);
       return nope();
     },
+    overview: (days) => {
+      calls.push(['overview', days]);
+      return nope();
+    },
+    health: () => {
+      calls.push(['health']);
+      return nope();
+    },
+    repositories: () => {
+      calls.push(['repositories']);
+      return nope();
+    },
+    quality: (repository, window) => {
+      calls.push(['quality', repository, window]);
+      return nope();
+    },
+    memory: (query) => {
+      calls.push(['memory', query]);
+      return nope();
+    },
+    switchMemory: (csrf, id, on) => {
+      calls.push(['switchMemory', csrf, id, on]);
+      return nope();
+    },
   };
   const named = (name: string): unknown[][] => calls.filter(([n]) => n === name);
   return { api, named };

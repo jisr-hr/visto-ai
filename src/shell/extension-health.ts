@@ -7,7 +7,7 @@ export interface ExtensionHealth {
 }
 
 /** One state for each module and part, in this process: an alert at the first failure, and one at the first success after it. */
-export function createExtensionHealth(alert: Alert): ExtensionHealth {
+export function createExtensionHealth(alert: Alert, note?: (extension: string, part: 'context' | 'notify' | 'route', ok: boolean, code: string) => void): ExtensionHealth {
   const failing = new Map<string, boolean>();
 
   function raise(code: string, details: Record<string, string>): void {
@@ -21,6 +21,7 @@ export function createExtensionHealth(alert: Alert): ExtensionHealth {
       failing.set(key, !ok);
       if (!ok && !wasFailing) raise('extension_error', { extension, part, reason: isShortCode(code) ? code : 'internal_error' });
       else if (ok && wasFailing) raise('extension_ok', { extension, part });
+      try { note?.(extension, part, ok, code); } catch { /* a note that throws changes nothing */ }
     },
   };
 }

@@ -4,4 +4,7 @@ export type {
   ApprovalDecision, Posting, GateShown, ApprovalEntry, ReviewDependency, FeedbackReason,
   SettingValue, SettingSource, Setting, RepositorySettings, SecretKind, SecretState, SettingsView, SettingsSave, SettingIssue, SettingsInvalid,
   SettingChangeRow, SettingChanges, SettingsExport,
+  WindowDays, QualityWindow, Measure, ApprovalShort, OverviewQuality, Overview, DependencyKind, DependencyStatus, DependencyPart, DependencyShown,
+  AlertShown, Health, QualityRow, SteppedBlock, Quality, QualityState, QualityAnswer, Repositories, MemoryKind, MemoryRecordShown, MemoryView,
+  MemorySwitched,
 } from '../../src/ui/api-types.ts';

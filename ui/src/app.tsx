@@ -10,9 +10,11 @@ import type { Me } from './api-types.ts';
 import { Layout, REVIEW_PATH } from './components/layout.tsx';
 import { Button } from './components/ui/button.tsx';
 import { ActivityPage } from './pages/activity.tsx';
-import { Later } from './pages/later.tsx';
+import { MemoryPage } from './pages/memory.tsx';
 import { NotFound } from './pages/not-found.tsx';
+import { OverviewPage } from './pages/overview.tsx';
 import { PasswordPage } from './pages/password.tsx';
+import { RepositoriesPage } from './pages/repositories.tsx';
 import { ReviewNotFound, ReviewPage, runOfPath } from './pages/review.tsx';
 import { SettingsPage } from './pages/settings.tsx';
 import { SignIn } from './pages/sign-in.tsx';
@@ -42,13 +44,13 @@ function ReviewOf({ path }: { path: string }) {
 function Page({ path, me }: { path: string; me: Me }) {
   switch (path) {
     case '/ui/':
-      return <Later title="Overview" />;
+      return <OverviewPage />;
     case '/ui/activity':
       return <ActivityPage />;
     case '/ui/repositories':
-      return <Later title="Repositories" />;
+      return <RepositoriesPage />;
     case '/ui/memory':
-      return <Later title="Memory" />;
+      return <MemoryPage />;
     case '/ui/settings':
       return me.role === 'admin' ? <SettingsPage /> : <NotFound />;
     case '/ui/password':
@@ -132,6 +134,12 @@ export function App({ api }: { api: Api }) {
       saveSettings: (csrf, save) => watch(api.saveSettings(csrf, save)),
       settingChanges: (before) => watch(api.settingChanges(before)),
       settingsExport: () => watch(api.settingsExport()),
+      overview: (days) => watch(api.overview(days)),
+      health: () => watch(api.health()),
+      repositories: () => watch(api.repositories()),
+      quality: (repository, window) => watch(api.quality(repository, window)),
+      memory: (query) => watch(api.memory(query)),
+      switchMemory: (csrf, id, on) => watch(api.switchMemory(csrf, id, on)),
     };
   }, [api]);
 

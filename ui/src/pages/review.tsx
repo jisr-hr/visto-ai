@@ -65,7 +65,7 @@ const TONES: Readonly<Record<'ok' | 'warn' | 'bad' | 'muted', Tone>> = {
 };
 
 /** Text with each backtick span in the code face. */
-function Spans({ text }: { text: string }): ReactElement {
+export function Spans({ text }: { text: string }): ReactElement {
   return (
     <>
       {codeSpans(text).map((part, i) => (

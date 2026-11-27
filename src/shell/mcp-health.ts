@@ -7,7 +7,7 @@ export interface McpHealth {
 }
 
 /** One state for each server, in this process: an alert at the first failure, and one at the first success after it. */
-export function createMcpHealth(alert: Alert): McpHealth {
+export function createMcpHealth(alert: Alert, note?: (server: string, ok: boolean, code: string) => void): McpHealth {
   const failing = new Map<string, boolean>();
 
   function raise(code: string, details: Record<string, string>): void {
@@ -20,6 +20,7 @@ export function createMcpHealth(alert: Alert): McpHealth {
       failing.set(server, !ok);
       if (!ok && !wasFailing) raise('mcp_error', { server, reason: isShortCode(code) ? code : 'internal_error' });
       else if (ok && wasFailing) raise('mcp_ok', { server });
+      try { note?.(server, ok, code); } catch { /* a note that throws changes nothing */ }
     },
   };
 }

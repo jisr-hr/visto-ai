@@ -42,7 +42,7 @@ interface ResultRow {
 /** Memory as of each case, and the file it was built from. */
 export interface BacktestMemory { of(c: HistoryCase): Memory; file: string; sha256: string }
 interface ScoresLine {
-  key: string; threshold: number; status: 'ok' | 'failed'; scores: FileScore[];
+  key: string; threshold: number; status: 'ok' | 'failed'; scores: readonly FileScore[];
   labels: { blocks: Record<string, Label>; files: Record<string, Label>; comments: Labels['comments']; final_missing: number };
 }
 interface Outcome { total_cost: number; row: ResultRow; scores: CaseScores; reviewedByPerson: boolean; models: string[] }

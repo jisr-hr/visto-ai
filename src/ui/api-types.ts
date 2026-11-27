@@ -116,3 +116,62 @@ export interface SettingChangeRow {
 }
 export interface SettingChanges { changes: SettingChangeRow[]; next: number | null }
 export interface SettingsExport { text: string }
+
+// -- live score quality and the repositories (the plan "The UI's Overview, Repositories and Memory"; calls 23 to 29) ---------
+export type WindowDays = 7 | 30 | 90;
+export type QualityWindow = WindowDays | 'all';
+/** `share`: `part` of `of`, three decimals; null when `of` is 0. */
+export interface Measure { share: number | null; part: number; of: number }
+export interface ApprovalShort { enabled: boolean; threads: 'strict' | 'gate'; auditShare: number }
+export interface QualityRow { threshold: number; current: boolean; safetyBlocks: Measure; safetyFiles: Measure; benefit: Measure; focus: Measure }
+export interface SteppedBlock { path: string; number: number; score: number }
+/** `closed`: the pull requests closed in the window that were read (at most 300); `pullRequests`: those of them measured (a last run read). */
+export interface Quality {
+  repository: string; window: QualityWindow; threshold: number;
+  closed: number; pullRequests: number; unreadable: number; cut: { pulls: boolean; comments: boolean; runs: boolean };
+  rows: QualityRow[]; stepped: SteppedBlock[];
+  reverts: { merged: number; approved: number }; audits: { drawn: number; needed: number };
+  feedback: { helpful: number; notHelpful: number; reasons: Array<{ reason: string; count: number }> };
+}
+export type QualityState = 'ready' | 'computing' | 'failed';
+/** `quality` only when `state` is ready. */
+export interface QualityAnswer { now: string; state: QualityState; quality: Quality | null }
+export interface Repositories { now: string; repositories: string[] }
+
+// -- the Overview and dependency health (the same plan; calls 14 to 18 and 22) -------------------------------------------------
+export interface OverviewQuality {
+  repository: string; threshold: number; state: QualityState;   // the numbers and reverts only when ready
+  safety: Measure | null; benefit: Measure | null; focus: Measure | null; reverts: { merged: number; approved: number } | null;
+  approval: ApprovalShort;
+}
+export interface Overview {
+  now: string; days: WindowDays; repositories: number;
+  reviews: { total: number; published: number; dryRun: number; failed: number; nothingNew: number; notPosted: number };
+  spend: { today: number; limit: number };
+  approvals: { approved: number; audited: number };
+  perDay: Array<{ day: string; published: number; failed: number; other: number; cost: number }>;   // oldest first; day 'YYYY-MM-DD', UTC
+  quality: OverviewQuality[]; qualityCut: number;
+}
+export type DependencyKind = 'model' | 'scorer' | 'memory' | 'extension' | 'mcp' | 'app';
+export type DependencyStatus = 'working' | 'failing' | 'unknown';
+export interface DependencyPart { part: 'context' | 'notify' | 'alert' | 'route'; status: DependencyStatus; code: string | null; since: string | null }
+export interface DependencyShown {
+  kind: DependencyKind; name: string | null; model: string | null; status: DependencyStatus; code: string | null;
+  since: string | null; seenAt: string | null; parts: DependencyPart[]; missing: Array<{ feature: string; missing: string }>;
+}
+export interface AlertShown { id: number; code: string; details: Record<string, string | number | boolean>; raisedAt: string; open: boolean }
+export interface Health { now: string; dependencies: DependencyShown[]; open: AlertShown[]; recent: AlertShown[] }
+
+// -- Memory (the same plan; calls 30 to 33 and 35) ------------------------------------------------------------------------------
+export type MemoryKind = 'human_signal' | 'revert' | 'lesson';
+/** `text`: the excerpt of a person's record, the lesson of a lesson, '' for a revert. `by`: the commenter of a person's record. `reverted`: the pull request a revert undid. */
+export interface MemoryRecordShown {
+  id: number; kind: MemoryKind; repository: string; number: number; text: string; path: string | null; directory: string | null;
+  by: string | null; reverted: number | null; createdAt: string | null; expiresAt: string | null; on: boolean;   // a time no ISO time writes is none
+}
+export interface MemoryView {
+  now: string; learning: { on: boolean; ranAt: string | null };
+  counts: { signals: number; signalRepositories: number; reverts: number; lessons: number; off: number };
+  total: number; records: MemoryRecordShown[]; next: number | null;
+}
+export interface MemorySwitched { record: MemoryRecordShown }

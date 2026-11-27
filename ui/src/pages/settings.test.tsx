@@ -93,6 +93,30 @@ function fakeApi(over: Partial<Api> = {}) {
       calls.push(['settingsExport']);
       return over.settingsExport ? over.settingsExport() : Promise.reject(new RequestFailed(500, 'not_expected'));
     },
+    overview: (days) => {
+      calls.push(['overview', days]);
+      return over.overview ? over.overview(days) : Promise.reject(new RequestFailed(500, 'not_expected'));
+    },
+    health: () => {
+      calls.push(['health']);
+      return over.health ? over.health() : Promise.reject(new RequestFailed(500, 'not_expected'));
+    },
+    repositories: () => {
+      calls.push(['repositories']);
+      return over.repositories ? over.repositories() : Promise.reject(new RequestFailed(500, 'not_expected'));
+    },
+    quality: (repository, window) => {
+      calls.push(['quality', repository, window]);
+      return over.quality ? over.quality(repository, window) : Promise.reject(new RequestFailed(500, 'not_expected'));
+    },
+    memory: (query) => {
+      calls.push(['memory', query]);
+      return over.memory ? over.memory(query) : Promise.reject(new RequestFailed(500, 'not_expected'));
+    },
+    switchMemory: (csrf, id, on) => {
+      calls.push(['switchMemory', csrf, id, on]);
+      return over.switchMemory ? over.switchMemory(csrf, id, on) : Promise.reject(new RequestFailed(500, 'not_expected'));
+    },
   };
   const sent = (name: string): unknown[][] => calls.filter(([called]) => called === name);
   return { api, sent };
@@ -478,8 +502,8 @@ test('the secrets show only their variable and whether it is set, and Access sho
   expect(row('Model key')).toHaveTextContent('Model key OPENROUTER_API_KEY');
   expect(within(row('Model key')).getByText('Set')).toBeInTheDocument();
   expect(classes(within(row('Model key')).getByText('OPENROUTER_API_KEY'))).toEqual(words('font-mono text-[12.5px] text-muted'));
-  expect(row('Alert webhook')).toHaveTextContent(/^Alert webhookNot set$/);
-  expect(classes(within(row('Alert webhook')).getByText('Not set'))).toEqual(words('inline-flex items-center gap-1.5 whitespace-nowrap rounded-full px-2 py-0.5 text-xs leading-5 font-medium bg-subtle text-muted'));
+  expect(row('Alert webhook')).toHaveTextContent(/^Alert webhookNot set, alerts are shown here only$/);
+  expect(classes(within(row('Alert webhook')).getByText('Not set, alerts are shown here only'))).toEqual(words('inline-flex items-center gap-1.5 whitespace-nowrap rounded-full px-2 py-0.5 text-xs leading-5 font-medium bg-subtle text-muted'));
   expect(row('Extension example, option secret')).toHaveTextContent('EXAMPLE_SECRET');
   expect(row('MCP server docs')).toHaveTextContent('DOCS_TOKEN');
   expect(within(secrets).getAllByText('Set')).toHaveLength(4);
