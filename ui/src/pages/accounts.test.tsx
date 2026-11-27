@@ -110,6 +110,22 @@ function fakeApi(over: Partial<Api> = {}) {
       calls.push(['pullReviews', repository, number]);
       return over.pullReviews ? over.pullReviews(repository, number) : Promise.resolve({ now: NOW, total: 0, reviews: [] });
     },
+    settings: () => {
+      calls.push(['settings']);
+      return over.settings ? over.settings() : Promise.reject(new RequestFailed(500, 'not_expected'));
+    },
+    saveSettings: (csrf, save) => {
+      calls.push(['saveSettings', csrf, save]);
+      return over.saveSettings ? over.saveSettings(csrf, save) : Promise.reject(new RequestFailed(500, 'not_expected'));
+    },
+    settingChanges: (before) => {
+      calls.push(['settingChanges', before]);
+      return over.settingChanges ? over.settingChanges(before) : Promise.reject(new RequestFailed(500, 'not_expected'));
+    },
+    settingsExport: () => {
+      calls.push(['settingsExport']);
+      return over.settingsExport ? over.settingsExport() : Promise.reject(new RequestFailed(500, 'not_expected'));
+    },
   };
   const sent = (name: string): unknown[][] => calls.filter(([called]) => called === name);
   return { api, calls, sent };

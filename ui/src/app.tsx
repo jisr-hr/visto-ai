@@ -128,6 +128,10 @@ export function App({ api }: { api: Api }) {
       removeAccount: (csrf, id) => watch(api.removeAccount(csrf, id)),
       review: (run) => watch(api.review(run)),
       pullReviews: (repository, number) => watch(api.pullReviews(repository, number)),
+      settings: () => watch(api.settings()),
+      saveSettings: (csrf, save) => watch(api.saveSettings(csrf, save)),
+      settingChanges: (before) => watch(api.settingChanges(before)),
+      settingsExport: () => watch(api.settingsExport()),
     };
   }, [api]);
 
