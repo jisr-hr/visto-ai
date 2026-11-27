@@ -2899,3 +2899,40 @@ test('status writes that never end change nothing either, and the stop waits for
   assert.equal(h.allQueries.length, statementsAtClose);
   assert.equal(h.logged.some((e) => e.event === 'upkeep_failed' || e.event === 'start_step_failed'), false);
 });
+
+test('with the UI on, the overview reads the settings in force and the dependencies the service started with', async () => {
+  const given = passwordOnly();
+  const h = await harness({ uiYaml: ADDRESS_YAML + DOCS_YAML, ui: given.ui });
+  await (await h.start()).settled;
+  await passwordAccountOf(h.db, 'octo-admin', 'admin');
+  const signed = await h.request('POST', '/api/auth/password', Buffer.from(JSON.stringify({ name: 'octo-admin', password: PASSWORD })), FROM_THE_PAGE);
+  const cookie = cookieOf(signed.headers['set-cookie']);
+  const health = await h.request('GET', '/api/health', Buffer.from(''), { cookie });
+  assert.equal(health.status, 200);
+  const dependencies = (JSON.parse(health.body) as { dependencies: Array<{ kind: string; name: string | null; status: string }> }).dependencies;
+  assert.deepEqual(dependencies.filter((d) => d.kind === 'mcp').map((d) => [d.name, d.status]), [['docs', 'unknown']]);
+  const overview = await h.request('GET', '/api/overview', Buffer.from(''), { cookie });
+  assert.equal(overview.status, 200);
+  assert.equal((JSON.parse(overview.body) as { spend: { limit: number } }).spend.limit, 50);
+  const off = await harness({ uiYaml: ADDRESS_YAML, ui: passwordOnly().ui });
+  await (await off.start()).settled;
+  assert.equal((await off.request('GET', '/api/health')).status, 401);
+});
+
+test('a started extension and MCP server show with the state the service stored under their names', async () => {
+  const given = passwordOnly();
+  const h = await harness({
+    uiYaml: ADDRESS_YAML + DOCS_YAML, ui: given.ui,
+    extensions: [{ name: 'chat', parts: { route: async () => ({ status: 200, body: 'pong' }) } }],
+  });
+  const ok = { docs: { status: 'ok' as const, code: 'ok', calls: 1 } };
+  await threeReviews(h, [ok, ok, ok]);
+  assert.equal((await h.request('GET', '/extensions/chat/ping')).status, 200);
+  await h.until(async () => (await healthRows(h)).some((r) => r.kind === 'extension' && r.name === 'chat') && (await healthRows(h)).some((r) => r.kind === 'mcp' && r.name === 'docs'));
+  await passwordAccountOf(h.db, 'octo-admin', 'admin');
+  const signed = await h.request('POST', '/api/auth/password', Buffer.from(JSON.stringify({ name: 'octo-admin', password: PASSWORD })), FROM_THE_PAGE);
+  const cookie = cookieOf(signed.headers['set-cookie']);
+  const health = await h.request('GET', '/api/health', Buffer.from(''), { cookie });
+  const shown = (JSON.parse(health.body) as { dependencies: Array<{ kind: string; name: string | null; status: string; parts: unknown[] }> }).dependencies;
+  assert.deepEqual(shown.filter((d) => d.kind === 'extension' || d.kind === 'mcp').map((d) => [d.kind, d.name, d.status]), [['extension', 'chat', 'working'], ['mcp', 'docs', 'working']]);
+});

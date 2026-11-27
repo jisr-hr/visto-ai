@@ -46,6 +46,7 @@ import { createAccountChanges } from './ui/accounts.ts';
 import { createAuth } from './ui/auth.ts';
 import type { UiFiles } from './ui/files.ts';
 import { createPasswordAuth } from './ui/password-auth.ts';
+import { createQualityCache } from './ui/quality.ts';
 import type { PasswordCost } from './ui/passwords.ts';
 import { createUiRoute } from './ui/route.ts';
 
@@ -365,6 +366,16 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps): Pr
       holds: (ref) => runner.holds(ref), paused: pauseCode, pullRequestUrl: deps.pullRequestUrl,
     },
     files: ui.files, ui: { publicUrl: ui.access.publicUrl, github: ui.signIn !== null }, log: say,
+    // One cache of score quality, so one computation at a time for the service; the dependencies are the ones it started with.
+    insight: {
+      db, clock, inForce,
+      started: {
+        dryRun: config.dryRun, learning: config.learning, scorer: config.scorer !== null,
+        extensions: deps.extensions.map((e) => ({ name: e.name, parts: (['context', 'notify', 'alert', 'route'] as const).filter((p) => e.parts[p] !== undefined) })),
+        mcpServers: config.mcpServers.map((m) => m.name),
+      },
+      quality: createQualityCache({ clock, log: say }),
+    },
     ...(deps.settings === undefined ? {} : {
       settings: {
         db, clock, settings: deps.settings, log: say,
