@@ -7,12 +7,14 @@ export function Switch({
   labelledBy,
   label,
   disabled,
+  title,
 }: {
   checked: boolean;
   onChange: (checked: boolean) => void;
   labelledBy?: string;
   label?: string;
   disabled?: boolean;
+  title?: string;
 }) {
   return (
     <button
@@ -22,6 +24,7 @@ export function Switch({
       aria-labelledby={labelledBy}
       aria-label={label}
       disabled={disabled}
+      title={title}
       className={cn(
         'relative h-[26px] w-11 flex-none cursor-pointer rounded-full border-0 p-0 disabled:cursor-default disabled:opacity-55',
         checked ? 'bg-accent' : 'bg-muted',

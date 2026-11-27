@@ -20,6 +20,9 @@ import { useApp } from '../context.tsx';
 import { ago, plural, shortDay } from '../format.ts';
 import { CARD, MONO, SEARCH_MS } from './activity.tsx';
 
+/** The longest search the API takes (a trimmed `q` over it is `bad_request`). */
+const SEARCH_MAX = 100;
+
 type Kind = '' | MemoryKind;
 const KINDS: readonly SegmentedOption<Kind>[] = [
   { value: '', label: 'All' },
@@ -102,6 +105,7 @@ function RecordRow({ record, admin, busy, onSwitch }: { record: MemoryRecordShow
             checked={record.on}
             label={`${record.on ? 'Turn off' : 'Turn on'}: ${where}`}
             disabled={!admin || busy}
+            title={admin ? undefined : 'Only an admin can turn a record on or off.'}
             onChange={onSwitch}
           />
           <span className="text-[13px] text-muted">{record.on ? 'On' : 'Off'}</span>
@@ -142,7 +146,7 @@ export function MemoryPage() {
 
   // The search is sent SEARCH_MS after the last key, and starts again from the first page.
   useEffect(() => {
-    const wanted = search.trim();
+    const wanted = search.trim().slice(0, SEARCH_MAX);
     if (wanted === q) return undefined;
     const timer = setTimeout(() => {
       setQ(wanted);
@@ -154,6 +158,11 @@ export function MemoryPage() {
   const before = pages.at(-1);
   const query = queryOf(kind, repo, q, before);
   const key = JSON.stringify(query);
+
+  // A refusal belongs to the page it was said on.
+  useEffect(() => {
+    setRefused(false);
+  }, [key]);
 
   useEffect(() => {
     let live = true;
@@ -268,6 +277,7 @@ export function MemoryPage() {
               type="search"
               placeholder="Search path or text"
               className="w-[220px]"
+              maxLength={SEARCH_MAX}
               value={search}
               onChange={(event) => setSearch(event.target.value)}
             />

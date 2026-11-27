@@ -248,3 +248,68 @@ test('learning and the counts are said, and so are an empty and a failed list', 
   expect(screen.queryByRole('alert')).toBeNull();
   expect(screen.queryByText('Learning is on')).toBeNull();
 });
+
+test('a search is cut to 100 characters before it is sent', async () => {
+  vi.useFakeTimers();
+  const { api, memoryCalls } = fakeApi({ memory: () => Promise.resolve(view()) });
+  open(api);
+  await settle();
+  const box = screen.getByLabelText('Search records');
+  expect(box).toHaveAttribute('maxLength', '100');
+  fireEvent.change(box, { target: { value: 'a'.repeat(101) } });
+  await act(() => vi.advanceTimersByTimeAsync(300));
+  expect((memoryCalls().at(-1) as MemoryQuery).q).toBe('a'.repeat(100));
+});
+
+test('two quick clicks on a switch send one change', async () => {
+  let release: (value: unknown) => void = () => {};
+  const { api, calls } = fakeApi({
+    memory: () => Promise.resolve(view({ records: [SIGNAL], total: 1 })),
+    switchMemory: () => new Promise((resolve) => { release = resolve; }),
+  });
+  const user = userEvent.setup();
+  open(api);
+  const one = await screen.findByRole('switch', { name: 'Turn off: src/cart/price.ts' });
+  await user.click(one);
+  await user.click(one);
+  expect(calls.filter(([name]) => name === 'switchMemory')).toHaveLength(1);
+  expect(one).toBeDisabled();
+  await act(async () => release({ record: { ...SIGNAL, on: false } }));
+});
+
+test('an older read that answers after a filter change is never shown', async () => {
+  const waiting: Array<(value: MemoryView) => void> = [];
+  const { api } = fakeApi({
+    memory: (...args: unknown[]) => {
+      const query = args[0] as MemoryQuery;
+      if (query.kind === undefined) return new Promise((resolve) => { waiting.push(resolve); });
+      return Promise.resolve(view({ records: [REVERT], total: 1 }));
+    },
+  });
+  const user = userEvent.setup();
+  open(api);
+  await user.click(await screen.findByRole('button', { name: 'Reverts' }));
+  expect(await screen.findByText('#70 reverted #68')).toBeInTheDocument();
+  await act(async () => waiting[0]?.(view()));
+  expect(screen.queryByText('Rounds after tax, not before')).toBeNull();
+  expect(screen.getByText('#70 reverted #68')).toBeInTheDocument();
+});
+
+test('a refusal is cleared when the filter changes, and a viewer switch says why on hover', async () => {
+  const { api } = fakeApi({
+    memory: () => Promise.resolve(view({ records: [SIGNAL], total: 1 })),
+    switchMemory: () => Promise.reject(new RequestFailed(403, 'forbidden')),
+  });
+  const user = userEvent.setup();
+  const first = open(api);
+  await user.click(await screen.findByRole('switch', { name: 'Turn off: src/cart/price.ts' }));
+  expect(await screen.findByRole('alert')).toBeInTheDocument();
+  await user.click(screen.getByRole('button', { name: 'Reverts' }));
+  expect(screen.queryByRole('alert')).toBeNull();
+  first.unmount();
+
+  const viewer = fakeApi({ me: () => Promise.resolve(VIEWER), memory: () => Promise.resolve(view()) });
+  open(viewer.api);
+  const switches = await screen.findAllByRole('switch', { name: 'Turn off: src/cart/price.ts' });
+  expect(switches.at(-1)).toHaveAttribute('title', 'Only an admin can turn a record on or off.');
+});
