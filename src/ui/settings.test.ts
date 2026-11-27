@@ -237,6 +237,24 @@ test('a save that leaves a setting waiting for a restart restarts the service on
   assert.equal((JSON.parse(String(alone.body)) as { restarting: boolean }).restarting, false);
 });
 
+test('a save that leaves a setting waiting asks the restart even when its answer cannot be read', async () => {
+  const d = await deps();
+  const asked: string[] = [];
+  // The save runs on the settings' own database; the view of the answer reads through this one, which fails.
+  const down: Db = {
+    query: () => Promise.reject(new Error('database_down')),
+    script: (sql) => db.script(sql),
+    transaction: (work) => db.transaction(work),
+    close: () => Promise.resolve(),
+  };
+  await assert.rejects(
+    saveSettings({ ...d, db: down, restart: () => { asked.push('restart'); } }, 'octo-admin', { version: 4, changes: [{ scope: 'global', path: 'dryRun', value: false }] }),
+    /database_down/,
+  );
+  assert.deepEqual(asked, ['restart']);
+  assert.equal(await settingsVersion(db), 5);
+});
+
 test('a save whose body is not of its shape is null, and one of its shape is read as it is', () => {
   const one = (change: Record<string, unknown>) => ({ version: 1, changes: [change] });
   const bad: Array<Record<string, unknown>> = [
