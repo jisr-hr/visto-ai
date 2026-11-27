@@ -206,3 +206,24 @@ test('with no limit given each sink has 5 seconds', async () => {
     mock.timers.reset();
   }
 });
+
+test('the store is told of each alert, with no webhook and no sink too, and a store that throws changes nothing', async () => {
+  const events: string[] = [];
+  const told: Array<[string, unknown]> = [];
+  const alerts = createAlerts({
+    webhook: null, fetch: (async () => new Response('')) as typeof fetch, clock: () => new Date('2026-03-01T10:00:00.000Z'),
+    log: (entry) => { events.push(`log:${String(entry.code)}`); },
+    store: (code, details) => { events.push(`store:${code}`); told.push([code, details]); },
+  });
+  alerts.alert('gate_bypass');
+  alerts.alert('spend_80', { spent: 40, limit: 50 });
+  assert.deepEqual(told, [['gate_bypass', {}], ['spend_80', { spent: 40, limit: 50 }]]);
+  assert.deepEqual(events, ['log:gate_bypass', 'store:gate_bypass', 'log:spend_80', 'store:spend_80']);
+  const logged: Array<Record<string, unknown>> = [];
+  const throwing = createAlerts({
+    webhook: null, fetch: (async () => new Response('')) as typeof fetch, clock: () => new Date('2026-03-01T10:00:00.000Z'),
+    log: (entry) => { logged.push(entry); }, store: () => { throw new Error('store'); },
+  });
+  assert.doesNotThrow(() => throwing.alert('gate_bypass'));
+  assert.deepEqual(logged, [{ event: 'alert', code: 'gate_bypass' }]);
+});

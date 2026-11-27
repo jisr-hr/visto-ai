@@ -15,6 +15,8 @@ export interface AlertSink { name: string; alert(notice: AlertNotice, signal: Ab
 export function createAlerts(deps: {
   webhook: string | null; fetch: typeof fetch; clock: () => Date; log: Log;
   sinks?: AlertSink[]; sinkTimeoutMs?: number;
+  /** Told each alert right after its log line; one that throws changes nothing. */
+  store?: (code: string, details: Record<string, string | number | boolean | null>) => void;
 }): { alert: Alert; settled(): Promise<void> } {
   const sinks = deps.sinks ?? [];
   const sinkTimeoutMs = deps.sinkTimeoutMs ?? ALERT_TIMEOUT_MS;
@@ -62,6 +64,7 @@ export function createAlerts(deps: {
 
   function alert(code: string, details: Record<string, string | number | boolean | null> = {}): void {
     safeLog({ event: 'alert', code, ...details });
+    try { deps.store?.(code, details); } catch { /* a store that throws changes nothing */ }
     if (deps.webhook === null && sinks.length === 0) return;
     // One read of the clock: the webhook and every sink get the same time.
     let at: string | null;
