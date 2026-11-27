@@ -13,12 +13,14 @@ import type { UiAnswer } from '../shell/http.ts';
 import type { Settings } from '../shell/settings.ts';
 import { json } from './headers.ts';
 import type {
-  Setting, SettingChangeRow, SettingChanges, SettingIssue, SettingsExport, SettingsInvalid, SettingsSave, SettingsView,
+  Setting, SettingChangeRow, SettingChanges, SettingIssue, SettingsExport, SettingsInvalid, SettingsSave, SettingsSaved, SettingsView,
 } from './api-types.ts';
 
 export interface SettingsApiDeps {
   db: Db; clock: () => Date; settings: Settings; log: (entry: Record<string, unknown>) => void;
   access: SettingsView['access'];
+  /** Stops the service and starts it again (the process exits for its supervisor); absent: a save never restarts it. */
+  restart?: () => void;
 }
 
 export const CHANGES_SHOWN = 50;
@@ -79,6 +81,7 @@ export async function settingsView(deps: SettingsApiDeps): Promise<SettingsView>
 
   return {
     now: deps.clock().toISOString(),
+    started: settings.started,
     version,
     global: section(GLOBAL, GLOBAL_PATHS),
     defaults: section(DEFAULTS, REPOSITORY_PATHS),
@@ -142,7 +145,14 @@ export function saveOf(body: Record<string, unknown>): SettingsSave | null {
 
 export async function saveSettings(deps: SettingsApiDeps, by: string, save: SettingsSave): Promise<UiAnswer> {
   const outcome = await deps.settings.save(save.version, save.changes, by);
-  if (outcome.kind === 'saved') return json(200, await settingsView(deps));
+  if (outcome.kind === 'saved') {
+    // A setting read at start that the save leaves waiting takes effect by a restart, asked once the answer is built: the
+    // stop lets the reviews running finish and the requests in flight, this one included, be answered before the listener closes.
+    const restarting = outcome.restart && deps.restart !== undefined;
+    const answer = json(200, { ...(await settingsView(deps)), restarting } satisfies SettingsSaved);
+    if (restarting) deps.restart!();
+    return answer;
+  }
   if (outcome.kind === 'changed') return json(409, { error: 'changed' });
   const issues: SettingIssue[] = outcome.issues.map((issue) => ({ scope: issue.scope, path: issue.path, message: issue.message }));
   return json(422, { error: 'invalid', issues } satisfies SettingsInvalid);

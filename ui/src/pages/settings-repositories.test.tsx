@@ -41,6 +41,7 @@ const SHOP: Record<string, Setting> = {
 function viewOf(over: { defaults?: Record<string, Setting>; shop?: Record<string, Setting>; secrets?: SecretState[] } = {}): SettingsView {
   return {
     now: NOW,
+    started: '2026-03-01T09:00:00.000Z',
     version: 14,
     global: {},
     defaults: { ...DEFAULTS, ...over.defaults },

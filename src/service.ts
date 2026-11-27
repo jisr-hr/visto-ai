@@ -71,6 +71,8 @@ export interface ServiceDeps {
   every: (ms: number, work: () => Promise<void>) => () => void;
   /** Absent: the settings are `config`, which never changes. Given: `config` is `settings.atStart`. */
   settings?: Settings;
+  /** Stops this service and starts the process again; a save from the UI that leaves a setting waiting for a restart calls it. */
+  restart?: () => void;
   /** The engine's dependencies for one review, from the settings it runs on (the service always gives them). */
   engineDeps: (source: Source, settings?: ServiceConfig) => ReviewDeps;
   review: (input: ReviewInput, deps: ReviewDeps) => Promise<ReviewResult>;
@@ -382,6 +384,7 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps): Pr
       settings: {
         db, clock, settings: deps.settings, log: say,
         access: { publicUrl: ui.access.publicUrl, github: ui.signIn !== null, accounts: ui.access.accounts, team: ui.access.team },
+        ...(deps.restart === undefined ? {} : { restart: deps.restart }),
       },
     }),
   });

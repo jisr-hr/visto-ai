@@ -98,7 +98,8 @@ export type SecretKind = 'model_key' | 'scorer_key' | 'app_private_key' | 'webho
 /** A secret as the screen shows it: what it is for and the variable that holds it, never its value; `variable` null: not set. */
 export interface SecretState { kind: SecretKind; of: string | null; variable: string | null }
 export interface SettingsView {
-  now: string; version: number;
+  /** `started`: when the running start read the settings; a restart gives a newer one. */
+  now: string; started: string; version: number;
   global: Record<string, Setting>; defaults: Record<string, Setting>; repositories: RepositorySettings[];
   scorer: { on: boolean; waits: boolean };
   /** Where the keys are sent: set in config.yml only (no admin can change it here); `scorer` is read from the file (its default when the block writes none), so it shows while the scorer is off; null only when the file has no scorer block. */
@@ -106,6 +107,8 @@ export interface SettingsView {
   secrets: SecretState[];
   access: { publicUrl: string; github: boolean; accounts: string[]; team: string | null };
 }
+/** The answer to a save: the settings as they now are, and whether the service is restarting for one that waits. */
+export type SettingsSaved = SettingsView & { restarting: boolean };
 export interface SettingsSave { version: number; changes: Array<{ scope: string; path: string; value?: SettingValue }> }
 export interface SettingIssue { scope: string | null; path: string | null; message: string }
 export interface SettingsInvalid { error: 'invalid'; issues: SettingIssue[] }

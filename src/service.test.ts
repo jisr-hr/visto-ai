@@ -123,6 +123,8 @@ interface Options {
   ui?: ServiceDeps['ui'];
   /** `limits.queueConcurrency` in the deployment file; the config's default (2) when not given. */
   queueConcurrency?: number;
+  /** What the service is given to restart with; none when not given. */
+  restart?: () => void;
 }
 interface Timer { ms: number; work: () => Promise<void>; cancelled: boolean }
 
@@ -386,6 +388,7 @@ async function harness(options: Options = {}) {
       ...(options.approvals === undefined ? {} : { approvals: options.approvals }),
       ...(options.ui === undefined ? {} : { ui: options.ui }),
       ...(settings === undefined ? {} : { settings }),
+      ...(options.restart === undefined ? {} : { restart: options.restart }),
       });
       started.push(service);
       return service;
@@ -2713,6 +2716,27 @@ test('with the UI on and settings given, an admin saves a setting and the next r
   await h.webhook(pr('opened'), 'd1');
   await h.reviewed();
   assert.equal(h.inputs[0]!.repoConfig.scoreThreshold, 55);
+});
+
+test('with the UI on, a save that leaves dry run waiting is answered, then restarts the service; one that waits for nothing does not', async () => {
+  const restarts: string[] = [];
+  const h = await harness({ ui: passwordOnly().ui, restart: () => { restarts.push('restart'); } });
+  const settings = await settingsOf(h, `${BASE_YAML}ui:\n  publicUrl: https://visto.example.test\n`);
+  await (await h.start(settings)).settled;
+  await passwordAccountOf(h.db, 'octo-admin', 'admin');
+  const signed = await h.request('POST', '/api/auth/password', Buffer.from(JSON.stringify({ name: 'octo-admin', password: PASSWORD })), FROM_THE_PAGE);
+  const cookie = cookieOf(signed.headers['set-cookie']);
+  const { csrf } = JSON.parse((await h.request('GET', '/api/me', Buffer.from(''), { cookie })).body) as Me;
+  const save = async (path: string, value: unknown) => {
+    const { version } = JSON.parse((await h.request('GET', '/api/settings', Buffer.from(''), { cookie })).body) as { version: number };
+    const answer = await h.request('PUT', '/api/settings', Buffer.from(JSON.stringify({ version, changes: [{ scope: 'global', path, value }] })),
+      { cookie, 'x-visto-csrf': csrf, 'content-type': 'application/json' });
+    return { status: answer.status, restarting: (JSON.parse(answer.body) as { restarting: boolean }).restarting };
+  };
+  assert.deepEqual(await save('limits.spendPerDay', 40), { status: 200, restarting: false });
+  assert.deepEqual(restarts, []);
+  assert.deepEqual(await save('dryRun', false), { status: 200, restarting: true });
+  assert.deepEqual(restarts, ['restart']);
 });
 
 // The status store (the UI plan's Overview, calls 6, 10 to 13).

@@ -485,6 +485,20 @@ test('the settings in force keep what is read at start until the next start; the
   assert.equal(scored.inForce().scorer?.model, 'vendor/scorer-a');
 });
 
+test('a save asks for a restart while, after it, a setting read at start differs from the start, and not otherwise', async () => {
+  const s = await start();
+  now = 10;
+  assert.deepEqual(await saveNow(s, [set('global', 'dryRun', false)]), { kind: 'saved', changed: 1, restart: true });
+  now = 20;
+  // Another setting, while dry run still waits: the restart it waits for is still asked.
+  assert.deepEqual(await saveNow(s, [set('defaults', 'score.threshold', 60)]), { kind: 'saved', changed: 1, restart: true });
+  now = 30;
+  // Back to what the start read: nothing waits, so no restart.
+  assert.deepEqual(await saveNow(s, [unset('global', 'dryRun')]), { kind: 'saved', changed: 1, restart: false });
+  now = 40;
+  assert.deepEqual(await saveNow(s, [set('defaults', 'score.threshold', 65)]), { kind: 'saved', changed: 1, restart: false });
+});
+
 test("no row, log line or error holds a secret's value", async () => {
   const seen: string[] = [];
   const s = await start(SCORER_YAML);

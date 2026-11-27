@@ -40,6 +40,7 @@ const GLOBAL: Record<string, Setting> = {
 function viewOf(over: { version?: number; global?: Record<string, Setting>; access?: SettingsView['access']; scorer?: SettingsView['scorer'] } = {}): SettingsView {
   return {
     now: NOW,
+    started: '2026-03-01T09:00:00.000Z',
     version: over.version ?? 14,
     global: { ...GLOBAL, ...over.global },
     defaults: {},

@@ -11,7 +11,7 @@ import type { LoadedExtension } from './extensions/types.ts';
 import type { Settings } from './shell/settings.ts';
 import {
   afterLock, boundedFetch, clientsFor, createServer, describeFailure, engineBase, GITHUB_CALL_MS, guardRejections, HEADERS_TIMEOUT_MS, lockThenLoad, main,
-  mcpServersOf, rejectionHandler, REQUEST_TIMEOUT_MS, runUntilSignal, startFailed, uiOnOf,
+  mcpServersOf, rejectionHandler, REQUEST_TIMEOUT_MS, RESTART_CODE, runUntilSignal, startFailed, uiOnOf,
 } from './main.ts';
 
 async function run(argv: string[], env: Record<string, string | undefined> = {}): Promise<{ code: number; lines: string[] }> {
@@ -95,6 +95,46 @@ test('a second signal ends the process at once', async () => {
   signals.send();
   signals.send();
   assert.deepEqual(exits, [1]);
+});
+test('a restart asked stops the service once, however often it is asked, and the code is RESTART_CODE', async () => {
+  const signals = signalsFake();
+  const logged: Array<Record<string, unknown>> = [];
+  let stops = 0;
+  let restart!: () => void;
+  const done = runUntilSignal(async (asked) => { restart = asked; return { stop: async () => { stops += 1; } }; }, signals, () => {}, (e) => { logged.push(e); });
+  await new Promise((r) => setImmediate(r));
+  restart();
+  restart();
+  assert.deepEqual([await done, stops, signals.count(), logged], [RESTART_CODE, 1, 0, [{ event: 'restarting' }]]);
+  assert.equal(RESTART_CODE, 75);
+});
+test('a signal while a restart stops the service ends with 0, and a restart after a signal changes nothing', async () => {
+  const signals = signalsFake();
+  let stops = 0;
+  let restart!: () => void;
+  let stopped!: () => void;
+  const done = runUntilSignal(async (asked) => {
+    restart = asked;
+    return { stop: () => { stops += 1; return new Promise<void>((r) => { stopped = r; }); } };
+  }, signals, () => {}, () => {});
+  await new Promise((r) => setImmediate(r));
+  restart();
+  signals.send();
+  stopped();
+  assert.deepEqual([await done, stops], [0, 1]);
+
+  const later = signalsFake();
+  const logged: Array<Record<string, unknown>> = [];
+  const second = runUntilSignal(async (asked) => { restart = asked; return { stop: async () => { stops += 1; } }; }, later, () => {}, (e) => { logged.push(e); });
+  await new Promise((r) => setImmediate(r));
+  later.send();
+  restart();
+  assert.deepEqual([await second, stops, logged], [0, 2, [{ event: 'stopping' }]]);
+});
+test('a restart asked during the start stops the service as soon as it has started', async () => {
+  let stops = 0;
+  const code = await runUntilSignal(async (restart) => { restart(); return { stop: async () => { stops += 1; } }; }, signalsFake(), () => {}, () => {});
+  assert.deepEqual([code, stops], [RESTART_CODE, 1]);
 });
 test('a start that fails is logged with its reason and the code is 1', async () => {
   const logged: Array<Record<string, unknown>> = [];

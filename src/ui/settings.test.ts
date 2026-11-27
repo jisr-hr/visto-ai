@@ -178,7 +178,7 @@ test("no answer holds a secret's value or a field the screen does not show", asy
   const d = await deps(SCORER_YAML);
   await saveNow(d, [{ scope: 'defaults', path: 'score.threshold', value: 65 }]);
   const view = await settingsView(d);
-  assert.deepEqual(Object.keys(view), ['now', 'version', 'global', 'defaults', 'repositories', 'scorer', 'endpoints', 'secrets', 'access']);
+  assert.deepEqual(Object.keys(view), ['now', 'started', 'version', 'global', 'defaults', 'repositories', 'scorer', 'endpoints', 'secrets', 'access']);
   for (const setting of [...Object.values(view.global), ...Object.values(view.defaults), ...Object.values(view.repositories[0]!.settings)]) {
     assert.deepEqual(Object.keys(setting), ['written', 'value', 'source', 'restart', 'waits']);
     if (setting.source !== null) assert.deepEqual(Object.keys(setting.source), ['by', 'name', 'at']);
@@ -217,6 +217,24 @@ test('a save is answered saved, changed or invalid, and invalid stores nothing',
   assert.ok(body.issues.length >= 1);
   for (const issue of body.issues) assert.deepEqual(Object.keys(issue), ['scope', 'path', 'message']);
   assert.equal(await settingsVersion(db), 5);
+});
+
+test('a save that leaves a setting waiting for a restart restarts the service once it is answered, and says so', async () => {
+  const d = await deps();
+  const asked: string[] = [];
+  const restarting: SettingsApiDeps = { ...d, restart: () => { asked.push('restart'); } };
+  assert.equal((await settingsView(restarting)).started, at(0));
+  const plain = await saveSettings(restarting, 'octo-admin', { version: 4, changes: [{ scope: 'defaults', path: 'score.threshold', value: 65 }] });
+  assert.equal(plain.status, 200);
+  assert.equal((JSON.parse(String(plain.body)) as { restarting: boolean }).restarting, false);
+  assert.deepEqual(asked, []);
+  const start = await saveSettings(restarting, 'octo-admin', { version: 5, changes: [{ scope: 'global', path: 'dryRun', value: false }] });
+  const body = JSON.parse(String(start.body)) as { restarting: boolean; started: string; version: number };
+  assert.deepEqual([start.status, body.restarting, body.started, body.version], [200, true, at(0), 6]);
+  assert.deepEqual(asked, ['restart']);
+  // With no way to restart given, nothing is asked and the answer says it is not restarting.
+  const alone = await saveSettings(d, 'octo-admin', { version: 6, changes: [{ scope: 'global', path: 'learning', value: true }] });
+  assert.equal((JSON.parse(String(alone.body)) as { restarting: boolean }).restarting, false);
 });
 
 test('a save whose body is not of its shape is null, and one of its shape is read as it is', () => {
