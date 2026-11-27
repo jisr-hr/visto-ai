@@ -93,7 +93,7 @@ function words(...parts: string[]): string[] {
 const root = 'flex min-h-screen flex-wrap bg-bg font-sans text-text';
 const aside = 'flex max-w-full shrink grow basis-[232px] flex-col gap-6 border-r border-border bg-card px-3.5 py-5';
 const brand = 'flex items-center gap-2.5 px-1.5';
-const square = 'flex size-8 items-center justify-center rounded-[9px] bg-accent text-on-accent';
+const mark = 'shrink-0 rounded-[7px] ring-1 ring-border';
 const nav = 'flex flex-col gap-0.5';
 const entry = 'flex min-h-10 items-center gap-2.5 rounded-lg px-2.5 py-2 text-sm font-medium text-muted no-underline hover:bg-subtle hover:text-text';
 const entryOn = 'flex min-h-10 items-center gap-2.5 rounded-lg px-2.5 py-2 text-sm font-medium no-underline bg-accent-soft text-accent-text hover:bg-accent-soft hover:text-accent-text';
@@ -152,11 +152,15 @@ test('the sidebar shows who is signed in, the mode and the running count', async
   expect(classes(side)).toEqual(words(aside));
   expect(classes(side?.parentElement)).toEqual(words(root));
   expect(classes(sidebar)).toEqual(words(nav));
-  // The name over its line, beside the square.
+  // The name over its line, beside the project icon.
   const named = screen.getByText('Visto AI').parentElement?.parentElement;
   expect(classes(named)).toEqual(words(brand));
-  expect(classes(named?.firstElementChild)).toEqual(words(square));
-  expect(named?.firstElementChild?.querySelector('path')).toHaveAttribute('d', 'M5 12.5l4.5 4.5L19 7.5');
+  const icon = named?.firstElementChild;
+  expect(icon?.tagName).toBe('svg');
+  expect(classes(icon)).toEqual(words(mark));
+  expect(icon).toHaveAttribute('aria-hidden', 'true');
+  expect(icon).toHaveAttribute('viewBox', '0 0 512 512');
+  expect([...(icon?.querySelectorAll('[fill]') ?? [])].map((shape) => shape.getAttribute('fill'))).toEqual(['#0e211d', '#f3f6f4', '#34d399', '#f3f6f4', '#f3f6f4']);
   expect(classes(screen.getByText('Visto AI'))).toEqual(words('text-[15px]'));
   expect(screen.getByText('Visto AI').tagName).toBe('STRONG');
   expect(classes(screen.getByText('Review service'))).toEqual(words('text-xs text-muted'));
