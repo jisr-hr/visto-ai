@@ -47,8 +47,8 @@ test('each alert code reads with its tone, its badge, its title and its detail',
   expect(words(alert('gate_bypass', {}, false))).toEqual({
     tone: 'muted', badge: 'Recent', title: "A repository's merge gate is in bypass", detail: 'Said at each start, 12 min ago.',
   });
-  expect(words(alert('feature_off', { feature: 'the merge gate', missing: 'checks:write' }, true))).toEqual({
-    tone: 'warn', badge: 'Warning', title: 'The GitHub App lacks `checks:write`', detail: 'So the merge gate is off. A start finds it once it is granted.',
+  expect(words(alert('feature_off', { feature: 'gate', missing: 'checks:write' }, true))).toEqual({
+    tone: 'warn', badge: 'Warning', title: 'The GitHub App lacks checks:write', detail: 'So `gate` is off. A start finds it once it is granted.',
   });
   expect(words(alert('redelivery_failed', { reason: 'rate_limited' }, false))).toMatchObject({
     title: 'Missed deliveries could not all be asked for again', detail: '`rate_limited`, 12 min ago.',

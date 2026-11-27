@@ -149,7 +149,7 @@ function quality(repository: string, over: Partial<OverviewQuality> = {}): Overv
 
 const OVERVIEW: Overview = {
   now: NOW, days: 30, repositories: 4,
-  reviews: { total: 412, published: 398, dryRun: 9, failed: 5, nothingNew: 0, notPosted: 0 },
+  reviews: { total: 1234, published: 398, dryRun: 9, failed: 5, nothingNew: 0, notPosted: 0 },
   spend: { today: 12.4, limit: 50 }, approvals: { approved: 38, audited: 6 },
   perDay: perDay(), quality: [quality('acme/shop')], qualityCut: 0,
 };
@@ -191,14 +191,12 @@ test('the summary cards say the reviews, what is in review now, the spend and th
   expect(await screen.findByText('Last 30 days across 4 repositories')).toBeInTheDocument();
   const summary = screen.getByRole('region', { name: 'Summary' });
   expect(classes(summary)).toEqual(words('grid grid-cols-[repeat(auto-fit,minmax(220px,1fr))] gap-4'));
-  const cards = within(summary).getAllByText(/./, { selector: 'span.text-muted, span.font-medium' }).length;
-  expect(cards).toBeGreaterThan(0);
 
   const reviews = box('Reviews');
-  expect(within(reviews).getByText('412')).toBeInTheDocument();
+  expect(within(reviews).getByText('1,234')).toBeInTheDocument();
   expect(within(reviews).getByText('398 published, 9 in dry run, 5 failed')).toBeInTheDocument();
   expect(classes(reviews)).toEqual(words('rounded-[12px] border border-border bg-card shadow-card flex flex-col gap-2 p-[18px]'));
-  expect(classes(within(reviews).getByText('412'))).toEqual(words('text-[30px] font-semibold leading-[1.1] tracking-[-0.02em]'));
+  expect(classes(within(reviews).getByText('1,234'))).toEqual(words('text-[30px] font-semibold leading-[1.1] tracking-[-0.02em]'));
   expect(classes(within(reviews).getByText('Reviews'))).toEqual(words('text-[13px] font-medium text-muted'));
 
   const now = await screen.findByText('2 reviewing, 1 waiting for pushes to settle, 1 queued');
@@ -382,6 +380,7 @@ const cellsOf = (name: string): HTMLElement[] => within(rowOf(name)).getAllByRol
 test('score quality by repository shows each number with its count, and too few labels as such', async () => {
   const rows = [
     quality('acme/shop'),
+    quality('acme/quiet', { reverts: { merged: 0, approved: 0 } }),
     quality('acme/infra', { safety: { share: null, part: 0, of: 4 }, benefit: { share: null, part: 0, of: 0 }, focus: { share: null, part: 0, of: 0 }, reverts: { merged: 3, approved: 1 }, approval: { enabled: false, threads: 'strict', auditShare: 5 } }),
   ];
   const { api } = fakeApi({ overview: () => Promise.resolve({ ...OVERVIEW, quality: rows, qualityCut: 1 }), health: () => Promise.resolve(HEALTH) });
@@ -397,11 +396,12 @@ test('score quality by repository shows each number with its count, and too few 
   expect(screen.getByRole('link', { name: 'acme/shop' })).toHaveAttribute('href', '/ui/repositories?repo=acme/shop');
 
   const shop = cellsOf('acme/shop');
-  expect(shop.map((cell) => cell.textContent)).toEqual(['acme/shop', '70%', '4% 3 of 74 blocks', '41% 52 of 127', '18% of lines', '2', 'On, strict, 5% audit']);
+  expect(shop.map((cell) => cell.textContent)).toEqual(['acme/shop', '70%', '4% 3 of 74 blocks', '41% 52 of 127', '18% of lines', '2 (0 approved)', 'On, strict, 5% audit']);
   expect(within(shop[2]!).getByText('4%').tagName).toBe('STRONG');
   expect(classes(within(shop[2]!).getByText('3 of 74 blocks'))).toEqual(words('text-muted'));
   expect(classes(within(shop[6]!).getByText('On, strict, 5% audit'))).toEqual(words(badge, tones.ok));
 
+  expect(cellsOf('acme/quiet')[5]!.textContent).toBe('0');
   const infra = cellsOf('acme/infra');
   expect(infra.map((cell) => cell.textContent)).toEqual(['acme/infra', '70%', 'Not enough labels yet, 0 of 4 blocks', 'None', 'None', '3 (1 approved)', 'Off']);
   expect(classes(within(infra[2]!).getByText('Not enough labels yet, 0 of 4 blocks'))).toEqual(words('text-muted'));
@@ -513,4 +513,20 @@ test('while the overview is read, the page shows its header and a busy mark', as
   expect(screen.getByText('Last 30 days')).toBeInTheDocument();
   expect(screen.getByRole('main').querySelector('div[aria-busy="true"]')).not.toBeNull();
   expect(screen.queryByText('The overview could not be read.')).toBeNull();
+});
+
+test('an open alert shows from the health read alone, before the overview answers and when it fails', async () => {
+  const health: Health = { ...HEALTH, open: [alert(1, 'feature_off', { feature: 'gate', missing: 'checks:write' }, true)] };
+  const { api } = fakeApi({ overview: () => new Promise<Overview>(() => undefined), health: () => Promise.resolve(health) });
+  const first = open(api);
+  expect(await screen.findByText('The GitHub App lacks checks:write')).toBeInTheDocument();
+  expect(screen.getByText('gate')).toHaveClass('font-mono');
+  expect(screen.getByText('1 open')).toBeInTheDocument();
+  expect(screen.getByText('Dependencies')).toBeInTheDocument();
+  first.unmount();
+
+  const { api: failed } = fakeApi({ overview: () => Promise.reject(new RequestFailed(500, 'internal_error')), health: () => Promise.resolve(health) });
+  open(failed);
+  expect(await screen.findByText('The overview could not be read.')).toBeInTheDocument();
+  expect(screen.getByText('The GitHub App lacks checks:write')).toBeInTheDocument();
 });

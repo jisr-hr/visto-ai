@@ -14,10 +14,11 @@ import { Button } from '../components/ui/button.tsx';
 import { Card } from '../components/ui/card.tsx';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../components/ui/table.tsx';
 import { reviewCounts, useApp } from '../context.tsx';
-import { codeSpans, dollars, percent, plural, shortDay } from '../format.ts';
+import { count, dollars, percent, plural, shortDay } from '../format.ts';
 import { Link } from '../router.tsx';
 import { alertWords, approvalWords, dependencyWords } from '../words.ts';
-import { CARD, CARD_TITLE, MONO } from './activity.tsx';
+import { CARD, CARD_TITLE } from './activity.tsx';
+import { Spans } from './review.tsx';
 
 /** How often the overview is read again, and health. */
 export const OVERVIEW_MS = 60000;
@@ -37,15 +38,6 @@ const SUMMARY = 'flex flex-col gap-2 p-[18px]';
 const LABEL = 'text-[13px] font-medium text-muted';
 const BIG = 'text-[30px] font-semibold leading-[1.1] tracking-[-0.02em]';
 const LINE = 'text-[13px] text-muted';
-
-/** A text with each backticked part in code. */
-function Spans({ text }: { text: string }) {
-  return (
-    <>
-      {codeSpans(text).map((part, i) => (part.code ? <span key={i} className={MONO}>{part.text}</span> : part.text))}
-    </>
-  );
-}
 
 function SummaryCard({ label, big, children }: { label: string; big: string; children: ReactNode }) {
   return (
@@ -69,7 +61,7 @@ function Summary({ overview }: { overview: Overview }) {
   if (activity !== null) {
     const counts = reviewCounts(activity.jobs);
     const waiting = activity.jobs.filter((job) => job.stage === 'waiting').length;
-    running = String(counts.running);
+    running = count(counts.running);
     now = `${counts.running - waiting} reviewing, ${waiting} waiting for pushes to settle`;
     if (counts.queued > 0) now += `, ${counts.queued} queued`;
   }
@@ -77,7 +69,7 @@ function Summary({ overview }: { overview: Overview }) {
 
   return (
     <section aria-label="Summary" className="grid grid-cols-[repeat(auto-fit,minmax(220px,1fr))] gap-4">
-      <SummaryCard label="Reviews" big={String(reviews.total)}>
+      <SummaryCard label="Reviews" big={count(reviews.total)}>
         <span className={LINE}>{published}</span>
       </SummaryCard>
       <Link to="/ui/activity" className={`rounded-[12px] border border-border bg-card shadow-card ${SUMMARY} text-text no-underline`}>
@@ -91,7 +83,7 @@ function Summary({ overview }: { overview: Overview }) {
         </div>
         <span className={LINE}>{`of the ${dollars(spend.limit)} daily limit`}</span>
       </SummaryCard>
-      <SummaryCard label="Approved automatically" big={String(approvals.approved)}>
+      <SummaryCard label="Approved automatically" big={count(approvals.approved)}>
         <span className={LINE}>
           {me.mode === 'dry_run' ? 'Not decided in dry run' : `of ${approvals.approved + approvals.audited} approvable, ${approvals.audited} drawn for the audit`}
         </span>
@@ -244,7 +236,7 @@ function QualityRow({ row }: { row: OverviewQuality }) {
             {row.reverts === null ? <Muted>None</Muted> : (
               <>
                 {row.reverts.merged}
-                {row.reverts.approved > 0 ? <Muted>{` (${row.reverts.approved} approved)`}</Muted> : null}
+                {row.reverts.merged > 0 ? <Muted>{` (${row.reverts.approved} approved)`}</Muted> : null}
               </>
             )}
           </TableCell>
@@ -371,16 +363,14 @@ export function OverviewPage() {
           <div aria-busy="true"></div>
         )
       ) : (
-        <>
-          <Summary overview={data} />
-          <section className="flex flex-wrap gap-4">
-            <PerDay overview={data} />
-            <Alerts health={health.data} failed={health.failed} />
-          </section>
-          <ScoreQuality overview={data} />
-          <Dependencies health={health.data} failed={health.failed} />
-        </>
+        <Summary overview={data} />
       )}
+      <section className="flex flex-wrap gap-4">
+        {data === null ? null : <PerDay overview={data} />}
+        <Alerts health={health.data} failed={health.failed} />
+      </section>
+      {data === null ? null : <ScoreQuality overview={data} />}
+      <Dependencies health={health.data} failed={health.failed} />
     </>
   );
 }

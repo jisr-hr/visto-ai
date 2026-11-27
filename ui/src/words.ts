@@ -50,7 +50,7 @@ function alertText(alert: AlertShown, now: string): { title: string; detail: str
     case 'gate_bypass':
       return { title: "A repository's merge gate is in bypass", detail: `Said at each start, ${when}.` };
     case 'feature_off':
-      return { title: `The GitHub App lacks ${code(d.missing)}`, detail: `So ${text(d.feature)} is off. A start finds it once it is granted.` };
+      return { title: `The GitHub App lacks ${text(d.missing)}`, detail: `So ${code(d.feature)} is off. A start finds it once it is granted.` };
     case 'redelivery_failed':
       return { title: 'Missed deliveries could not all be asked for again', detail: `${code(d.reason)}, ${when}.` };
     case 'dismissal_failed':
