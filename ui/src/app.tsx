@@ -14,6 +14,7 @@ import { Later } from './pages/later.tsx';
 import { NotFound } from './pages/not-found.tsx';
 import { OverviewPage } from './pages/overview.tsx';
 import { PasswordPage } from './pages/password.tsx';
+import { RepositoriesPage } from './pages/repositories.tsx';
 import { ReviewNotFound, ReviewPage, runOfPath } from './pages/review.tsx';
 import { SettingsPage } from './pages/settings.tsx';
 import { SignIn } from './pages/sign-in.tsx';
@@ -47,7 +48,7 @@ function Page({ path, me }: { path: string; me: Me }) {
     case '/ui/activity':
       return <ActivityPage />;
     case '/ui/repositories':
-      return <Later title="Repositories" />;
+      return <RepositoriesPage />;
     case '/ui/memory':
       return <Later title="Memory" />;
     case '/ui/settings':

@@ -31,6 +31,7 @@ vi.mock('./pages/overview.tsx', async (importOriginal) => {
 });
 
 const NOW = '2026-03-01T10:00:00.000Z';
+const REPOSITORIES_SUB = 'How well the score tells what needs a person, measured from what people did';
 const SAVE: SettingsSave = { version: 14, changes: [{ scope: 'global', path: 'learning', value: true }] };
 const ME: Me = { name: 'octo-lead', kind: 'github', role: 'admin', csrf: 'csrf-token-for-tests', mode: 'live', repositories: ['acme/billing', 'acme/infra', 'acme/shop', 'acme/web'] };
 const ACTIVITY: Activity = { now: NOW, places: { reviews: 2, withdrawals: 2 }, paused: null, jobs: [], withdrawals: [] };
@@ -204,7 +205,7 @@ test('each sidebar entry leads to its page, and an unknown path is not found', a
   const { unmount } = render(<App api={api} />);
 
   expect(await screen.findByRole('heading', { level: 1, name: 'Repositories' })).toBeInTheDocument();
-  expect(screen.getByText('Coming in a later plan.')).toBeInTheDocument();
+  expect(screen.getByText(REPOSITORIES_SUB)).toBeInTheDocument();
   const nav = screen.getByRole('navigation', { name: 'Main' });
   const current = (): string[] => within(nav).queryAllByRole('link', { current: 'page' }).map((link) => link.textContent ?? '');
   expect(current()).toEqual(['Repositories']);
@@ -212,7 +213,7 @@ test('each sidebar entry leads to its page, and an unknown path is not found', a
   const pages = [
     ['Overview', '/ui/', 'Overview', 'Last 30 days'],
     ['Memory', '/ui/memory', 'Memory', 'Coming in a later plan.'],
-    ['Repositories', '/ui/repositories', 'Repositories', 'Coming in a later plan.'],
+    ['Repositories', '/ui/repositories', 'Repositories', REPOSITORIES_SUB],
   ] as const;
   for (const [entry, path, heading, subLine] of pages) {
     await user.click(within(nav).getByRole('link', { name: entry }));
