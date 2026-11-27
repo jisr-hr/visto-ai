@@ -6,7 +6,7 @@ export interface NoiseRow { threshold: number; blocks_flipped: number | null; bl
 
 // A hunk's score is the highest effective score of the blocks that came from it, so a hunk split
 // in one run and whole in the other still compares as one.
-function hunkScores(scores: FileScore[]): Map<string, number> {
+function hunkScores(scores: readonly FileScore[]): Map<string, number> {
   const out = new Map<string, number>();
   for (const f of scores) {
     for (const b of f.blocks) {
