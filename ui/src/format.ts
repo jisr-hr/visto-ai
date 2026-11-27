@@ -82,3 +82,23 @@ export function codeSpans(text: string): Array<{ code: boolean; text: string }> 
 export function sentence(text: string): string {
   return text.charAt(0).toUpperCase() + text.slice(1);
 }
+
+/** A share as a whole percent; none is `None`. */
+export function percent(share: number | null): string {
+  return share === null ? 'None' : `${Math.round(share * 100)}%`;
+}
+
+/** Money with cents. */
+export function dollars(n: number): string {
+  return `$${n.toFixed(2)}`;
+}
+
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+/** `YYYY-MM-DD` as the UTC month's three letters and the day without a leading zero; a day that cannot be read is ''. */
+export function shortDay(day: string): string {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(day);
+  if (match === null) return '';
+  const month = MONTHS[Number(match[2]) - 1];
+  return month === undefined ? '' : `${month} ${Number(match[3])}`;
+}

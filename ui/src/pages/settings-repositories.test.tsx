@@ -79,6 +79,12 @@ function fakeApi(view: SettingsView, over: Partial<Api> = {}) {
     },
     settingChanges: () => Promise.reject(new RequestFailed(500, 'not_expected')),
     settingsExport: () => Promise.reject(new RequestFailed(500, 'not_expected')),
+    overview: () => Promise.reject(new RequestFailed(500, 'not_expected')),
+    health: () => Promise.reject(new RequestFailed(500, 'not_expected')),
+    repositories: () => Promise.reject(new RequestFailed(500, 'not_expected')),
+    quality: () => Promise.reject(new RequestFailed(500, 'not_expected')),
+    memory: () => Promise.reject(new RequestFailed(500, 'not_expected')),
+    switchMemory: () => Promise.reject(new RequestFailed(500, 'not_expected')),
   };
   return { api, sent: () => calls.filter(([called]) => called === 'saveSettings') };
 }

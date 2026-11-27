@@ -49,3 +49,45 @@ test('the settings calls send what the service reads and read what it answers', 
     ['/api/settings/export', get],
   ]);
 });
+
+test('the reads of the overview, repositories and memory ask their own paths, and a switch sends the token and the body', async () => {
+  const seen: [string, RequestInit | undefined][] = [];
+  const answers: (() => Response)[] = [];
+  const fetchFn = ((input: RequestInfo | URL, init?: RequestInit) => {
+    seen.push([String(input), init]);
+    const next = answers.shift();
+    return next ? Promise.resolve(next()) : Promise.reject(new TypeError('Failed to fetch'));
+  }) as typeof fetch;
+  const api = createApi(fetchFn);
+  const jsonOf = (status: number, value: unknown) => () =>
+    new Response(JSON.stringify(value), { status, headers: { 'content-type': 'application/json' } });
+  const get = { method: 'GET', credentials: 'same-origin', headers: { accept: 'application/json' } };
+  const ok = { now: '2026-03-01T10:00:00.000Z' };
+
+  answers.push(
+    jsonOf(200, ok), jsonOf(200, ok), jsonOf(200, ok), jsonOf(200, ok), jsonOf(200, ok), jsonOf(200, ok), jsonOf(200, ok),
+    jsonOf(200, { record: { id: 7 } }), jsonOf(403, { error: 'forbidden' }),
+  );
+  await api.overview(7);
+  await api.health();
+  await api.repositories();
+  await api.quality('acme/shop', 'all');
+  await api.quality('acme/we b', 30);
+  await api.memory({});
+  await api.memory({ kind: 'lesson', q: 'a b' });
+  expect(seen.slice(0, 7)).toEqual([
+    ['/api/overview?days=7', get], ['/api/health', get], ['/api/repositories', get],
+    ['/api/repositories/acme/shop/quality?days=all', get], ['/api/repositories/acme/we%20b/quality?days=30', get],
+    ['/api/memory', get], [expect.stringMatching(/^\/api\/memory\?kind=lesson&q=a(%20|\+)b$/), get],
+  ]);
+
+  expect(await api.switchMemory('t', 7, false)).toEqual({ record: { id: 7 } });
+  expect(seen[7]).toEqual([
+    '/api/memory/7',
+    {
+      method: 'PUT', credentials: 'same-origin', headers: { accept: 'application/json', 'content-type': 'application/json', 'x-visto-csrf': 't' },
+      body: '{"on":false}',
+    },
+  ]);
+  await expect(api.switchMemory('t', 7, true)).rejects.toEqual(new RequestFailed(403, 'forbidden'));
+});

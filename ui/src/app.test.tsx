@@ -105,6 +105,30 @@ function fakeApi(over: Partial<Api> = {}) {
       calls.push(['settingsExport']);
       return over.settingsExport ? over.settingsExport() : Promise.reject(new RequestFailed(500, 'not_expected'));
     },
+    overview: (days) => {
+      calls.push(['overview', days]);
+      return over.overview ? over.overview(days) : Promise.reject(new RequestFailed(500, 'not_expected'));
+    },
+    health: () => {
+      calls.push(['health']);
+      return over.health ? over.health() : Promise.reject(new RequestFailed(500, 'not_expected'));
+    },
+    repositories: () => {
+      calls.push(['repositories']);
+      return over.repositories ? over.repositories() : Promise.reject(new RequestFailed(500, 'not_expected'));
+    },
+    quality: (repository, window) => {
+      calls.push(['quality', repository, window]);
+      return over.quality ? over.quality(repository, window) : Promise.reject(new RequestFailed(500, 'not_expected'));
+    },
+    memory: (query) => {
+      calls.push(['memory', query]);
+      return over.memory ? over.memory(query) : Promise.reject(new RequestFailed(500, 'not_expected'));
+    },
+    switchMemory: (csrf, id, on) => {
+      calls.push(['switchMemory', csrf, id, on]);
+      return over.switchMemory ? over.switchMemory(csrf, id, on) : Promise.reject(new RequestFailed(500, 'not_expected'));
+    },
   };
   return { api, calls };
 }
@@ -269,6 +293,12 @@ test('a 401 from any method of the API the pages are given shows the sign-in pag
     ['saveSettings', (api) => api.saveSettings(ME.csrf, SAVE), ['saveSettings', ME.csrf, SAVE]],
     ['settingChanges', (api) => api.settingChanges(8977), ['settingChanges', 8977]],
     ['settingsExport', (api) => api.settingsExport(), ['settingsExport']],
+    ['overview', (api) => api.overview(30), ['overview', 30]],
+    ['health', (api) => api.health(), ['health']],
+    ['repositories', (api) => api.repositories(), ['repositories']],
+    ['quality', (api) => api.quality('acme/shop', 30), ['quality', 'acme/shop', 30]],
+    ['memory', (api) => api.memory({}), ['memory', {}]],
+    ['switchMemory', (api) => api.switchMemory('t', 7, false), ['switchMemory', 't', 7, false]],
   ];
   // Every method there is.
   expect(each.map(([name]) => name).sort()).toEqual(Object.keys(createApi()).sort());

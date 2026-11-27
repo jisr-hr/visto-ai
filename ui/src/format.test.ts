@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, expect, test, vi } from 'vitest';
-import { ago, codeSpans, count, initials, left, money, plural, sentence, took, utc } from './format.ts';
+import { ago, codeSpans, count, dollars, initials, left, money, percent, plural, sentence, shortDay, took, utc } from './format.ts';
 
 // Every test here runs in a zone half an hour off UTC (UTC+05:30), so that a time read in the zone
 // of the machine, where UTC's is meant, fails whatever zone the tests run in.
@@ -93,4 +93,17 @@ test('counts read with their thousands, code spans are found on one line, and a 
   expect(codeSpans('x `a\nb` y')).toEqual([{ code: false, text: 'x `a\nb` y' }]);
   expect(sentence('a part')).toBe('A part');
   expect(sentence('')).toBe('');
+});
+
+test('shares read as whole percents, money with cents, and days with their month', () => {
+  expect(percent(0.041)).toBe('4%');
+  expect(percent(0.005)).toBe('1%');
+  expect(percent(0)).toBe('0%');
+  expect(percent(null)).toBe('None');
+  expect(dollars(12.4)).toBe('$12.40');
+  expect(dollars(50)).toBe('$50.00');
+  expect(dollars(0)).toBe('$0.00');
+  expect(shortDay('2026-10-27')).toBe('Oct 27');
+  expect(shortDay('2026-01-05')).toBe('Jan 5');
+  expect(shortDay('x')).toBe('');
 });

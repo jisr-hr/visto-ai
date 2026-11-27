@@ -3,7 +3,11 @@
 // header. An answer that is not ok rejects with its status and its short code. No password, one-time password or name is put in
 // an address, a log or an error: they travel in the body only.
 import { useEffect, useRef, useState } from 'react';
-import type { AccountAnswer, Accounts, Activity, ApiError, Me, OneReview, OneTime, PullReviews, Reviews, Role, SettingChanges, SettingIssue, SettingsExport, SettingsInvalid, SettingsSave, SettingsView, SignInStep, Ways } from './api-types.ts';
+import type {
+  AccountAnswer, Accounts, Activity, ApiError, Health, Me, MemoryKind, MemorySwitched, MemoryView, OneReview, OneTime, Overview, PullReviews, QualityAnswer,
+  QualityWindow, Repositories, Reviews, Role, SettingChanges, SettingIssue, SettingsExport, SettingsInvalid, SettingsSave, SettingsView, SignInStep, Ways,
+  WindowDays,
+} from './api-types.ts';
 
 /**
  * A request the API did not answer with success; not `ApiError`, which is the JSON type of the answer it carries. A request
@@ -22,6 +26,7 @@ export class RequestFailed extends Error {
 }
 
 export interface ReviewQuery { repo?: string; outcome?: 'approved' | 'needs_person' | 'failed'; q?: string; before?: number }
+export interface MemoryQuery { kind?: MemoryKind; repo?: string; q?: string; before?: number }
 export interface Api {
   me(): Promise<Me>; activity(): Promise<Activity>; reviews(query: ReviewQuery): Promise<Reviews>; signOut(csrf: string): Promise<void>;
   ways(): Promise<Ways>;
@@ -40,6 +45,12 @@ export interface Api {
   saveSettings(csrf: string, save: SettingsSave): Promise<{ kind: 'saved'; view: SettingsView } | { kind: 'invalid'; issues: SettingIssue[] }>;
   settingChanges(before?: number): Promise<SettingChanges>;
   settingsExport(): Promise<SettingsExport>;
+  overview(days: WindowDays): Promise<Overview>;
+  health(): Promise<Health>;
+  repositories(): Promise<Repositories>;
+  quality(repository: string, window: QualityWindow): Promise<QualityAnswer>;
+  memory(query: MemoryQuery): Promise<MemoryView>;
+  switchMemory(csrf: string, id: number, on: boolean): Promise<MemorySwitched>;
 }
 
 const CSRF_HEADER = 'x-visto-csrf';
@@ -160,6 +171,26 @@ export function createApi(fetchFn?: typeof fetch): Api {
     saveSettings,
     settingChanges: (before) => read<SettingChanges>(before === undefined ? '/api/settings/changes' : `/api/settings/changes?before=${before}`),
     settingsExport: () => read<SettingsExport>('/api/settings/export'),
+    overview: (days) => read<Overview>(`/api/overview?days=${days}`),
+    health: () => read<Health>('/api/health'),
+    repositories: () => read<Repositories>('/api/repositories'),
+    quality(repository, window) {
+      // 'owner/repo' split at its first slash.
+      const slash = repository.indexOf('/');
+      const owner = slash < 0 ? repository : repository.slice(0, slash);
+      const repo = slash < 0 ? '' : repository.slice(slash + 1);
+      return read<QualityAnswer>(`/api/repositories/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/quality?days=${window}`);
+    },
+    memory(query) {
+      const params = new URLSearchParams();
+      if (query.kind) params.set('kind', query.kind);
+      if (query.repo) params.set('repo', query.repo);
+      if (query.q) params.set('q', query.q);
+      if (query.before !== undefined) params.set('before', String(query.before));
+      const search = params.toString();
+      return read<MemoryView>(search === '' ? '/api/memory' : `/api/memory?${search}`);
+    },
+    switchMemory: async (csrf, id, on) => answerOf<MemorySwitched>(await send('PUT', `/api/memory/${id}`, { [CSRF_HEADER]: csrf }, { on })),
   };
 }
 

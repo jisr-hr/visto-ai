@@ -132,6 +132,12 @@ export function App({ api }: { api: Api }) {
       saveSettings: (csrf, save) => watch(api.saveSettings(csrf, save)),
       settingChanges: (before) => watch(api.settingChanges(before)),
       settingsExport: () => watch(api.settingsExport()),
+      overview: (days) => watch(api.overview(days)),
+      health: () => watch(api.health()),
+      repositories: () => watch(api.repositories()),
+      quality: (repository, window) => watch(api.quality(repository, window)),
+      memory: (query) => watch(api.memory(query)),
+      switchMemory: (csrf, id, on) => watch(api.switchMemory(csrf, id, on)),
     };
   }, [api]);
 
