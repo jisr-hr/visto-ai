@@ -22,6 +22,10 @@ export interface Form {
   set(scope: string, path: string, value: SettingValue | Unset): void;
   issuesAt(scope: string, path: string): string[];
   setBadJson(key: string, bad: boolean): void;
+  /** The draft keys of JSON fields whose text is not valid JSON. */
+  bad: ReadonlySet<string>;
+  /** Takes the draft's entries for these paths of one scope away, so each reads as the view has it. */
+  drop(scope: string, paths: readonly string[]): void;
 }
 
 /** Each path's row label (also how a refused save names it). */
@@ -77,7 +81,6 @@ export const WORD = 'text-[13px] text-muted';
 const ROW = 'flex flex-wrap items-start gap-x-8 gap-y-3 border-t border-border py-4 first-of-type:border-t-0';
 const LBL = 'flex min-w-0 shrink grow basis-[260px] flex-col gap-1';
 const CTL = 'flex min-w-0 shrink grow basis-[300px] flex-wrap items-center gap-2.5';
-export const CHIP = 'inline-flex items-center gap-1.5 rounded-[7px] bg-subtle py-1 pr-1.5 pl-2.5 font-mono text-[13px]';
 
 /** A value as a field holds it: a number stays a number (so a number field keeps what was typed), text stays text, the rest is empty. */
 export function fieldValue(value: SettingValue): string | number {
@@ -85,7 +88,7 @@ export function fieldValue(value: SettingValue): string | number {
 }
 
 /** Where a setting's value came from (call 28); nothing for a value the draft sets, and "Not written" for one the draft takes back. */
-export function SourceLine({ form, scope, path }: { form: Form; scope: string; path: string }) {
+export function SourceLine({ form, scope, path, prefix = '' }: { form: Form; scope: string; path: string; prefix?: string }) {
   const now = form.shown(scope, path);
   let text: string | null;
   if (now.edited) text = now.written ? null : 'Not written';
@@ -93,7 +96,7 @@ export function SourceLine({ form, scope, path }: { form: Form; scope: string; p
   else if (now.source === null) text = null;
   else if (now.source.by === 'config.yml') text = `From config.yml at the start of ${utc(now.source.at)}`;
   else text = now.source.name === null ? `Changed in the UI, ${utc(now.source.at)}` : `Changed in the UI by ${now.source.name}, ${utc(now.source.at)}`;
-  return text === null ? null : <span className="text-xs text-muted">{text}</span>;
+  return text === null ? null : <span className="text-xs text-muted">{`${prefix}${text}`}</span>;
 }
 
 /** A repository's setting (call 28): not written, it comes from the defaults; written, it says what it overrides and can take the default back. */
@@ -132,7 +135,7 @@ export function Row({
   label: string;
   help: ReactNode;
   labelFor?: string;
-  /** The badge beside the label: what a save of this waits for, when it is read once at start. */
+  /** The badge beside the label, over "Needs a restart", which a setting the service reads once at start gets of itself. */
   restart?: string;
   /** A save of this waits for the restart, over what the setting says of itself. */
   waits?: boolean;
@@ -144,6 +147,9 @@ export function Row({
 }) {
   const paths = [path, ...also];
   const issues = paths.flatMap((one) => form.issuesAt(scope, one));
+  const bad = paths.some((one) => form.bad.has(keyOf(scope, one)));
+  const badge = restart ?? (paths.some((one) => form.shown(scope, one).restart) ? 'Needs a restart' : undefined);
+  const field = labelFor ?? id;
   return (
     <div data-slot="setting-row" className={ROW}>
       <div data-slot="setting-label" className={LBL}>
@@ -157,7 +163,7 @@ export function Row({
               {label}
             </label>
           )}
-          {restart === undefined ? null : <Badge tone="muted">{restart}</Badge>}
+          {badge === undefined ? null : <Badge tone="muted">{badge}</Badge>}
         </div>
         <span className="text-[13px] leading-[1.45] text-muted">{help}</span>
       </div>
@@ -167,10 +173,17 @@ export function Row({
         {scope !== GLOBAL && scope !== DEFAULTS ? (
           <OverrideLine form={form} scope={scope} path={path} />
         ) : (
-          paths.map((one) => <SourceLine key={one} form={form} scope={scope} path={one} />)
+          paths.map((one) => (
+            <SourceLine key={one} form={form} scope={scope} path={one} prefix={paths.length > 1 ? `${one.slice(one.lastIndexOf('.') + 1).replace(/^./, (c) => c.toUpperCase())}: ` : ''} />
+          ))
         )}
-        {issues.map((issue) => (
-          <p key={issue} className="w-full text-[13px] text-bad">
+        {bad ? (
+          <p id={`${field}-bad`} className="w-full text-[13px] text-bad">
+            Not valid JSON.
+          </p>
+        ) : null}
+        {issues.map((issue, index) => (
+          <p key={`${index}-${issue}`} id={`${field}-issue-${index}`} className="w-full text-[13px] text-bad">
             {issue}
           </p>
         ))}
@@ -229,32 +242,31 @@ export function TextField({ form, scope, path, id, className, label, disabled }:
  */
 function JsonFieldOf({ form, scope, path, id }: { form: Form; scope: string; path: string; id: string }) {
   const [typed, setTyped] = useState<string | null>(null);
-  const [bad, setBad] = useState(false);
+  const bad = form.bad.has(keyOf(scope, path));
+  const issues = form.issuesAt(scope, path);
   const value = form.shown(scope, path).value;
   const text = typed ?? JSON.stringify(value, null, 2);
+  const described = bad ? [`${id}-bad`] : issues.map((_, index) => `${id}-issue-${index}`);
   return (
-    <>
-      <textarea
-        id={id}
-        className={cn(fieldClasses, 'min-h-24 w-full py-2 font-mono text-[12.5px]')}
-        spellCheck={false}
-        value={text}
-        onChange={(event) => {
-          const next = event.target.value;
-          setTyped(next);
-          try {
-            const parsed = JSON.parse(next.trim() === '' ? '{}' : next) as SettingValue;
-            setBad(false);
-            form.setBadJson(keyOf(scope, path), false);
-            form.set(scope, path, parsed);
-          } catch {
-            setBad(true);
-            form.setBadJson(keyOf(scope, path), true);
-          }
-        }}
-      />
-      {bad ? <p className="w-full text-[13px] text-bad">Not valid JSON.</p> : null}
-    </>
+    <textarea
+      id={id}
+      className={cn(fieldClasses, 'min-h-24 w-full py-2 font-mono text-[12.5px]')}
+      spellCheck={false}
+      aria-invalid={bad || issues.length > 0}
+      aria-describedby={described.length === 0 ? undefined : described.join(' ')}
+      value={text}
+      onChange={(event) => {
+        const next = event.target.value;
+        setTyped(next);
+        try {
+          const parsed = JSON.parse(next.trim() === '' ? '{}' : next) as SettingValue;
+          form.setBadJson(keyOf(scope, path), false);
+          form.set(scope, path, parsed);
+        } catch {
+          form.setBadJson(keyOf(scope, path), true);
+        }
+      }}
+    />
   );
 }
 

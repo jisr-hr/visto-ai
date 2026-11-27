@@ -19,7 +19,7 @@ function splitKey(key: string): { scope: string; path: string } {
   const colon = key.indexOf(':');
   return { scope: key.slice(0, colon), path: key.slice(colon + 1) };
 }
-const isUnset = (value: SettingValue | Unset): value is Unset => typeof value === 'object' && value !== null && 'unset' in value && value.unset === true;
+export const isUnset = (value: SettingValue | Unset): value is Unset => typeof value === 'object' && value !== null && 'unset' in value && value.unset === true;
 
 /** A value's JSON with the keys of every map sorted, so two values are the same when their text is. */
 function canonical(value: SettingValue): string {

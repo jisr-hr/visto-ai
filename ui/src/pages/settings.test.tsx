@@ -378,7 +378,7 @@ test("the model's rows read and write their values", async () => {
   expect(await changesAfter()).toEqual([{ scope: 'global', path: 'model.effort.default', value: { reasoning: { effort: 'low' } } }]);
   await discard();
 
-  // A custom value is kept and named.
+  // How the answer is asked for.
   await user.click(screen.getByRole('button', { name: 'Auto' }));
   expect(await changesAfter()).toEqual([{ scope: 'global', path: 'model.toolChoice', value: 'auto' }]);
   await discard();
@@ -579,4 +579,102 @@ test('after a save the changes and the export are read again', async () => {
   await screen.findByRole('status');
   await vi.waitFor(() => expect(sent('settingChanges')).toHaveLength(2));
   await vi.waitFor(() => expect(sent('settingsExport')).toHaveLength(2));
+});
+
+/** A promise and the ways to settle it. */
+function later<T>() {
+  let resolve: (value: T) => void = () => {};
+  const promise = new Promise<T>((yes) => {
+    resolve = yes;
+  });
+  return { promise, resolve };
+}
+
+test('a field of invalid JSON blocks the save and counts as a change, while another change waits', async () => {
+  const user = userEvent.setup();
+  const { sent } = await open();
+  await user.click(screen.getByRole('switch', { name: 'Learning' }));
+  const body = screen.getByLabelText('Extra body');
+  expect(body).not.toHaveAttribute('aria-invalid', 'true');
+  fireEvent.change(body, { target: { value: '{' } });
+  expect(screen.getByRole('button', { name: 'Save changes' })).toBeDisabled();
+  expect(screen.getByText('2 unsaved changes')).toBeInTheDocument();
+  expect(body).toHaveAttribute('aria-invalid', 'true');
+  const message = within(rowOf('Extra body')).getByText('Not valid JSON.');
+  expect(body.getAttribute('aria-describedby')).toBe(message.id);
+  expect(message.parentElement?.lastElementChild).toBe(message);
+  fireEvent.change(body, { target: { value: '{"a":1}' } });
+  expect(screen.getByRole('button', { name: 'Save changes' })).toBeEnabled();
+  expect(screen.getByText('2 unsaved changes')).toBeInTheDocument();
+  expect(sent('saveSettings')).toEqual([]);
+});
+
+test('invalid JSON typed first counts as an unsaved change, and Discard takes it back', async () => {
+  const user = userEvent.setup();
+  await open();
+  fireEvent.change(screen.getByLabelText('Extra headers'), { target: { value: 'x' } });
+  expect(screen.getByText('1 unsaved change')).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Discard' })).toBeEnabled();
+  await user.click(screen.getByRole('button', { name: 'Discard' }));
+  expect(screen.getByText('No unsaved changes')).toBeInTheDocument();
+  expect(screen.getByLabelText('Extra headers')).toHaveValue('{}');
+});
+
+test('a refused JSON field is marked invalid and described by its issue', async () => {
+  const user = userEvent.setup();
+  const { api } = fakeApi({
+    saveSettings: () => Promise.resolve({ kind: 'invalid', issues: [{ scope: 'global', path: 'model.extraBody', message: 'Expected an object' }] }),
+  });
+  visit('/ui/settings');
+  render(<App api={api} />);
+  await screen.findByRole('region', { name: 'General' });
+  await user.click(screen.getByRole('switch', { name: 'Learning' }));
+  await user.click(screen.getByRole('button', { name: 'Save changes' }));
+  const issue = await within(rowOf('Extra body')).findByText('Expected an object');
+  const body = screen.getByLabelText('Extra body');
+  expect(body).toHaveAttribute('aria-invalid', 'true');
+  expect(body.getAttribute('aria-describedby')).toBe(issue.id);
+});
+
+test('a save in flight says Saving, cannot be sent twice, and keeps what is typed meanwhile', async () => {
+  const user = userEvent.setup();
+  const wait = later<{ kind: 'saved'; view: SettingsView }>();
+  const { api, sent } = fakeApi({ saveSettings: () => wait.promise });
+  visit('/ui/settings');
+  render(<App api={api} />);
+  await screen.findByRole('region', { name: 'General' });
+  await user.click(screen.getByRole('switch', { name: 'Learning' }));
+  await user.click(screen.getByRole('button', { name: 'Save changes' }));
+  const saving = screen.getByRole('button', { name: 'Saving' });
+  expect(saving).toBeDisabled();
+  await user.click(saving);
+  expect(sent('saveSettings')).toHaveLength(1);
+  // Typed while the request is out.
+  await user.clear(screen.getByLabelText('Daily spend limit'));
+  await user.type(screen.getByLabelText('Daily spend limit'), '50');
+  wait.resolve({ kind: 'saved', view: viewOf({ version: 15, global: { learning: written(true, UI) } }) });
+  expect(await screen.findByRole('status')).toHaveTextContent('Saved.');
+  expect(screen.getByText('1 unsaved change')).toBeInTheDocument();
+  expect(screen.getByLabelText('Daily spend limit')).toHaveValue(50);
+  expect(screen.getByRole('switch', { name: 'Learning' })).toHaveAttribute('aria-checked', 'true');
+  expect(sent('saveSettings')).toHaveLength(1);
+});
+
+test('the scorer off and on again, with the view having it on, is no change', async () => {
+  const user = userEvent.setup();
+  await open();
+  await user.click(screen.getByRole('switch', { name: 'Second scorer' }));
+  expect(screen.getByText('3 unsaved changes')).toBeInTheDocument();
+  await user.click(screen.getByRole('switch', { name: 'Second scorer' }));
+  expect(screen.getByText('No unsaved changes')).toBeInTheDocument();
+  expect(screen.getByLabelText('Scorer model')).toHaveValue('vendor/decision-model');
+  expect(screen.getByLabelText('Second scorer endpoint')).toHaveValue('https://scorer.example.test/v1');
+  expect(within(rowOf('Second scorer endpoint')).getByText('From config.yml at the start of 2026-03-01 09:00 UTC')).toBeInTheDocument();
+});
+
+test('the two efforts each say where they came from', async () => {
+  await open();
+  const row = rowOf('Effort');
+  expect(within(row).getByText('Default: From config.yml at the start of 2026-03-01 09:00 UTC')).toBeInTheDocument();
+  expect(within(row).getByText('Elevated: From config.yml at the start of 2026-03-01 09:00 UTC')).toBeInTheDocument();
 });

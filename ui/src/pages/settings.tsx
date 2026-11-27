@@ -6,7 +6,7 @@ import { useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { RequestFailed } from '../api.ts';
 import type { SecretKind, SecretState, SettingIssue, SettingsView, SettingValue } from '../api-types.ts';
-import { Chips } from '../components/chips.tsx';
+import { CHIP, Chips } from '../components/chips.tsx';
 import { PageHeader } from '../components/layout.tsx';
 import { Segmented } from '../components/segmented.tsx';
 import { Badge } from '../components/ui/badge.tsx';
@@ -16,16 +16,15 @@ import { Select } from '../components/ui/select.tsx';
 import { Switch } from '../components/ui/switch.tsx';
 import { useApp } from '../context.tsx';
 import { plural } from '../format.ts';
-import { changesOf, effortChoice, effortValue, GLOBAL, numberOrText, shown, UNSET, withChange } from '../settings-draft.ts';
-import type { Draft, EffortChoice, Unset } from '../settings-draft.ts';
+import { changesOf, DEFAULTS, effortChoice, effortValue, GLOBAL, isUnset, keyOf, numberOrText, shown, UNSET, withChange } from '../settings-draft.ts';
+import type { Draft, EffortChoice } from '../settings-draft.ts';
 import { AccountsSection } from './accounts.tsx';
 import { ChangesSection, ExportSection } from './settings-record.tsx';
 import { RepositoriesSection } from './settings-repositories.tsx';
-import { CHIP, fieldValue, H2, JsonField, LABELS, MONO, NumberField, PlainRow, Row, SECTION, TextField, whereOf, WORD } from './settings-parts.tsx';
+import { fieldValue, H2, JsonField, LABELS, MONO, NumberField, PlainRow, Row, SECTION, TextField, whereOf, WORD } from './settings-parts.tsx';
 import type { Form } from './settings-parts.tsx';
 
 const SUB = 'Saved settings apply from the next review. A review already running keeps the settings it started with.';
-const RESTART = 'Needs a restart';
 const CHANGED = 'Settings were saved meanwhile, here or in config.yml at a start. They were read again, and your changes are kept: save again.';
 const FAILED = 'The settings could not be saved.';
 const BUSY = 'The service is busy. Try again in a moment.';
@@ -36,7 +35,6 @@ const SCORER_PATHS = ['scorer.baseUrl', 'scorer.model', 'scorer.timeoutSeconds']
 /** What the top of the page says of a save that did not go through: the issues, or a sentence. */
 type Notice = { kind: 'issues'; issues: SettingIssue[] } | { kind: 'text'; text: string };
 
-const isUnset = (value: SettingValue | Unset | undefined): boolean => typeof value === 'object' && value !== null && 'unset' in value;
 
 function failureOf(error: unknown): string {
   if (error instanceof RequestFailed && error.status === 503) return BUSY;
@@ -64,7 +62,7 @@ function General({ form }: { form: Form }) {
       <h2 id="general-title" className={`${H2} mb-1`}>
         General
       </h2>
-      <Row {...row} path="dryRun" id="l-dry" label={LABELS.dryRun!} restart={RESTART} help="Reviews are run and recorded, and nothing is posted to GitHub.">
+      <Row {...row} path="dryRun" id="l-dry" label={LABELS.dryRun!} help="Reviews are run and recorded, and nothing is posted to GitHub.">
         <Toggle form={form} path="dryRun" labelId="l-dry" />
       </Row>
       <Row
@@ -72,7 +70,7 @@ function General({ form }: { form: Form }) {
         path="learning"
         id="l-learn"
         label={LABELS.learning!}
-        restart={RESTART}
+       
         help="Learn from what people do on pull requests: where they stepped in, reverts, and replies to findings."
       >
         <Toggle form={form} path="learning" labelId="l-learn" />
@@ -88,7 +86,7 @@ function General({ form }: { form: Form }) {
         <span className="text-muted">$</span>
         <NumberField form={form} scope={GLOBAL} path="limits.spendPerDay" id="g-spend" className="max-w-[140px]" />
       </Row>
-      <Row {...row} path="limits.queueConcurrency" id="l-conc" labelFor="g-conc" label={LABELS['limits.queueConcurrency']!} restart={RESTART} help="How many reviews run side by side.">
+      <Row {...row} path="limits.queueConcurrency" id="l-conc" labelFor="g-conc" label={LABELS['limits.queueConcurrency']!} help="How many reviews run side by side.">
         <NumberField form={form} scope={GLOBAL} path="limits.queueConcurrency" id="g-conc" className="max-w-[140px]" />
       </Row>
       <Row
@@ -170,7 +168,7 @@ function ModelSection({ form }: { form: Form }) {
       <h2 id="model-title" className={`${H2} mb-1`}>
         Model
       </h2>
-      <Row {...row} path="model.baseUrl" id="l-url" labelFor="m-url" label={LABELS['model.baseUrl']!} restart={RESTART} help="An OpenAI-compatible endpoint. Its key is a secret, set in the environment.">
+      <Row {...row} path="model.baseUrl" id="l-url" labelFor="m-url" label={LABELS['model.baseUrl']!} help="An OpenAI-compatible endpoint. Its key is a secret, set in the environment.">
         <TextField form={form} scope={GLOBAL} path="model.baseUrl" id="m-url" className={`${MONO} w-full`} />
       </Row>
       <Row {...row} path="model.model" id="l-model" labelFor="m-model" label={LABELS['model.model']!} help="Tried first for every review.">
@@ -188,7 +186,7 @@ function ModelSection({ form }: { form: Form }) {
         <Effort form={form} path="model.effort.default" label="Default" />
         <Effort form={form} path="model.effort.elevated" label="Elevated" />
       </Row>
-      <Row {...row} path="model.toolChoice" id="l-tool" label={LABELS['model.toolChoice']!} restart={RESTART} help="Auto is for a model whose endpoint refuses a request that names a tool.">
+      <Row {...row} path="model.toolChoice" id="l-tool" label={LABELS['model.toolChoice']!} help="Auto is for a model whose endpoint refuses a request that names a tool.">
         <Segmented
           label="How the answer is asked for"
           options={[{ value: 'forced', label: 'Forced' }, { value: 'auto', label: 'Auto' }]}
@@ -196,7 +194,7 @@ function ModelSection({ form }: { form: Form }) {
           onChange={(next) => form.set(GLOBAL, 'model.toolChoice', next)}
         />
       </Row>
-      <Row {...row} path="model.timeoutSeconds" id="l-time" labelFor="m-time" label={LABELS['model.timeoutSeconds']!} restart={RESTART} help="Seconds.">
+      <Row {...row} path="model.timeoutSeconds" id="l-time" labelFor="m-time" label={LABELS['model.timeoutSeconds']!} help="Seconds.">
         <NumberField form={form} scope={GLOBAL} path="model.timeoutSeconds" id="m-time" className="max-w-[140px]" />
       </Row>
       <Row {...row} path="model.prices" id="l-prices" label={LABELS['model.prices']!} help="Used only when the endpoint reports no cost.">
@@ -215,8 +213,13 @@ function ModelSection({ form }: { form: Form }) {
           checked={on}
           labelledBy="l-scorer"
           onChange={(next) => {
-            if (next) form.set(GLOBAL, 'scorer.model', typeof scorerText === 'string' ? scorerText : '');
-            else for (const path of SCORER_PATHS) form.set(GLOBAL, path, UNSET);
+            if (!next) {
+              for (const path of SCORER_PATHS) form.set(GLOBAL, path, UNSET);
+              return;
+            }
+            // On again reads as the view has it; a scorer the view has off is written with the text typed, if any.
+            form.drop(GLOBAL, SCORER_PATHS);
+            if (!form.view.global['scorer.model']?.written) form.set(GLOBAL, 'scorer.model', typeof scorerText === 'string' ? scorerText : '');
           }}
         />
         <TextField form={form} scope={GLOBAL} path="scorer.model" label="Scorer model" disabled={!on} className={`${MONO} min-w-0 flex-[1_1_200px]`} />
@@ -229,7 +232,7 @@ function ModelSection({ form }: { form: Form }) {
             id="l-surl"
             labelFor="s-url"
             label={LABELS['scorer.baseUrl']!}
-            restart={RESTART}
+           
             help="The scorer's API. Its key is a secret, set in the environment."
           >
             <TextField form={form} scope={GLOBAL} path="scorer.baseUrl" id="s-url" className={`${MONO} w-full`} />
@@ -388,6 +391,10 @@ export function SettingsPage() {
 
   const view = read.view;
   const changes = view === null ? [] : changesOf(view, draft);
+  // What is unsaved: each setting that differs from the view, and each JSON field whose text is not valid yet (it writes nothing).
+  const unsavedCount = new Set([...changes.map((change) => keyOf(change.scope, change.path)), ...badJson]).size;
+  const badNow = useRef(badJson);
+  badNow.current = badJson;
 
   const form: Form | null =
     view === null
@@ -396,10 +403,17 @@ export function SettingsPage() {
           view,
           draft,
           epoch,
+          bad: badJson,
+          drop: (scope, paths) =>
+            setDraft((last) => {
+              const next = new Map(last);
+              for (const path of paths) next.delete(keyOf(scope, path));
+              return next;
+            }),
           // A setting the draft takes back is not written: the view's old value is not its default, so it shows as none.
           shown: (scope, path) => {
             const now = shown(view, draft, scope, path);
-            return isUnset(draft.get(`${scope}:${path}`)) && !now.written && (scope === GLOBAL || scope === 'defaults') ? { ...now, value: null } : now;
+            return isUnset(draft.get(keyOf(scope, path)) ?? null) && !now.written && (scope === GLOBAL || scope === DEFAULTS) ? { ...now, value: null } : now;
           },
           set: (scope, path, value) => {
             setDraft((last) => withChange(last, scope, path, value));
@@ -431,13 +445,14 @@ export function SettingsPage() {
     setSending(true);
     setNotice(null);
     setSaved(false);
+    const sentDraft = draft;
     try {
       const answer = await api.saveSettings(me.csrf, { version: view.version, changes });
       if (answer.kind === 'saved') {
         setRead({ view: answer.view, failed: false });
-        setDraft(new Map());
-        setBadJson(new Set());
-        setEpoch((n) => n + 1);
+        // What was typed while the request was out is kept: an entry the draft still holds as it was sent was saved.
+        setDraft((last) => new Map([...last].filter(([key, value]) => sentDraft.get(key) !== value)));
+        if (badNow.current.size === 0) setEpoch((n) => n + 1);
         setSaved(true);
         setRecorded((n) => n + 1);
       } else {
@@ -458,7 +473,7 @@ export function SettingsPage() {
     }
   }
 
-  const unsaved = changes.length === 0 ? 'No unsaved changes' : plural(changes.length, 'unsaved change', 'unsaved changes');
+  const unsaved = unsavedCount === 0 ? 'No unsaved changes' : plural(unsavedCount, 'unsaved change', 'unsaved changes');
   const body = (): ReactNode => {
     if (form === null) {
       if (read.failed) {
@@ -501,7 +516,7 @@ export function SettingsPage() {
               </span>
             ) : null}
             <span className="text-[13px] text-muted">{unsaved}</span>
-            <Button type="button" disabled={changes.length === 0} onClick={discard}>
+            <Button type="button" disabled={unsavedCount === 0} onClick={discard}>
               Discard
             </Button>
             <Button type="button" variant="primary" disabled={changes.length === 0 || sending || badJson.size > 0} onClick={() => void save()}>

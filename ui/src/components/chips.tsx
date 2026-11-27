@@ -3,7 +3,7 @@ import { Button } from './ui/button.tsx';
 import { Input } from './ui/input.tsx';
 
 // The mockup's .chip (Settings.dc.html): a list of names, each removed by its button, and one added by name.
-const CHIP = 'inline-flex items-center gap-1.5 rounded-[7px] bg-subtle py-1 pr-1.5 pl-2.5 font-mono text-[13px]';
+export const CHIP = 'inline-flex items-center gap-1.5 rounded-[7px] bg-subtle py-1 pr-1.5 pl-2.5 font-mono text-[13px]';
 
 export function Chips({
   label,
