@@ -10,7 +10,7 @@ import type { Me } from './api-types.ts';
 import { Layout, REVIEW_PATH } from './components/layout.tsx';
 import { Button } from './components/ui/button.tsx';
 import { ActivityPage } from './pages/activity.tsx';
-import { Later } from './pages/later.tsx';
+import { MemoryPage } from './pages/memory.tsx';
 import { NotFound } from './pages/not-found.tsx';
 import { OverviewPage } from './pages/overview.tsx';
 import { PasswordPage } from './pages/password.tsx';
@@ -50,7 +50,7 @@ function Page({ path, me }: { path: string; me: Me }) {
     case '/ui/repositories':
       return <RepositoriesPage />;
     case '/ui/memory':
-      return <Later title="Memory" />;
+      return <MemoryPage />;
     case '/ui/settings':
       return me.role === 'admin' ? <SettingsPage /> : <NotFound />;
     case '/ui/password':

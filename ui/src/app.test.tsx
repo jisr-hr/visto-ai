@@ -6,20 +6,9 @@ import type { Api } from './api.ts';
 import type { Account, Accounts, Activity, Me, OneTime, Reviews, SettingsSave, SignInStep } from './api-types.ts';
 import { App } from './app.tsx';
 
-// The page of a screen still to come, as it is, which also keeps the API the app gave the pages: no page calls every method
-// yet, so a test calls each of them on it.
 const shown = vi.hoisted(() => ({ api: null as Api | null }));
-vi.mock('./pages/later.tsx', async (importOriginal) => {
-  const real = await importOriginal<typeof import('./pages/later.tsx')>();
-  const { useApp } = await import('./context.tsx');
-  function Later(props: { title: string }) {
-    shown.api = useApp().api;
-    return real.Later(props);
-  }
-  return { Later };
-});
 
-// The Overview, as it is, keeps the API the app gave the pages in the same way (it replaced the page still to come at /ui/).
+// The Overview, as it is, keeps the API the app gave the pages: no page calls every method yet, so a test calls each of them on it.
 vi.mock('./pages/overview.tsx', async (importOriginal) => {
   const real = await importOriginal<typeof import('./pages/overview.tsx')>();
   const { useApp } = await import('./context.tsx');
@@ -31,6 +20,7 @@ vi.mock('./pages/overview.tsx', async (importOriginal) => {
 });
 
 const NOW = '2026-03-01T10:00:00.000Z';
+const MEMORY_SUB = 'What the service learned from people, reverts and replies, told to later reviews as context';
 const REPOSITORIES_SUB = 'How well the score tells what needs a person, measured from what people did';
 const SAVE: SettingsSave = { version: 14, changes: [{ scope: 'global', path: 'learning', value: true }] };
 const ME: Me = { name: 'octo-lead', kind: 'github', role: 'admin', csrf: 'csrf-token-for-tests', mode: 'live', repositories: ['acme/billing', 'acme/infra', 'acme/shop', 'acme/web'] };
@@ -212,7 +202,7 @@ test('each sidebar entry leads to its page, and an unknown path is not found', a
 
   const pages = [
     ['Overview', '/ui/', 'Overview', 'Last 30 days'],
-    ['Memory', '/ui/memory', 'Memory', 'Coming in a later plan.'],
+    ['Memory', '/ui/memory', 'Memory', MEMORY_SUB],
     ['Repositories', '/ui/repositories', 'Repositories', REPOSITORIES_SUB],
   ] as const;
   for (const [entry, path, heading, subLine] of pages) {

@@ -226,11 +226,12 @@ test('the sidebar shows who is signed in, the mode and the running count', async
   expect(classes(title.closest('header'))).toEqual(words(header));
   first.unmount();
 
-  // The coming pages' line is the header's sub-line.
+  // A page's line under its title is the header's sub-line.
   at('/ui/memory');
   const memory = render(<App api={fakeApi().api} />);
-  expect(classes(await screen.findByText('Coming in a later plan.'))).toEqual(words(subLine));
-  expect(screen.getByText('Coming in a later plan.').tagName).toBe('P');
+  const memoryLine = 'What the service learned from people, reverts and replies, told to later reviews as context';
+  expect(classes(await screen.findByText(memoryLine))).toEqual(words(subLine));
+  expect(screen.getByText(memoryLine).tagName).toBe('P');
   // With no job running, the entry carries no count.
   expect(within(screen.getByRole('navigation', { name: 'Main' })).getByRole('link', { name: 'Activity' }).textContent).toBe('Activity');
   memory.unmount();
