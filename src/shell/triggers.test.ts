@@ -40,3 +40,15 @@ test('a gated pull request is not reviewed on a push, an opening or a retarget; 
     assert.deepEqual(triggerOf(action, facts({ draft: true }), GATED), { kind: 'skip', reason: 'draft' });
   }
 });
+
+test('a base filter holding * reviews every branch, beside names too', () => {
+  const reason = (baseBranches: string[], base: string) => {
+    const t = triggerOf('opened', facts({ baseBranch: base }), { ...SETTINGS, baseBranches });
+    return t.kind === 'skip' ? t.reason : null;
+  };
+  assert.equal(reason(['*'], 'feature'), null);
+  assert.equal(reason(['main', '*'], 'feature'), null);
+  assert.equal(reason(['main'], 'feature'), 'base_filtered');
+  assert.equal(reason(['main'], 'main'), null);
+  assert.equal(reason([], 'feature'), null);
+});

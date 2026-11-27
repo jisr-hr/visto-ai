@@ -1,8 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { testDb } from './testing.ts';
-import { addRecords, liveLessons, liveLessonsWithin, liveRecords, liveRecordsWithin, liveReverts, liveRevertsWithin, retireExpired, standingLessons } from './memory-records.ts';
+import { addRecords, countShown, liveLessons, liveLessonsWithin, liveRecords, liveRecordsWithin, liveReverts, liveRevertsWithin, memoryCounts, retireExpired, shownRecord, shownRecords, standingLessons, switchRecord } from './memory-records.ts';
 import type { NewRecord, RepoKey } from './memory-records.ts';
+import { recordActivity } from './human-activity.ts';
 
 const REPO: RepoKey = { service: 'github', owner: 'acme', repo: 'shop' };
 const T = '2026-03-10T12:00:00.000Z';
@@ -467,5 +468,133 @@ test('a read of reverts within a limit sets the limit inside its transaction, an
     assert.deepEqual(seen, [], String(bad));
     assert.equal(transactions, 0, String(bad));
   }
+  await db.close();
+});
+
+const AT = ms(T, DAY);
+const NONE = { repo: null, kind: null, text: null, before: null } as const;
+const triple = (): NewRecord[] => [
+  record(),
+  record({ kind: 'revert', sourceRef: '8:revert', number: 8, path: 'src/a.ts', directory: 'src', reverted: 6, excerpt: '' }),
+  record({ kind: 'lesson', sourceRef: '9:lesson', number: 9, path: 'src/b.ts', directory: 'src', lesson: 'check the unit', excerpt: '' }),
+];
+const idsOf = async (db: Awaited<ReturnType<typeof testDb>>): Promise<number[]> =>
+  (await db.query<{ id: number }>('select id from visto_ai.memory_records order by id')).map((r) => r.id);
+
+test('a record switched off is read by no later review, and switched on again is read by the next', async () => {
+  const db = await testDb();
+  await addRecords(db, REPO, triple());
+  const ids = await idsOf(db);
+  const reads = async (): Promise<number[]> => [
+    (await liveRecords(db, REPO, 'human_signal', AT, 10)).length,
+    (await liveReverts(db, REPO, AT, 10)).length,
+    (await liveLessons(db, REPO, AT, 10)).length,
+  ];
+  assert.deepEqual(await reads(), [1, 1, 1]);
+  const switchedAt = ms(AT, 1000);
+  for (const id of ids) assert.equal(await switchRecord(db, id, false, 'octo-admin', switchedAt), true);
+  assert.deepEqual(await reads(), [0, 0, 0]);
+  assert.deepEqual(await db.query('select distinct switched_by, switched_at from visto_ai.memory_records'), [{ switched_by: 'octo-admin', switched_at: new Date(switchedAt) }]);
+  assert.deepEqual(await standingLessons(db, REPO, AT, 10), ['check the unit']);
+  assert.equal(await addRecords(db, REPO, triple()), 0);
+  assert.deepEqual(await db.query('select distinct status from visto_ai.memory_records'), [{ status: 'disabled' }]);
+  for (const id of ids) assert.equal(await switchRecord(db, id, true, 'octo-admin', ms(AT, 2000)), true);
+  assert.deepEqual(await reads(), [1, 1, 1]);
+  await db.close();
+});
+
+test('a switch changes nothing of a record but its status and who and when', async () => {
+  const db = await testDb();
+  await addRecords(db, REPO, [record()]);
+  const before = await db.query('select service, owner, repo, kind, source_ref, created_at, expires_at, number, path, directory, category, reason, missed, excerpt, comment, lesson, reverted from visto_ai.memory_records');
+  const [id] = await idsOf(db);
+  await switchRecord(db, id!, false, 'octo-admin', AT);
+  assert.deepEqual(await db.query('select service, owner, repo, kind, source_ref, created_at, expires_at, number, path, directory, category, reason, missed, excerpt, comment, lesson, reverted from visto_ai.memory_records'), before);
+  await db.close();
+});
+
+test('an expired record cannot be switched, and a switch to the state it is in changes nothing', async () => {
+  const db = await testDb();
+  await addRecords(db, REPO, [record(), record({ sourceRef: 'x2', kind: 'lesson', lesson: 'l', path: 'p' })]);
+  const [a, b] = await idsOf(db);
+  const late = ms(T, 181 * DAY);
+  assert.equal(await switchRecord(db, a!, false, 'octo-admin', late), false);
+  assert.deepEqual(await db.query('select status, switched_at, switched_by from visto_ai.memory_records where id = $1', [a]), [{ status: 'active', switched_at: null, switched_by: null }]);
+  await db.query("update visto_ai.memory_records set status = 'expired' where id = $1", [b]);
+  assert.equal(await switchRecord(db, b!, true, 'octo-admin', AT), false);
+  assert.equal(await switchRecord(db, a!, true, 'octo-admin', AT), false);
+  assert.deepEqual(await db.query('select switched_at from visto_ai.memory_records where id = $1', [a]), [{ switched_at: null }]);
+  assert.equal(await switchRecord(db, a!, false, 'octo-admin', AT), true);
+  assert.equal(await switchRecord(db, a!, false, 'octo-other', ms(AT, 5000)), false);
+  assert.deepEqual(await db.query('select switched_at, switched_by from visto_ai.memory_records where id = $1', [a]), [{ switched_at: new Date(AT), switched_by: 'octo-admin' }]);
+  await db.close();
+});
+
+test('the records shown are those on or off not expired, newest recorded first, filtered and paged, with the commenter of a person\'s record', async () => {
+  const db = await testDb();
+  await recordActivity(db, {
+    ref: { service: 'github', owner: 'acme', repo: 'shop', number: 7 }, kind: 'inline_comment', sourceId: 'c-1', author: 'octo-guest', association: null,
+    state: null, body: 'b', path: null, side: null, line: null, startLine: null, fileLevel: null, commit: null, replyTo: null, thread: null, at: T, delivery: null,
+  });
+  await addRecords(db, REPO, [
+    record({ excerpt: 'the cart total', sourceRef: 's1' }),
+    record({ kind: 'lesson', sourceRef: 's2', lesson: 'cart rounding', path: 'src/cart/x.ts', excerpt: '' }),
+    record({ kind: 'revert', sourceRef: 's3', reverted: 3, excerpt: '', path: 'src/y.ts', directory: 'src' }),
+    record({ sourceRef: 's4', expiresAt: ms(T, 5 * DAY), excerpt: 'gone' }),
+  ]);
+  await addRecords(db, { ...REPO, repo: 'web' }, [record({ sourceRef: 's5', excerpt: 'web text', path: 'w.ts', directory: null })]);
+  const ids = await idsOf(db);
+  const now = ms(T, 10 * DAY);
+  await switchRecord(db, ids[2]!, false, 'octo-admin', now);
+  const all = await shownRecords(db, NONE, now, 51);
+  assert.deepEqual(all.map((r) => r.id), [ids[4], ids[2], ids[1], ids[0]]);
+  assert.deepEqual(all.map((r) => r.status), ['active', 'disabled', 'active', 'active']);
+  assert.equal(all[3]!.by, 'octo-guest');
+  assert.equal(all[1]!.by, null);
+  assert.equal(all[1]!.reverted, 3);
+  assert.equal(all[0]!.owner, 'acme');
+  assert.equal((await shownRecords(db, { ...NONE, kind: 'lesson' }, now, 51)).length, 1);
+  assert.deepEqual((await shownRecords(db, { ...NONE, repo: { service: 'github', owner: 'acme', repo: 'web' } }, now, 51)).map((r) => r.id), [ids[4]]);
+  assert.deepEqual((await shownRecords(db, { ...NONE, text: '%cart%' }, now, 51)).map((r) => r.id), [ids[1], ids[0]]);
+  assert.deepEqual((await shownRecords(db, { ...NONE, before: ids[2]! }, now, 51)).map((r) => r.id), [ids[1], ids[0]]);
+  assert.deepEqual((await shownRecords(db, NONE, now, 2)).map((r) => r.id), [ids[4], ids[2]]);
+  assert.equal(await countShown(db, { ...NONE, before: ids[2]! }, now), 4);
+  assert.equal(await countShown(db, { ...NONE, text: '%cart%' }, now), 2);
+  assert.equal((await shownRecord(db, ids[3]!, now)), null);
+  assert.equal((await shownRecord(db, ids[2]!, now))?.status, 'disabled');
+  assert.equal(await shownRecord(db, 99999, now), null);
+  await db.close();
+});
+
+test("the search finds a record by its path alone, its directory alone, a person's words or a lesson, and never by a lesson's quote", async () => {
+  const db = await testDb();
+  await addRecords(db, REPO, [
+    record({ sourceRef: 'by-path', path: 'src/cart/coupon.ts', directory: 'src/cart', excerpt: 'nothing to see' }),
+    record({ sourceRef: 'by-directory', path: null, directory: 'lib/ledger', excerpt: 'nothing to see' }),
+    record({ sourceRef: 'by-words', path: 'src/a.ts', directory: 'src', excerpt: 'the refund comes late' }),
+    record({ kind: 'lesson', sourceRef: 'by-lesson', path: 'src/b.ts', directory: 'src', lesson: 'check the currency', excerpt: 'a quoted hidden reply' }),
+    record({ kind: 'revert', sourceRef: 'a-revert', path: 'src/c.ts', directory: 'src', reverted: 3, excerpt: 'an unshown note' }),
+  ]);
+  const ids = await idsOf(db);
+  const found = async (part: string): Promise<number[]> => (await shownRecords(db, { ...NONE, text: `%${part}%` }, AT, 51)).map((r) => r.id);
+  assert.deepEqual(await found('coupon'), [ids[0]]);
+  assert.deepEqual(await found('ledger'), [ids[1]]);
+  assert.deepEqual(await found('refund'), [ids[2]]);
+  assert.deepEqual(await found('currency'), [ids[3]]);
+  assert.deepEqual(await found('hidden'), []);
+  assert.deepEqual(await found('unshown'), []);
+  assert.equal(await countShown(db, { ...NONE, text: '%hidden%' }, AT), 0);
+  assert.equal(await countShown(db, { ...NONE, text: '%currency%' }, AT), 1);
+  await db.close();
+});
+
+test('the counts are the records on by kind, the repositories of people stepping in, and the records off', async () => {
+  const db = await testDb();
+  await addRecords(db, REPO, [...triple(), record({ sourceRef: 'k2' })]);
+  await addRecords(db, { ...REPO, repo: 'web' }, [record()]);
+  await addRecords(db, { ...REPO, repo: 'api' }, [record({ kind: 'revert', excerpt: '' }), record({ sourceRef: 'old', expiresAt: ms(T, DAY) })]);
+  const [first] = await idsOf(db);
+  await switchRecord(db, first!, false, 'octo-admin', AT);
+  assert.deepEqual(await memoryCounts(db, ms(T, 2 * DAY)), { signals: 2, signal_repositories: 2, reverts: 2, lessons: 1, off: 1 });
   await db.close();
 });

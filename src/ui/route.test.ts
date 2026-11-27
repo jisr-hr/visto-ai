@@ -1,7 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createHash } from 'node:crypto';
+import { createHash, generateKeyPairSync } from 'node:crypto';
+import { parseConfig, parseDocument, readYaml, serviceConfig } from '../config/load.ts';
+import { settingsVersion } from '../db/settings.ts';
+import { startSettings } from '../shell/settings.ts';
 import { enqueueJob } from '../db/jobs.ts';
+import { addRecords } from '../db/memory-records.ts';
 import { savePullRequest } from '../db/pull-requests.ts';
 import { recordRun } from '../db/review-runs.ts';
 import { testDb } from '../db/testing.ts';
@@ -18,6 +22,7 @@ import { createAuth } from './auth.ts';
 import type { UiFile, UiFiles } from './files.ts';
 import { createPasswordAuth } from './password-auth.ts';
 import { hashPassword } from './passwords.ts';
+import { createQualityCache } from './quality.ts';
 import { createUiRoute, METHODS } from './route.ts';
 
 const at = (seconds: number): string => new Date(Date.parse('2026-03-01T10:00:00.000Z') + seconds * 1000).toISOString();
@@ -45,6 +50,29 @@ const error = (status: number, code: string, extra: Record<string, string> = {})
 const INDEX: UiFile = { body: Buffer.from('<!doctype html><title>Visto AI</title>'), type: 'text/html; charset=utf-8' };
 const FILES: UiFiles = new Map([['/ui/index.html', INDEX]]);
 
+const PEM = generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey.export({ type: 'pkcs8', format: 'pem' }) as string;
+const SETTINGS_ENV = {
+  OPENROUTER_API_KEY: 'model-key-for-tests-only', WEBHOOK_SECRET: 'webhook-secret-for-tests-only', APP_PRIVATE_KEY: PEM,
+  DATABASE_URL: 'postgres://visto:db-password-for-tests@db.example.test/visto',
+};
+const SETTINGS_YAML = `model:
+  apiKey: { env: OPENROUTER_API_KEY }
+  model: vendor/model-a
+app:
+  id: 12345
+  privateKey: { env: APP_PRIVATE_KEY }
+  webhookSecret: { env: WEBHOOK_SECRET }
+database:
+  url: { env: DATABASE_URL }
+ui:
+  publicUrl: https://visto.example.test
+limits:
+  spendPerDay: 50
+repositories:
+  defaults:
+    score: { threshold: 70 }
+`;
+
 interface Sent { query?: string; cookie?: string; csrf?: string; body?: string; origin?: string; type?: string }
 interface Harness {
   db: Db; api: ApiDeps; logs: Array<Record<string, unknown>>;
@@ -58,7 +86,7 @@ interface Harness {
 }
 
 /** `github` false: a route with GitHub sign-in off, and auth given no sign-in. `changesOf`: the account changes the route is given, from the real ones. */
-async function harness(github = true, changesOf: (real: AccountChanges) => AccountChanges = (real) => real): Promise<Harness> {
+async function harness(github = true, changesOf: (real: AccountChanges) => AccountChanges = (real) => real, withSettings = false, withInsight = false): Promise<Harness> {
   const real = await testDb();
   const logs: Array<Record<string, unknown>> = [];
   const statements: string[] = [];
@@ -90,9 +118,22 @@ async function harness(github = true, changesOf: (real: AccountChanges) => Accou
     db, clock, dryRun: true, reviewPlaces: 2, withdrawPlaces: 2, holds: () => true, paused: async () => null,
     pullRequestUrl: (ref) => `https://github.example.test/${ref.owner}/${ref.repo}/pull/${ref.number}`,
   };
+  const settings = !withSettings ? undefined : await startSettings({
+    db, file: readYaml(SETTINGS_YAML), check: (d) => serviceConfig(parseDocument(d, SETTINGS_ENV)), clock, log, uiOn: true,
+  });
+  logs.length = 0;
   const route = createUiRoute({
     auth, passwords: createPasswordAuth({ db, clock, log, cost: COST }), accounts: changesOf(createAccountChanges({ db, clock, log, cost: COST })), api, files: FILES,
     ui: { publicUrl: 'https://visto.example.test', github }, log,
+    ...(!withInsight ? {} : {
+      insight: {
+        db, clock, inForce: () => parseConfig('model:\n  apiKey: { env: K }\n  model: vendor/model-a\n', { K: 'model-key-for-tests-only' }),
+        started: { dryRun: true, learning: true, scorer: false, extensions: [], mcpServers: ['docs'] }, quality: createQualityCache({ clock, log }),
+      },
+    }),
+    ...(settings === undefined ? {} : {
+      settings: { db, clock, settings, log, access: { publicUrl: 'https://visto.example.test', github, accounts: ['octo-lead'], team: null } },
+    }),
   });
   const send: Harness['send'] = (method, path, sent = {}) => route({
     method, path, query: sent.query ?? '', body: sent.body === undefined ? Buffer.alloc(0) : Buffer.from(sent.body),
@@ -188,7 +229,7 @@ test('without a session every read is signed_out, and the sign-in routes are ope
 
   // A path the API does not know, or a known one with another method, reads nothing.
   h.statements.length = 0;
-  for (const path of ['/api/nope', '/api', '/api/', '/api/me/', '/api/auth', '/api/ME', '/api/reviews/9001']) {
+  for (const path of ['/api/nope', '/api', '/api/', '/api/me/', '/api/auth', '/api/ME', '/api/reviews/x9']) {
     assert.deepEqual(await h.send('GET', path), error(404, 'not_found'), path);
   }
   for (const [method, path, allow] of [
@@ -688,5 +729,297 @@ test('a handler of the new routes that fails is internal_error, logged with its 
     { name: 'octo-admin', role: 'admin', one_time_until: null }, { name: 'octo-viewer', role: 'viewer', one_time_until: null },
   ]);
   assert.equal((await h.send('GET', '/api/accounts', { cookie: a.cookie })).status, 200);
+  await h.db.close();
+});
+
+/** One run of acme/shop #7 recorded, its pull request saved; the run's id. */
+async function oneRun(h: Harness): Promise<number> {
+  await savePullRequest(h.db, {
+    ref: REF, author: 'octo-dev', authorIsBot: false, baseBranch: 'main', headBranch: 'feature-branch', headSha: HEAD, draft: false,
+    state: 'open', mergedAt: null, closedAt: null, mergeCommit: null, installation: '99', updatedAt: at(0), title: 'Cache the tax table per region',
+  });
+  return recordRun(h.db, {
+    ref: REF, job: null, trigger: 'automatic', mode: 'full', dryRun: true, headSha: HEAD, baseSha: HEAD, baseBranch: 'main',
+    outcome: 'ok', failureStage: null, failureCode: null, needsHuman: false, highestScore: 30, body: '', comments: [],
+    result: { findings: [], verdict: { threshold: 70 } },
+    usage: { calls: 1, inputTokens: 10, outputTokens: 5, cachedTokens: 0, cost: 0.084 }, startedAt: at(-700), finishedAt: at(-659),
+  });
+}
+
+test('one review and the reviews of its pull request are read behind a session, by a viewer too', async () => {
+  const h = await harness();
+  const run = await oneRun(h);
+  for (const path of [`/api/reviews/${run}`, '/api/pulls/acme/shop/7/reviews']) {
+    assert.deepEqual(await h.send('GET', path), error(401, 'signed_out'), path);
+  }
+  const { cookie } = await h.signIn();
+  const one = await h.send('GET', `/api/reviews/${run}`, { cookie });
+  assert.deepEqual([one.status, one.headers], [200, JSON_HEADERS]);
+  const body = JSON.parse(String(one.body)) as { run: number; pullRequest: { repository: string } };
+  assert.deepEqual([body.run, body.pullRequest.repository], [run, 'acme/shop']);
+  const list = await h.send('GET', '/api/pulls/acme/shop/7/reviews', { cookie });
+  assert.deepEqual([list.status, list.headers], [200, JSON_HEADERS]);
+  assert.equal((JSON.parse(String(list.body)) as { total: number }).total, 1);
+  assert.deepEqual(await h.send('GET', '/api/pulls/Acme/Shop/7/reviews', { cookie }), list);
+  assert.deepEqual(await h.send('GET', '/api/reviews/999999', { cookie }), error(404, 'not_found'));
+  await h.db.close();
+});
+
+test('a review path a person types wrongly is not found and reads nothing, and another method is refused', async () => {
+  const h = await harness();
+  const { cookie } = await h.signIn();
+  h.statements.length = 0;
+  for (const path of [
+    '/api/reviews/0', '/api/reviews/007', '/api/reviews/2147483648', '/api/reviews/7x', '/api/reviews/7/', '/api/reviews/',
+    '/api/pulls/acme/shop/128/reviews/', '/api/pulls/acme/shop/0/reviews', '/api/pulls/acme/sh%6fp/128/reviews', '/api/pulls/acme/shop/128',
+    '/api/pulls/a/b/c/1/reviews',
+  ]) {
+    assert.deepEqual(await h.send('GET', path, { cookie }), error(404, 'not_found'), path);
+  }
+  for (const [method, path] of [['POST', '/api/reviews/7'], ['DELETE', '/api/pulls/acme/shop/7/reviews']] as const) {
+    assert.deepEqual(await h.send(method, path, { cookie }), error(405, 'method_not_allowed', { allow: 'GET' }), `${method} ${path}`);
+  }
+  assert.deepEqual(h.statements, []);
+  await h.db.close();
+});
+
+test('a handler of the review routes that fails is internal_error, logged with its route name only', async () => {
+  const h = await harness();
+  const run = await oneRun(h);
+  const { cookie } = await h.signIn();
+  const before = h.logs.length;
+  for (const [path, text] of [[`/api/reviews/${run}`, 'left join visto_ai.jobs j'], ['/api/pulls/acme/shop/7/reviews', 'row_number() over']] as const) {
+    h.failing.text = text;
+    assert.deepEqual(await h.send('GET', path, { cookie }), error(500, 'internal_error'), path);
+  }
+  assert.deepEqual(h.logs.slice(before), [
+    { event: 'ui_failed', route: 'review', reason: 'db_down' },
+    { event: 'ui_failed', route: 'pull_reviews', reason: 'db_down' },
+  ]);
+  h.failing.text = null;
+  await h.db.close();
+});
+
+// -- the settings routes (the plan "The UI's Settings", task 6) --------------------------------------------------------
+
+/** An admin's session on a harness with settings: its cookie and token. */
+async function adminSession(h: Harness): Promise<{ cookie: string; csrf: string }> {
+  await account(h, 'octo-admin', 'admin');
+  const { cookie, id } = await passwordSignIn(h, 'octo-admin');
+  return { cookie, csrf: tokenOf(id) };
+}
+const putOf = (version: number, changes: unknown[]): string => JSON.stringify({ version, changes });
+const recordLength = async (h: Harness): Promise<number> => (await h.db.query('select 1 from visto_ai.setting_changes')).length;
+
+test('an admin reads the settings, saves a change, reads the record and the export', async () => {
+  const h = await harness(true, (real) => real, true);
+  const { cookie, csrf } = await adminSession(h);
+  const read = await h.send('GET', '/api/settings', { cookie });
+  assert.deepEqual([read.status, read.headers], [200, JSON_HEADERS]);
+  const view = JSON.parse(String(read.body)) as { version: number; defaults: Record<string, { value: unknown }> };
+  assert.equal(view.defaults['score.threshold']!.value, 70);
+  const saved = await h.send('PUT', '/api/settings', { cookie, csrf, type: JSON_TYPE, body: putOf(view.version, [{ scope: 'defaults', path: 'score.threshold', value: 65 }]) });
+  assert.deepEqual([saved.status, saved.headers], [200, JSON_HEADERS]);
+  const after = JSON.parse(String(saved.body)) as { version: number; defaults: Record<string, { value: unknown; source: { name: string } }> };
+  assert.deepEqual([after.version, after.defaults['score.threshold']!.value, after.defaults['score.threshold']!.source.name], [view.version + 1, 65, 'octo-admin']);
+  const changes = await h.send('GET', '/api/settings/changes', { cookie });
+  assert.equal(changes.status, 200);
+  const record = JSON.parse(String(changes.body)) as { changes: Array<{ path: string; before: string; after: string; by: string; name: string }>; next: null };
+  assert.deepEqual([record.changes[0]!.path, record.changes[0]!.before, record.changes[0]!.after, record.changes[0]!.by, record.changes[0]!.name], ['score.threshold', '70', '65', 'ui', 'octo-admin']);
+  assert.equal((await h.send('GET', '/api/settings/changes', { cookie, query: 'before=x' })).status, 400);
+  const exported = await h.send('GET', '/api/settings/export', { cookie });
+  assert.equal(exported.status, 200);
+  assert.match((JSON.parse(String(exported.body)) as { text: string }).text, /threshold: 65/);
+  await h.db.close();
+});
+
+test('a viewer is refused every settings route as forbidden, and a save without the token is csrf first', async () => {
+  const h = await harness(true, (real) => real, true);
+  const { cookie } = await h.signIn();
+  const id = SESSION_ID_OF.exec(cookie)?.[1] ?? '';
+  for (const [method, path] of [['GET', '/api/settings'], ['GET', '/api/settings/changes'], ['GET', '/api/settings/export']] as const) {
+    assert.deepEqual(await h.send(method, path, { cookie }), error(403, 'forbidden'), path);
+  }
+  const body = putOf(0, [{ scope: 'defaults', path: 'newHead' }]);
+  assert.deepEqual(await h.send('PUT', '/api/settings', { cookie, csrf: tokenOf(id), type: JSON_TYPE, body }), error(403, 'forbidden'));
+  assert.deepEqual(await h.send('PUT', '/api/settings', { cookie, type: JSON_TYPE, body }), error(403, 'csrf'));
+  assert.deepEqual(await h.send('PUT', '/api/settings', { type: JSON_TYPE, body }), error(401, 'signed_out'));
+  assert.deepEqual(await h.send('GET', '/api/settings'), error(401, 'signed_out'));
+  await h.db.close();
+});
+
+test('a save is refused with each issue at its setting, as changed when another came first, and as bad_request when its body is not of its shape; nothing is stored then', async () => {
+  const h = await harness(true, (real) => real, true);
+  const { cookie, csrf } = await adminSession(h);
+  const version = await settingsVersion(h.db);
+  const length = await recordLength(h);
+  const put = (body: string, type = JSON_TYPE) => h.send('PUT', '/api/settings', { cookie, csrf, type, body });
+  const before = h.logs.length;
+
+  const invalid = await put(putOf(version, [{ scope: 'defaults', path: 'gate.enabled', value: true }]));
+  assert.deepEqual([invalid.status, invalid.headers], [422, JSON_HEADERS]);
+  const body = JSON.parse(String(invalid.body)) as { error: string; issues: Array<{ scope: unknown; path: unknown; message: string }> };
+  assert.equal(body.error, 'invalid');
+  assert.ok(body.issues.some((issue) => issue.scope === 'defaults' && issue.path === 'gate.branches'), JSON.stringify(body.issues));
+  assert.equal(await recordLength(h), length);
+
+  assert.deepEqual(await put(putOf(version - 1, [{ scope: 'defaults', path: 'score.threshold', value: 66 }])), { status: 409, headers: JSON_HEADERS, body: '{"error":"changed"}' });
+  assert.equal(await recordLength(h), length);
+
+  assert.deepEqual(await put(putOf(version, [{ scope: 'defaults', path: 'nope', value: 1 }])), error(400, 'bad_request'));
+  assert.deepEqual(await put('[]'), error(400, 'bad_request'));
+  assert.deepEqual(await put('{', JSON_TYPE), error(400, 'bad_request'));
+  assert.deepEqual(await put(putOf(version, [{ scope: 'defaults', path: 'newHead' }]), 'text/plain'), error(415, 'not_json'));
+  assert.equal(await recordLength(h), length);
+
+  const lines = h.logs.slice(before).filter((e) => e.event === 'settings_save');
+  assert.deepEqual(lines, [{ event: 'settings_save', outcome: 'invalid', changes: 1 }, { event: 'settings_save', outcome: 'changed', changes: 1 }]);
+  assert.equal(h.logs.slice(before).length, 2);
+  assert.ok(!JSON.stringify(h.logs).includes('octo-admin'));
+  await h.db.close();
+});
+
+test('a save that fails after the version check is internal_error, logged as settings_save with its short code only', async () => {
+  const h = await harness(true, (real) => real, true);
+  const { cookie, csrf } = await adminSession(h);
+  const version = await settingsVersion(h.db);
+  h.failing.text = 'insert into visto_ai.settings ';
+  const before = h.logs.length;
+  assert.deepEqual(await h.send('PUT', '/api/settings', { cookie, csrf, type: JSON_TYPE, body: putOf(version, [{ scope: 'defaults', path: 'score.threshold', value: 66 }]) }), error(500, 'internal_error'));
+  assert.deepEqual(h.logs.slice(before), [{ event: 'ui_failed', route: 'settings_save', reason: 'db_down' }]);
+  for (const [path, text, route] of [['/api/settings', 'from visto_ai.settings order by scope', 'settings'], ['/api/settings/changes', 'from visto_ai.setting_changes where', 'settings_changes']] as const) {
+    h.failing.text = text;
+    const mark = h.logs.length;
+    assert.deepEqual(await h.send('GET', path, { cookie }), error(500, 'internal_error'), path);
+    assert.deepEqual(h.logs.slice(mark), [{ event: 'ui_failed', route, reason: 'db_down' }]);
+  }
+  h.failing.text = null;
+  await h.db.close();
+});
+
+test('the settings route takes GET and PUT, and refuses another with both in allow', async () => {
+  const h = await harness(true, (real) => real, true);
+  const { cookie, csrf } = await adminSession(h);
+  h.statements.length = 0;
+  for (const [method, path, allow] of [
+    ['DELETE', '/api/settings', 'GET, PUT'], ['POST', '/api/settings', 'GET, PUT'], ['PATCH', '/api/settings', 'GET, PUT'],
+    ['POST', '/api/settings/export', 'GET'], ['PUT', '/api/settings/changes', 'GET'],
+  ] as const) {
+    assert.deepEqual(await h.send(method, path, { cookie, csrf }), error(405, 'method_not_allowed', { allow }), `${method} ${path}`);
+  }
+  assert.deepEqual(h.statements, []);
+  assert.equal(METHODS.get('/api/settings'), 'GET, PUT');
+  await h.db.close();
+});
+
+test('without settings given, the four routes are not found and read nothing', async () => {
+  const h = await harness();
+  const { cookie } = await h.signIn();
+  const id = SESSION_ID_OF.exec(cookie)?.[1] ?? '';
+  h.statements.length = 0;
+  for (const [method, path] of [['GET', '/api/settings'], ['PUT', '/api/settings'], ['GET', '/api/settings/changes'], ['GET', '/api/settings/export'], ['DELETE', '/api/settings']] as const) {
+    assert.deepEqual(await h.send(method, path, { cookie, csrf: tokenOf(id), type: JSON_TYPE, body: '{}' }), error(404, 'not_found'), `${method} ${path}`);
+  }
+  assert.deepEqual(h.statements, []);
+  await h.db.close();
+});
+
+// -- the overview, health, repositories, quality and memory routes (the plan "The UI's Overview, Repositories and Memory", task 8) --
+
+const INSIGHT_READS: ReadonlyArray<readonly [string, string[]]> = [
+  ['/api/overview', ['now', 'days', 'reviews', 'spend']], ['/api/health', ['now', 'dependencies', 'open', 'recent']], ['/api/repositories', ['now', 'repositories']],
+  ['/api/repositories/acme/shop/quality', ['now', 'state', 'quality']], ['/api/memory', ['now', 'learning', 'counts', 'total', 'records', 'next']],
+];
+
+test('the overview, health, repositories, quality and memory are read behind a session, by a viewer too', async () => {
+  const h = await harness(true, (real) => real, false, true);
+  for (const [path] of INSIGHT_READS) assert.deepEqual(await h.send('GET', path), error(401, 'signed_out'), path);
+  const { cookie } = await h.signIn();
+  for (const [path, keys] of INSIGHT_READS) {
+    const answer = await h.send('GET', path, { cookie });
+    assert.deepEqual([answer.status, answer.headers], [200, JSON_HEADERS], path);
+    for (const key of keys) assert.ok(Object.hasOwn(JSON.parse(String(answer.body)) as object, key), `${path} ${key}`);
+  }
+  assert.deepEqual(await h.send('GET', '/api/overview', { cookie, query: 'days=0' }), error(400, 'bad_request'));
+  assert.deepEqual(await h.send('GET', '/api/repositories/Acme/Shop/quality', { cookie, query: 'days=0' }), error(400, 'bad_request'));
+  assert.deepEqual(await h.send('GET', '/api/memory', { cookie, query: 'kind=nope' }), error(400, 'bad_request'));
+  await h.db.close();
+});
+
+test('a record is switched by an admin with the token, and refused to a viewer, without the token, or with a body of another shape', async () => {
+  const h = await harness(true, (real) => real, false, true);
+  await addRecords(h.db, { service: 'github', owner: 'acme', repo: 'shop' }, [{
+    kind: 'human_signal', sourceRef: 'ref-1', number: 7, path: 'src/cart.ts', directory: 'src', category: 'money', reason: 'r', missed: true,
+    excerpt: 'the cart rounds', comment: null, createdAt: at(-60), expiresAt: at(86400 * 30),
+  }]);
+  const [{ id }] = (await h.db.query<{ id: number }>('select id from visto_ai.memory_records')) as [{ id: number }];
+  const { cookie: viewer, id: viewerId } = await (async () => { await account(h, 'octo-viewer', 'viewer'); return passwordSignIn(h, 'octo-viewer'); })();
+  const admin = await adminSession(h);
+  const put = (c: string, extra: Sent) => h.send('PUT', `/api/memory/${id}`, { cookie: c, type: JSON_TYPE, ...extra });
+  const body = JSON.stringify({ on: false });
+  const before = h.statements.length;
+  assert.deepEqual(await put(viewer, { csrf: tokenOf(viewerId), body }), error(403, 'forbidden'));
+  assert.deepEqual(await put(admin.cookie, { body }), error(403, 'csrf'));
+  assert.deepEqual(await h.send('PUT', `/api/memory/${id}`, { type: JSON_TYPE, body }), error(401, 'signed_out'));
+  assert.equal(h.statements.slice(before).some((t) => t.includes('update visto_ai.memory_records')), false);
+  assert.deepEqual(await put(admin.cookie, { csrf: admin.csrf, body: JSON.stringify({ on: 'no' }) }), error(400, 'bad_request'));
+  assert.deepEqual(await put(admin.cookie, { csrf: admin.csrf, body: '[]' }), error(400, 'bad_request'));
+  assert.deepEqual(await put(admin.cookie, { csrf: admin.csrf, body: 'x' }), error(400, 'bad_request'));
+  assert.deepEqual(await put(admin.cookie, { csrf: admin.csrf, body, type: 'text/plain' }), error(415, 'not_json'));
+  const done = await put(admin.cookie, { csrf: admin.csrf, body });
+  assert.deepEqual([done.status, done.headers], [200, JSON_HEADERS]);
+  assert.equal((JSON.parse(String(done.body)) as { record: { id: number; on: boolean } }).record.on, false);
+  assert.deepEqual(await h.db.query('select status, switched_by from visto_ai.memory_records'), [{ status: 'disabled', switched_by: 'octo-admin' }]);
+  assert.deepEqual(await h.send('PUT', `/api/memory/${id + 1000}`, { cookie: admin.cookie, csrf: admin.csrf, type: JSON_TYPE, body }), error(404, 'not_found'));
+  await h.db.close();
+});
+
+test('a path of these routes typed wrongly is not found and reads nothing, and another method is refused', async () => {
+  const h = await harness(true, (real) => real, false, true);
+  const { cookie } = await h.signIn();
+  h.statements.length = 0;
+  for (const path of [
+    '/api/repositories/acme/shop/quality/', '/api/repositories/acme/quality', '/api/repositories/acme/sh%6fp/quality', '/api/repositories/', '/api/repositories/a/b/c/quality',
+    '/api/memory/007', '/api/memory/0', '/api/memory/2147483648', '/api/memory/x', '/api/memory/',
+  ]) {
+    assert.deepEqual(await h.send('GET', path, { cookie }), error(404, 'not_found'), path);
+  }
+  for (const [method, path, allow] of [
+    ['POST', '/api/overview', 'GET'], ['PUT', '/api/health', 'GET'], ['DELETE', '/api/repositories', 'GET'], ['POST', '/api/memory', 'GET'],
+    ['POST', '/api/repositories/acme/shop/quality', 'GET'], ['DELETE', '/api/memory/7', 'PUT'], ['GET', '/api/memory/7', 'PUT'],
+  ] as const) {
+    assert.deepEqual(await h.send(method, path, { cookie }), error(405, 'method_not_allowed', { allow }), `${method} ${path}`);
+  }
+  assert.deepEqual(h.statements, []);
+  await h.db.close();
+});
+
+test('without insight the six routes are not found and read nothing', async () => {
+  const h = await harness();
+  const { cookie } = await h.signIn();
+  const id = SESSION_ID_OF.exec(cookie)?.[1] ?? '';
+  h.statements.length = 0;
+  for (const [method, path] of [
+    ['GET', '/api/overview'], ['GET', '/api/health'], ['GET', '/api/repositories'], ['GET', '/api/repositories/acme/shop/quality'], ['GET', '/api/memory'], ['PUT', '/api/memory/7'],
+  ] as const) {
+    assert.deepEqual(await h.send(method, path, { cookie, csrf: tokenOf(id), type: JSON_TYPE, body: '{"on":false}' }), error(404, 'not_found'), `${method} ${path}`);
+  }
+  assert.deepEqual(h.statements, []);
+  await h.db.close();
+});
+
+test('a handler of these routes that fails is internal_error, logged with its route name only', async () => {
+  const h = await harness(true, (real) => real, false, true);
+  const { cookie } = await h.signIn();
+  const before = h.logs.length;
+  for (const [path, text] of [['/api/health', 'from visto_ai.dependency_health'], ['/api/memory', 'from visto_ai.memory_records r']] as const) {
+    h.failing.text = text;
+    assert.deepEqual(await h.send('GET', path, { cookie }), error(500, 'internal_error'), path);
+  }
+  assert.deepEqual(h.logs.slice(before), [
+    { event: 'ui_failed', route: 'health', reason: 'db_down' },
+    { event: 'ui_failed', route: 'memory', reason: 'db_down' },
+  ]);
+  h.failing.text = null;
   await h.db.close();
 });

@@ -64,3 +64,19 @@ test('an alert that returns a rejected promise leaves no rejection unhandled', a
     process.off('unhandledRejection', listener);
   }
 });
+
+test('the health tells its note of what it was told, every time, and a note that throws changes nothing', () => {
+  const alerts: unknown[][] = [];
+  const notes: unknown[][] = [];
+  const health = createMemoryHealth((code, details) => { alerts.push([code, details]); }, (...args) => { notes.push(args); });
+  health.noted(false, 'timeout');
+  health.noted(false, 'timeout');
+  health.noted(true, 'ok');
+  assert.deepEqual(notes, [[false, 'timeout'], [false, 'timeout'], [true, 'ok']]);
+  assert.deepEqual(alerts, [['memory_error', { reason: 'timeout' }], ['memory_ok', undefined]]);
+  const after: unknown[][] = [];
+  const throwing = createMemoryHealth((code) => { after.push([code]); }, () => { throw new Error('note'); });
+  assert.doesNotThrow(() => throwing.noted(false, 'timeout'));
+  assert.doesNotThrow(() => throwing.noted(true, 'ok'));
+  assert.deepEqual(after, [['memory_error'], ['memory_ok']]);
+});

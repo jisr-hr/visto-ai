@@ -1,12 +1,24 @@
 // The UI's route: the built files, the sign-in routes, the JSON reads of the frame and Activity, and the accounts, under one
-// group (UI design 3.1, 3.2 and 5; calls 12, 13, 17, 23, 27 and 30; the password design 4.1, 4.3 and 4.5, calls 19 to 21). Every
-// answer is built by headers.ts or files.ts. No answer or log line holds a name, a login, a password or a hash, but the one-time
-// password in the answer of the route that made it.
+// group (UI design 3.1, 3.2 and 5; calls 12, 13, 17, 23, 27 and 30; the password design 4.1, 4.3 and 4.5, calls 19 to 21); the
+// two routes of the page of one review, GET /api/reviews/<run> and GET /api/pulls/<owner>/<repo>/<number>/reviews (the plan "The
+// UI, One Review", calls 18 and 19); the four of Settings (the plan "The UI's Settings"); and the six of the plan "The UI's
+// Overview, Repositories and Memory" (call 34): GET /api/overview, /api/health, /api/repositories,
+// /api/repositories/<owner>/<repo>/quality and /api/memory, and PUT /api/memory/<id>, an admin's change. Every answer is built by
+// headers.ts or files.ts. No log line holds a name, a login, a password or a hash. A name or a login is in the accounts' answers,
+// in `/api/me` (the signed-in name), in Activity's rows (the requester's login), in the two review routes' (whose logins, texts
+// and limits are call 16's), in Settings' answers (who saved each setting and each change, and the accounts `ui.accounts` lets in),
+// and in Memory's records (the login of whoever wrote the words of a record of people stepping in), and in no other; the one-time
+// password is in the answer of the route that made it only.
 import { codeOf } from '../shell/codes.ts';
 import type { UiAnswer, UiRequest, UiRoute } from '../shell/http.ts';
 import { accountOf } from './accounts.ts';
 import type { AccountChanges, Actor, Made, Refusal } from './accounts.ts';
 import { activity, me, reviews } from './api.ts';
+import { memory, switchMemory, switchOf } from './memory.ts';
+import { health, overview } from './overview.ts';
+import { quality, repositories } from './quality.ts';
+import type { InsightDeps } from './insight.ts';
+import { pullReviews, review } from './review.ts';
 import type { ApiDeps } from './api.ts';
 import type { AccountAnswer, Accounts, OneTime, Role, Ways } from './api-types.ts';
 import { CSRF_HEADER, cookiesOf, csrfOk } from './auth.ts';
@@ -15,17 +27,35 @@ import { fileAnswer } from './files.ts';
 import type { UiFiles } from './files.ts';
 import { SECURITY_HEADERS, json, redirect } from './headers.ts';
 import type { PasswordAuth } from './password-auth.ts';
+import { saveOf, saveSettings, settingChanges, settingsExport, settingsView } from './settings.ts';
+import type { SettingsApiDeps } from './settings.ts';
 
 /** The fixed name a failed handler is logged with (call 30). */
-type Handler = 'me' | 'activity' | 'reviews' | 'signout' | 'ways' | 'own_password' | 'accounts' | 'account_new' | 'account_role' | 'account_reset' | 'account_remove';
+type Handler = 'me' | 'activity' | 'reviews' | 'signout' | 'ways' | 'own_password' | 'accounts' | 'account_new' | 'account_role' | 'account_reset' | 'account_remove' | 'review' | 'pull_reviews'
+  | 'settings' | 'settings_save' | 'settings_changes' | 'settings_export' | 'overview' | 'health' | 'repositories' | 'quality' | 'memory' | 'memory_switch';
 
-/** The API's paths, each with the one method it answers. A path here with no case of its own below is not found. */
+/** The API's paths, each with the methods it answers (one, or several as `GET, PUT`). A path here with no case of its own below is not found. */
 export const METHODS: ReadonlyMap<string, string> = new Map([
   ['/api/auth/ways', 'GET'], ['/api/auth/start', 'GET'], ['/api/auth/callback', 'GET'],
   ['/api/auth/password', 'POST'], ['/api/auth/first-password', 'POST'], ['/api/auth/signout', 'POST'],
   ['/api/me', 'GET'], ['/api/me/password', 'POST'], ['/api/activity', 'GET'], ['/api/reviews', 'GET'],
   ['/api/accounts', 'GET'], ['/api/accounts/new', 'POST'], ['/api/accounts/role', 'POST'], ['/api/accounts/reset', 'POST'], ['/api/accounts/remove', 'POST'],
+  ['/api/settings', 'GET, PUT'], ['/api/settings/changes', 'GET'], ['/api/settings/export', 'GET'],
+  ['/api/overview', 'GET'], ['/api/health', 'GET'], ['/api/repositories', 'GET'], ['/api/memory', 'GET'],
 ]);
+
+/** The settings' paths: with no settings given they are not found. */
+const SETTINGS_PATHS: ReadonlySet<string> = new Set(['/api/settings', '/api/settings/changes', '/api/settings/export']);
+/** The insight routes' exact paths: with no insight given they are not found. */
+const INSIGHT_PATHS: ReadonlySet<string> = new Set(['/api/overview', '/api/health', '/api/repositories', '/api/memory']);
+
+/** The paths of one review and of a pull request's reviews: a run, and an owner, a repo and a number, written as a person types them. */
+export const ONE_REVIEW = /^\/api\/reviews\/([1-9][0-9]{0,9})$/;
+export const REPOSITORY_QUALITY = /^\/api\/repositories\/([^/]+)\/([^/]+)\/quality$/;
+export const MEMORY_RECORD = /^\/api\/memory\/([1-9][0-9]{0,9})$/;
+export const PULL_REVIEWS = /^\/api\/pulls\/([^/]+)\/([^/]+)\/([1-9][0-9]{0,9})\/reviews$/;
+/** An owner or a repo, lower-cased, as GitHub writes them. */
+const NAME = /^[a-z0-9_.-]{1,100}$/;
 
 /** The status each refusal of an account change answers with. `bad_login` is the command's: the API names an account by its id. */
 const REFUSED: Readonly<Record<Refusal, number>> = {
@@ -98,7 +128,7 @@ const ADMIN_CHANGE: Needs = { change: true, admin: true };
 
 export function createUiRoute(deps: {
   auth: Auth; passwords: PasswordAuth; accounts: AccountChanges; api: ApiDeps; files: UiFiles;
-  ui: { publicUrl: string; github: boolean }; log: (entry: Record<string, unknown>) => void;
+  ui: { publicUrl: string; github: boolean }; settings?: SettingsApiDeps; insight?: InsightDeps; log: (entry: Record<string, unknown>) => void;
 }): UiRoute {
   const { auth, passwords, accounts, api, files } = deps;
 
@@ -153,7 +183,7 @@ export function createUiRoute(deps: {
     account: accountOf(made.account, api.clock(), session.accountId), oneTimePassword: made.oneTimePassword, expiresAt: made.expiresAt,
   });
 
-  /** An account change behind a session, the token and the admin role, with a body of its shape (rule 1). */
+  /** An admin's change (an account's or the settings') behind a session, the token and the admin role, with a body of its shape (rule 1). */
   function change<T>(request: UiRequest, handler: Handler, shape: (body: Body) => T | null, work: (session: Session, given: T) => Promise<UiAnswer>): Promise<UiAnswer> {
     return behindSession(request, handler, ADMIN_CHANGE, (session) => withBody(request, async (body) => {
       const given = shape(body);
@@ -161,15 +191,63 @@ export function createUiRoute(deps: {
     }));
   }
 
+  /** A save: an admin's change with a body of its shape, by the session's login. */
+  const saveRoute = (request: UiRequest): Promise<UiAnswer> =>
+    change(request, 'settings_save', saveOf, (session, save) => saveSettings(deps.settings!, session.login, save));
+
   return async (request) => {
     const { method, path } = request;
     // A method other than GET is the files' own refusal.
     if (path === '/') return method === 'GET' ? redirect('/ui/') : fileAnswer(files, method, path);
     if (path === '/ui' || path.startsWith('/ui/')) return fileAnswer(files, method, path);
+    if (path.startsWith('/api/reviews/') || path.startsWith('/api/pulls/')) {
+      const run = ONE_REVIEW.exec(path);
+      const pull = run === null ? PULL_REVIEWS.exec(path) : null;
+      const number = pull === null ? 0 : Number(pull[3]);
+      const owner = pull === null ? '' : pull[1]!.toLowerCase();
+      const repo = pull === null ? '' : pull[2]!.toLowerCase();
+      const valid = run !== null ? Number(run[1]) <= MAX_ID : pull !== null && number <= MAX_ID && NAME.test(owner) && NAME.test(repo);
+      if (!valid) return refused(404, 'not_found');
+      if (method !== 'GET') return refused(405, 'method_not_allowed', { allow: 'GET' });
+      if (run !== null) {
+        return behindSession(request, 'review', READ, async () => {
+          const found = await review(api, Number(run[1]));
+          return found === null ? refused(404, 'not_found') : json(200, found);
+        });
+      }
+      return behindSession(request, 'pull_reviews', READ, async () => json(200, await pullReviews(api, { service: 'github', owner, repo, number })));
+    }
+    if (path.startsWith('/api/repositories/') || path.startsWith('/api/memory/')) {
+      const found = REPOSITORY_QUALITY.exec(path);
+      const record = found === null ? MEMORY_RECORD.exec(path) : null;
+      const owner = found === null ? '' : found[1]!.toLowerCase();
+      const repo = found === null ? '' : found[2]!.toLowerCase();
+      const valid = found !== null ? NAME.test(owner) && NAME.test(repo) : record !== null && Number(record[1]) <= MAX_ID;
+      if (!valid || deps.insight === undefined) return refused(404, 'not_found');
+      const insight = deps.insight;
+      if (found !== null) {
+        if (method !== 'GET') return refused(405, 'method_not_allowed', { allow: 'GET' });
+        return behindSession(request, 'quality', READ, async () => {
+          const answer = await quality(insight, `${owner}/${repo}`, new URLSearchParams(request.query));
+          return answer === 'bad_request' ? refused(400, 'bad_request') : json(200, answer);
+        });
+      }
+      if (method !== 'PUT') return refused(405, 'method_not_allowed', { allow: 'PUT' });
+      const id = Number(record![1]);
+      return behindSession(request, 'memory_switch', ADMIN_CHANGE, (session) => withBody(request, async (body) => {
+        const given = switchOf(body);
+        if (given === null) return refused(400, 'bad_request');
+        const switched = await switchMemory({ ...insight, log: deps.log }, id, given.on, session.login);
+        return switched === null ? refused(404, 'not_found') : json(200, { record: switched });
+      }));
+    }
     const allowed = METHODS.get(path);
     if (allowed === undefined) return refused(404, 'not_found');
     // Before any read: a known path with another method is refused whoever asks.
-    if (method !== allowed) return refused(405, 'method_not_allowed', { allow: allowed });
+    // The settings routes are there only when the settings are given.
+    if (SETTINGS_PATHS.has(path) && deps.settings === undefined) return refused(404, 'not_found');
+    if (INSIGHT_PATHS.has(path) && deps.insight === undefined) return refused(404, 'not_found');
+    if (!allowed.split(', ').includes(method)) return refused(405, 'method_not_allowed', { allow: allowed });
     switch (path) {
       case '/api/auth/ways':
         return guarded('ways', async () => json(200, { github: deps.ui.github } satisfies Ways));
@@ -222,6 +300,29 @@ export function createUiRoute(deps: {
         return change(request, 'account_remove', idOf, async (session, id) => {
           const gone = await accounts.remove(actorOf(session), id);
           return typeof gone === 'string' ? refusal(gone) : noContent();
+        });
+      case '/api/settings':
+        return method === 'PUT' ? saveRoute(request) : behindSession(request, 'settings', ADMIN_READ, async () => json(200, await settingsView(deps.settings!)));
+      case '/api/settings/changes':
+        return behindSession(request, 'settings_changes', ADMIN_READ, async () => {
+          const found = await settingChanges(deps.settings!, new URLSearchParams(request.query));
+          return found === 'bad_request' ? refused(400, 'bad_request') : json(200, found);
+        });
+      case '/api/settings/export':
+        return behindSession(request, 'settings_export', ADMIN_READ, async () => json(200, settingsExport(deps.settings!)));
+      case '/api/overview':
+        return behindSession(request, 'overview', READ, async () => {
+          const found = await overview(deps.insight!, new URLSearchParams(request.query));
+          return found === 'bad_request' ? refused(400, 'bad_request') : json(200, found);
+        });
+      case '/api/health':
+        return behindSession(request, 'health', READ, async () => json(200, await health(deps.insight!)));
+      case '/api/repositories':
+        return behindSession(request, 'repositories', READ, async () => json(200, await repositories(deps.insight!)));
+      case '/api/memory':
+        return behindSession(request, 'memory', READ, async () => {
+          const found = await memory(deps.insight!, new URLSearchParams(request.query));
+          return found === 'bad_request' ? refused(400, 'bad_request') : json(200, found);
         });
       default:
         // A path of METHODS with no case of its own reads nothing.

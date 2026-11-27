@@ -7,7 +7,7 @@ export interface MemoryHealth {
 }
 
 /** One state, in this process: an alert at the first failure, and one at the first success after it. */
-export function createMemoryHealth(alert: Alert): MemoryHealth {
+export function createMemoryHealth(alert: Alert, note?: (ok: boolean, code: string) => void): MemoryHealth {
   let failing = false;
 
   function raise(code: string, details?: Record<string, string>): void {
@@ -24,6 +24,7 @@ export function createMemoryHealth(alert: Alert): MemoryHealth {
       failing = !ok;
       if (!ok && !wasFailing) raise('memory_error', { reason: typeof code === 'string' && isShortCode(code) ? code : 'internal_error' });
       else if (ok && wasFailing) raise('memory_ok');
+      try { note?.(ok, code); } catch { /* a note that throws changes nothing */ }
     },
   };
 }

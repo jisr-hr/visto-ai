@@ -2610,6 +2610,55 @@ test('the health is told once for a review: an error of either part is a failure
   assert.deepEqual([resumed.inputs.length, told], [0, []]);
 });
 
+// The second scorer's state (the UI plan's Overview, call 12).
+/** An engine that holds a scorer; the scorer is never asked, as the review is the harness's. */
+const SCORED = (): ReviewDeps => ({ scorer: { score: () => Promise.reject(new Error('not_expected')) } }) as unknown as ReviewDeps;
+const scorerAudit = (action: string, reason: string, subject = 'a.ts') => ({ stage: 'scorer', action, subject, reason });
+
+test('with a second scorer, the review job notes how it did from the audit, and without one notes nothing', async () => {
+  const cases: Array<[string, Partial<ReviewResult>, boolean, unknown[][]]> = [
+    ['a file failed', { audit: [scorerAudit('file_failed', 'timeout')] }, true, [[false, 'timeout']]],
+    ['the first of two', { audit: [scorerAudit('file_not_asked', 'stopped', 'b.ts'), scorerAudit('file_failed', 'timeout')] }, true, [[false, 'stopped']]],
+    ['no scorer entry, calls 2', { audit: [{ stage: 'context', action: 'file_failed', subject: 'a.ts', reason: 'timeout' }] }, true, [[true, 'ok']]],
+    ['another action', { audit: [scorerAudit('file_scored', 'timeout')] }, true, [[true, 'ok']]],
+    ['no call', { audit: [], usage: NO_CALLS }, true, []],
+    ['a reason that is no code', { audit: [scorerAudit('file_failed', 'Not A Code')] }, true, [[true, 'ok']]],
+    ['a reason that is no code, then one that is', { audit: [scorerAudit('file_failed', 'Not A Code'), scorerAudit('file_failed', 'timeout', 'b.ts')] }, true, [[false, 'timeout']]],
+    ['a reason that is no code, no call', { audit: [scorerAudit('file_failed', 'Not A Code')], usage: NO_CALLS }, true, []],
+    ['no scorer in the engine', { audit: [scorerAudit('file_failed', 'timeout')] }, false, []],
+    ['no scorer in the engine, calls 2', { audit: [] }, false, []],
+  ];
+  let number = 300;
+  for (const [label, over, scored, expected] of cases) {
+    for (const dryRun of [true, false]) {
+      number += 1;
+      const told: unknown[][] = [];
+      const h = await harness({ pullRequest: number, dryRun, result: okResult(over) });
+      if (scored) h.deps.engineDeps = SCORED;
+      await runReviewJob(h.job, { ...h.deps, scorerHealth: { noted: (...args) => { told.push(args); } } });
+      assert.deepEqual(told, expected, `${label} ${dryRun}`);
+    }
+  }
+  // A review an earlier start recorded tells nothing.
+  await recorded({ ref: { ...REF, number: 340 }, result: okResult({ audit: [scorerAudit('file_failed', 'timeout')] }) });
+  const told: unknown[][] = [];
+  const resumed = await live({ pullRequest: 340 });
+  resumed.deps.engineDeps = SCORED;
+  await runReviewJob(resumed.job, { ...resumed.deps, scorerHealth: { noted: (...args) => { told.push(args); } } });
+  assert.deepEqual([resumed.inputs.length, told], [0, []]);
+  // A health that throws changes nothing of the job.
+  const result = okResult({ audit: [scorerAudit('file_failed', 'timeout')] });
+  const plain = await live({ pullRequest: 341, result });
+  plain.deps.engineDeps = SCORED;
+  await runReviewJob(plain.job, plain.deps);
+  const throwing = await live({ pullRequest: 342, result });
+  throwing.deps.engineDeps = SCORED;
+  await runReviewJob(throwing.job, { ...throwing.deps, scorerHealth: { noted: () => { throw new Error('health_down'); } } });
+  const same = (x: Harness): Record<string, unknown> => ({ ...reviewLine(x), job: 0, number: 0, duration_ms: 0 });
+  assert.deepEqual(same(throwing), same(plain));
+  assert.equal((await getJob(db, throwing.job.id))?.outcome, 'published');
+});
+
 // Automatic approval.
 const APPROVING: RepoSettings = { ...SETTINGS, approval: { enabled: true, threads: 'strict', auditShare: 0 } };
 /** The pull request, from the repository itself: with an approvable result, every live condition of approval holds. */

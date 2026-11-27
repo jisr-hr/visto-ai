@@ -93,6 +93,54 @@ function fakeApi(over: Partial<Api> = {}) {
       calls.push(['removeAccount', csrf, id]);
       return notExpected();
     },
+    review: (run) => {
+      calls.push(['review', run]);
+      return over.review ? over.review(run) : Promise.reject(new RequestFailed(404, 'not_found'));
+    },
+    pullReviews: (repository, number) => {
+      calls.push(['pullReviews', repository, number]);
+      return over.pullReviews ? over.pullReviews(repository, number) : Promise.resolve({ now: '2026-03-01T10:00:00.000Z', total: 0, reviews: [] });
+    },
+    settings: () => {
+      calls.push(['settings']);
+      return over.settings ? over.settings() : Promise.reject(new RequestFailed(500, 'not_expected'));
+    },
+    saveSettings: (csrf, save) => {
+      calls.push(['saveSettings', csrf, save]);
+      return over.saveSettings ? over.saveSettings(csrf, save) : Promise.reject(new RequestFailed(500, 'not_expected'));
+    },
+    settingChanges: (before) => {
+      calls.push(['settingChanges', before]);
+      return over.settingChanges ? over.settingChanges(before) : Promise.reject(new RequestFailed(500, 'not_expected'));
+    },
+    settingsExport: () => {
+      calls.push(['settingsExport']);
+      return over.settingsExport ? over.settingsExport() : Promise.reject(new RequestFailed(500, 'not_expected'));
+    },
+    overview: (days) => {
+      calls.push(['overview', days]);
+      return over.overview ? over.overview(days) : Promise.reject(new RequestFailed(500, 'not_expected'));
+    },
+    health: () => {
+      calls.push(['health']);
+      return over.health ? over.health() : Promise.reject(new RequestFailed(500, 'not_expected'));
+    },
+    repositories: () => {
+      calls.push(['repositories']);
+      return over.repositories ? over.repositories() : Promise.reject(new RequestFailed(500, 'not_expected'));
+    },
+    quality: (repository, window) => {
+      calls.push(['quality', repository, window]);
+      return over.quality ? over.quality(repository, window) : Promise.reject(new RequestFailed(500, 'not_expected'));
+    },
+    memory: (query) => {
+      calls.push(['memory', query]);
+      return over.memory ? over.memory(query) : Promise.reject(new RequestFailed(500, 'not_expected'));
+    },
+    switchMemory: (csrf, id, on) => {
+      calls.push(['switchMemory', csrf, id, on]);
+      return over.switchMemory ? over.switchMemory(csrf, id, on) : Promise.reject(new RequestFailed(500, 'not_expected'));
+    },
   };
   const sent = (name: string): unknown[][] => calls.filter(([called]) => called === name);
   return { api, calls, sent };

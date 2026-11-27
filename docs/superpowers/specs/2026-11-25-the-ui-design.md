@@ -13,7 +13,7 @@ The people who run the service open it to see what the reviewer is doing now, wh
 5. **Memory.** The learned records (people stepped in, reverts, lessons) with their kind, text, place, source, dates and an on and off switch each (design 7, "every record has a kill switch in the UI").
 6. **Settings.** Every setting that is not a secret and not needed before the database is reached, editable, with what it does in plain words; secrets shown only as set or not set; who may open the UI.
 
-The mockups were drawn on a design canvas and are copied, as approved, into `2026-11-25-the-ui-mockups/` beside this document, one HTML file per screen (`Main` is the Overview). Every value in them is invented. They fix the screens' content and look: the columns, filters, cards and the grouping and wording of the Settings form; this document fixes everything else. The look: light by default with a dark theme a viewer switches, a soft gray-blue ground, white cards, an indigo accent, Inter for text and a monospace face for code, built with shadcn/ui on React.
+The mockups were drawn on a design canvas and are copied, as approved, into `2026-11-25-the-ui-mockups/` beside this document, one HTML file per screen (`Main` is the Overview). Every value in them is invented. They fix the screens' content and look: the columns, filters, cards and the grouping and wording of the Settings form; this document fixes everything else. The look: light by default with a dark theme a viewer switches, a soft gray-blue ground, white cards, an indigo accent, Inter for text and a monospace face for code, built with shadcn/ui on React. On 2026-11-27 the owner had the colours follow the project icon (`assets/icon.svg`): a pale green-gray ground and a dark green accent in the light theme, a deep green ground and the icon's mint in the dark one, and the icon itself beside the name and as the tab's icon. The mockups' indigo is replaced; the rest of their look stands.
 
 ## 2. What the owner decided
 
@@ -49,20 +49,20 @@ From the map of the code made for this stage. Each becomes a task of a plan:
 
 1. **A review's stage while it runs.** The job's row gains a stage (preparing; reviewing batch n of m, from the engine as its batches end; judging threads while a batch holding a thread owed a verdict has not ended; publishing) and the time it was reached; a claim clears it, and a running row the service does not hold reads as stopped.
 2. **A pull request's title**, stored with its facts on each delivery.
-3. **Alerts.** A table of alerts: code, short details (never a secret, a login or a text), when raised and when cleared. The alerts the service already raises are written there as well as logged and posted; an alert that has a pair (a dependency failing, then working) is cleared by its pair.
-4. **Dependency health.** A table holding each dependency's current status (the model's key check, the second scorer, memory, each extension, each MCP server, the app's permissions and events) and since when, written where the service already learns it.
+3. **Alerts.** A table of alerts: code, short details (never a secret, a login or a text), when raised and when cleared. The alerts the service already raises are written there as well as logged and posted; an alert that has a pair (a dependency failing, then working) is cleared by its pair. A dependency working again clears the alert of its pair through its stored state, and the alert that says so is not stored; alerts are kept 30 days.
+4. **Dependency health.** A table holding each dependency's current status (the model's key check, the second scorer, memory, each extension, each MCP server, the app's permissions and events) and since when, written where the service already learns it. The second scorer's state is read from each review's audit; a dependency the service did not start with is not listed.
 5. **Spend per day** over a window, and reviews per day, read from what is stored.
 6. **Feedback**, read back per review and per repository.
-7. **The kill switch** of a memory record, written by the UI and read by the next review (the status `disabled` the table already allows).
-8. **Live score quality.** The labels of design 6.6 (a block needed a person) are built from the stored human activity and the stored runs, and fed to the same pure measuring code the backtest uses. The stricter label needs the diff at the last head before the merge, which is not stored; the live numbers use each block's hash at the pull request's last review instead, and say so on the screen. They are computed on request for one repository and window, and cached for a few minutes.
-9. **A finding's thread state** is derived from what is stored (thread events in human activity, verdicts kept by later runs), not read from GitHub on each view.
+7. **The kill switch** of a memory record, written by the UI and read by the next review (the status `disabled` the table already allows). Admins switch a record; viewers see the switches. A switch is not a setting: the record keeps who switched it last and when, and no history.
+8. **Live score quality.** The labels of design 6.6 (a block needed a person) are built from the stored human activity and the stored runs, and fed to the same pure measuring code the backtest uses. The stricter label needs the diff at the last head before the merge, which is not stored; the live numbers use each block's hash at the pull request's last review instead, and say so on the screen. They are computed on request for one repository and window, and cached for a few minutes. The pull requests closed in the window, the newest 300, are measured at the repository's threshold in force, one computation at a time in the service, in bounded reads; a result is kept 5 minutes and a failure 1 minute.
+9. **A finding's thread state** is derived from what is stored (thread events in human activity, verdicts kept by later runs), not read from GitHub on each view. A thread event of a person and a verdict of a later published review are its signals; the newest decides, a person's event wins a tie, and with none the thread is open.
 
 ### 3.4 Calls the builder made on the design's check
 
 Each is reversible and listed for the owner.
 
 - **Dry run decides no approval.** The service in dry run works out no approval (it reads neither threads nor branch rules then). The UI says "Not decided in dry run" where a decision would stand, and counts no approval or audit for a dry-run review. Cost: a deployment trying the service in dry run sees no approval numbers until it goes live.
-- **Open and recent alerts.** An alert is open only while what it reports still holds: a dependency failing (until its pair says it works again), a permission or event missing (until a start finds it), a withdrawal that failed (while its failure is recorded), spend at 80% of the limit (until the day ends, UTC). Every other alert is listed under "Recent" for 7 days and is never open. Nobody clears an alert by hand. Cost: an alert that has no state behind it cannot be marked as dealt with.
+- **Open and recent alerts.** An alert is open only while what it reports still holds: a dependency failing (until its pair says it works again), a permission or event missing (until a start finds it), a withdrawal that failed (while its failure is recorded), spend at 80% of the limit (until the day ends, UTC). Spend at the limit is open as spend at 80% is, until the UTC day ends. Every other alert is listed under "Recent" for 7 days and is never open. Nobody clears an alert by hand. Cost: an alert that has no state behind it cannot be marked as dealt with.
 - **File and database that pass apart and clash together.** When the file passes on its own but the settings it leaves in the database make the whole refuse (for example the UI switched approval on with an audit share above 0, and the file later drops `auditKey`), the start is refused with each issue and a sentence saying which settings clash and that writing them in `config.yml` settles it (a setting changed in the file wins at the next start). Cost: the service and its UI are down until the file is fixed.
 - **An audited pull request "needed a person"** when, after its review, any of its blocks or files is labelled as needing a person by design 6.6's strict label, or it was later reverted. The count shows how many audits there were and how many of them needed a person, each with its count. Cost: an audit a person read and found fine leaves no trace, so a low count means "nobody stepped in", not "a person checked".
 
@@ -72,10 +72,11 @@ Each is reversible and listed for the owner.
 
 - **In the database, editable in the UI:** `dryRun`, `learning`, `limits`, the model's non-secret fields (endpoint, model, fallbacks, effort, extra body and headers that are not secret references, prices, time limit, how the answer is asked for), the second scorer's non-secret fields and its threshold, and the repository defaults and every override (branches, ignored authors, "Reviewed on every push", how a new commit is reviewed, threshold, inline notes, the merge gate, automatic approval, the thread rule, the audit share).
 - **In `config.yml` only, shown read-only:** what the service needs before it reaches the database or that holds a secret by reference: `app` (id, key, webhook secret, client id and secret), `database`, `server`, `alerts`, `auditKey`, `extensions`, `mcpServers`, and `ui` (who may open it). Secret values are never shown; the UI shows each secret's variable name and whether it is set.
+- **As built:** the model's and the second scorer's endpoints (`model.baseUrl`, `scorer.baseUrl`) are not editable: they stay in `config.yml`, shown read only, because the API keys are sent to them and an admin who could change them could send the keys to an address of their choosing. The second scorer is on while one of its keys (`scorer.model`, `scorer.timeoutSeconds`) is in the database; its key stays in `config.yml`. An override key that names no repository (not `<owner>/<name>`) is not copied.
 
 ### 4.2 One validation
 
-A save is the whole set of editable settings, merged with the file-only part, checked by the same schema and the same checks across fields that check the file today (an enabled gate names a branch, the audit key is set when approval draws, and the rest). A save that fails is refused with each issue next to its field, and nothing is stored. The service never runs on settings it would refuse at start.
+A save is the whole set of editable settings, merged with the file-only part, checked by the same schema and the same checks across fields that check the file today (an enabled gate names a branch, the audit key is set when approval draws, and the rest). A save that fails is refused with each issue next to its field, and nothing is stored. The service never runs on settings it would refuse at start. **As built:** a save is a list of changes against the version the page read; a save after another is refused and sent again; both the settings saved and those in force until the next start are checked.
 
 ### 4.3 Keeping the file and the database in sync (O-UI-3)
 
@@ -85,8 +86,9 @@ At each start, for each editable setting, the service compares the file's value 
 - **Not changed in the file:** the database keeps its value, so a change made in the UI survives a restart.
 - **A file that fails validation** stops the start, as today, and nothing is copied.
 - **The first start** with no stored settings copies every setting from the file.
+- **As built, while the UI is off:** each start copies the file's editable part whole, every difference recorded as made by `config.yml`.
 
-Each value on the Settings page says where it came from ("From `config.yml` at the start of <time>", or "Changed in the UI by <login>, <time>"). The page gives the current settings as a `config.yml` section to copy back into the file. The UI never writes the file.
+Each value on the Settings page says where it came from ("From `config.yml` at the start of <time>", or "Changed in the UI by <login>, <time>"). The page gives the current settings as a `config.yml` section to copy back into the file. The UI never writes the file. **As built:** the sync runs after the migrations, before anything reads a setting, in one transaction; a start refused for a clash copies nothing, and says which settings came from the UI.
 
 ### 4.4 The record of changes
 
@@ -95,9 +97,9 @@ Every change, from the UI or from the file at a start, is a row: when, who (`con
 ### 4.5 When a change takes effect
 
 - **At the next review**, with no restart: the repository settings, the limits read for each review (tokens per call, batches per review, the daily spend limit), and the model's and scorer's fields read at each call.
-- **At the next start:** settings the service reads once when it starts (dry run, learning, the queue's concurrency, the model's endpoint and time limit, how the answer is asked for, the second scorer's endpoint). The UI marks them, and after such a change shows "Takes effect when the service restarts" until it has.
+- **At the next start:** settings the service reads once when it starts (dry run, learning, the queue's concurrency, the model's time limit, how the answer is asked for; as built, the endpoints are in the file only). The UI marks them, and after such a change shows "Takes effect when the service restarts" until it has.
 
-A review already running keeps the settings it started with.
+A review already running keeps the settings it started with. **As built:** whether the second scorer is on is read at the next start too; a merge gate switched on applies at each pull request's next event, and its sweep of checks, the asking for the waiting reviews' checks when a pause begins, ends or changes (whether the gate is in use is decided at the start), and the app's permission checks (the gate's, and automatic approval's Administration read) at the next start. Every check of the model's key, at the start and at each upkeep, sends the start's headers and endpoint, so a wrong saved header can pause reviews until the next start.
 
 ## 5. The API, in outline
 
@@ -111,7 +113,7 @@ All under `/api/`, all answers JSON, all behind a session but the sign-in routes
 - `GET /api/settings`, `PUT /api/settings`, `GET /api/settings/changes`, `GET /api/settings/export`.
 - `GET /api/health` (dependency statuses and open alerts).
 
-The plans fix the shapes. Every list is paged and bounded. `GET /api/activity` also lists the withdrawals waiting to try again; `GET /api/reviews` reads the last 30 days, 25 a page; `GET /api/me` holds the repositories the service has seen.
+The plans fix the shapes. **As built:** `GET /api/settings/changes` pages 50 at a time; `PUT /api/settings` answers 409 when another save came first and 422 with each issue. Every list is paged and bounded. `GET /api/repositories/{owner}/{repo}/quality` takes `days` 7, 30, 90 or `all`; `GET /api/memory` pages 50 at a time with `before`; `PUT /api/memory/{id}` is an admin's. `GET /api/activity` also lists the withdrawals waiting to try again; `GET /api/reviews` reads the last 30 days, 25 a page; `GET /api/me` holds the repositories the service has seen. `GET /api/reviews/{run}` reads one run with its threads, approvals, gate state at its head and feedback; `GET /api/pulls/{owner}/{repo}/{number}/reviews` lists the newest 200 runs of a pull request.
 
 ## 6. Testing
 
@@ -121,9 +123,9 @@ The plans fix the shapes. Every list is paged and bounded. `GET /api/activity` a
 
 ## 7. The cut into plans
 
-1. **The frame:** the `ui/` application and its build, serving it, the API's route group, sign-in, sessions and access, the layout with its sidebar and theme switch, Activity (with the stage of a running review and pull request titles) and One review. It ends with a signed-in person seeing what runs and opening a review. Cut in two plans: sign-in, serving, the layout and Activity, which is built, and the One review screen, which is next.
-2. **Settings:** the settings tables, the sync at start, validation, saving, the record of changes, the export, applying at the next review and marking what waits for a restart, `*` in "Reviewed on every push", and the Settings screen.
-3. **The rest:** alerts and dependency health stored, spend and reviews per day, feedback read, live score quality, the kill switch, and the Overview, Repositories and Memory screens.
+1. **The frame:** the `ui/` application and its build, serving it, the API's route group, sign-in, sessions and access, the layout with its sidebar and theme switch, Activity (with the stage of a running review and pull request titles) and One review. It ends with a signed-in person seeing what runs and opening a review. Cut in two plans, both built: sign-in, serving, the layout and Activity, and the One review screen.
+2. **Settings:** the settings tables, the sync at start, validation, saving, the record of changes, the export, applying at the next review and marking what waits for a restart, `*` in "Reviewed on every push", and the Settings screen. Built in one plan.
+3. **The rest:** alerts and dependency health stored, spend and reviews per day, feedback read, live score quality, the kill switch, and the Overview, Repositories and Memory screens. Built in one plan.
 
 Each plan is reviewed before it is built, built task by task with a review of each task, ends with a run under Docker and a review of the whole branch, and is merged through a pull request, as in the stages before.
 

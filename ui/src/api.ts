@@ -3,7 +3,11 @@
 // header. An answer that is not ok rejects with its status and its short code. No password, one-time password or name is put in
 // an address, a log or an error: they travel in the body only.
 import { useEffect, useRef, useState } from 'react';
-import type { AccountAnswer, Accounts, Activity, ApiError, Me, OneTime, Reviews, Role, SignInStep, Ways } from './api-types.ts';
+import type {
+  AccountAnswer, Accounts, Activity, ApiError, Health, Me, MemoryKind, MemorySwitched, MemoryView, OneReview, OneTime, Overview, PullReviews, QualityAnswer,
+  QualityWindow, Repositories, Reviews, Role, SettingChanges, SettingIssue, SettingsExport, SettingsInvalid, SettingsSave, SettingsView, SignInStep, Ways,
+  WindowDays,
+} from './api-types.ts';
 
 /**
  * A request the API did not answer with success; not `ApiError`, which is the JSON type of the answer it carries. A request
@@ -22,6 +26,7 @@ export class RequestFailed extends Error {
 }
 
 export interface ReviewQuery { repo?: string; outcome?: 'approved' | 'needs_person' | 'failed'; q?: string; before?: number }
+export interface MemoryQuery { kind?: MemoryKind; repo?: string; q?: string; before?: number }
 export interface Api {
   me(): Promise<Me>; activity(): Promise<Activity>; reviews(query: ReviewQuery): Promise<Reviews>; signOut(csrf: string): Promise<void>;
   ways(): Promise<Ways>;
@@ -33,11 +38,22 @@ export interface Api {
   setRole(csrf: string, id: number, role: Role): Promise<AccountAnswer>;
   resetPassword(csrf: string, id: number): Promise<OneTime>;
   removeAccount(csrf: string, id: number): Promise<void>;
+  review(run: number): Promise<OneReview>;
+  pullReviews(repository: string, number: number): Promise<PullReviews>;
+  settings(): Promise<SettingsView>;
+  /** 200 resolves saved with the new view; 422 holding issues resolves invalid; any other refusal rejects RequestFailed (409 'changed' among them). */
+  saveSettings(csrf: string, save: SettingsSave): Promise<{ kind: 'saved'; view: SettingsView } | { kind: 'invalid'; issues: SettingIssue[] }>;
+  settingChanges(before?: number): Promise<SettingChanges>;
+  settingsExport(): Promise<SettingsExport>;
+  overview(days: WindowDays): Promise<Overview>;
+  health(): Promise<Health>;
+  repositories(): Promise<Repositories>;
+  quality(repository: string, window: QualityWindow): Promise<QualityAnswer>;
+  memory(query: MemoryQuery): Promise<MemoryView>;
+  switchMemory(csrf: string, id: number, on: boolean): Promise<MemorySwitched>;
 }
 
 const CSRF_HEADER = 'x-visto-csrf';
-/** The body of a change, as the service reads it (an object of exactly the route's keys). */
-type Body = Record<string, string | number>;
 /** A short code as the API writes one; anything else an answer carries reads as `unknown`. */
 const SHORT_CODE = /^[a-z][a-z0-9_]{0,63}$/;
 
@@ -56,19 +72,23 @@ export function createApi(fetchFn?: typeof fetch): Api {
   // Called as a function of its own, never as a method of another object, which a browser's fetch refuses.
   const call: typeof fetch = fetchFn ?? ((input, init) => fetch(input, init));
 
-  /** A network failure is status 0, `network`. A body is sent as JSON, said so in its content-type. */
-  async function send(method: 'GET' | 'POST', path: string, headers: Record<string, string> = {}, body?: Body): Promise<Response> {
+  /** The request, as it is answered: a network failure is status 0, `network`. A body is sent as JSON, said so in its content-type. */
+  async function request(method: 'GET' | 'POST' | 'PUT', path: string, headers: Record<string, string> = {}, body?: unknown): Promise<Response> {
     const init: RequestInit = { method, credentials: 'same-origin', headers: { accept: 'application/json', ...headers } };
     if (body !== undefined) {
       init.headers = { accept: 'application/json', 'content-type': 'application/json', ...headers };
       init.body = JSON.stringify(body);
     }
-    let response: Response;
     try {
-      response = await call(path, init);
+      return await call(path, init);
     } catch {
       throw new RequestFailed(0, 'network');
     }
+  }
+
+  /** An answer that is not ok rejects with its status and its code. */
+  async function send(method: 'GET' | 'POST' | 'PUT', path: string, headers: Record<string, string> = {}, body?: unknown): Promise<Response> {
+    const response = await request(method, path, headers, body);
     if (!response.ok) throw new RequestFailed(response.status, await codeOf(response));
     return response;
   }
@@ -84,12 +104,33 @@ export function createApi(fetchFn?: typeof fetch): Api {
 
   const read = async <T>(path: string): Promise<T> => answerOf<T>(await send('GET', path));
   /** A change; `csrf` given, behind a session with its token. Its answer is JSON. */
-  const post = async <T>(path: string, body: Body, csrf?: string): Promise<T> =>
+  const post = async <T>(path: string, body: unknown, csrf?: string): Promise<T> =>
     answerOf<T>(await send('POST', path, csrf === undefined ? {} : { [CSRF_HEADER]: csrf }, body));
   /** A change behind a session answered 204: no body is read. */
-  const postEmpty = async (path: string, body: Body, csrf: string): Promise<void> => {
+  const postEmpty = async (path: string, body: unknown, csrf: string): Promise<void> => {
     await send('POST', path, { [CSRF_HEADER]: csrf }, body);
   };
+
+  /** The save: a 422 with issues is an answer, its body read once; any other refusal is as `send` reads it. */
+  async function saveSettings(csrf: string, save: SettingsSave): Promise<{ kind: 'saved'; view: SettingsView } | { kind: 'invalid'; issues: SettingIssue[] }> {
+    const response = await request('PUT', '/api/settings', { [CSRF_HEADER]: csrf }, save);
+    if (response.ok) return { kind: 'saved', view: await answerOf<SettingsView>(response) };
+    if (response.status === 422) {
+      let body: unknown = null;
+      try {
+        body = await response.json();
+      } catch {
+        // Not JSON: it carries no code either.
+      }
+      const invalid = body as Partial<SettingsInvalid> | null;
+      if (typeof invalid === 'object' && invalid !== null) {
+        if (invalid.error === 'invalid' && Array.isArray(invalid.issues)) return { kind: 'invalid', issues: invalid.issues };
+        if (typeof invalid.error === 'string' && SHORT_CODE.test(invalid.error)) throw new RequestFailed(422, invalid.error);
+      }
+      throw new RequestFailed(422, 'unknown');
+    }
+    throw new RequestFailed(response.status, await codeOf(response));
+  }
 
   return {
     me: () => read<Me>('/api/me'),
@@ -118,6 +159,38 @@ export function createApi(fetchFn?: typeof fetch): Api {
     setRole: (csrf, id, role) => post<AccountAnswer>('/api/accounts/role', { id, role }, csrf),
     resetPassword: (csrf, id) => post<OneTime>('/api/accounts/reset', { id }, csrf),
     removeAccount: (csrf, id) => postEmpty('/api/accounts/remove', { id }, csrf),
+    review: (run) => read<OneReview>(`/api/reviews/${run}`),
+    pullReviews(repository, number) {
+      // 'owner/repo' split at its first slash.
+      const slash = repository.indexOf('/');
+      const owner = slash < 0 ? repository : repository.slice(0, slash);
+      const repo = slash < 0 ? '' : repository.slice(slash + 1);
+      return read<PullReviews>(`/api/pulls/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/${number}/reviews`);
+    },
+    settings: () => read<SettingsView>('/api/settings'),
+    saveSettings,
+    settingChanges: (before) => read<SettingChanges>(before === undefined ? '/api/settings/changes' : `/api/settings/changes?before=${before}`),
+    settingsExport: () => read<SettingsExport>('/api/settings/export'),
+    overview: (days) => read<Overview>(`/api/overview?days=${days}`),
+    health: () => read<Health>('/api/health'),
+    repositories: () => read<Repositories>('/api/repositories'),
+    quality(repository, window) {
+      // 'owner/repo' split at its first slash.
+      const slash = repository.indexOf('/');
+      const owner = slash < 0 ? repository : repository.slice(0, slash);
+      const repo = slash < 0 ? '' : repository.slice(slash + 1);
+      return read<QualityAnswer>(`/api/repositories/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/quality?days=${window}`);
+    },
+    memory(query) {
+      const params = new URLSearchParams();
+      if (query.kind) params.set('kind', query.kind);
+      if (query.repo) params.set('repo', query.repo);
+      if (query.q) params.set('q', query.q);
+      if (query.before !== undefined) params.set('before', String(query.before));
+      const search = params.toString();
+      return read<MemoryView>(search === '' ? '/api/memory' : `/api/memory?${search}`);
+    },
+    switchMemory: async (csrf, id, on) => answerOf<MemorySwitched>(await send('PUT', `/api/memory/${id}`, { [CSRF_HEADER]: csrf }, { on })),
   };
 }
 

@@ -38,10 +38,14 @@ export interface ModelHealth {
   reviewed(code: 'auth' | 'no_credit' | null, now: Date): void;
 }
 
-export function createModelHealth(alert: Alert): ModelHealth {
+export function createModelHealth(alert: Alert, note?: (ok: boolean, code: 'auth' | 'no_credit' | null) => void): ModelHealth {
   let failure: { code: 'auth' | 'no_credit'; seenBy: 'review' | 'check' } | null = null;
   let pausedUntil = 0;
   let trusted = true;
+
+  function tell(): void {
+    try { note?.(failure === null, failure === null ? null : failure.code); } catch { /* a note that throws changes nothing */ }
+  }
 
   function clear(): void {
     failure = null;
@@ -53,13 +57,15 @@ export function createModelHealth(alert: Alert): ModelHealth {
     paused: (now) => now.getTime() < pausedUntil,
     checked(result, now) {
       if (result === 'auth' || result === 'no_credit') {
-        if (failure !== null || !trusted) return;
-        failure = { code: result, seenBy: 'check' };
-        pausedUntil = now.getTime() + PAUSE_MS;
-        alert('model_error', { reason: result, seen_by: 'check' });
+        if (failure === null && trusted) {
+          failure = { code: result, seenBy: 'check' };
+          pausedUntil = now.getTime() + PAUSE_MS;
+          alert('model_error', { reason: result, seen_by: 'check' });
+        }
       } else if (result === 'ok' && failure !== null && failure.seenBy === 'check') {
         clear();
       }
+      if (result !== 'unknown') tell();
     },
     reviewed(code, now) {
       if (code !== null) {
@@ -71,6 +77,7 @@ export function createModelHealth(alert: Alert): ModelHealth {
         if (failure.seenBy === 'check') trusted = false;
         clear();
       }
+      tell();
     },
   };
 }

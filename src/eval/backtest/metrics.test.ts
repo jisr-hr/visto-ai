@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { measure } from './metrics.ts';
+import { addCounts, blockFlagged, countAt, measure, share, THRESHOLDS } from './metrics.ts';
 import type { CaseScores } from './metrics.ts';
 import { A, B, block, C, file, labels, strict } from './test-cases.ts';
 
@@ -72,4 +72,28 @@ test('a block with no score of its own is measured as 0 unless its file is flagg
   assert.equal(n.safety_blocks_n, 2);
   assert.equal(n.safety_blocks, 0.5);
   assert.equal(n.focus, 0.6);
+});
+
+test('countAt holds the counts measure divides, addCounts adds them, and blockFlagged is the rule measure flags by', () => {
+  const all = [A, B, C];
+  for (const t of [...THRESHOLDS, 'own' as const]) {
+    const n = measure(all, t);
+    const c = countAt(all, t);
+    assert.equal(share(c.blocksLeft, c.blocks), n.safety_blocks);
+    assert.equal(c.blocks, n.safety_blocks_n);
+    assert.equal(share(c.looseBlocksLeft, c.looseBlocks), n.safety_blocks_loose);
+    assert.equal(share(c.filesLeft, c.files), n.safety_files);
+    assert.equal(share(c.looseFilesLeft, c.looseFiles), n.safety_files_loose);
+    assert.equal(share(c.prsClear, c.prs), n.benefit);
+    assert.equal(share(c.flaggedLines, c.totalLines), n.focus);
+    assert.equal(c.focusPrs, n.focus_n);
+  }
+  assert.deepEqual(addCounts(countAt([A], 70), countAt([B, C], 70)), countAt(all, 70));
+  const f = file('x.ts', [block('B1', 75, 3)], 3);
+  const wholeFile = file('y.ts', [block('B1', 10, 3)], 3, 80);
+  assert.equal(blockFlagged(wholeFile, wholeFile.blocks[0]!, 70), true);
+  assert.equal(blockFlagged(f, f.blocks[0]!, 70), true);
+  assert.equal(blockFlagged(f, f.blocks[0]!, 90), false);
+  const none = file('z.ts', [block('B1', null, 3)], 3);
+  assert.equal(blockFlagged(none, none.blocks[0]!, 20), false);
 });

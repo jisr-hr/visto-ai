@@ -11,7 +11,7 @@ import type { AppContextValue } from '../context.tsx';
 import { initials, plural } from '../format.ts';
 import { Link, navigate, useLocation } from '../router.tsx';
 import { chooseTheme, shownTheme, subscribeTheme } from '../theme.ts';
-import { ActivityIcon, CheckIcon, MemoryIcon, MoonIcon, OverviewIcon, RepositoriesIcon, SettingsIcon, SignOutIcon } from './icons.tsx';
+import { ActivityIcon, BrandMark, MemoryIcon, MoonIcon, OverviewIcon, RepositoriesIcon, SettingsIcon, SignOutIcon } from './icons.tsx';
 import { Badge } from './ui/badge.tsx';
 import { Button } from './ui/button.tsx';
 
@@ -39,9 +39,7 @@ const ENTRIES: readonly { name: string; to: string; icon: ReactNode; on: (path: 
 export function Brand() {
   return (
     <div className="flex items-center gap-2.5 px-1.5">
-      <div className="flex size-8 items-center justify-center rounded-[9px] bg-accent text-on-accent">
-        <CheckIcon />
-      </div>
+      <BrandMark />
       <div className="flex flex-col">
         <strong className="text-[15px]">Visto AI</strong>
         <span className="text-xs text-muted">Review service</span>

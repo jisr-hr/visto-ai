@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react';
+import type { ReactElement, ReactNode } from 'react';
 
 // The mockup's icons (Activity.dc.html, lines 52 to 67): strokes in the text's colour on a 24 by 24 box, hidden from
 // assistive technology. The sign-out icon is ours (call 24), drawn the same way.
@@ -20,11 +20,19 @@ function Icon({ size, weight = 2, children }: { size: 16 | 18; weight?: 2 | 2.5;
   );
 }
 
-export function CheckIcon() {
+/**
+ * The project icon (assets/icon.svg), shape for shape, drawn at 32 by 32 beside the name, which says what it is. Its tile is
+ * the dark theme's card colour, so a ring in the border's colour keeps its edge there.
+ */
+export function BrandMark() {
   return (
-    <Icon size={18} weight={2.5}>
-      <path d="M5 12.5l4.5 4.5L19 7.5" />
-    </Icon>
+    <svg aria-hidden="true" width={32} height={32} viewBox="0 0 512 512" className="shrink-0 rounded-[7px] ring-1 ring-border">
+      <rect width="512" height="512" rx="112" fill="#0e211d" />
+      <rect x="108" y="140" width="208" height="56" rx="28" fill="#f3f6f4" fillOpacity="0.32" />
+      <rect x="108" y="228" width="216" height="56" rx="28" fill="#34d399" />
+      <circle cx="376" cy="256" r="28" fill="#f3f6f4" />
+      <rect x="108" y="316" width="144" height="56" rx="28" fill="#f3f6f4" fillOpacity="0.32" />
+    </svg>
   );
 }
 
@@ -88,6 +96,16 @@ export function SignOutIcon() {
       <path d="M15 4h3a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3" />
       <path d="M10 17l-5-5 5-5" />
       <path d="M5 12h11" />
+    </Icon>
+  );
+}
+
+/** The mockup's alert circle (Review.dc.html, line 78), at the helper's size. */
+export function AlertIcon(): ReactElement {
+  return (
+    <Icon size={18}>
+      <circle cx="12" cy="12" r="9" />
+      <path d="M12 8v5M12 16.5v.01" />
     </Icon>
   );
 }
