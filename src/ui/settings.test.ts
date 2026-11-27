@@ -6,7 +6,7 @@ import type { SettingValue } from '../config/editable.ts';
 import { parseDocument, readYaml, serviceConfig } from '../config/load.ts';
 import type { ServiceConfig } from '../config/load.ts';
 import { savePullRequest } from '../db/pull-requests.ts';
-import { settingsVersion } from '../db/settings.ts';
+import { settingsVersion, writeSetting } from '../db/settings.ts';
 import { testDb } from '../db/testing.ts';
 import type { Db } from '../db/types.ts';
 import { startSettings } from '../shell/settings.ts';
@@ -92,6 +92,28 @@ test('the view holds every setting with its value, whether it is written and whe
   assert.deepEqual(after.global['limits.spendPerDay']!.source, { by: 'ui', name: 'octo-admin', at: at(0) });
 });
 
+test("the view reads the version before the rows, and shows a row's own value", async () => {
+  const d = await deps();
+  const seen: string[] = [];
+  const spy: Db = {
+    query: (text, params) => { seen.push(text); return db.query(text, params); },
+    script: (sql) => db.script(sql),
+    transaction: (work) => db.transaction(work),
+    close: () => Promise.resolve(),
+  };
+  // A save between the two reads would give an older version with newer rows: the version is the first statement.
+  await settingsView({ ...d, db: spy });
+  const versionAt = seen.findIndex((t) => t.includes('max(id)'));
+  const rowsAt = seen.findIndex((t) => t.includes('from visto_ai.settings order by'));
+  assert.ok(versionAt !== -1 && rowsAt !== -1 && versionAt < rowsAt, seen.join(' | '));
+  // A row written straight into the table differs from the saved configuration held in memory: the view shows the row.
+  assert.equal(d.settings.saved().config.limits.spendPerDay, 50);
+  await writeSetting(db, { scope: 'global', path: 'limits.spendPerDay', value: 99, by: 'ui', name: 'octo-admin', at: at(5) });
+  const view = await settingsView(d);
+  assert.equal(view.global['limits.spendPerDay']!.value, 99);
+  assert.deepEqual(view.global['limits.spendPerDay']!.source, { by: 'ui', name: 'octo-admin', at: at(5) });
+});
+
 test("the endpoints are the file's, shown as they are written and never as settings", async () => {
   const d = await deps(SCORER_YAML.replace('  model: vendor/model-a', '  baseUrl: https://model.example.test/v1\n  model: vendor/model-a'));
   assert.deepEqual((await settingsView(d)).endpoints, { model: 'https://model.example.test/v1', scorer: 'https://openrouter.ai/api/alpha' });
@@ -127,15 +149,15 @@ test('the record is paged newest first, its values cut at 200 characters, and a 
   assert.deepEqual(await settingChanges(d, new URLSearchParams({ before: '' })), first);
   for (const bad of ['x', '-1', '1.5', '2147483648', '12345678901', ' 3']) assert.equal(await settingChanges(d, new URLSearchParams({ before: bad })), 'bad_request', bad);
 
-  await saveNow(d, [{ scope: 'global', path: 'model.extraBody', value: { b: 'x'.repeat(300), a: 1 } }]);
+  await saveNow(d, [{ scope: 'global', path: 'model.extraBody', value: { b: 'x'.repeat(300), aa: 1 } }]);
   const long = await settingChanges(d, new URLSearchParams(''));
   if (long === 'bad_request') throw new Error('bad_request');
   const row = long.changes[0]!;
   assert.equal(row.before, null);
   assert.equal(row.after!.length, 203);
   assert.ok(row.after!.endsWith('...'));
-  // Postgres keeps keys in its own order; the record shows them sorted, parsed and written again.
-  assert.ok(row.after!.startsWith('{"a":1,"b":"xxx'));
+  // Postgres keeps the keys of an object shorter first, then bytewise ('b' before 'aa'); the record shows them sorted, parsed and written again.
+  assert.ok(row.after!.startsWith('{"aa":1,"b":"xxx'));
 });
 
 test("no answer holds a secret's value or a field the screen does not show", async () => {

@@ -109,3 +109,57 @@ test('when reads changes the changes and the export are read again', async () =>
   await waitFor(() => expect(settingChanges).toHaveBeenCalledTimes(2));
   await waitFor(() => expect(settingsExport).toHaveBeenCalledTimes(2));
 });
+
+test('an export that cannot be read again says its text may be old, and Copied goes back to Copy', async () => {
+  let fail = false;
+  const settingsExport = vi.fn(() => (fail ? Promise.reject(new RequestFailed(500, 'x')) : Promise.resolve({ text: TEXT })));
+  const tree = (reads: number) => (
+    <AppContext.Provider value={{ api: { settingsExport } as unknown as Api, me: ME, activity: null, activityFailed: false }}>
+      <ExportSection reads={reads} />
+    </AppContext.Provider>
+  );
+  const view = render(tree(0));
+  await userEvent.click(await screen.findByRole('button', { name: 'Copy' }));
+  expect(await screen.findByRole('button', { name: 'Copied' })).toBeInTheDocument();
+  expect(screen.queryByText(/could not be read again/)).toBeNull();
+  fail = true;
+  view.rerender(tree(1));
+  expect(await screen.findByText('The text could not be read again. What is shown may be out of date.')).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Copy' })).toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Copied' })).toBeNull();
+  expect(document.querySelector('pre')!.textContent).toBe(TEXT);
+});
+
+test('an Older answer that arrives after a save read the changes again is dropped', async () => {
+  const fresh: SettingChanges = { changes: [{ ...ROW_UI, id: 10 }, ROW_UI, ROW_FILE], next: 8 };
+  let release: (answer: SettingChanges) => void = () => {};
+  const slow = new Promise<SettingChanges>((yes) => {
+    release = yes;
+  });
+  const settingChanges = vi.fn((before?: number) => {
+    if (before === 3) return slow;
+    return Promise.resolve(fresh.changes.length === 3 && settingChanges.mock.calls.length > 2 ? fresh : ({ changes: [ROW_UI, ROW_FILE], next: 3 } as SettingChanges));
+  });
+  const tree = (reads: number) => (
+    <AppContext.Provider value={{ api: { settingChanges } as unknown as Api, me: ME, activity: null, activityFailed: false }}>
+      <ChangesSection reads={reads} />
+    </AppContext.Provider>
+  );
+  const view = render(tree(0));
+  const card = await screen.findByRole('region', { name: 'Changes' });
+  await screen.findByText('Daily spend limit');
+  await userEvent.click(within(card).getByRole('button', { name: 'Older' }));
+  expect(settingChanges).toHaveBeenLastCalledWith(3);
+  // A save read the first page again while Older was out.
+  view.rerender(tree(1));
+  await waitFor(() => expect(settingChanges).toHaveBeenCalledTimes(3));
+  await waitFor(() => expect(within(card).getAllByRole('row')).toHaveLength(4));
+  release({ changes: [ROW_OLD], next: null });
+  await new Promise((done) => setTimeout(done, 20));
+  // Nothing of the late answer: no row twice, the page's own `next` kept.
+  expect(within(card).getAllByRole('row')).toHaveLength(4);
+  expect(within(card).queryByText('model.zzz')).toBeNull();
+  expect(within(card).getByRole('button', { name: 'Older' })).toBeEnabled();
+  await userEvent.click(within(card).getByRole('button', { name: 'Older' }));
+  expect(settingChanges).toHaveBeenLastCalledWith(8);
+});

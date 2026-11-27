@@ -12,7 +12,7 @@ export type Trigger =
   | { kind: 'skip'; reason: SkipReason }
   | { kind: 'none' };
 
-/** Why no automatic review is wanted for a pull request in this state; null when one is. Checked in this order: any state but open (`closed`), draft, ignored author, base branch, gated (reviewed only when asked: enforce and bypass). */
+/** Why no automatic review is wanted for a pull request in this state; null when one is. Checked in this order: any state but open (`closed`), draft, ignored author, base branch (a `*` among `baseBranches` means every branch), gated (reviewed only when asked: enforce and bypass). */
 export function skipReason(
   pr: { state: 'open' | 'closed' | 'merged'; draft: boolean; author: string; baseBranch: string }, settings: RepoSettings,
 ): SkipReason | null {

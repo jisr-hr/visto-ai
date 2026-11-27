@@ -262,8 +262,11 @@ export function exportText(document: unknown, editable: Editable, at: string): s
   const full = withEditable(document, editable) as Record<string, unknown>;
   const picked: Record<string, unknown> = {};
   for (const key of ['dryRun', 'learning', 'limits', 'model', 'scorer', 'repositories']) if (has(full, key)) picked[key] = full[key];
+  // A scorer switched off in the UI is no block here, and a block left in the file keeps scoring (the evals read the file).
+  const scorerGone = isMapping(document) && has(document, 'scorer') && !has(full, 'scorer');
   return `# The settings saved in the UI on ${at}, as config.yml writes them.\n`
     + '# Replace these keys of config.yml with them: a setting changed in the file wins at the next start.\n'
+    + (scorerGone ? '# scorer: not in the saved settings (the second scorer is off); remove the scorer block from config.yml.\n' : '')
     + stringify(picked);
 }
 
@@ -303,7 +306,10 @@ export function secretsOf(document: unknown): SecretRef[] {
     for (const extension of root.extensions) {
       if (!isMapping(extension)) continue;
       const found: Array<{ path: string[]; variable: string }> = [];
-      referencesIn(extension.options, [], found);
+      // As load.ts reads them: a reference is a value inside options, never options itself.
+      if (isMapping(extension.options)) {
+        for (const [option, value] of Object.entries(extension.options)) referencesIn(value, [option], found);
+      }
       for (const { path, variable } of found) out.push({ kind: 'extension', of: `${String(extension.name)}, option ${path.join('.')}`, variable });
     }
   }

@@ -197,9 +197,13 @@ test('the values shown are the settings loaded, in the shape the file writes the
 });
 
 test('the export holds the references the file writes and no secret, and reads back as the same settings', () => {
-  const base = readYaml(example()) as { repositories: { overrides: Record<string, unknown> } };
-  const doc = { ...base, auditKey: { env: 'AUDIT_KEY' }, repositories: { ...base.repositories, overrides: { ...base.repositories.overrides, 'acme/shop.js': { newHead: 'full', gate: { mode: 'shadow' } } } } };
-  const editable = editableOf(doc);
+  // Every block of the file switched on, so that what the export leaves out is there to be left out.
+  let text0 = example();
+  for (const first of ['# scorer:', '# app:', '# ui:', '# auditKey: { env: AUDIT_KEY }', '# extensions:', '# mcpServers:']) text0 = uncomment(text0, first);
+  const base = readYaml(text0) as { repositories: { overrides: Record<string, unknown> } };
+  for (const block of ['scorer', 'app', 'database', 'server', 'alerts', 'ui', 'auditKey', 'extensions', 'mcpServers']) assert.ok(block in base, block);
+  const doc = { ...base, repositories: { ...base.repositories, overrides: { ...base.repositories.overrides, 'acme/shop.js': { newHead: 'full', gate: { mode: 'shadow' } } } } };
+  const editable = withKeys(editableOf(doc), ['global:scorer.model', 'vendor/decision-model']);
   const text = exportText(doc, editable, '2026-03-01 10:00 UTC');
   assert.ok(text.startsWith(
     '# The settings saved in the UI on 2026-03-01 10:00 UTC, as config.yml writes them.\n'
@@ -209,8 +213,20 @@ test('the export holds the references the file writes and no secret, and reads b
   assert.equal(editable.get('acme/shop.js:newHead'), 'full');
   assert.equal(editableOf(readYaml(text)).get('acme/shop.js:gate.mode'), 'shadow');
   assert.ok(text.includes('OPENROUTER_API_KEY'));
-  for (const never of ['model-key-for-tests-only', 'app:', 'database:', 'ui:', 'auditKey', 'AUDIT_KEY']) assert.ok(!text.includes(never), never);
-  assert.deepEqual(Object.keys(readYaml(text) as object), ['dryRun', 'learning', 'limits', 'model', 'repositories']);
+  // The variables of every other block are in the file, and not in the export.
+  const others = secretsOf(doc).filter((r) => !['model_key', 'scorer_key'].includes(r.kind)).map((r) => r.variable).filter((v): v is string => v !== null);
+  assert.ok(others.length >= 5, others.join(','));
+  for (const variable of others) assert.ok(!text.includes(variable), variable);
+  for (const never of ['model-key-for-tests-only', 'app:', 'database:', 'ui:', 'server:', 'alerts:', 'extensions:', 'mcpServers:', 'auditKey', 'AUDIT_KEY']) assert.ok(!text.includes(never), never);
+  assert.deepEqual(Object.keys(readYaml(text) as object), ['dryRun', 'learning', 'limits', 'model', 'scorer', 'repositories']);
+  assert.ok(!text.includes('# scorer:'));
+  // The second scorer off in the saved settings while the file writes its block: the export says to remove the block.
+  const off = exportText(doc, new Map([...editable].filter(([k]) => !k.startsWith('global:scorer.'))), '2026-03-01 10:00 UTC');
+  assert.ok(!('scorer' in (readYaml(off) as object)));
+  assert.equal(off.split('\n').filter((l) => l.startsWith('#')).length, 3);
+  assert.match(off, /^# scorer: not in the saved settings \(the second scorer is off\); remove the scorer block from config\.yml\.$/m);
+  const none = exportText({ model: { apiKey: { env: 'OPENROUTER_API_KEY' }, model: 'x' } }, new Map<string, SettingValue>([['global:model.model', 'x']]), '2026-03-01 10:00 UTC');
+  assert.equal(none.split('\n').filter((l) => l.startsWith('#')).length, 2);
 });
 
 test('the secrets are the references config.yml writes, by variable name, and the ones it does not write have none', () => {
@@ -228,5 +244,12 @@ test('the secrets are the references config.yml writes, by variable name, and th
   assert.deepEqual(literal.filter((r) => r.kind === 'mcp_header'), [{ kind: 'mcp_header', of: 'docs, header X-Ref', variable: 'X_REF' }]);
   const nested = secretsOf({ extensions: [{ name: 'e', module: './m.ts', options: { a: { b: [{ env: 'DEEP' }] } } }] });
   assert.deepEqual(nested.filter((r) => r.kind === 'extension'), [{ kind: 'extension', of: 'e, option a.b.0', variable: 'DEEP' }]);
+  // As load.ts reads them, a reference is a value inside options, never options itself.
+  const whole = secretsOf({ extensions: [{ name: 'e', module: './m.ts', options: { env: 'WHOLE' } }] });
+  assert.deepEqual(whole.filter((r) => r.kind === 'extension'), []);
+  const top = secretsOf({ extensions: [{ name: 'e', module: './m.ts', options: { token: { env: 'TOKEN' }, plain: 'x', env: { env: 'ENV_NAMED' } } }] });
+  assert.deepEqual(top.filter((r) => r.kind === 'extension'), [
+    { kind: 'extension', of: 'e, option token', variable: 'TOKEN' }, { kind: 'extension', of: 'e, option env', variable: 'ENV_NAMED' },
+  ]);
   assert.equal(secretsOf({}).length, 8);
 });

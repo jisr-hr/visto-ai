@@ -99,7 +99,7 @@ Every change, from the UI or from the file at a start, is a row: when, who (`con
 - **At the next review**, with no restart: the repository settings, the limits read for each review (tokens per call, batches per review, the daily spend limit), and the model's and scorer's fields read at each call.
 - **At the next start:** settings the service reads once when it starts (dry run, learning, the queue's concurrency, the model's time limit, how the answer is asked for; as built, the endpoints are in the file only). The UI marks them, and after such a change shows "Takes effect when the service restarts" until it has.
 
-A review already running keeps the settings it started with. **As built:** whether the second scorer is on is read at the next start too; a merge gate switched on applies at each pull request's next event, and its sweep of checks and the app's permission checks (the gate's, and automatic approval's Administration read) at the next start.
+A review already running keeps the settings it started with. **As built:** whether the second scorer is on is read at the next start too; a merge gate switched on applies at each pull request's next event, and its sweep of checks, the asking for the waiting reviews' checks when a pause begins, ends or changes (whether the gate is in use is decided at the start), and the app's permission checks (the gate's, and automatic approval's Administration read) at the next start. Every check of the model's key, at the start and at each upkeep, sends the start's headers and endpoint, so a wrong saved header can pause reviews until the next start.
 
 ## 5. The API, in outline
 

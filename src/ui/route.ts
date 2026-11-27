@@ -169,7 +169,7 @@ export function createUiRoute(deps: {
     account: accountOf(made.account, api.clock(), session.accountId), oneTimePassword: made.oneTimePassword, expiresAt: made.expiresAt,
   });
 
-  /** An account change behind a session, the token and the admin role, with a body of its shape (rule 1). */
+  /** An admin's change (an account's or the settings') behind a session, the token and the admin role, with a body of its shape (rule 1). */
   function change<T>(request: UiRequest, handler: Handler, shape: (body: Body) => T | null, work: (session: Session, given: T) => Promise<UiAnswer>): Promise<UiAnswer> {
     return behindSession(request, handler, ADMIN_CHANGE, (session) => withBody(request, async (body) => {
       const given = shape(body);

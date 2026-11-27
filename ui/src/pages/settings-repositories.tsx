@@ -387,9 +387,11 @@ export function RepositoriesSection({ form, issues }: { form: Form; issues: read
         <span className={WORD}>A repository uses the defaults unless it overrides a setting</span>
       </div>
       <div className="flex flex-wrap items-start gap-6">
-        <div role="listbox" aria-label="Repository" className="flex max-w-[260px] shrink grow basis-[200px] flex-col gap-0.5">
-          {option(DEFAULTS, 'Defaults for all', <Badge tone="muted">Defaults</Badge>)}
-          {names.map((name) => option(name, name, <Note form={form} issues={issues} name={name} />))}
+        <div className="flex max-w-[260px] shrink grow basis-[200px] flex-col gap-0.5">
+          <div role="listbox" aria-label="Repository" className="flex flex-col gap-0.5">
+            {option(DEFAULTS, 'Defaults for all', <Badge tone="muted">Defaults</Badge>)}
+            {names.map((name) => option(name, name, <Note form={form} issues={issues} name={name} />))}
+          </div>
           {adding ? (
             <div className="mt-2 flex flex-col gap-2">
               <Input

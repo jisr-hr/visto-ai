@@ -1,6 +1,6 @@
 // The record of setting changes and the export as config.yml (UI design 4.3 and 4.4; calls 10 and 24). The record's values are
 // the service's parsed JSON text, shown as text; the export is text to copy: the page never writes the file.
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { SettingChangeRow } from '../api-types.ts';
 import { Button } from '../components/ui/button.tsx';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../components/ui/table.tsx';
@@ -43,9 +43,13 @@ export function ChangesSection({ reads }: { reads: number }) {
   const [next, setNext] = useState<number | null>(null);
   const [failed, setFailed] = useState(false);
   const [older, setOlder] = useState(false);
+  // Counts the reads of the first page: an Older answer that belongs to an earlier one is dropped.
+  const generation = useRef(0);
 
   useEffect(() => {
     let live = true;
+    generation.current += 1;
+    setOlder(false);
     api.settingChanges().then(
       (answer) => {
         if (!live) return;
@@ -65,14 +69,17 @@ export function ChangesSection({ reads }: { reads: number }) {
   function more(): void {
     if (next === null || older) return;
     setOlder(true);
+    const mine = generation.current;
     api.settingChanges(next).then(
       (answer) => {
+        if (mine !== generation.current) return;
         setRows((last) => [...(last ?? []), ...answer.changes]);
         setNext(answer.next);
         setFailed(false);
         setOlder(false);
       },
       () => {
+        if (mine !== generation.current) return;
         setFailed(true);
         setOlder(false);
       },
@@ -146,7 +153,9 @@ export function ExportSection({ reads }: { reads: number }) {
         setCopy('not_yet');
       },
       () => {
-        if (live) setFailed(true);
+        if (!live) return;
+        setFailed(true);
+        setCopy('not_yet');
       },
     );
     return () => {
@@ -175,6 +184,7 @@ export function ExportSection({ reads }: { reads: number }) {
         <p className="m-0 text-sm text-muted">{failed ? 'The text could not be read.' : 'Reading the text.'}</p>
       ) : (
         <>
+          {failed ? <p className="m-0 text-[13px] text-bad">The text could not be read again. What is shown may be out of date.</p> : null}
           <pre className="m-0 overflow-x-auto rounded-lg bg-subtle p-3.5 font-mono text-[12.5px]">{text}</pre>
           <div className="flex flex-wrap items-center gap-2">
             <Button type="button" onClick={() => void copyText(text)}>

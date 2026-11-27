@@ -664,6 +664,30 @@ test('a save in flight says Saving, cannot be sent twice, and keeps what is type
   expect(sent('saveSettings')).toHaveLength(1);
 });
 
+test('a JSON field that is not valid typed while a save is out survives the save, and still blocks the next one', async () => {
+  const user = userEvent.setup();
+  const wait = later<{ kind: 'saved'; view: SettingsView }>();
+  const { api, sent } = fakeApi({ saveSettings: () => wait.promise });
+  visit('/ui/settings');
+  render(<App api={api} />);
+  await screen.findByRole('region', { name: 'General' });
+  await user.click(screen.getByRole('switch', { name: 'Learning' }));
+  await user.click(screen.getByRole('button', { name: 'Save changes' }));
+  expect(screen.getByRole('button', { name: 'Saving' })).toBeDisabled();
+  fireEvent.change(screen.getByLabelText('Extra body'), { target: { value: '{' } });
+  wait.resolve({ kind: 'saved', view: viewOf({ version: 15, global: { learning: written(true, UI) } }) });
+  expect(await screen.findByRole('status')).toHaveTextContent('Saved.');
+  // The text typed is still there, still said to be invalid, still counted, and Save stays off.
+  expect(screen.getByLabelText('Extra body')).toHaveValue('{');
+  expect(within(rowOf('Extra body')).getByText('Not valid JSON.')).toBeInTheDocument();
+  expect(screen.getByText('1 unsaved change')).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Save changes' })).toBeDisabled();
+  expect(sent('saveSettings')).toHaveLength(1);
+  // Made valid, it saves as typed.
+  fireEvent.change(screen.getByLabelText('Extra body'), { target: { value: '{"a":1}' } });
+  expect(screen.getByRole('button', { name: 'Save changes' })).toBeEnabled();
+});
+
 test('the scorer off and on again, with the view having it on, is no change', async () => {
   const user = userEvent.setup();
   await open();
