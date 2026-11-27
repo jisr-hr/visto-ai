@@ -357,6 +357,8 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps): Pr
     signIn: githubSignInOn(config.ui) ? deps.ui.signIn : null, files: deps.ui.files,
     cost: deps.ui.passwordCost,
   };
+  // One cache of score quality, so one computation at a time for the service; the stop stops it before the database closes.
+  const qualityCache = createQualityCache({ clock, log: say });
   const uiRoute = ui === null ? null : createUiRoute({
     auth: createAuth({ db, ui: ui.access, signIn: ui.signIn, checks: deps.checks, clock, log: say }),
     passwords: createPasswordAuth({ db, clock, log: say, ...(ui.cost === undefined ? {} : { cost: ui.cost }) }),
@@ -366,7 +368,7 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps): Pr
       holds: (ref) => runner.holds(ref), paused: pauseCode, pullRequestUrl: deps.pullRequestUrl,
     },
     files: ui.files, ui: { publicUrl: ui.access.publicUrl, github: ui.signIn !== null }, log: say,
-    // One cache of score quality, so one computation at a time for the service; the dependencies are the ones it started with.
+    // The dependencies are the ones it started with.
     insight: {
       db, clock, inForce,
       started: {
@@ -374,7 +376,7 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps): Pr
         extensions: deps.extensions.map((e) => ({ name: e.name, parts: (['context', 'notify', 'alert', 'route'] as const).filter((p) => e.parts[p] !== undefined) })),
         mcpServers: config.mcpServers.map((m) => m.name),
       },
-      quality: createQualityCache({ clock, log: say }),
+      quality: qualityCache,
     },
     ...(deps.settings === undefined ? {} : {
       settings: {
@@ -566,6 +568,9 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps): Pr
 
   async function stopOnce(): Promise<void> {
     ending = true;
+    // No computation of score quality starts from now on, a request waiting for one is answered, and the one under way ends
+    // before its next statement; it is waited for before the database closes.
+    const qualityStopped = qualityCache.stop();
     learning?.stop();
     nightly?.stop();
     for (const cancel of cancels) {
@@ -616,6 +621,11 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps): Pr
       // settled never rejects
     }
     status.close();
+    try {
+      await within(CLOSE_WAIT_MS, qualityStopped);
+    } catch {
+      // the stop never rejects
+    }
     try {
       if (await within(CLOSE_WAIT_MS, db.close()) === 'timeout') say({ event: 'database_close_timeout' });
     } catch (error) {

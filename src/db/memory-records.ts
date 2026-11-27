@@ -55,7 +55,7 @@ interface LiveDbRow {
 }
 
 // A time as the driver hands it back, as an ISO time; null for one that cannot be read as one (-infinity, a date before the year 1, ...).
-function isoOf(value: unknown): string | null {
+export function isoOf(value: unknown): string | null {
   if (!(value instanceof Date) || !Number.isFinite(value.getTime())) return null;
   try {
     return value.toISOString();
@@ -200,24 +200,30 @@ export async function retireExpired(db: Db, now: string): Promise<number> {
 }
 
 // -- what the UI shows of the records, and the switch (the plan "The UI's Overview, Repositories and Memory"; Task 7) --------
-/** A record as the screens read it: the commenter of a person's record comes from the stored comment. */
+/** A record as the screens read it: the commenter of a person's record comes from the stored comment; a time as the driver hands it back. */
 export interface ShownRow {
   id: number; owner: string; repo: string; kind: RecordKind; number: number; path: string | null; directory: string | null;
-  excerpt: string; lesson: string | null; reverted: number | null; status: 'active' | 'disabled'; created_at: Date; expires_at: Date; by: string | null;
+  excerpt: string; lesson: string | null; reverted: number | null; status: 'active' | 'disabled'; created_at: unknown; expires_at: unknown; by: string | null;
 }
 /** `text`: the ilike pattern, already escaped. */
 export interface MemoryFilter { repo: RepoKey | null; kind: RecordKind | null; text: string | null; before: number | null }
+
+/** The records the screens show, of `r`: on or off, not expired at $1. One condition for the read, its count and the counts. */
+const SHOWN = `r.status in ('active', 'disabled') and r.expires_at > $1::timestamptz`;
 
 const SHOWN_SELECT = `select r.id, r.owner, r.repo, r.kind, r.number, r.path, r.directory, r.excerpt, r.lesson, r.reverted, r.status, r.created_at, r.expires_at,
        a.author as by
 from visto_ai.memory_records r
 left join visto_ai.human_activity a
   on r.kind = 'human_signal' and a.service = r.service and a.kind = 'inline_comment' and a.source_id = r.comment
-where r.status in ('active', 'disabled') and r.expires_at > $1::timestamptz`;
+where ${SHOWN}`;
 
+// The search: the path, the directory, the person's words of a record of people stepping in, the lesson; a lesson's quote, kept in
+// `excerpt` and shown by no screen, is never searched.
 const SHOWN_FILTER = `
   and ($2::text is null or (r.owner = $2 and r.repo = $3)) and ($4::text is null or r.kind = $4)
-  and ($5::text is null or r.path ilike $5 escape '\\' or r.directory ilike $5 escape '\\' or r.excerpt ilike $5 escape '\\' or r.lesson ilike $5 escape '\\')`;
+  and ($5::text is null or r.path ilike $5 escape '\\' or r.directory ilike $5 escape '\\'
+       or (r.kind = 'human_signal' and r.excerpt ilike $5 escape '\\') or r.lesson ilike $5 escape '\\')`;
 
 function filterParams(f: MemoryFilter, now: string): unknown[] {
   const r = f.repo === null ? null : lowered(f.repo);
@@ -239,7 +245,7 @@ export async function countShown(db: Db, f: MemoryFilter, now: string): Promise<
     `select count(*)::int as n from (
        select r.id
        from visto_ai.memory_records r
-       where r.status in ('active', 'disabled') and r.expires_at > $1::timestamptz${SHOWN_FILTER}
+       where ${SHOWN}${SHOWN_FILTER}
      ) shown`,
     filterParams(f, now));
   return rows[0]!.n;
@@ -258,7 +264,7 @@ export async function memoryCounts(db: Db, now: string): Promise<{ signals: numb
             (count(*) filter (where kind = 'revert' and status = 'active'))::int as reverts,
             (count(*) filter (where kind = 'lesson' and status = 'active'))::int as lessons,
             (count(*) filter (where status = 'disabled'))::int as off
-     from visto_ai.memory_records where status in ('active', 'disabled') and expires_at > $1::timestamptz`,
+     from visto_ai.memory_records r where ${SHOWN}`,
     [now]);
   return rows[0]!;
 }

@@ -1,6 +1,6 @@
 // Memory's answers (UI design 1 item 3, 3.3 item 7; calls 30 to 33 and 35): the learned records with their words and places,
 // and the switch of one. Each is built field by field into the shapes of api-types.ts: no source reference, comment id, category or reason leaves.
-import { countShown, memoryCounts, shownRecord, shownRecords, switchRecord } from '../db/memory-records.ts';
+import { countShown, isoOf, memoryCounts, shownRecord, shownRecords, switchRecord } from '../db/memory-records.ts';
 import type { MemoryFilter, ShownRow } from '../db/memory-records.ts';
 import { readLearning } from '../db/learning.ts';
 import { WORK } from '../shell/learning.ts';
@@ -21,7 +21,8 @@ function shown(row: ShownRow): MemoryRecordShown {
     id: row.id, kind: row.kind, repository: `${row.owner}/${row.repo}`, number: row.number, text: clip(text, TEXT_CHARS),
     path: row.path, directory: row.directory,
     by: row.kind === 'human_signal' ? row.by : null, reverted: row.kind === 'revert' ? row.reverted : null,
-    createdAt: row.created_at.toISOString(), expiresAt: row.expires_at.toISOString(), on: row.status === 'active',
+    // A time an operator set to one no ISO time writes (infinity) is answered as none, never a failure of the page.
+    createdAt: isoOf(row.created_at), expiresAt: isoOf(row.expires_at), on: row.status === 'active',
   };
 }
 

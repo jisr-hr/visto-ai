@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { countAt } from '../backtest/metrics.ts';
+import { block, file } from '../backtest/test-cases.ts';
 import { blockKey, countedComments, liveCases, storedScores } from './labels.ts';
 import type { LiveComment, LiveFile, LivePull, LiveRun } from './labels.ts';
 
@@ -49,6 +50,30 @@ test("a comment on a head whose only run found nothing new labels that run's blo
   const r = liveCases([pull([comment('x1', { commit: 'A2' })], { atHead: new Map([['A2', found], ['B', runB]]) })]);
   assert.equal(r.labelled[0]!.key, '128:13');
   assert.deepEqual(r.labelled[0]!.labels.blocks.get(blockKey(PATH, 'B1')), { loose: true, strict: true });
+});
+
+test('a comment on a block of the last run itself labels that block, never strictly', () => {
+  const r = liveCases([pull([comment('x1', { commit: 'B' })])]);
+  assert.equal(r.labelled.length, 1);
+  const c = r.labelled[0]!;
+  assert.equal(c.key, '128:12');
+  assert.deepEqual(c.labels.blocks.get(blockKey(PATH, 'B1')), { loose: true, strict: false });
+  assert.deepEqual(c.labels.blocks.get(blockKey(PATH, 'B2')), { loose: false, strict: false });
+  assert.deepEqual(c.labels.files.get(PATH), { loose: true, strict: false });
+  assert.deepEqual([...r.strict], []);
+});
+
+test("the engine's score of a file, stored as JSON, is read back with every field measured", () => {
+  const ranged = { ...block('B1', 80, 10), lines: { LEFT: [[1, 2]] as [number, number][], RIGHT: [[3, 9], [12, 14]] as [number, number][] } };
+  const engine = [file('src/a.ts', [ranged, block('B2', null, 5)], 15, 40), file('src/b.ts', [], 3)];
+  const read = storedScores(JSON.parse(JSON.stringify(engine)));
+  assert.deepEqual(read, engine.map((f) => ({
+    path: f.path, diffHash: f.diffHash, changedLines: f.changedLines, finalScore: f.finalScore,
+    fileLevel: f.fileLevel === null ? null : { score: f.fileLevel.score },
+    blocks: f.blocks.map((b) => ({ id: b.id, hunkHash: b.hunkHash, changedLines: b.changedLines, entry: b.entry === null ? null : { score: b.entry.score }, lines: b.lines })),
+  })));
+  assert.deepEqual(read![0]!.fileLevel, { score: 40 });
+  assert.deepEqual(read![0]!.blocks[0]!.lines.RIGHT, [[3, 9], [12, 14]]);
 });
 
 test('a comment on a commit no run scored labels its file in the last run, never strictly', () => {

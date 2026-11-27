@@ -8,6 +8,7 @@ create table visto_ai.alerts (
 );
 create index alerts_raised on visto_ai.alerts (raised_at);
 create index alerts_open on visto_ai.alerts (code, key) where cleared_at is null;
+create index alerts_withdrawal on visto_ai.alerts (key, id) where code = 'dismissal_failed';
 create table visto_ai.dependency_health (
   kind text not null check (kind in ('model', 'scorer', 'memory', 'extension', 'mcp', 'app')),
   name text not null,

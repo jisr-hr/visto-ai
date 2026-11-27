@@ -371,6 +371,9 @@ test('0017_overview adds the alerts, dependency health and who switched a record
   assert.deepEqual(await db.query('select count(*)::int as n from visto_ai.alerts'), [{ n: 0 }]);
   assert.deepEqual(await db.query('select count(*)::int as n from visto_ai.dependency_health'), [{ n: 0 }]);
   assert.deepEqual(
+    await db.query("select indexname from pg_indexes where schemaname = 'visto_ai' and tablename = 'alerts' order by indexname"),
+    [{ indexname: 'alerts_open' }, { indexname: 'alerts_pkey' }, { indexname: 'alerts_raised' }, { indexname: 'alerts_withdrawal' }]);
+  assert.deepEqual(
     await db.query('select source_ref, status, switched_at, switched_by from visto_ai.memory_records'),
     [{ source_ref: '7:h1:src/a.ts', status: 'active', switched_at: null, switched_by: null }]);
   await db.close();

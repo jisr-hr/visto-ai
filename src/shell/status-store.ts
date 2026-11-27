@@ -38,7 +38,8 @@ export interface StatusStore {
 const OPENERS: Record<string, true> = { model_error: true, mcp_error: true, extension_error: true, memory_error: true };
 const CLOSERS: Record<string, true> = { model_ok: true, mcp_ok: true, extension_ok: true, memory_ok: true };
 const SPEND: Record<string, true> = { spend_80: true, spend_limit: true };
-const KEPT_DETAILS = ['reason', 'seen_by', 'server', 'extension', 'part', 'spent', 'limit', 'hours', 'feature', 'missing', 'failed', 'complete', 'repo', 'number'];
+/** The details an alert keeps (call 6's allowlist), stored and shown alike. */
+export const KEPT_DETAILS: readonly string[] = ['reason', 'seen_by', 'server', 'extension', 'part', 'spent', 'limit', 'hours', 'feature', 'missing', 'failed', 'complete', 'repo', 'number'];
 
 /** An alert's key (call 7). */
 export function alertKey(code: string, details: Record<string, unknown>): string {
@@ -53,7 +54,8 @@ export function alertKey(code: string, details: Record<string, unknown>): string
   }
 }
 
-function keptDetails(details: Record<string, unknown>): Record<string, string | number | boolean> {
+/** The allowlisted details: a string cut at 200 characters, a finite number or a boolean; anything else is left out. */
+export function keptDetails(details: Record<string, unknown>): Record<string, string | number | boolean> {
   const kept: Record<string, string | number | boolean> = {};
   for (const name of KEPT_DETAILS) {
     const value = details[name];
@@ -85,7 +87,12 @@ export function createStatusStore(deps: { db: Db; clock: () => Date; log: (entry
     try { deps.log(entry); } catch { /* a logger that throws stops nothing */ }
   }
 
-  /** True when the write was queued. */
+  /** Logs a failure; its code is read inside the guard, so an error whose message cannot be read stops nothing either. */
+  function failed(what: string, error: unknown): void {
+    try { deps.log({ event: 'status_store_failed', what, reason: codeOf(error) }); } catch { /* nothing more to do */ }
+  }
+
+  /** True when the write was queued. A write whose turn comes after the close is not sent (call 13). */
   function enqueue(what: string, work: () => Promise<unknown>): boolean {
     if (closed) return false;
     if (waiting >= MAX_WAITING) {
@@ -93,20 +100,17 @@ export function createStatusStore(deps: { db: Db; clock: () => Date; log: (entry
       return false;
     }
     waiting++;
+    // The chain never stays rejected: whatever a write does, the next one runs.
     tail = tail.then(async () => {
       try {
-        await work();
+        if (!closed) await work();
       } catch (error) {
-        safeLog({ event: 'status_store_failed', what, reason: codeOf(error) });
+        failed(what, error);
       } finally {
         waiting--;
       }
-    });
+    }).catch(() => undefined);
     return true;
-  }
-
-  function failed(what: string, error: unknown): void {
-    safeLog({ event: 'status_store_failed', what, reason: codeOf(error) });
   }
 
   /** The clock's time, or null (logged) when it cannot be read. */
@@ -145,7 +149,18 @@ export function createStatusStore(deps: { db: Db; clock: () => Date; log: (entry
     if (!queued) return;
     written.set(key, entry);
     const pair = ok ? pairOf(note) : null;
-    if (pair !== null) enqueue('clear', () => clearAlerts(db, pair.code, pair.key, iso));
+    if (pair === null) return;
+    // A clear that fails or is dropped forgets the note, so the next one is written and clears again.
+    const forget = (): void => { if (written.get(key) === entry) written.delete(key); };
+    const cleared = enqueue('clear', async () => {
+      try {
+        await clearAlerts(db, pair.code, pair.key, iso);
+      } catch (error) {
+        forget();
+        throw error;
+      }
+    });
+    if (!cleared) forget();
   }
 
   return {

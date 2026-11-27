@@ -1,8 +1,9 @@
 // A repository's live score quality (main 6.6 "Live"; UI design 3.3 items 6 and 8, 3.4; calls 23 to 29), and the list of
 // repositories. The reviews and the webhooks share the database's few connections with the UI, so a computation is bounded in
 // what it reads, in what it holds and in how many run at once (call 26): one at a time in the whole service, one statement at a
-// time, the scores of at most QUALITY_GROUP runs (and about QUALITY_GROUP_BYTES stored, but for one pull request alone) held at
-// once and dropped once counted, stopped past QUALITY_DEADLINE_MS, and kept; a repository with no pull request stored is not measured.
+// time, the scores of at most QUALITY_GROUP runs and about QUALITY_GROUP_BYTES stored held at once (one pull request's too) and
+// dropped once counted, stopped past QUALITY_DEADLINE_MS or by the service's stop, and kept; a repository with no pull request
+// stored is not measured.
 // Every answer is built field by field: no comment's body, author or id, no quote, no score's reason and no stored result leaves.
 import { approvalOf, repoSettingsFor } from '../config/load.ts';
 import { knownRepositories } from '../db/activity.ts';
@@ -27,7 +28,10 @@ export const QUALITY_COMMENTS = 20000;
 export const QUALITY_RUNS = 1000;
 /** Runs whose scores one statement reads. */
 export const QUALITY_GROUP = 10;
-/** A statement of scores reads at most about this much stored: a group closes before a pull request that would take it past (call 26, as built). */
+/**
+ * A statement of scores reads at most about this much stored: a group closes before a pull request that would take it past, and
+ * one pull request's own reads are held to it (call 26, as built, last fix).
+ */
 export const QUALITY_GROUP_BYTES = 4 * 1024 * 1024;
 /** A stored result above this, as stored, is not read. */
 export const QUALITY_RESULT_BYTES = 2 * 1024 * 1024;
@@ -50,14 +54,26 @@ export interface QualityCache {
   kept(key: string): Measured | null;
   /** What is kept, else the key's computation: queued behind every other of the service (one runs at a time), not queued twice, waited for at most `waitMs`. */
   measure(key: string, compute: () => Promise<Quality>, waitMs: number): Promise<Measured>;
+  /** Whether the cache was stopped: a computation asks before each of its statements. */
+  stopped(): boolean;
+  /**
+   * The service's stop (call 26, as built, last fix): from now on no computation starts, the one under way ends before its next
+   * statement, and every request waiting is answered `computing` at once; what is kept is still answered. Resolves once the one
+   * under way has ended; never rejects.
+   */
+  stop(): Promise<void>;
 }
 
-/** The computation's answer, or `computing` once `waitMs` has passed; the computation goes on either way. */
-async function waitFor(job: Promise<Measured>, waitMs: number): Promise<Measured> {
+const COMPUTING: Measured = { state: 'computing' };
+/** What a statement asked for after the stop rejects with. */
+const STOPPED = 'stopped';
+
+/** The computation's answer, or `computing` once `waitMs` has passed or the cache stops; the computation goes on either way. */
+async function waitFor(job: Promise<Measured>, waitMs: number, stopping: Promise<Measured>): Promise<Measured> {
   let timer: ReturnType<typeof setTimeout> | undefined;
-  const waited = new Promise<Measured>((resolve) => { timer = setTimeout(() => resolve({ state: 'computing' }), waitMs); });
+  const waited = new Promise<Measured>((resolve) => { timer = setTimeout(() => resolve(COMPUTING), waitMs); });
   try {
-    return await Promise.race([job, waited]);
+    return await Promise.race([job, waited, stopping]);
   } finally {
     clearTimeout(timer);
   }
@@ -68,6 +84,9 @@ export function createQualityCache(deps: { clock: () => Date; log: (entry: Recor
   const kept = new Map<string, { measured: Measured; at: number }>();
   const pending = new Map<string, Promise<Measured>>();
   let tail: Promise<unknown> = Promise.resolve();
+  let stopped = false;
+  let answerWaiting = (): void => {};
+  const stopping = new Promise<Measured>((resolve) => { answerWaiting = () => resolve(COMPUTING); });
 
   const keptFor = (key: string): Measured | null => {
     const entry = kept.get(key);
@@ -86,6 +105,8 @@ export function createQualityCache(deps: { clock: () => Date; log: (entry: Recor
     }
   };
   const run = async (key: string, compute: () => Promise<Quality>): Promise<Measured> => {
+    // A computation whose turn comes after the stop does not start.
+    if (stopped) { pending.delete(key); return COMPUTING; }
     let measured: Measured;
     let failure: string | null = null;
     try {
@@ -95,6 +116,8 @@ export function createQualityCache(deps: { clock: () => Date; log: (entry: Recor
       failure = codeOf(error);
     }
     pending.delete(key);
+    // One the stop ended is neither kept nor logged: it did not fail.
+    if (stopped && measured.state === 'failed') return COMPUTING;
     put(key, measured);
     if (failure !== null) deps.log({ event: 'quality_failed', reason: failure });
     return measured;
@@ -105,6 +128,7 @@ export function createQualityCache(deps: { clock: () => Date; log: (entry: Recor
     measure(key, compute, waitMs) {
       const known = keptFor(key);
       if (known !== null) return Promise.resolve(known);
+      if (stopped) return Promise.resolve(COMPUTING);
       let job = pending.get(key);
       if (job === undefined) {
         // A computation starts only when the one before it settled.
@@ -112,7 +136,13 @@ export function createQualityCache(deps: { clock: () => Date; log: (entry: Recor
         tail = job.then(() => undefined, () => undefined);
         pending.set(key, job);
       }
-      return waitFor(job, waitMs);
+      return waitFor(job, waitMs, stopping);
+    },
+    stopped: () => stopped,
+    stop() {
+      stopped = true;
+      answerWaiting();
+      return tail.then(() => undefined);
     },
   };
 }
@@ -141,22 +171,25 @@ export interface Planned {
   last: { id: number; head: string } | null;   // its last run: the newest that did not fail, started at or before its close
   heads: Map<string, number>;                  // each head a counted comment names whose run is read, and that run (the last run's head is its own)
   read: number[];
-  bytes: number;                               // the sizes as stored of the runs read whose result is read (at most `resultBytes` each)
+  bytes: number;                               // the sizes as stored of the runs read (at most `resultBytes` each; none when the last run is over it)
+  cut: boolean;                                // a head a counted comment names, scored by a run, was left out: its comments label the last run's file only
   comments: LiveComment[]; findings: Set<string>;
 }
 
 /**
  * What of a closed pull request is read (call 26): its last run, then the runs at the heads its counted comments name (the comments
  * `liveCases` counts, by `countedComments`), each head's newest started at or before the close, newest first, other than the last
- * run, at most QUALITY_GROUP in all. A head no run scored is not read: its comments label the last run's file.
+ * run, while they fit: at most QUALITY_GROUP in all and `groupBytes` stored (as built, last fix). A head no run scored is not read:
+ * its comments label the last run's file, as do those of a head left out (`cut`), whose run is over `resultBytes` or does not fit.
+ * A last run over `resultBytes` is read alone: it is not read, so its pull request is unreadable, and no other run of it is read.
  */
 export function planOf(
   pull: { number: number; author: string | null; closed_at: Date }, runs: readonly PlanRun[], comments: readonly LiveComment[],
-  findings: ReadonlySet<string>, resultBytes = QUALITY_RESULT_BYTES,
+  findings: ReadonlySet<string>, resultBytes = QUALITY_RESULT_BYTES, groupBytes = QUALITY_GROUP_BYTES,
 ): Planned {
   const close = pull.closed_at.getTime();
   const plan: Planned = {
-    number: pull.number, author: pull.author, last: null, heads: new Map(), read: [], bytes: 0, comments: [...comments], findings: new Set(findings),
+    number: pull.number, author: pull.author, last: null, heads: new Map(), read: [], bytes: 0, cut: false, comments: [...comments], findings: new Set(findings),
   };
   const newest = new Map<string, PlanRun>();
   let last: PlanRun | null = null;
@@ -166,6 +199,10 @@ export function planOf(
     if ((newest.get(r.head)?.id ?? -1) < r.id) newest.set(r.head, r);
   }
   if (last === null) return plan;
+  plan.last = { id: last.id, head: last.head };
+  plan.read = [last.id];
+  if (last.size > resultBytes) return plan;
+  plan.bytes = last.size;
   const counted = countedComments({ author: pull.author, comments: plan.comments, findingThreads: plan.findings });
   const others: PlanRun[] = [];
   for (const head of new Set(counted.flatMap((c) => (c.commit === null ? [] : [c.commit])))) {
@@ -174,13 +211,14 @@ export function planOf(
     if (run.id === last.id) plan.heads.set(head, run.id);
     else others.push(run);
   }
-  // A pull request is never split across two groups, so it reads at most QUALITY_GROUP runs.
-  const chosen = others.sort((x, y) => y.id - x.id).slice(0, QUALITY_GROUP - 1);
-  for (const run of chosen) plan.heads.set(run.head, run.id);
-  const read = [last, ...chosen];
-  plan.last = { id: last.id, head: last.head };
-  plan.read = read.map((r) => r.id);
-  plan.bytes = read.reduce((n, r) => n + (r.size <= resultBytes ? r.size : 0), 0);
+  // A pull request is never split across two groups, so it reads at most QUALITY_GROUP runs and about `groupBytes` stored.
+  for (const run of others.sort((x, y) => y.id - x.id)) {
+    if (run.size > resultBytes) { plan.cut = true; continue; }
+    if (plan.read.length >= QUALITY_GROUP || plan.bytes + run.size > groupBytes) { plan.cut = true; break; }
+    plan.heads.set(run.head, run.id);
+    plan.read.push(run.id);
+    plan.bytes += run.size;
+  }
   return plan;
 }
 
@@ -201,13 +239,13 @@ const zeroCounts = (thresholds: readonly number[]): Map<number, Counts> => new M
 function nothingStored(name: string, window: QualityWindow, t: number): Quality {
   const thresholds = thresholdsOf(t);
   return {
-    repository: name, window, threshold: t, pullRequests: 0, unreadable: 0, cut: { pulls: false, comments: false, runs: false },
+    repository: name, window, threshold: t, closed: 0, pullRequests: 0, unreadable: 0, cut: { pulls: false, comments: false, runs: false },
     rows: rowsOf(thresholds, t, zeroCounts(thresholds), zeroCounts(thresholds)), stepped: [],
     reverts: { merged: 0, approved: 0 }, audits: { drawn: 0, needed: 0 }, feedback: { helpful: 0, notHelpful: 0, reasons: [] },
   };
 }
 
-/** One repository's quality over a window at a threshold (calls 23 to 29); rejects `too_slow` past QUALITY_DEADLINE_MS. */
+/** One repository's quality over a window at a threshold (calls 23 to 29); rejects `too_slow` past QUALITY_DEADLINE_MS, and `stopped` once the cache is. */
 export async function computeQuality(
   deps: InsightDeps, repository: string, window: QualityWindow, threshold: number, bounds: Partial<QualityBounds> = {},
 ): Promise<Quality> {
@@ -217,7 +255,8 @@ export async function computeQuality(
   const began = deps.clock().getTime();
   // Checked before each statement: a statement under way is cut by the pool.
   const step = <T>(read: () => Promise<T>): Promise<T> =>
-    (deps.clock().getTime() - began >= QUALITY_DEADLINE_MS ? Promise.reject(new Error('too_slow')) : read());
+    (deps.quality.stopped() ? Promise.reject(new Error(STOPPED))
+      : deps.clock().getTime() - began >= QUALITY_DEADLINE_MS ? Promise.reject(new Error('too_slow')) : read());
   const name = repository.toLowerCase();
   const key = repoKeyOf(name);
   const since = windowStart(deps.clock(), window);
@@ -260,7 +299,7 @@ export async function computeQuality(
     }
     const findings = new Map<number, Set<string>>();
     for (const f of threadRows) findings.set(f.number, (findings.get(f.number) ?? new Set()).add(f.comment_id));
-    const planned = pulls.map((p) => planOf(p, runs.get(p.number) ?? [], comments.get(p.number) ?? [], findings.get(p.number) ?? new Set(), b.resultBytes));
+    const planned = pulls.map((p) => planOf(p, runs.get(p.number) ?? [], comments.get(p.number) ?? [], findings.get(p.number) ?? new Set(), b.resultBytes, b.groupBytes));
 
     // One group: its runs' scores in one statement; each pull request then measured by one call of liveCases, counted, and dropped.
     const measureGroup = async (group: readonly Planned[]): Promise<void> => {
@@ -297,8 +336,8 @@ export async function computeQuality(
       }
     };
 
-    // A group closes before a pull request that would take it past QUALITY_GROUP runs or `groupBytes` stored; a pull request
-    // alone above `groupBytes` is a group of its own.
+    // A group closes before a pull request that would take it past QUALITY_GROUP runs or `groupBytes` stored; a pull request's
+    // own reads are held to both (`planOf`), and a head it left out is said.
     let group: Planned[] = [];
     let inGroup = 0;
     let groupBytes = 0;
@@ -307,6 +346,7 @@ export async function computeQuality(
       const n = p.read.length;
       if (n === 0) continue;
       if (read + n > b.runs) { cut.runs = true; break; }
+      if (p.cut) cut.runs = true;
       if (group.length > 0 && (inGroup + n > QUALITY_GROUP || groupBytes + p.bytes > b.groupBytes)) {
         await measureGroup(group);
         group = []; inGroup = 0; groupBytes = 0;
@@ -333,7 +373,7 @@ export async function computeQuality(
 
   return {
     repository: name, window, threshold: t,
-    pullRequests: measured, unreadable, cut,
+    closed: pulls.length, pullRequests: measured, unreadable, cut,
     rows: rowsOf(thresholds, t, pullCounts, labelCounts), stepped: stepped.map((s) => ({ path: s.path, number: s.number, score: s.score })),
     reverts: { merged: ofWindow.length, approved: ofWindow.filter((r) => r.approved).length },
     audits,
@@ -359,8 +399,15 @@ export async function quality(deps: InsightDeps, repository: string, query: URLS
   const threshold = repoSettingsFor(deps.inForce(), name).scoreThreshold;
   let measured = deps.quality.kept(qualityKey(name, window, threshold));
   if (measured === null) {
-    measured = await repositoryKnown(deps.db, repoKeyOf(name))
-      ? await qualityOf(deps, name, window, QUALITY_WAIT_MS)
+    // A lookup that fails is answered `failed`, not kept: the route answers a state, never 500.
+    let known: boolean | null;
+    try {
+      known = await repositoryKnown(deps.db, repoKeyOf(name));
+    } catch {
+      known = null;
+    }
+    measured = known === null ? { state: 'failed' }
+      : known ? await qualityOf(deps, name, window, QUALITY_WAIT_MS)
       : { state: 'ready', quality: nothingStored(name, window, threshold) };
   }
   return { now: deps.clock().toISOString(), state: measured.state, quality: measured.state === 'ready' ? measured.quality : null };

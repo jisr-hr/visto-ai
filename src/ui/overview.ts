@@ -5,7 +5,7 @@ import { approvalCounts, judgeCostPerDay, reviewedRepositories, reviewsPerDay, r
 import { spentSince } from '../db/review-runs.ts';
 import { openAlerts, readHealth, recentAlerts } from '../db/status.ts';
 import type { AlertRow, HealthRow } from '../db/status.ts';
-import { RECENT_MS } from '../shell/status-store.ts';
+import { RECENT_MS, keptDetails } from '../shell/status-store.ts';
 import type {
   AlertShown, DependencyKind, DependencyPart, DependencyShown, DependencyStatus, Health, Overview, OverviewQuality, QualityState, WindowDays,
 } from './api-types.ts';
@@ -24,8 +24,6 @@ const MISSING_SHOWN = 50;
 const TEXT_SHOWN = 200;
 const DAY_MS = 86_400_000;
 const WINDOWS: ReadonlyMap<string, WindowDays> = new Map<string, WindowDays>([['', 30], ['7', 7], ['30', 30], ['90', 90]]);
-/** The details an alert shows (call 6's allowlist, applied again on the way out). */
-const ALERT_DETAILS = ['reason', 'seen_by', 'server', 'extension', 'part', 'spent', 'limit', 'hours', 'feature', 'missing', 'failed', 'complete', 'repo', 'number'];
 
 /** The start of the clock's UTC day. */
 const dayStart = (now: Date): string => new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate())).toISOString();
@@ -115,17 +113,15 @@ function missingOf(value: unknown): Array<{ feature: string; missing: string }> 
   return out;
 }
 
-function alertShown(row: AlertRow, open: boolean): AlertShown {
-  const details: AlertShown['details'] = {};
+/** An alert as shown, its details through the store's allowlist again; null for one whose time no ISO time writes (infinity), passed over. */
+function alertShown(row: AlertRow, open: boolean): AlertShown | null {
+  const raisedAt = iso(row.raised_at);
+  if (raisedAt === null) return null;
   const stored = typeof row.details === 'object' && row.details !== null && !Array.isArray(row.details) ? (row.details as Record<string, unknown>) : {};
-  for (const name of ALERT_DETAILS) {
-    const value = stored[name];
-    if (typeof value === 'string') details[name] = value.slice(0, TEXT_SHOWN);
-    else if (typeof value === 'number' && Number.isFinite(value)) details[name] = value;
-    else if (typeof value === 'boolean') details[name] = value;
-  }
-  return { id: row.id, code: row.code, details, raisedAt: row.raised_at.toISOString(), open };
+  return { id: row.id, code: row.code, details: keptDetails(stored), raisedAt, open };
 }
+const shownOf = (rows: readonly AlertRow[], open: boolean): AlertShown[] =>
+  rows.flatMap((row) => { const shown = alertShown(row, open); return shown === null ? [] : [shown]; });
 
 export async function health(deps: InsightDeps): Promise<Health> {
   const now = deps.clock();
@@ -161,10 +157,9 @@ export async function health(deps: InsightDeps): Promise<Health> {
   const app = find('app', '');
   dependencies.push({ ...shown('app', null, null, app), missing: app === undefined ? [] : missingOf(app.missing) });
 
-  const open = await openAlerts(deps.db, dayStart(now), OPEN_SHOWN);
-  const recent = await recentAlerts(deps.db, new Date(now.getTime() - RECENT_MS).toISOString(), open.map((a) => a.id), RECENT_SHOWN);
-  return {
-    now: now.toISOString(), dependencies,
-    open: open.map((a) => alertShown(a, true)), recent: recent.map((a) => alertShown(a, false)),
-  };
+  // The recent ones are those not open by the open rule, so an open alert past the ones shown is never read as resolved.
+  const today = dayStart(now);
+  const open = await openAlerts(deps.db, today, OPEN_SHOWN);
+  const recent = await recentAlerts(deps.db, new Date(now.getTime() - RECENT_MS).toISOString(), today, RECENT_SHOWN);
+  return { now: now.toISOString(), dependencies, open: shownOf(open, true), recent: shownOf(recent, false) };
 }

@@ -566,6 +566,28 @@ test('the records shown are those on or off not expired, newest recorded first, 
   await db.close();
 });
 
+test("the search finds a record by its path alone, its directory alone, a person's words or a lesson, and never by a lesson's quote", async () => {
+  const db = await testDb();
+  await addRecords(db, REPO, [
+    record({ sourceRef: 'by-path', path: 'src/cart/coupon.ts', directory: 'src/cart', excerpt: 'nothing to see' }),
+    record({ sourceRef: 'by-directory', path: null, directory: 'lib/ledger', excerpt: 'nothing to see' }),
+    record({ sourceRef: 'by-words', path: 'src/a.ts', directory: 'src', excerpt: 'the refund comes late' }),
+    record({ kind: 'lesson', sourceRef: 'by-lesson', path: 'src/b.ts', directory: 'src', lesson: 'check the currency', excerpt: 'a quoted hidden reply' }),
+    record({ kind: 'revert', sourceRef: 'a-revert', path: 'src/c.ts', directory: 'src', reverted: 3, excerpt: 'an unshown note' }),
+  ]);
+  const ids = await idsOf(db);
+  const found = async (part: string): Promise<number[]> => (await shownRecords(db, { ...NONE, text: `%${part}%` }, AT, 51)).map((r) => r.id);
+  assert.deepEqual(await found('coupon'), [ids[0]]);
+  assert.deepEqual(await found('ledger'), [ids[1]]);
+  assert.deepEqual(await found('refund'), [ids[2]]);
+  assert.deepEqual(await found('currency'), [ids[3]]);
+  assert.deepEqual(await found('hidden'), []);
+  assert.deepEqual(await found('unshown'), []);
+  assert.equal(await countShown(db, { ...NONE, text: '%hidden%' }, AT), 0);
+  assert.equal(await countShown(db, { ...NONE, text: '%currency%' }, AT), 1);
+  await db.close();
+});
+
 test('the counts are the records on by kind, the repositories of people stepping in, and the records off', async () => {
   const db = await testDb();
   await addRecords(db, REPO, [...triple(), record({ sourceRef: 'k2' })]);

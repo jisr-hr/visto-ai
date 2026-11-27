@@ -125,9 +125,10 @@ export interface Measure { share: number | null; part: number; of: number }
 export interface ApprovalShort { enabled: boolean; threads: 'strict' | 'gate'; auditShare: number }
 export interface QualityRow { threshold: number; current: boolean; safetyBlocks: Measure; safetyFiles: Measure; benefit: Measure; focus: Measure }
 export interface SteppedBlock { path: string; number: number; score: number }
+/** `closed`: the pull requests closed in the window that were read (at most 300); `pullRequests`: those of them measured (a last run read). */
 export interface Quality {
   repository: string; window: QualityWindow; threshold: number;
-  pullRequests: number; unreadable: number; cut: { pulls: boolean; comments: boolean; runs: boolean };
+  closed: number; pullRequests: number; unreadable: number; cut: { pulls: boolean; comments: boolean; runs: boolean };
   rows: QualityRow[]; stepped: SteppedBlock[];
   reverts: { merged: number; approved: number }; audits: { drawn: number; needed: number };
   feedback: { helpful: number; notHelpful: number; reasons: Array<{ reason: string; count: number }> };
@@ -166,7 +167,7 @@ export type MemoryKind = 'human_signal' | 'revert' | 'lesson';
 /** `text`: the excerpt of a person's record, the lesson of a lesson, '' for a revert. `by`: the commenter of a person's record. `reverted`: the pull request a revert undid. */
 export interface MemoryRecordShown {
   id: number; kind: MemoryKind; repository: string; number: number; text: string; path: string | null; directory: string | null;
-  by: string | null; reverted: number | null; createdAt: string; expiresAt: string; on: boolean;
+  by: string | null; reverted: number | null; createdAt: string | null; expiresAt: string | null; on: boolean;   // a time no ISO time writes is none
 }
 export interface MemoryView {
   now: string; learning: { on: boolean; ranAt: string | null };

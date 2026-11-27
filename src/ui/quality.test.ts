@@ -150,7 +150,7 @@ test("a repository's quality is measured on the pull requests closed in the wind
 
   const h = harness(db);
   const want: Quality = {
-    repository: 'acme/shop', window: 30, threshold: 70, pullRequests: 2, unreadable: 0, cut: { pulls: false, comments: false, runs: false },
+    repository: 'acme/shop', window: 30, threshold: 70, closed: 2, pullRequests: 2, unreadable: 0, cut: { pulls: false, comments: false, runs: false },
     rows: [
       { threshold: 20, current: false, safetyBlocks: m(0, 1), safetyFiles: m(0, 1), benefit: m(0, 2), focus: m(20, 20) },
       { threshold: 40, current: false, safetyBlocks: m(0, 1), safetyFiles: m(0, 1), benefit: m(1, 2), focus: m(10, 10) },
@@ -266,6 +266,8 @@ test("a pull request's runs are read with it in one statement, its last run and 
   assert.deepEqual(rowAt(q, 70).safetyFiles, m(9, 9));
   assert.deepEqual(q.stepped, Array.from({ length: 9 }, () => ({ path: P, number: 301, score: 50 })));
   assert.equal(q.pullRequests, 3);
+  // The two heads left out are said: their labels are approximate.
+  assert.deepEqual(q.cut, { pulls: false, comments: false, runs: true });
   await db.close();
 });
 
@@ -321,7 +323,7 @@ test("only the heads a counted comment names are read: the author's own comments
   await db.close();
 });
 
-test('a statement of scores reads about four megabytes stored at most, and a pull request above that is a group of its own', async () => {
+test("a statement of scores reads about four megabytes stored at most, and a pull request's own reads are held to it", async () => {
   const db = await testDb();
   const ids = new Map<number, number[]>();
   // #503 reads two runs: its last, and the earlier one at the head a guest commented on.
@@ -336,16 +338,39 @@ test('a statement of scores reads about four megabytes stored at most, and a pul
   assert.equal(sizes.length, 1);
   const size = sizes[0]!.size;
   const of = (...numbers: number[]): number[] => numbers.flatMap((n) => ids.get(n)!);
-  const read = async (groupBytes: number): Promise<number[][]> => {
+  const read = async (groupBytes: number): Promise<{ groups: number[][]; cut: boolean }> => {
     const h = harness(db);
     const q = await computeQuality(h.deps, 'acme/shop', 30, 70, { groupBytes });
     assert.equal(q.pullRequests, 4);
-    return groupsRead(h);
+    return { groups: groupsRead(h), cut: q.cut.runs };
   };
-  assert.deepEqual(await read(QUALITY_GROUP_BYTES), [of(501, 502, 503, 504)]);
-  assert.deepEqual(await read(2 * size), [of(501, 502), of(503), of(504)]);
-  assert.deepEqual(await read(size), [of(501), of(502), of(503), of(504)]);
+  assert.deepEqual(await read(QUALITY_GROUP_BYTES), { groups: [of(501, 502, 503, 504)], cut: false });
+  assert.deepEqual(await read(2 * size), { groups: [of(501, 502), of(503), of(504)], cut: false });
+  // At one run's size #503 reads its last run alone: the head left out is said cut.
+  assert.deepEqual(await read(size), { groups: [of(501), of(502), [ids.get(503)![0]!], of(504)], cut: true });
   assert.equal(QUALITY_GROUP_BYTES, 4 * 1024 * 1024);
+  await db.close();
+});
+
+test('a pull request whose last run is over two megabytes stored has no other run read, and is counted unreadable', async () => {
+  const db = await testDb();
+  await savePullRequest(db, facts(601, -DAY));
+  const earlier = await scored(db, 601, HEAD_A, -3 * DAY, one('dA', 'h1', 50));
+  await comment(db, 601, '7001', HEAD_A, -3 * DAY + 100);
+  const wide = Array.from({ length: 40 }, (_, i) => file(`src/part-${i}.ts`, `d${i}`, [block('B1', `h${i}`, 50, [[38, 51]])]));
+  const last = await scored(db, 601, HEAD_B, -2 * DAY, wide);
+  const size = async (id: number): Promise<number> =>
+    (await db.query<{ size: number }>('select pg_column_size(result) as size from visto_ai.review_runs where id = $1', [id]))[0]!.size;
+  const [small, large] = [await size(earlier), await size(last)];
+  assert.ok(small < large);
+  const h = harness(db);
+  const whole = await computeQuality(h.deps, 'acme/shop', 30, 70);
+  assert.deepEqual(groupsRead(h), [[last, earlier]]);
+  assert.deepEqual([whole.pullRequests, whole.unreadable], [1, 0]);
+  const k = harness(db);
+  const cut = await computeQuality(k.deps, 'acme/shop', 30, 70, { resultBytes: large - 1 });
+  assert.deepEqual(groupsRead(k), [[last]]);
+  assert.deepEqual([cut.pullRequests, cut.unreadable, cut.cut.runs], [0, 1, false]);
   await db.close();
 });
 
@@ -358,7 +383,7 @@ test('a repository with no pull request stored is answered at once with none, ne
   const shop = await ready(quality(h.deps, 'acme/shop', days()));
   const zero = m(0, 0);
   const none: Quality = {
-    repository: 'acme/made-up', window: 30, threshold: 70, pullRequests: 0, unreadable: 0, cut: { pulls: false, comments: false, runs: false },
+    repository: 'acme/made-up', window: 30, threshold: 70, closed: 0, pullRequests: 0, unreadable: 0, cut: { pulls: false, comments: false, runs: false },
     rows: [20, 40, 70, 90].map((x) => ({ threshold: x, current: x === 70, safetyBlocks: zero, safetyFiles: zero, benefit: zero, focus: zero })),
     stepped: [], ...NOTHING,
   };
@@ -403,9 +428,11 @@ test('the plan of a pull request reads its last run, then the runs at the heads 
   ];
   const plan = planOf({ number: 401, author: 'octo-dev', closed_at: closed }, runs, comments, new Set(['9001']));
   assert.deepEqual(plan.last, { id: 6, head: H(5) });
-  assert.deepEqual(plan.read, [6, 4, 3, 1]);
-  assert.deepEqual([...plan.heads].sort(), [[H(1), 1], [H(2), 3], [H(3), 4], [H(5), 6]].sort());
+  // Run 4, at head 3, is over 2 MB as stored: it is not read, and its head is said cut.
+  assert.deepEqual(plan.read, [6, 3, 1]);
+  assert.deepEqual([...plan.heads].sort(), [[H(1), 1], [H(2), 3], [H(5), 6]].sort());
   assert.equal(plan.bytes, 50 + 300 + 100);
+  assert.equal(plan.cut, true);
   assert.deepEqual(plan.comments.map((x) => x.id), comments.map((x) => x.id));
   assert.deepEqual([plan.number, plan.author, [...plan.findings]], [401, 'octo-dev', ['9001']]);
 
@@ -414,9 +441,44 @@ test('the plan of a pull request reads its last run, then the runs at the heads 
   assert.deepEqual(wide.read, [14, 13, 12, 11, 10, 9, 8, 7, 6, 5]);
   assert.equal(wide.read.length, QUALITY_GROUP);
   assert.equal(wide.bytes, 100);
+  assert.equal(wide.cut, true);
+  const nine = planOf({ number: 9, author: null, closed_at: closed }, many.slice(0, 10), many.slice(0, 10).map((r) => c(`w${r.id}`, r.head)), new Set());
+  assert.deepEqual([nine.read.length, nine.cut], [QUALITY_GROUP, false]);
 
   const empty = planOf({ number: 8, author: 'octo-dev', closed_at: closed }, [runs[6]!], [c('k7', H(7))], new Set());
-  assert.deepEqual([empty.last, empty.read, empty.heads.size, empty.bytes], [null, [], 0, 0]);
+  assert.deepEqual([empty.last, empty.read, empty.heads.size, empty.bytes, empty.cut], [null, [], 0, 0, false]);
+});
+
+test("a pull request's reads are held to about four megabytes stored: its last run, then the newest commented heads while they fit", () => {
+  const closed = new Date(at(0));
+  const MB = 1024 * 1024;
+  const H = (i: number): string => headOf(i);
+  const c = (id: string, commit: string): LiveComment => ({
+    id, author: 'octo-guest', path: P, side: 'RIGHT', line: 40, startLine: null, fileLevel: false, commit, replyTo: null,
+  });
+  const runs: PlanRun[] = [
+    { id: 1, head: H(1), started: new Date(at(-600)), size: 0.5 * MB },
+    { id: 2, head: H(2), started: new Date(at(-500)), size: 1 * MB },
+    { id: 3, head: H(3), started: new Date(at(-400)), size: 1.5 * MB },
+    { id: 4, head: H(4), started: new Date(at(-300)), size: 1 * MB },
+    { id: 5, head: H(5), started: new Date(at(-200)), size: 1.5 * MB },
+  ];
+  const comments = [c('k1', H(1)), c('k2', H(2)), c('k3', H(3)), c('k4', H(4))];
+  const pull = { number: 401, author: 'octo-dev', closed_at: closed };
+  // The last run (1.5), head 4 (2.5), head 3 (4.0, the bound itself); head 2 would pass it, and it and every older head are cut.
+  const plan = planOf(pull, runs, comments, new Set());
+  assert.deepEqual([plan.last, plan.read, plan.bytes, plan.cut], [{ id: 5, head: H(5) }, [5, 4, 3], 4 * MB, true]);
+  assert.deepEqual([...plan.heads].sort(), [[H(3), 3], [H(4), 4]].sort());
+  assert.equal(QUALITY_GROUP_BYTES, 4 * MB);
+  // Under a bound of its own, as a test lowers it.
+  const low = planOf(pull, runs, comments, new Set(), QUALITY_RESULT_BYTES, 2 * MB);
+  assert.deepEqual([low.read, low.bytes, low.cut], [[5], 1.5 * MB, true]);
+  // A last run over 2 MB as stored is not read, so no other run of its pull request is read either: it is unreadable, not cut.
+  const big = planOf(pull, [...runs.slice(0, 4), { ...runs[4]!, size: QUALITY_RESULT_BYTES + 1 }], comments, new Set());
+  assert.deepEqual([big.last, big.read, big.heads.size, big.bytes, big.cut], [{ id: 5, head: H(5) }, [5], 0, 0, false]);
+  // Every head fits: nothing is cut.
+  const fits = planOf(pull, runs.map((r) => ({ ...r, size: 100 })), comments, new Set());
+  assert.deepEqual([fits.read, fits.bytes, fits.cut], [[5, 4, 3, 2, 1], 500, false]);
 });
 
 test('one computation runs at a time in the service, the same key is not queued twice, and a result is kept five minutes', async () => {
@@ -528,6 +590,60 @@ test('a computation past sixty seconds stops as too slow', async () => {
   await db.close();
 });
 
+test('a stop of the cache starts no computation, ends the one under way before its next statement, and answers whoever waits', async () => {
+  const db = await testDb();
+  await savePullRequest(db, facts(119, -DAY));
+  await scored(db, 119, HEAD_A, -2 * DAY, one('dA', 'h1', 50));
+  await savePullRequest(db, { ...facts(120, -DAY), ref: refOf(120, 'web') });
+  const h = harness(db);
+  const kept = await ready(quality(h.deps, 'acme/shop', days('7')));
+  let release = (): void => {};
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  let holding = false;
+  h.hook.before = async (text, params) => { if (kindOf(text) === 'closedPulls' && params[2] === 'shop') { holding = true; await held; } };
+  const asked = quality(h.deps, 'acme/shop', days());
+  const queued = quality(h.deps, 'acme/web', days());
+  for (let i = 0; i < 1000 && !holding; i++) await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(holding, true);
+  assert.equal(h.deps.quality.stopped(), false);
+  let ended = false;
+  const stopping = h.deps.quality.stop().then(() => { ended = true; });
+  assert.equal(h.deps.quality.stopped(), true);
+  // Both requests are answered at once, while the statement under way still holds.
+  const computing = { now: at(0), state: 'computing', quality: null };
+  assert.deepEqual([await asked, await queued], [computing, computing]);
+  for (let i = 0; i < 20; i++) await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(ended, false);
+  const from = h.sent.length;
+  release();
+  await stopping;
+  // No statement after the one under way, none of the one queued, nothing kept, nothing logged.
+  assert.deepEqual(kinds(h, from), []);
+  assert.equal(h.deps.quality.kept(qualityKey('acme/shop', 30, 70)), null);
+  assert.equal(h.deps.quality.kept(qualityKey('acme/web', 30, 70)), null);
+  assert.deepEqual(h.logs, []);
+  // After it: what is kept is answered, and nothing else is measured.
+  assert.deepEqual(await ready(quality(h.deps, 'acme/shop', days('7'))), kept);
+  const after = h.sent.length;
+  assert.deepEqual(await quality(h.deps, 'acme/web', days('90')), computing);
+  assert.deepEqual(kinds(h, after), ['repositoryKnown']);
+  await h.deps.quality.stop();
+  await db.close();
+});
+
+test('a repository whose lookup fails is answered failed, neither measured nor kept', async () => {
+  const db = await testDb();
+  await savePullRequest(db, facts(119, -DAY));
+  const h = harness(db);
+  h.hook.before = (text) => { if (kindOf(text) === 'repositoryKnown') throw new Error('db_down'); };
+  assert.deepEqual(await quality(h.deps, 'acme/shop', days()), { now: at(0), state: 'failed', quality: null });
+  assert.deepEqual(kinds(h), ['repositoryKnown']);
+  assert.equal(h.deps.quality.kept(qualityKey('acme/shop', 30, 70)), null);
+  h.hook.before = null;
+  assert.equal((await ready(quality(h.deps, 'acme/shop', days()))).closed, 1);
+  await db.close();
+});
+
 test('reverts and audits are counted, an audit needing a person when it was labelled strictly or reverted', async () => {
   const db = await testDb();
   const publish = (id: number, approved: boolean, approvalCode: string): Promise<boolean> =>
@@ -570,17 +686,21 @@ test('a run whose scores cannot be read, or whose stored result is too large, le
   await scored(db, 141, HEAD_B, -3 * DAY, null, { result: { findings: [] } });
   await scored(db, 141, HEAD_C, -2 * DAY, one('dC', 'h9', 30));
   await comment(db, 141, '7001', HEAD_B, -3 * DAY + 100);
+  // #144 closed with no run: neither measured nor unreadable, but closed in the window.
+  await savePullRequest(db, facts(144, -DAY));
 
   const h = harness(db);
   const q = await computeQuality(h.deps, 'acme/shop', 30, 70);
   assert.equal(q.unreadable, 3);
   assert.equal(q.pullRequests, 1);
+  assert.equal(q.closed, 5);
   assert.deepEqual(rowAt(q, 70).safetyBlocks, m(0, 0));
   assert.deepEqual(rowAt(q, 70).safetyFiles, m(0, 0));
   assert.deepEqual(rowAt(q, 70).benefit, m(1, 1));
   const small = await computeQuality(h.deps, 'acme/shop', 30, 70, { resultBytes: 10 });
   assert.equal(small.unreadable, 4);
   assert.equal(small.pullRequests, 0);
+  assert.equal(small.closed, 5);
   assert.ok(QUALITY_RESULT_BYTES === 2 * 1024 * 1024);
   await db.close();
 });
@@ -594,6 +714,7 @@ test('pull requests, comments and runs past their bounds are cut, and said so', 
   const q = await computeQuality(h.deps, 'acme/shop', 30, 70);
   assert.deepEqual(q.cut, { pulls: true, comments: false, runs: false });
   assert.equal(q.pullRequests, 1);
+  assert.equal(q.closed, QUALITY_PULLS);
   const closed = h.sent.find((s) => kindOf(s.text) === 'closedPulls')!;
   assert.equal(closed.params[4], QUALITY_PULLS + 1);
   assert.equal((JSON.parse(h.sent.find((s) => kindOf(s.text) === 'okRuns')!.params[3] as string) as number[]).length, QUALITY_PULLS);
@@ -664,7 +785,7 @@ test('the automatic approval in short is read from the settings in force', async
 test('at most a hundred are kept, the oldest put dropped first', async () => {
   const cache = createQualityCache({ clock: () => new Date(at(0)), log: () => {} });
   const made = (repository: string): Quality => ({
-    repository, window: 30, threshold: 70, pullRequests: 0, unreadable: 0, cut: { pulls: false, comments: false, runs: false }, rows: [], stepped: [], ...NOTHING,
+    repository, window: 30, threshold: 70, closed: 0, pullRequests: 0, unreadable: 0, cut: { pulls: false, comments: false, runs: false }, rows: [], stepped: [], ...NOTHING,
   });
   let computed = 0;
   const measure = (key: string): Promise<unknown> => cache.measure(key, async () => { computed += 1; return made(key); }, 1000);
@@ -696,7 +817,7 @@ const KEYS = (shape: object): string[] => Object.keys(shape).sort();
 const keysOf = (value: object): string[] => Object.keys(value).sort();
 const ANSWER: Record<keyof QualityAnswer, true> = { now: true, state: true, quality: true };
 const QUALITY: Record<keyof Quality, true> = {
-  repository: true, window: true, threshold: true, pullRequests: true, unreadable: true, cut: true, rows: true, stepped: true, reverts: true,
+  repository: true, window: true, threshold: true, closed: true, pullRequests: true, unreadable: true, cut: true, rows: true, stepped: true, reverts: true,
   audits: true, feedback: true,
 };
 const CUT: Record<keyof Quality['cut'], true> = { pulls: true, comments: true, runs: true };

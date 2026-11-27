@@ -1,10 +1,14 @@
 // The UI's route: the built files, the sign-in routes, the JSON reads of the frame and Activity, and the accounts, under one
-// group (UI design 3.1, 3.2 and 5; calls 12, 13, 17, 23, 27 and 30; the password design 4.1, 4.3 and 4.5, calls 19 to 21), and the
+// group (UI design 3.1, 3.2 and 5; calls 12, 13, 17, 23, 27 and 30; the password design 4.1, 4.3 and 4.5, calls 19 to 21); the
 // two routes of the page of one review, GET /api/reviews/<run> and GET /api/pulls/<owner>/<repo>/<number>/reviews (the plan "The
-// UI, One Review", calls 18 and 19). Every answer is built by headers.ts or files.ts. No log line holds a name, a login, a password
-// or a hash. A name or a login is in the accounts' answers, in `/api/me` (the signed-in name), in Activity's rows (the requester's
-// login) and in the two review routes' (whose logins, texts and limits are call 16's), and in no other; the one-time password is
-// in the answer of the route that made it only.
+// UI, One Review", calls 18 and 19); the four of Settings (the plan "The UI's Settings"); and the six of the plan "The UI's
+// Overview, Repositories and Memory" (call 34): GET /api/overview, /api/health, /api/repositories,
+// /api/repositories/<owner>/<repo>/quality and /api/memory, and PUT /api/memory/<id>, an admin's change. Every answer is built by
+// headers.ts or files.ts. No log line holds a name, a login, a password or a hash. A name or a login is in the accounts' answers,
+// in `/api/me` (the signed-in name), in Activity's rows (the requester's login), in the two review routes' (whose logins, texts
+// and limits are call 16's), in Settings' answers (who saved each setting and each change, and the accounts `ui.accounts` lets in),
+// and in Memory's records (the login of whoever wrote the words of a record of people stepping in), and in no other; the one-time
+// password is in the answer of the route that made it only.
 import { codeOf } from '../shell/codes.ts';
 import type { UiAnswer, UiRequest, UiRoute } from '../shell/http.ts';
 import { accountOf } from './accounts.ts';

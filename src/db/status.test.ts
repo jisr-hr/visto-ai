@@ -4,7 +4,8 @@ import { testDb } from './testing.ts';
 import { markPublished, recordRun } from './review-runs.ts';
 import type { RunRecord } from './review-runs.ts';
 import { clearDismissFailure, markDismissFailed } from './approvals.ts';
-import { clearAlerts, openAlerts, pruneAlerts, readHealth, recentAlerts, storeAlert, writeHealth } from './status.ts';
+import { PAIR_OPENERS, SPEND_ALERTS, clearAlerts, openAlerts, pruneAlerts, readHealth, recentAlerts, storeAlert, writeHealth } from './status.ts';
+import type { Db } from './types.ts';
 
 const T0 = Date.parse('2026-03-01T10:00:00.000Z');
 const at = (seconds: number): string => new Date(T0 + seconds * 1000).toISOString();
@@ -67,8 +68,10 @@ const run = (over: Partial<RunRecord> = {}): RunRecord => ({
 
 test('the open alerts follow their rules: openers and feature_off until cleared, spend for its UTC day, a withdrawal while its failure is recorded', async () => {
   const db = await testDb();
-  const base = 2 * DAY;
+  // The start of the UTC day of 2026-03-03.
+  const base = 2 * DAY - 10 * 3600;
   const dayStart = at(base);
+  assert.equal(dayStart, '2026-03-03T00:00:00.000Z');
   await store(db, 'memory_error', 'memory', base + 1);
   await store(db, 'model_error', 'model', base + 2);
   await clearAlerts(db, 'model_error', null, at(base + 3));
@@ -93,18 +96,59 @@ test('the open alerts follow their rules: openers and feature_off until cleared,
 test('the recent alerts are those of the last days that are not open, newest first', async () => {
   const db = await testDb();
   const now = 20 * DAY;
+  const dayStart = '2026-03-21T00:00:00.000Z';
+  assert.equal(at(now).slice(0, 10), dayStart.slice(0, 10));
   await store(db, 'memory_error', 'memory', now - 100);
   await store(db, 'model_error', 'model', now - 200);
   await clearAlerts(db, 'model_error', null, at(now - 150));
   await store(db, 'gate_bypass', 'k', now - 50);
   await store(db, 'spend_80', 'global', now - DAY);
+  await store(db, 'spend_limit', 'global', now - 60);
   await store(db, 'dismissal_failed', 'acme/shop#128', now - 3 * DAY);
   await store(db, 'gate_bypass', 'old', now - 8 * DAY);
-  const open = [await idOf(db, 'memory_error', 'memory', now - 100)];
-  const recent = await recentAlerts(db, at(now - 7 * DAY), open, 20);
+  // The memory_error and today's spend_limit are open: they are not recent, whatever is shown of the open ones.
+  const recent = await recentAlerts(db, at(now - 7 * DAY), dayStart, 20);
   assert.deepEqual(recent.map((a) => a.code), ['gate_bypass', 'model_error', 'spend_80', 'dismissal_failed']);
-  assert.equal((await recentAlerts(db, at(now - 7 * DAY), [], 2)).length, 2);
-  assert.deepEqual((await recentAlerts(db, at(now - 7 * DAY), [], 20)).length, 5);
+  assert.equal((await recentAlerts(db, at(now - 7 * DAY), dayStart, 2)).length, 2);
+  assert.equal(await idOf(db, 'memory_error', 'memory', now - 100) > 0, true);
+  await db.close();
+});
+test('open alerts past the fifty shown are not recent either', async () => {
+  const db = await testDb();
+  const now = 20 * DAY;
+  for (let i = 0; i < 60; i++) await store(db, 'mcp_error', `server-${i}`, now - 1000 + i);
+  await store(db, 'mcp_error', 'cleared', now - 2000);
+  await clearAlerts(db, 'mcp_error', 'cleared', at(now - 1500));
+  assert.equal((await openAlerts(db, '2026-03-21T00:00:00.000Z', 50)).length, 50);
+  assert.deepEqual((await recentAlerts(db, at(now - 7 * DAY), '2026-03-21T00:00:00.000Z', 20)).map((a) => a.key), ['cleared']);
+  await db.close();
+});
+test('a failed withdrawal of a dry run, or of a review not posted, is not open', async () => {
+  const db = await testDb();
+  await store(db, 'dismissal_failed', 'acme/shop#128', 10);
+  const dry = await recordRun(db, run({ dryRun: true }));
+  await markPublished(db, dry, { reviewId: '501', publishedAt: at(95), body: 'posted', inlineDropped: false, approved: true, approvalCode: 'approved' });
+  await markDismissFailed(db, dry, 'github_403');
+  const unposted = await recordRun(db, run());
+  await db.query('update visto_ai.review_runs set approved = true, dismiss_failure = $2 where id = $1', [unposted, 'github_403']);
+  assert.deepEqual(await openAlerts(db, at(0), 50), []);
+  const posted = await recordRun(db, run());
+  await markPublished(db, posted, { reviewId: '502', publishedAt: at(95), body: 'posted', inlineDropped: false, approved: true, approvalCode: 'approved' });
+  await markDismissFailed(db, posted, 'github_403');
+  assert.deepEqual((await openAlerts(db, at(0), 50)).map((a) => a.code), ['dismissal_failed']);
+  await db.close();
+});
+test('the codes are parameters of the statements, never in their text', async () => {
+  const db = await testDb();
+  const texts: string[] = [];
+  const spied = { ...db, query: (text: string, params?: unknown[]) => { texts.push(text); return db.query(text, params); } } as Db;
+  await openAlerts(spied, at(0), 50);
+  await recentAlerts(spied, at(0), at(0), 5);
+  await pruneAlerts(spied, at(0));
+  assert.equal(texts.length, 3);
+  for (const code of [...PAIR_OPENERS, ...SPEND_ALERTS, 'feature_off', 'dismissal_failed']) {
+    assert.ok(texts.every((t) => !t.includes(code)), code);
+  }
   await db.close();
 });
 test('pruning keeps what is open, and deletes the rest raised before the time', async () => {
@@ -124,6 +168,12 @@ test('pruning keeps what is open, and deletes the rest raised before the time', 
   assert.deepEqual(
     (await db.query<{ code: string; key: string }>('select code, key from visto_ai.alerts order by id')).map((r) => `${r.code}:${r.key}`),
     ['memory_error:memory', 'dismissal_failed:acme/shop#128', 'gate_bypass:new']);
+  // Once the failure is cleared, the old failed withdrawal is pruned too.
+  await clearDismissFailure(db, id);
+  assert.equal(await pruneAlerts(db, at(now - 30 * DAY)), 1);
+  assert.deepEqual(
+    (await db.query<{ code: string; key: string }>('select code, key from visto_ai.alerts order by id')).map((r) => `${r.code}:${r.key}`),
+    ['memory_error:memory', 'gate_bypass:new']);
   await db.close();
 });
 test("a dependency's state keeps since while its status holds, moves it when the status changes, and an older write changes nothing", async () => {

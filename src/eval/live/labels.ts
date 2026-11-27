@@ -1,6 +1,7 @@
 // Labels for the live score quality: what people said on a pull request, laid on the runs that scored it.
 // Pure: no database, no clock.
 import type { Ranges } from '../../engine/context/diff.ts';
+import type { FileScore } from '../../engine/score/types.ts';
 import { blockKey } from '../backtest/labels.ts';
 import type { Label, Labels } from '../backtest/labels.ts';
 import type { CaseScores, ScoredBlock, ScoredFile } from '../backtest/metrics.ts';
@@ -9,6 +10,9 @@ export { blockKey };
 
 export interface LiveBlock extends ScoredBlock { hunkHash: string; lines: Ranges }
 export interface LiveFile extends ScoredFile { diffHash: string | null; blocks: readonly LiveBlock[] }
+type IsLiveFile<F extends LiveFile> = F;
+/** The engine's score of a file is a LiveFile, checked by the type check: a measured field the engine renames fails it here. */
+export type EngineLiveFile = IsLiveFile<FileScore>;
 export interface LiveRun { id: number; head: string; scores: readonly LiveFile[] }
 export interface LiveComment {
   id: string; author: string; path: string | null; side: 'LEFT' | 'RIGHT' | null; line: number | null; startLine: number | null;

@@ -35,43 +35,52 @@ export async function clearAlerts(db: Db, code: string, key: string | null, at: 
   return rows.length;
 }
 
+/** The alerts open until cleared: the pairs' openers and what the app lacks. */
+const UNTIL_CLEARED: readonly string[] = [...PAIR_OPENERS, 'feature_off'];
+/** The alert of a failed withdrawal. */
+const WITHDRAWAL_FAILED = 'dismissal_failed';
+/** Of the alert `a`: an approval of its pull request, posted live and not dismissed, still carries a failed withdrawal. */
+const WITHDRAWAL_STANDS = `exists (select 1 from visto_ai.review_runs r
+  where r.owner || '/' || r.repo || '#' || r.number = a.key
+    and r.approved and r.published and not r.dry_run and r.dismissed_at is null and r.dismiss_failure is not null)`;
+/**
+ * The open rule (call 8) of the alert `a`, its parameters $1 to $4 (`openParams`): an opener or feature_off until cleared; spend
+ * for its UTC day, from $3; a failed withdrawal, the newest of its key, while its failure stands. Every code is a parameter.
+ */
+const OPEN = `((a.code in (select jsonb_array_elements_text($1::jsonb)) and a.cleared_at is null)
+  or (a.code in (select jsonb_array_elements_text($2::jsonb)) and a.cleared_at is null and a.raised_at >= $3::timestamptz)
+  or (a.code = $4 and a.id = (select max(b.id) from visto_ai.alerts b where b.code = $4 and b.key = a.key) and ${WITHDRAWAL_STANDS}))`;
+const openParams = (dayStart: string): unknown[] => [JSON.stringify(UNTIL_CLEARED), JSON.stringify(SPEND_ALERTS), dayStart, WITHDRAWAL_FAILED];
+
 /** The open alerts (call 8), newest first; `dayStart` is the start of the clock's UTC day. */
 export function openAlerts(db: Db, dayStart: string, limit: number): Promise<AlertRow[]> {
   return db.query<AlertRow>(
     `select a.id, a.code, a.key, a.details, a.raised_at, a.cleared_at from visto_ai.alerts a
-     where (a.code in ('model_error', 'mcp_error', 'extension_error', 'memory_error', 'feature_off') and a.cleared_at is null)
-        or (a.code in ('spend_80', 'spend_limit') and a.cleared_at is null and a.raised_at >= $1::timestamptz)
-        or (a.code = 'dismissal_failed'
-            and a.id = (select max(b.id) from visto_ai.alerts b where b.code = 'dismissal_failed' and b.key = a.key)
-            and exists (select 1 from visto_ai.review_runs r
-                        where r.owner || '/' || r.repo || '#' || r.number = a.key
-                          and r.approved and r.published and not r.dry_run and r.dismissed_at is null and r.dismiss_failure is not null))
+     where ${OPEN}
      order by a.raised_at desc, a.id desc
-     limit $2`,
-    [dayStart, limit]);
+     limit $5`,
+    [...openParams(dayStart), limit]);
 }
 
-/** The alerts raised since `since`, but those of `except`, newest first. */
-export function recentAlerts(db: Db, since: string, except: readonly number[], limit: number): Promise<AlertRow[]> {
+/** The alerts raised since `since` that are not open by the open rule (whether or not they are shown), newest first. */
+export function recentAlerts(db: Db, since: string, dayStart: string, limit: number): Promise<AlertRow[]> {
   return db.query<AlertRow>(
-    `select id, code, key, details, raised_at, cleared_at from visto_ai.alerts
-     where raised_at >= $1::timestamptz and id not in (select (jsonb_array_elements_text($2::jsonb))::int)
-     order by raised_at desc, id desc
-     limit $3`,
-    [since, JSON.stringify(except), limit]);
+    `select a.id, a.code, a.key, a.details, a.raised_at, a.cleared_at from visto_ai.alerts a
+     where a.raised_at >= $5::timestamptz and not ${OPEN}
+     order by a.raised_at desc, a.id desc
+     limit $6`,
+    [...openParams(dayStart), since, limit]);
 }
 
-/** Deletes the alerts raised before `before` that are not open but by their day; how many. */
+/** Deletes the alerts raised before `before` that are not open but by their day (every row of a failed withdrawal that stands is kept); how many. */
 export async function pruneAlerts(db: Db, before: string): Promise<number> {
   const rows = await db.query(
     `delete from visto_ai.alerts a
      where a.raised_at < $1::timestamptz
-       and not (a.code in ('model_error', 'mcp_error', 'extension_error', 'memory_error', 'feature_off') and a.cleared_at is null)
-       and not (a.code = 'dismissal_failed' and exists (select 1 from visto_ai.review_runs r
-                where r.owner || '/' || r.repo || '#' || r.number = a.key
-                  and r.approved and r.published and not r.dry_run and r.dismissed_at is null and r.dismiss_failure is not null))
+       and not (a.code in (select jsonb_array_elements_text($2::jsonb)) and a.cleared_at is null)
+       and not (a.code = $3 and ${WITHDRAWAL_STANDS})
      returning id`,
-    [before]);
+    [before, JSON.stringify(UNTIL_CLEARED), WITHDRAWAL_FAILED]);
   return rows.length;
 }
 

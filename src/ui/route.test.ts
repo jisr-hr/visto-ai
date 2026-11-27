@@ -969,7 +969,7 @@ test('a record is switched by an admin with the token, and refused to a viewer, 
   const done = await put(admin.cookie, { csrf: admin.csrf, body });
   assert.deepEqual([done.status, done.headers], [200, JSON_HEADERS]);
   assert.equal((JSON.parse(String(done.body)) as { record: { id: number; on: boolean } }).record.on, false);
-  assert.deepEqual((await h.db.query<{ status: string }>('select status from visto_ai.memory_records')).map((r) => r.status), ['disabled']);
+  assert.deepEqual(await h.db.query('select status, switched_by from visto_ai.memory_records'), [{ status: 'disabled', switched_by: 'octo-admin' }]);
   assert.deepEqual(await h.send('PUT', `/api/memory/${id + 1000}`, { cookie: admin.cookie, csrf: admin.csrf, type: JSON_TYPE, body }), error(404, 'not_found'));
   await h.db.close();
 });

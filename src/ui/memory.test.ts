@@ -69,6 +69,19 @@ test('the memory answer holds learning, the counts and a page of records with th
   await db.close();
 });
 
+test('a record whose times cannot be read as ISO times is answered with none, never a failure', async () => {
+  const db = await testDb();
+  await addRecords(db, REPO, [rec(), rec({ sourceRef: 'ref-2' })]);
+  await db.query("update visto_ai.memory_records set expires_at = 'infinity' where source_ref = 'ref-1'");
+  await db.query("update visto_ai.memory_records set created_at = '-infinity' where source_ref = 'ref-2'");
+  const view = asView(await memory(deps(db), q({})));
+  assert.deepEqual(view.records.map((r) => [r.createdAt, r.expiresAt]), [[null, at(100 * DAY)], [at(-DAY), null]]);
+  const d = deps(db);
+  const [first] = (await db.query<{ id: number }>("select id from visto_ai.memory_records where source_ref = 'ref-1'"));
+  assert.deepEqual((await switchMemory(d, first!.id, false, 'octo-admin'))?.expiresAt, null);
+  await db.close();
+});
+
 test('a long text is cut at the limit', async () => {
   const db = await testDb();
   await addRecords(db, REPO, [rec({ excerpt: 'x'.repeat(TEXT_CHARS + 50) })]);

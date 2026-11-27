@@ -171,6 +171,19 @@ test('the open and recent alerts carry only the allowlisted details', async () =
   assert.ok(!JSON.stringify(a).includes('octo-guest'));
 });
 
+test('open alerts past the fifty shown are not listed as recent, and an alert whose time cannot be read is passed over', async () => {
+  const db = await testDb();
+  const h = harness(db);
+  for (let i = 0; i < 55; i++) await storeAlert(db, { code: 'mcp_error', key: `server-${i}`, details: { server: `server-${i}` }, at: at(-1000 + i), dedupeSince: null });
+  await storeAlert(db, { code: 'redelivery_failed', key: '', details: { reason: 'github_502' }, at: at(-2000), dedupeSince: null });
+  await storeAlert(db, { code: 'gate_bypass', key: 'never', details: {}, at: at(-3000), dedupeSince: null });
+  await db.query("update visto_ai.alerts set raised_at = 'infinity' where key = 'never'");
+  const a = await health(h.deps);
+  assert.equal(a.open.length, 50);
+  assert.ok(a.open.every((x) => x.code === 'mcp_error' && x.open));
+  assert.deepEqual(a.recent.map((r) => [r.code, r.open]), [['redelivery_failed', false]]);
+});
+
 test('an answer holds no field the screens do not show', async () => {
   const db = await testDb();
   const h = harness(db, { started: { ...STARTED, extensions: [{ name: 'example', parts: ['context'] }], mcpServers: ['docs'] } });

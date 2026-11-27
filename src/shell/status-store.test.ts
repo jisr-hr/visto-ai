@@ -197,21 +197,91 @@ test('pruning deletes what is past keeping, queued and not waited for', async ()
   await db.close();
 });
 
-test('a closed store writes nothing more', async () => {
+test('a closed store writes nothing more: the write under way at the close ends, and those queued behind it are not sent', async () => {
   const db = await testDb();
   const statements: string[] = [];
-  const { store, logged } = setup(gated(db, (text) => { statements.push(text); }));
+  let release: () => void = () => {};
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  let holding = false;
+  const { store, logged } = setup(gated(db, async (text) => {
+    statements.push(text);
+    if (holding) return;
+    holding = true;
+    await held;
+  }));
   store.alerted('gate_bypass', {});
-  store.close();
-  const before = statements.length;
-  store.alerted('gate_bypass', {});
+  store.alerted('spend_80', { spent: 40, limit: 50 });
   store.noted({ kind: 'model', name: 'm', part: '', ok: true, code: null });
+  for (let i = 0; i < 100 && !holding; i++) await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(holding, true);
+  store.close();
+  store.alerted('gate_bypass', {});
+  store.noted({ kind: 'model', name: 'm', part: '', ok: false, code: 'auth' });
   store.appChecked([]);
   store.prune();
+  release();
   await store.settled();
-  assert.equal((await alertRows(db)).length, 1);
-  assert.equal(statements.length - before, 1, 'only the write queued before close ran');
+  assert.equal(statements.length, 1, 'only the write under way at the close was sent');
+  assert.deepEqual((await alertRows(db)).map((r) => r.code), ['gate_bypass']);
   assert.deepEqual(logged, []);
   assert.equal((await readHealth(db)).length, 0);
+  await db.close();
+});
+
+test('a write whose failure cannot be read leaves the queue working, and nothing rejects', async () => {
+  const db = await testDb();
+  const unreadable = new Error('x');
+  Object.defineProperty(unreadable, 'message', { get() { throw new Error('unreadable'); } });
+  let failing = true;
+  const { store, logged } = setup(gated(db, (text) => {
+    if (failing && text.includes('insert into visto_ai.alerts')) { failing = false; return Promise.reject(unreadable); }
+  }));
+  store.alerted('gate_bypass', {});
+  await assert.doesNotReject(store.settled());
+  store.alerted('spend_80', { spent: 40, limit: 50 });
+  await assert.doesNotReject(store.settled());
+  assert.deepEqual((await alertRows(db)).map((r) => r.code), ['spend_80']);
+  assert.ok(logged.every((e) => e.event === 'status_store_failed'));
+  await db.close();
+});
+
+test('a clear of its pair that fails or is dropped lets the next note within the minute be written again', async () => {
+  const db = await testDb();
+  const dedupeSince = '1970-01-01T00:00:00.000Z';
+  await storeAlert(db, { code: 'memory_error', key: '', details: {}, at: at(-100).toISOString(), dedupeSince });
+  let failClear = true;
+  const broken = setup(gated(db, (text) => {
+    if (failClear && text.includes('update visto_ai.alerts')) { failClear = false; return Promise.reject(new Error('db_down')); }
+  }));
+  broken.store.noted({ kind: 'memory', name: '', part: '', ok: true, code: null });
+  await broken.store.settled();
+  assert.deepEqual(broken.logged, [{ event: 'status_store_failed', what: 'clear', reason: 'db_down' }]);
+  assert.equal((await alertRows(db))[0]!.cleared_at, null);
+  broken.move(5);
+  broken.store.noted({ kind: 'memory', name: '', part: '', ok: true, code: null });
+  await broken.store.settled();
+  assert.equal((await alertRows(db))[0]!.cleared_at?.toISOString(), at(5).toISOString());
+
+  // Dropped: the queue is full when the clear is told.
+  await storeAlert(db, { code: 'mcp_error', key: 'docs', details: {}, at: at(-100).toISOString(), dedupeSince });
+  let release: () => void = () => {};
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  let first = true;
+  const full = setup(gated(db, (text) => {
+    if (!first || !text.includes('insert into visto_ai.alerts')) return;
+    first = false;
+    return held;
+  }));
+  for (let i = 0; i < MAX_WAITING - 1; i++) full.store.alerted('gate_bypass', {});
+  full.store.noted({ kind: 'mcp', name: 'docs', part: '', ok: true, code: null });
+  assert.deepEqual(full.logged, [{ event: 'status_store_full', what: 'clear' }]);
+  release();
+  await full.store.settled();
+  const docs = async () => (await alertRows(db)).find((r) => r.code === 'mcp_error')!;
+  assert.equal((await docs()).cleared_at, null);
+  full.move(5);
+  full.store.noted({ kind: 'mcp', name: 'docs', part: '', ok: true, code: null });
+  await full.store.settled();
+  assert.equal((await docs()).cleared_at?.toISOString(), at(5).toISOString());
   await db.close();
 });
