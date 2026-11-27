@@ -19,6 +19,7 @@ import { plural } from '../format.ts';
 import { changesOf, effortChoice, effortValue, GLOBAL, numberOrText, shown, UNSET, withChange } from '../settings-draft.ts';
 import type { Draft, EffortChoice, Unset } from '../settings-draft.ts';
 import { AccountsSection } from './accounts.tsx';
+import { ChangesSection, ExportSection } from './settings-record.tsx';
 import { RepositoriesSection } from './settings-repositories.tsx';
 import { CHIP, fieldValue, H2, JsonField, LABELS, MONO, NumberField, PlainRow, Row, SECTION, TextField, whereOf, WORD } from './settings-parts.tsx';
 import type { Form } from './settings-parts.tsx';
@@ -29,7 +30,7 @@ const CHANGED = 'Settings were saved meanwhile, here or in config.yml at a start
 const FAILED = 'The settings could not be saved.';
 const BUSY = 'The service is busy. Try again in a moment.';
 const UNREACHABLE = 'The service could not be reached. Try again in a moment.';
-const NAV: ReadonlyArray<readonly [string, string]> = [['general', 'General'], ['model', 'Model'], ['repos', 'Repositories'], ['secrets', 'Secrets'], ['access', 'Access'], ['accounts', 'Accounts']];
+const NAV: ReadonlyArray<readonly [string, string]> = [['general', 'General'], ['model', 'Model'], ['repos', 'Repositories'], ['secrets', 'Secrets'], ['access', 'Access'], ['accounts', 'Accounts'], ['changes', 'Changes'], ['export', 'In config.yml']];
 const SCORER_PATHS = ['scorer.baseUrl', 'scorer.model', 'scorer.timeoutSeconds'] as const;
 
 /** What the top of the page says of a save that did not go through: the issues, or a sentence. */
@@ -360,6 +361,8 @@ export function SettingsPage() {
   // The latest read of the settings; a failed one drops what was shown.
   const [read, setRead] = useState<{ view: SettingsView | null; failed: boolean }>({ view: null, failed: false });
   const [reads, setReads] = useState(0);
+  // Bumped after each save, and when a save met a change made meanwhile: the record and the export are read again.
+  const [recorded, setRecorded] = useState(0);
   const [draft, setDraft] = useState<Draft>(new Map());
   const [notice, setNotice] = useState<Notice | null>(null);
   const [saved, setSaved] = useState(false);
@@ -436,6 +439,7 @@ export function SettingsPage() {
         setBadJson(new Set());
         setEpoch((n) => n + 1);
         setSaved(true);
+        setRecorded((n) => n + 1);
       } else {
         setNotice({ kind: 'issues', issues: answer.issues });
       }
@@ -444,6 +448,7 @@ export function SettingsPage() {
       if (error instanceof RequestFailed && error.code === 'changed') {
         setNotice({ kind: 'text', text: CHANGED });
         setReads((n) => n + 1);
+        setRecorded((n) => n + 1);
       } else {
         setNotice({ kind: 'text', text: failureOf(error) });
       }
@@ -528,6 +533,8 @@ export function SettingsPage() {
       <Nav />
       {body()}
       <AccountsSection />
+      <ChangesSection reads={recorded} />
+      <ExportSection reads={recorded} />
     </>
   );
 }

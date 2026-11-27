@@ -1,6 +1,6 @@
 import { fireEvent, render, screen, within } from '@testing-library/react';
 import { userEvent } from '@testing-library/user-event';
-import { afterEach, expect, test } from 'vitest';
+import { afterEach, expect, test, vi } from 'vitest';
 import { RequestFailed } from '../api.ts';
 import type { Api } from '../api.ts';
 import type { Activity, Me, Reviews, Setting, SettingSource, SettingsView, SettingValue } from '../api-types.ts';
@@ -86,8 +86,14 @@ function fakeApi(over: Partial<Api> = {}) {
       calls.push(['saveSettings', csrf, save]);
       return over.saveSettings ? over.saveSettings(csrf, save) : Promise.reject(new RequestFailed(500, 'not_expected'));
     },
-    settingChanges: () => Promise.reject(new RequestFailed(500, 'not_expected')),
-    settingsExport: () => Promise.reject(new RequestFailed(500, 'not_expected')),
+    settingChanges: (before) => {
+      calls.push(['settingChanges', before]);
+      return over.settingChanges ? over.settingChanges(before) : Promise.reject(new RequestFailed(500, 'not_expected'));
+    },
+    settingsExport: () => {
+      calls.push(['settingsExport']);
+      return over.settingsExport ? over.settingsExport() : Promise.reject(new RequestFailed(500, 'not_expected'));
+    },
   };
   const sent = (name: string): unknown[][] => calls.filter(([called]) => called === name);
   return { api, sent };
@@ -141,10 +147,10 @@ test('Settings shows its header, its sections and their rows as drawn, with wher
   expect(classes(nav)).toEqual(words('flex flex-wrap gap-2'));
   const links = within(nav).getAllByRole('link');
   expect(links.map((link) => [link.textContent, link.getAttribute('href')])).toEqual([
-    ['General', '#general'], ['Model', '#model'], ['Repositories', '#repos'], ['Secrets', '#secrets'], ['Access', '#access'], ['Accounts', '#accounts'],
+    ['General', '#general'], ['Model', '#model'], ['Repositories', '#repos'], ['Secrets', '#secrets'], ['Access', '#access'], ['Accounts', '#accounts'], ['Changes', '#changes'], ['In config.yml', '#export'],
   ]);
   for (const link of links) expect(link.className).toContain('min-h-9');
-  const order = ['general', 'model', 'repos', 'secrets', 'access', 'accounts'].map((id) => document.getElementById(id));
+  const order = ['general', 'model', 'repos', 'secrets', 'access', 'accounts', 'changes', 'export'].map((id) => document.getElementById(id));
   for (const [index, element] of order.entries()) {
     expect(element?.tagName).toBe('SECTION');
     if (index > 0) expect(order[index - 1]!.compareDocumentPosition(element!) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
@@ -552,4 +558,25 @@ test('a viewer reaching Settings sees Not found and no settings are read', async
   render(<App api={viewer} />);
   expect(await screen.findByRole('heading', { level: 1, name: 'Not found' })).toBeInTheDocument();
   expect(sent('settings')).toEqual([]);
+});
+
+test('after a save the changes and the export are read again', async () => {
+  const user = userEvent.setup();
+  const saved = viewOf({ version: 15, global: { learning: written(true, UI) } });
+  const { api, sent } = fakeApi({
+    saveSettings: () => Promise.resolve({ kind: 'saved', view: saved }),
+    settingChanges: () => Promise.resolve({ changes: [], next: null }),
+    settingsExport: () => Promise.resolve({ text: 'learning: true\n' }),
+  });
+  visit('/ui/settings');
+  render(<App api={api} />);
+  await screen.findByRole('region', { name: 'General' });
+  await screen.findByText('No change yet.');
+  expect(sent('settingChanges')).toHaveLength(1);
+  expect(sent('settingsExport')).toHaveLength(1);
+  await user.click(screen.getByRole('switch', { name: 'Learning' }));
+  await user.click(screen.getByRole('button', { name: 'Save changes' }));
+  await screen.findByRole('status');
+  await vi.waitFor(() => expect(sent('settingChanges')).toHaveLength(2));
+  await vi.waitFor(() => expect(sent('settingsExport')).toHaveLength(2));
 });
