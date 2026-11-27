@@ -265,6 +265,8 @@ test('the threshold writes a whole number and says whether it overrides the defa
   expect(slider).toHaveAttribute('max', '100');
   expect(slider).toHaveClass('w-full', 'accent-accent');
   expect(screen.getByText('From the defaults: 70%')).toBeInTheDocument();
+  // Said once: the threshold's own row does not add a second line.
+  expect(within(rowOf('Threshold')).queryAllByText(/From the defaults/)).toHaveLength(1);
   expect(within(rowOf('Threshold')).getByText('70%')).toHaveClass('min-w-12', 'text-right', 'font-semibold');
   fireEvent.change(slider, { target: { value: '60' } });
   expect(within(rowOf('Threshold')).getByText('60%')).toBeInTheDocument();

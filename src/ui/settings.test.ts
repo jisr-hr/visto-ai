@@ -119,6 +119,20 @@ test("the endpoints are the file's, shown as they are written and never as setti
   assert.deepEqual((await settingsView(d)).endpoints, { model: 'https://model.example.test/v1', scorer: 'https://openrouter.ai/api/alpha' });
 });
 
+test("the scorer's endpoint is read from the file, whether or not the scorer is on", async () => {
+  // Written in the file while the scorer block is there: shown, and with the default when it writes none.
+  const own = await deps(SCORER_YAML.replace('  model: vendor/scorer-a', '  baseUrl: https://scorer.example.test/v1\n  model: vendor/scorer-a'));
+  assert.equal((await settingsView(own)).endpoints.scorer, 'https://scorer.example.test/v1');
+  // Switched off in the settings, the file still writes it: the view shows it.
+  assert.equal((await saveNow(own, [{ scope: 'global', path: 'scorer.model' }])).kind, 'saved');
+  const off = await settingsView(own);
+  assert.equal(off.scorer.on, false);
+  assert.equal(off.endpoints.scorer, 'https://scorer.example.test/v1');
+  // A file with no scorer block has none, and one with a block and no address has the default.
+  assert.equal((await settingsView(await deps())).endpoints.scorer, null);
+  assert.equal((await settingsView(await deps(SCORER_YAML))).endpoints.scorer, 'https://openrouter.ai/api/alpha');
+});
+
 test("a start-time setting saved waits for the restart, and the scorer's being on too", async () => {
   const d = await deps();
   assert.equal((await saveNow(d, [{ scope: 'global', path: 'dryRun', value: false }])).kind, 'saved');

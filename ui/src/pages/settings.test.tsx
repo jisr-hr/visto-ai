@@ -564,6 +564,25 @@ test('a viewer reaching Settings sees Not found and no settings are read', async
   expect(sent('settings')).toEqual([]);
 });
 
+test('the record and the export are read only after the settings have answered', async () => {
+  const held = later<SettingsView>();
+  const { api, sent } = fakeApi({
+    settings: () => held.promise,
+    settingChanges: () => Promise.resolve({ changes: [], next: null }),
+    settingsExport: () => Promise.resolve({ text: 'learning: true\n' }),
+  });
+  visit('/ui/settings');
+  render(<App api={api} />);
+  await screen.findByText('Reading the settings.');
+  await screen.findByRole('region', { name: 'Accounts' });
+  expect(sent('settingChanges')).toHaveLength(0);
+  expect(sent('settingsExport')).toHaveLength(0);
+  held.resolve(VIEW);
+  await screen.findByRole('region', { name: 'General' });
+  await vi.waitFor(() => expect(sent('settingChanges')).toHaveLength(1));
+  await vi.waitFor(() => expect(sent('settingsExport')).toHaveLength(1));
+});
+
 test('after a save the changes and the export are read again', async () => {
   const user = userEvent.setup();
   const saved = viewOf({ version: 15, global: { learning: written(true, UI) } });

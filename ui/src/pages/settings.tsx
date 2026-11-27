@@ -538,8 +538,13 @@ export function SettingsPage() {
       <Nav />
       {body()}
       <AccountsSection />
-      <ChangesSection reads={recorded} />
-      <ExportSection reads={recorded} />
+      {/* After the settings view has answered (or failed): the page's reads go in turn, as the API answers few at once. */}
+      {read.view !== null || read.failed ? (
+        <>
+          <ChangesSection reads={recorded} />
+          <ExportSection reads={recorded} />
+        </>
+      ) : null}
     </>
   );
 }

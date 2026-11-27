@@ -101,7 +101,10 @@ export function SourceLine({ form, scope, path, prefix = '' }: { form: Form; sco
 
 /** A repository's setting (call 28): not written, it comes from the defaults; written, it says what it overrides and can take the default back. */
 export function OverrideLine({ form, scope, path }: { form: Form; scope: string; path: string }) {
-  if (!form.shown(scope, path).written) return <span className="text-xs text-muted">From the defaults</span>;
+  if (!form.shown(scope, path).written) {
+    // The threshold's slider says it, with the number, under itself.
+    return path === 'score.threshold' ? null : <span className="text-xs text-muted">From the defaults</span>;
+  }
   const under = form.shown(DEFAULTS, path).value;
   let text = valueText(path, under);
   if (path === 'newHead' && under === null) text = 'incremental, and full where the merge gate holds pushes';
