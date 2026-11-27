@@ -70,6 +70,14 @@ function fakeApi(over: Partial<Api> = {}) {
       calls.push(['removeAccount', csrf, id]);
       return over.removeAccount ? over.removeAccount(csrf, id) : Promise.reject(new RequestFailed(500, 'not_expected'));
     },
+    review: (run) => {
+      calls.push(['review', run]);
+      return over.review ? over.review(run) : Promise.reject(new RequestFailed(404, 'not_found'));
+    },
+    pullReviews: (repository, number) => {
+      calls.push(['pullReviews', repository, number]);
+      return over.pullReviews ? over.pullReviews(repository, number) : Promise.resolve({ now: NOW, total: 0, reviews: [] });
+    },
   };
   const queries = (): unknown[] => calls.filter(([name]) => name === 'reviews').map(([, query]) => query);
   return { api, calls, queries };
@@ -529,7 +537,7 @@ test('recent reviews show each outcome, score, findings, mode, cost, time taken 
   const user = userEvent.setup();
   await user.click(link);
   expect(window.location.pathname).toBe('/ui/reviews/9001');
-  expect(screen.getByRole('heading', { level: 1, name: 'Review' })).toBeInTheDocument();
+  expect(await screen.findByRole('heading', { level: 1, name: 'Review not found' })).toBeInTheDocument();
 });
 
 test('the outcome, the repository and the search are sent to the server, and paging goes forward and back', async () => {

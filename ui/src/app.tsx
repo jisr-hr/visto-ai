@@ -14,6 +14,7 @@ import { ActivityPage } from './pages/activity.tsx';
 import { Later } from './pages/later.tsx';
 import { NotFound } from './pages/not-found.tsx';
 import { PasswordPage } from './pages/password.tsx';
+import { ReviewNotFound, ReviewPage, runOfPath } from './pages/review.tsx';
 import { SignIn } from './pages/sign-in.tsx';
 import { navigate, useLocation } from './router.tsx';
 
@@ -29,6 +30,12 @@ function ToOverview() {
     navigate('/ui/', true);
   }, []);
   return null;
+}
+
+/** A review's page, or its not-found page for an address whose run is not a run (call 20). */
+function ReviewOf({ path }: { path: string }) {
+  const run = runOfPath(path);
+  return run === null ? <ReviewNotFound /> : <ReviewPage run={run} />;
 }
 
 /** The page of the path; Settings is an admin's, Change password a password account's, and the not-found page to anyone else. */
@@ -49,7 +56,7 @@ function Page({ path, me }: { path: string; me: Me }) {
     case '/ui/signin':
       return <ToOverview />;
     default:
-      return REVIEW_PATH.test(path) ? <Later title="Review" /> : <NotFound />;
+      return REVIEW_PATH.test(path) ? <ReviewOf path={path} /> : <NotFound />;
   }
 }
 
@@ -119,6 +126,8 @@ export function App({ api }: { api: Api }) {
       setRole: (csrf, id, role) => watch(api.setRole(csrf, id, role)),
       resetPassword: (csrf, id) => watch(api.resetPassword(csrf, id)),
       removeAccount: (csrf, id) => watch(api.removeAccount(csrf, id)),
+      review: (run) => watch(api.review(run)),
+      pullReviews: (repository, number) => watch(api.pullReviews(repository, number)),
     };
   }, [api]);
 

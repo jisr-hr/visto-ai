@@ -55,7 +55,7 @@ From the map of the code made for this stage. Each becomes a task of a plan:
 6. **Feedback**, read back per review and per repository.
 7. **The kill switch** of a memory record, written by the UI and read by the next review (the status `disabled` the table already allows).
 8. **Live score quality.** The labels of design 6.6 (a block needed a person) are built from the stored human activity and the stored runs, and fed to the same pure measuring code the backtest uses. The stricter label needs the diff at the last head before the merge, which is not stored; the live numbers use each block's hash at the pull request's last review instead, and say so on the screen. They are computed on request for one repository and window, and cached for a few minutes.
-9. **A finding's thread state** is derived from what is stored (thread events in human activity, verdicts kept by later runs), not read from GitHub on each view.
+9. **A finding's thread state** is derived from what is stored (thread events in human activity, verdicts kept by later runs), not read from GitHub on each view. A thread event of a person and a verdict of a later published review are its signals; the newest decides, a person's event wins a tie, and with none the thread is open.
 
 ### 3.4 Calls the builder made on the design's check
 
@@ -111,7 +111,7 @@ All under `/api/`, all answers JSON, all behind a session but the sign-in routes
 - `GET /api/settings`, `PUT /api/settings`, `GET /api/settings/changes`, `GET /api/settings/export`.
 - `GET /api/health` (dependency statuses and open alerts).
 
-The plans fix the shapes. Every list is paged and bounded. `GET /api/activity` also lists the withdrawals waiting to try again; `GET /api/reviews` reads the last 30 days, 25 a page; `GET /api/me` holds the repositories the service has seen.
+The plans fix the shapes. Every list is paged and bounded. `GET /api/activity` also lists the withdrawals waiting to try again; `GET /api/reviews` reads the last 30 days, 25 a page; `GET /api/me` holds the repositories the service has seen. `GET /api/reviews/{run}` reads one run with its threads, approvals, gate state at its head and feedback; `GET /api/pulls/{owner}/{repo}/{number}/reviews` lists the newest 200 runs of a pull request.
 
 ## 6. Testing
 
@@ -121,7 +121,7 @@ The plans fix the shapes. Every list is paged and bounded. `GET /api/activity` a
 
 ## 7. The cut into plans
 
-1. **The frame:** the `ui/` application and its build, serving it, the API's route group, sign-in, sessions and access, the layout with its sidebar and theme switch, Activity (with the stage of a running review and pull request titles) and One review. It ends with a signed-in person seeing what runs and opening a review. Cut in two plans: sign-in, serving, the layout and Activity, which is built, and the One review screen, which is next.
+1. **The frame:** the `ui/` application and its build, serving it, the API's route group, sign-in, sessions and access, the layout with its sidebar and theme switch, Activity (with the stage of a running review and pull request titles) and One review. It ends with a signed-in person seeing what runs and opening a review. Cut in two plans, both built: sign-in, serving, the layout and Activity, and the One review screen.
 2. **Settings:** the settings tables, the sync at start, validation, saving, the record of changes, the export, applying at the next review and marking what waits for a restart, `*` in "Reviewed on every push", and the Settings screen.
 3. **The rest:** alerts and dependency health stored, spend and reviews per day, feedback read, live score quality, the kill switch, and the Overview, Repositories and Memory screens.
 

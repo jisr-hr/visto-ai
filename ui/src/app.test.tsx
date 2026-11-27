@@ -80,6 +80,14 @@ function fakeApi(over: Partial<Api> = {}) {
       calls.push(['removeAccount', csrf, id]);
       return over.removeAccount ? over.removeAccount(csrf, id) : Promise.reject(new RequestFailed(500, 'not_expected'));
     },
+    review: (run) => {
+      calls.push(['review', run]);
+      return over.review ? over.review(run) : Promise.reject(new RequestFailed(404, 'not_found'));
+    },
+    pullReviews: (repository, number) => {
+      calls.push(['pullReviews', repository, number]);
+      return over.pullReviews ? over.pullReviews(repository, number) : Promise.resolve({ now: NOW, total: 0, reviews: [] });
+    },
   };
   return { api, calls };
 }
@@ -169,8 +177,8 @@ test('each sidebar entry leads to its page, the coming ones say so, and an unkno
 
   at('/ui/reviews/9001');
   const review = render(<App api={api} />);
-  expect(await screen.findByRole('heading', { level: 1, name: 'Review' })).toBeInTheDocument();
-  expect(screen.getByText('Coming in a later plan.')).toBeInTheDocument();
+  expect(await screen.findByRole('heading', { level: 1, name: 'Review not found' })).toBeInTheDocument();
+  expect(screen.getByText('No review is stored under this number.')).toBeInTheDocument();
   expect(within(screen.getByRole('navigation', { name: 'Main' })).getByRole('link', { current: 'page' })).toHaveTextContent('Activity');
   review.unmount();
 
@@ -238,6 +246,8 @@ test('a 401 from any method of the API the pages are given shows the sign-in pag
     ['setRole', (api) => api.setRole(ME.csrf, 3, 'admin'), ['setRole', ME.csrf, 3, 'admin']],
     ['resetPassword', (api) => api.resetPassword(ME.csrf, 3), ['resetPassword', ME.csrf, 3]],
     ['removeAccount', (api) => api.removeAccount(ME.csrf, 3), ['removeAccount', ME.csrf, 3]],
+    ['review', (api) => api.review(9001), ['review', 9001]],
+    ['pullReviews', (api) => api.pullReviews('acme/shop', 128), ['pullReviews', 'acme/shop', 128]],
   ];
   // Every method there is.
   expect(each.map(([name]) => name).sort()).toEqual(Object.keys(createApi()).sort());
@@ -734,4 +744,27 @@ test('a read in flight is not asked again when the page is hidden and shown agai
   await act(async () => answer('first'));
   expect(screen.getByRole('paragraph').textContent).toBe('first');
   expect(reads).toBe(1);
+});
+
+test('the reads of one review ask their own paths, and a refusal carries its code', async () => {
+  const seen: [string, RequestInit | undefined][] = [];
+  const answers: (() => Response)[] = [];
+  const fetchFn = ((input: RequestInfo | URL, init?: RequestInit) => {
+    seen.push([String(input), init]);
+    const next = answers.shift();
+    return next ? Promise.resolve(next()) : Promise.reject(new TypeError('Failed to fetch'));
+  }) as typeof fetch;
+  const api = createApi(fetchFn);
+  const jsonOf = (status: number, value: unknown) => () =>
+    new Response(JSON.stringify(value), { status, headers: { 'content-type': 'application/json' } });
+  const get = { method: 'GET', credentials: 'same-origin', headers: { accept: 'application/json' } };
+  const list = { now: NOW, total: 0, reviews: [] };
+
+  answers.push(jsonOf(200, list), jsonOf(404, { error: 'not_found' }));
+  expect(await api.pullReviews('acme/shop', 128)).toEqual(list);
+  await expect(api.review(9001)).rejects.toEqual(new RequestFailed(404, 'not_found'));
+  expect(seen).toEqual([
+    ['/api/pulls/acme/shop/128/reviews', get],
+    ['/api/reviews/9001', get],
+  ]);
 });

@@ -1,12 +1,16 @@
 // The UI's route: the built files, the sign-in routes, the JSON reads of the frame and Activity, and the accounts, under one
-// group (UI design 3.1, 3.2 and 5; calls 12, 13, 17, 23, 27 and 30; the password design 4.1, 4.3 and 4.5, calls 19 to 21). Every
-// answer is built by headers.ts or files.ts. No answer or log line holds a name, a login, a password or a hash, but the one-time
-// password in the answer of the route that made it.
+// group (UI design 3.1, 3.2 and 5; calls 12, 13, 17, 23, 27 and 30; the password design 4.1, 4.3 and 4.5, calls 19 to 21), and the
+// two routes of the page of one review, GET /api/reviews/<run> and GET /api/pulls/<owner>/<repo>/<number>/reviews (the plan "The
+// UI, One Review", calls 18 and 19). Every answer is built by headers.ts or files.ts. No log line holds a name, a login, a password
+// or a hash. A name or a login is in the accounts' answers, in `/api/me` (the signed-in name), in Activity's rows (the requester's
+// login) and in the two review routes' (whose logins, texts and limits are call 16's), and in no other; the one-time password is
+// in the answer of the route that made it only.
 import { codeOf } from '../shell/codes.ts';
 import type { UiAnswer, UiRequest, UiRoute } from '../shell/http.ts';
 import { accountOf } from './accounts.ts';
 import type { AccountChanges, Actor, Made, Refusal } from './accounts.ts';
 import { activity, me, reviews } from './api.ts';
+import { pullReviews, review } from './review.ts';
 import type { ApiDeps } from './api.ts';
 import type { AccountAnswer, Accounts, OneTime, Role, Ways } from './api-types.ts';
 import { CSRF_HEADER, cookiesOf, csrfOk } from './auth.ts';
@@ -17,7 +21,7 @@ import { SECURITY_HEADERS, json, redirect } from './headers.ts';
 import type { PasswordAuth } from './password-auth.ts';
 
 /** The fixed name a failed handler is logged with (call 30). */
-type Handler = 'me' | 'activity' | 'reviews' | 'signout' | 'ways' | 'own_password' | 'accounts' | 'account_new' | 'account_role' | 'account_reset' | 'account_remove';
+type Handler = 'me' | 'activity' | 'reviews' | 'signout' | 'ways' | 'own_password' | 'accounts' | 'account_new' | 'account_role' | 'account_reset' | 'account_remove' | 'review' | 'pull_reviews';
 
 /** The API's paths, each with the one method it answers. A path here with no case of its own below is not found. */
 export const METHODS: ReadonlyMap<string, string> = new Map([
@@ -26,6 +30,12 @@ export const METHODS: ReadonlyMap<string, string> = new Map([
   ['/api/me', 'GET'], ['/api/me/password', 'POST'], ['/api/activity', 'GET'], ['/api/reviews', 'GET'],
   ['/api/accounts', 'GET'], ['/api/accounts/new', 'POST'], ['/api/accounts/role', 'POST'], ['/api/accounts/reset', 'POST'], ['/api/accounts/remove', 'POST'],
 ]);
+
+/** The paths of one review and of a pull request's reviews: a run, and an owner, a repo and a number, written as a person types them. */
+export const ONE_REVIEW = /^\/api\/reviews\/([1-9][0-9]{0,9})$/;
+export const PULL_REVIEWS = /^\/api\/pulls\/([^/]+)\/([^/]+)\/([1-9][0-9]{0,9})\/reviews$/;
+/** An owner or a repo, lower-cased, as GitHub writes them. */
+const NAME = /^[a-z0-9_.-]{1,100}$/;
 
 /** The status each refusal of an account change answers with. `bad_login` is the command's: the API names an account by its id. */
 const REFUSED: Readonly<Record<Refusal, number>> = {
@@ -166,6 +176,23 @@ export function createUiRoute(deps: {
     // A method other than GET is the files' own refusal.
     if (path === '/') return method === 'GET' ? redirect('/ui/') : fileAnswer(files, method, path);
     if (path === '/ui' || path.startsWith('/ui/')) return fileAnswer(files, method, path);
+    if (path.startsWith('/api/reviews/') || path.startsWith('/api/pulls/')) {
+      const run = ONE_REVIEW.exec(path);
+      const pull = run === null ? PULL_REVIEWS.exec(path) : null;
+      const number = pull === null ? 0 : Number(pull[3]);
+      const owner = pull === null ? '' : pull[1]!.toLowerCase();
+      const repo = pull === null ? '' : pull[2]!.toLowerCase();
+      const valid = run !== null ? Number(run[1]) <= MAX_ID : pull !== null && number <= MAX_ID && NAME.test(owner) && NAME.test(repo);
+      if (!valid) return refused(404, 'not_found');
+      if (method !== 'GET') return refused(405, 'method_not_allowed', { allow: 'GET' });
+      if (run !== null) {
+        return behindSession(request, 'review', READ, async () => {
+          const found = await review(api, Number(run[1]));
+          return found === null ? refused(404, 'not_found') : json(200, found);
+        });
+      }
+      return behindSession(request, 'pull_reviews', READ, async () => json(200, await pullReviews(api, { service: 'github', owner, repo, number })));
+    }
     const allowed = METHODS.get(path);
     if (allowed === undefined) return refused(404, 'not_found');
     // Before any read: a known path with another method is refused whoever asks.

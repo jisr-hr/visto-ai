@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, expect, test, vi } from 'vitest';
-import { ago, initials, left, money, plural, took, utc } from './format.ts';
+import { ago, codeSpans, count, initials, left, money, plural, sentence, took, utc } from './format.ts';
 
 // Every test here runs in a zone half an hour off UTC (UTC+05:30), so that a time read in the zone
 // of the machine, where UTC's is meant, fails whatever zone the tests run in.
@@ -78,4 +78,19 @@ test('a time is written in UTC whatever the zone the page runs in, here half an 
   expect(utc('2026-12-31T20:00:00.000Z')).toBe('2026-12-31 20:00 UTC');
   expect(utc('2026-03-31T19:45:00.000Z')).toBe('2026-03-31 19:45 UTC');
   expect(utc('2026-03-04T10:00:00.000Z')).toBe('2026-03-04 10:00 UTC');
+});
+
+test('counts read with their thousands, code spans are found on one line, and a sentence starts with a capital', () => {
+  expect(count(38412)).toBe('38,412');
+  expect(count(2118)).toBe('2,118');
+  expect(count(999)).toBe('999');
+  expect(count(1000000)).toBe('1,000,000');
+  expect(count(-3)).toBe('0');
+  expect(codeSpans('The name `amount` no longer')).toEqual([
+    { code: false, text: 'The name ' }, { code: true, text: 'amount' }, { code: false, text: ' no longer' },
+  ]);
+  expect(codeSpans('a ` b')).toEqual([{ code: false, text: 'a ` b' }]);
+  expect(codeSpans('x `a\nb` y')).toEqual([{ code: false, text: 'x `a\nb` y' }]);
+  expect(sentence('a part')).toBe('A part');
+  expect(sentence('')).toBe('');
 });

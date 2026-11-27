@@ -27,16 +27,16 @@ export const SEARCH_MS = 300;
 const SEARCH_MAX = 100;
 
 // The mockup's .card with its overflow, as a section of its own (the Card component is a div).
-const CARD = 'overflow-hidden rounded-[12px] border border-border bg-card shadow-card';
+export const CARD = 'overflow-hidden rounded-[12px] border border-border bg-card shadow-card';
 const CARD_HEADER = 'flex flex-wrap items-center justify-between gap-3 px-5 pb-3 pt-[18px]';
-const CARD_TITLE = 'm-0 text-base font-semibold';
+export const CARD_TITLE = 'm-0 text-base font-semibold';
 const TITLE_BOX = 'flex min-w-[220px] flex-col gap-0.5';
 const TITLE_LINK = 'font-medium text-text no-underline hover:text-accent-text hover:underline';
 const TITLE_TEXT = 'font-medium text-text';
 const SUB_LINE = 'text-[13px] text-muted';
 const DETAIL = 'text-[13px] text-muted';
-const MONO = 'font-mono text-[12.5px]';
-const SCORE = 'inline-flex min-w-11 items-center justify-center rounded-md px-2 py-0.5 text-[13px] font-semibold';
+export const MONO = 'font-mono text-[12.5px]';
+export const SCORE = 'inline-flex min-w-11 items-center justify-center rounded-md px-2 py-0.5 text-[13px] font-semibold';
 const WITHDRAWAL_LINE = 'flex flex-wrap items-center gap-2.5 border-t border-border px-5 py-3 text-[13px]';
 const FOOT = 'flex flex-wrap items-center justify-between gap-2.5 border-t border-border px-5 py-3';
 
@@ -89,7 +89,7 @@ const OUTCOME_WORDS: ReadonlyMap<string, { tone: BadgeTone; label: string }> = n
   ['not_posted', { tone: 'muted', label: 'Not posted' }],
   ['failed', { tone: 'bad', label: 'Failed' }],
 ]);
-const MODES: ReadonlyMap<string, string> = new Map([['full', 'Full'], ['incremental', 'Incremental'], ['recheck', 'Re-check']]);
+export const MODES: ReadonlyMap<string, string> = new Map([['full', 'Full'], ['incremental', 'Incremental'], ['recheck', 'Re-check']]);
 const SEVERITIES = ['blocker', 'major', 'minor'] as const;
 
 /** A number searched for, with or without `#`. */
@@ -165,13 +165,13 @@ function queryOf(repo: string, outcome: Outcome, q: string, before: number | und
   return query;
 }
 
-function scoreTone(highest: number, threshold: number | null): string {
+export function scoreTone(highest: number, threshold: number | null): string {
   if (highest >= (threshold ?? DEFAULT_THRESHOLD)) return 'bg-bad-bg text-bad';
   if (highest >= BLUE_FROM) return 'bg-info-bg text-info';
   return 'bg-ok-bg text-ok';
 }
 
-function AskedBy({ reason, login }: ActivityJob['askedBy']) {
+export function AskedBy({ reason, login }: ActivityJob['askedBy']) {
   const command = COMMANDS.get(reason);
   if (command !== undefined) {
     return (
