@@ -46,6 +46,17 @@ function inFindingThread(comment: LiveComment, byId: ReadonlyMap<string, LiveCom
   return false;
 }
 
+/**
+ * The comments `liveCases` counts on a pull request, in their order: on a path, by an account other than its author (letter case
+ * aside), and not in a thread one of the app's findings starts. The one rule, for liveCases and for whoever chooses what it reads.
+ */
+export function countedComments(pull: Pick<LivePull, 'author' | 'comments' | 'findingThreads'>): Array<LiveComment & { path: string }> {
+  const byId = new Map(pull.comments.map((c) => [c.id, c]));
+  const author = pull.author === null ? null : pull.author.toLowerCase();
+  return pull.comments.filter((c): c is LiveComment & { path: string } =>
+    c.path !== null && c.author.toLowerCase() !== author && !inFindingThread(c, byId, pull.findingThreads));
+}
+
 interface Loose { run: LiveRun; blocks: Set<string>; files: Set<string> }
 
 export function liveCases(pulls: readonly LivePull[]): LiveCases {
@@ -55,7 +66,6 @@ export function liveCases(pulls: readonly LivePull[]): LiveCases {
     if (last === null) continue;
     out.pulls.push({ key: String(p.number), threshold: p.threshold, status: 'ok', scores: last.scores, labels: emptyLabels() });
 
-    const byId = new Map(p.comments.map((c) => [c.id, c]));
     const loose = new Map<number, Loose>();
     const looseOf = (run: LiveRun): Loose => {
       let l = loose.get(run.id);
@@ -63,12 +73,10 @@ export function liveCases(pulls: readonly LivePull[]): LiveCases {
       return l;
     };
 
-    for (const c of p.comments) {
-      if (p.author !== null && c.author.toLowerCase() === p.author.toLowerCase()) continue;
-      if (inFindingThread(c, byId, p.findingThreads)) continue;
+    for (const c of countedComments(p)) {
       const scored = c.commit === null ? undefined : p.atHead.get(c.commit);
       const run = scored ?? last;
-      const file = c.path === null ? undefined : run.scores.find((f) => f.path === c.path);
+      const file = run.scores.find((f) => f.path === c.path);
       if (file === undefined) continue;
       const l = looseOf(run);
       l.files.add(file.path);

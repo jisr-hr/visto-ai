@@ -8,7 +8,7 @@ import type { Activity } from './human-activity.ts';
 import type { RepoKey } from './memory-records.ts';
 import { savePullRequest } from './pull-requests.ts';
 import {
-  auditedPulls, closedPulls, feedbackCounts, feedbackReasons, findingThreads, inlineCommentsOf, mergedReverts, okRuns, runScores,
+  auditedPulls, closedPulls, feedbackCounts, feedbackReasons, findingThreads, inlineCommentsOf, mergedReverts, okRuns, repositoryKnown, runScores,
 } from './quality.ts';
 import { recordComments } from './review-comments.ts';
 import { markPublished, recordRun } from './review-runs.ts';
@@ -70,24 +70,39 @@ test('the closed pull requests of a window are read newest first, and an open on
   await db.close();
 });
 
-test('the runs that did not fail are read as ids, nothing-new ones included, and no result is read', async () => {
+test('the runs that did not fail are read as ids and stored sizes, nothing-new ones included, and no result is read', async () => {
   const inner = await testDb();
-  const first = await recordRun(inner, run(119, { startedAt: at(-3 * DAY) }));
+  const first = await recordRun(inner, run(119, { startedAt: at(-3 * DAY), result: { scores: [], overview: 'o'.repeat(5000) } }));
   const nothingNew = await recordRun(inner, run(119, { startedAt: at(-2 * DAY), result: { nothingToDo: true, scores: [] } }));
   await recordRun(inner, run(119, { headSha: HEAD_B, outcome: 'failed', failureStage: 'model', failureCode: 'model_timeout', result: {} }));
   const other = await recordRun(inner, run(120, { headSha: HEAD_B }));
   await recordRun(inner, { ...run(119), ref: refOf(119, 'web') });
   const { db, sent } = recording(inner);
-  assert.deepEqual(await okRuns(db, SHOP, [119], 10), [
+  const rows = await okRuns(db, SHOP, [119], 10);
+  assert.deepEqual(rows.map((r) => ({ id: r.id, number: r.number, head_sha: r.head_sha, started_at: r.started_at })), [
     { id: nothingNew, number: 119, head_sha: HEAD_A, started_at: new Date(at(-2 * DAY)) },
     { id: first, number: 119, head_sha: HEAD_A, started_at: new Date(at(-3 * DAY)) },
   ]);
+  const stored = await inner.query<{ id: number; size: number }>('select id, pg_column_size(result) as size from visto_ai.review_runs where id in ($1, $2)', [first, nothingNew]);
+  assert.deepEqual(rows.map((r) => [r.id, r.size]).sort(), stored.map((r) => [r.id, r.size]).sort());
+  assert.ok(rows[1]!.size > rows[0]!.size && rows[0]!.size > 0);
   assert.deepEqual((await okRuns(db, SHOP, [119, 120], 10)).map((r) => r.id), [other, nothingNew, first]);
   assert.deepEqual((await okRuns(db, SHOP, [119, 120], 2)).map((r) => r.id), [other, nothingNew]);
   assert.deepEqual(await okRuns(db, SHOP, [], 10), []);
   assert.equal(sent.length, 4);
-  for (const text of sent) assert.ok(!text.includes('result'), text);
+  // The result is named only for its size as stored.
+  for (const text of sent) assert.ok(!text.replaceAll('pg_column_size(result)', '').includes('result'), text);
   await inner.close();
+});
+
+test('a repository is known when one of its pull requests is stored', async () => {
+  const db = await testDb();
+  await savePullRequest(db, facts(119, 'open', null));
+  assert.equal(await repositoryKnown(db, SHOP), true);
+  assert.equal(await repositoryKnown(db, { service: 'github', owner: 'Acme', repo: 'Shop' }), true);
+  assert.equal(await repositoryKnown(db, { service: 'github', owner: 'acme', repo: 'web' }), false);
+  assert.equal(await repositoryKnown(db, { service: 'github', owner: 'acme', repo: '' }), false);
+  await db.close();
 });
 
 test('scores are read for the ids given, and a stored result over the size is read as null', async () => {

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { countAt } from '../backtest/metrics.ts';
-import { blockKey, liveCases, storedScores } from './labels.ts';
+import { blockKey, countedComments, liveCases, storedScores } from './labels.ts';
 import type { LiveComment, LiveFile, LivePull, LiveRun } from './labels.ts';
 
 const stored = (path: string, diffHash: string, blocks: Array<[string, string, number, [number, number][]]>): Record<string, unknown> => ({
@@ -126,4 +126,16 @@ test('a stored score is reduced to what is measured, and one of another shape is
   assert.deepEqual(out[0]!.blocks[0]!.entry, { score: 55 });
   const absent: Record<string, unknown> = { id: 'B1', hunkHash: 'h', changedLines: 1, lines: { RIGHT: [], LEFT: [] } };
   assert.equal(storedScores([oneBlock(absent)])![0]!.blocks[0]!.entry, null);
+});
+
+test('the comments counted are those liveCases labels with: on a path, not the author\'s, not in a thread of the app\'s findings', () => {
+  const comments = [
+    comment('k1'), comment('a1', { author: 'Octo-Dev' }), comment('n1', { path: null }), comment('r1', { replyTo: 'c-1' }),
+    comment('r2', { replyTo: 'r1' }), comment('k2', { replyTo: 'n-1' }), comment('k3', { replyTo: 'gone', commit: null }),
+  ];
+  assert.deepEqual(countedComments(pull(comments)).map((c) => c.id), ['k1', 'k2', 'k3']);
+  assert.deepEqual(countedComments(pull(comments, { author: null })).map((c) => c.id), ['k1', 'a1', 'k2', 'k3']);
+  // liveCases labels with exactly those: the comments not counted change nothing.
+  const counted = countedComments(pull(comments));
+  assert.deepEqual(liveCases([pull(comments)]), liveCases([pull(counted)]));
 });

@@ -19,10 +19,11 @@ import type { Measure, Quality, QualityAnswer, QualityRow, Repositories, Stepped
 import { windowStart } from './insight.ts';
 import type { InsightDeps, StartedWith } from './insight.ts';
 import {
-  QUALITY_CACHE_MS, QUALITY_COMMENTS, QUALITY_DEADLINE_MS, QUALITY_FAILED_MS, QUALITY_GROUP, QUALITY_KEPT, QUALITY_PULLS, QUALITY_RESULT_BYTES,
-  QUALITY_RUN_ROWS, QUALITY_RUNS, QUALITY_WAIT_MS, REASONS_SHOWN, STEPPED_SHOWN, approvalShort, computeQuality, createQualityCache, quality,
-  qualityKey, qualityOf, repositories,
+  QUALITY_CACHE_MS, QUALITY_COMMENTS, QUALITY_DEADLINE_MS, QUALITY_FAILED_MS, QUALITY_GROUP, QUALITY_GROUP_BYTES, QUALITY_KEPT, QUALITY_PULLS,
+  QUALITY_RESULT_BYTES, QUALITY_RUN_ROWS, QUALITY_RUNS, QUALITY_WAIT_MS, REASONS_SHOWN, STEPPED_SHOWN, approvalShort, computeQuality,
+  createQualityCache, planOf, quality, qualityKey, qualityOf, repositories,
 } from './quality.ts';
+import type { PlanRun } from './quality.ts';
 
 const at = (seconds: number): string => new Date(Date.parse('2026-03-01T10:00:00.000Z') + seconds * 1000).toISOString();
 const DAY = 86400;
@@ -104,7 +105,8 @@ function harness(inner: Db, config = configOf()): Harness {
   };
 }
 const KINDS: Array<[string, string]> = [
-  ['closedPulls', "state in ('merged', 'closed')"], ['okRuns', 'select id, number, head_sha, started_at'], ['runScores', 'pg_column_size'],
+  ['repositoryKnown', 'select exists (select 1 from visto_ai.pull_requests'],
+  ['closedPulls', "state in ('merged', 'closed')"], ['okRuns', 'select id, number, head_sha, started_at'], ['runScores', "result -> 'scores'"],
   ['inlineCommentsOf', "kind = 'inline_comment'"], ['findingThreads', 'from visto_ai.review_comments'], ['mergedReverts', 'p.reverts is not null'],
   ['auditedPulls', "approval_code = 'audit_sample'"], ['feedbackCounts', "filter (where vote = 'up')"], ['feedbackReasons', 'array_agg'],
 ];
@@ -293,6 +295,130 @@ test("a comment is read field by field: a side of no known name as none, a file 
   await db.close();
 });
 
+test("only the heads a counted comment names are read: the author's own comments take no place", async () => {
+  const db = await testDb();
+  // #401: a guest stepped in at head 1 on a block that changed later; the author answered at heads 2 to 11.
+  await savePullRequest(db, facts(401, -DAY - 60));
+  const ids: number[] = [];
+  for (let k = 1; k <= 12; k++) ids.push(await scored(db, 401, headOf(k), -10 * DAY + k * 3600, one(`d${k}`, `h${k}`, 50)));
+  await comment(db, 401, '7100', headOf(1), -10 * DAY + 3600 + 100);
+  for (let k = 2; k <= 11; k++) await comment(db, 401, `71${k}`, headOf(k), -10 * DAY + k * 3600 + 100, { author: 'octo-dev', replyTo: '7100' });
+  // #402: only the author commented, at heads 1 and 2: its last run alone is read.
+  await savePullRequest(db, facts(402, -DAY));
+  await scored(db, 402, headOf(1), -5 * DAY, one('d1', 'h1', 50));
+  await scored(db, 402, headOf(2), -4 * DAY, one('d2', 'h2', 50));
+  const last402 = await scored(db, 402, headOf(3), -3 * DAY, one('d3', 'h3', 50));
+  await comment(db, 402, '7201', headOf(1), -5 * DAY + 100, { author: 'octo-dev' });
+  await comment(db, 402, '7202', headOf(2), -4 * DAY + 100, { author: 'Octo-Dev' });
+
+  const h = harness(db);
+  const q = await computeQuality(h.deps, 'acme/shop', 30, 70);
+  assert.deepEqual(groupsRead(h), [[last402, ids[11]!, ids[0]!]]);
+  // As the backtest's rule measures it: the guest's block at head 1, strict and left to the bot at 70.
+  assert.deepEqual(rowAt(q, 70).safetyBlocks, m(1, 1));
+  assert.deepEqual(q.stepped, [{ path: P, number: 401, score: 50 }]);
+  assert.equal(q.pullRequests, 2);
+  await db.close();
+});
+
+test('a statement of scores reads about four megabytes stored at most, and a pull request above that is a group of its own', async () => {
+  const db = await testDb();
+  const ids = new Map<number, number[]>();
+  // #503 reads two runs: its last, and the earlier one at the head a guest commented on.
+  const earlier = await scored(db, 503, HEAD_A, -3 * DAY, one('dA', 'h1', 10));
+  await comment(db, 503, '7001', HEAD_A, -3 * DAY + 100);
+  for (const [i, number] of [501, 502, 503, 504].entries()) {
+    await savePullRequest(db, facts(number, -DAY - i * 60));
+    ids.set(number, [await scored(db, number, HEAD_B, -2 * DAY, one('dA', 'h1', 10))]);
+  }
+  ids.get(503)!.push(earlier);
+  const sizes = await db.query<{ size: number }>('select distinct pg_column_size(result) as size from visto_ai.review_runs');
+  assert.equal(sizes.length, 1);
+  const size = sizes[0]!.size;
+  const of = (...numbers: number[]): number[] => numbers.flatMap((n) => ids.get(n)!);
+  const read = async (groupBytes: number): Promise<number[][]> => {
+    const h = harness(db);
+    const q = await computeQuality(h.deps, 'acme/shop', 30, 70, { groupBytes });
+    assert.equal(q.pullRequests, 4);
+    return groupsRead(h);
+  };
+  assert.deepEqual(await read(QUALITY_GROUP_BYTES), [of(501, 502, 503, 504)]);
+  assert.deepEqual(await read(2 * size), [of(501, 502), of(503), of(504)]);
+  assert.deepEqual(await read(size), [of(501), of(502), of(503), of(504)]);
+  assert.equal(QUALITY_GROUP_BYTES, 4 * 1024 * 1024);
+  await db.close();
+});
+
+test('a repository with no pull request stored is answered at once with none, neither queued nor kept', async () => {
+  const db = await testDb();
+  await savePullRequest(db, facts(119, -DAY));
+  await scored(db, 119, HEAD_A, -2 * DAY, one('dA', 'h1', 50));
+  await savePullRequest(db, { ...facts(120, -DAY), ref: refOf(120, 'web') });
+  const h = harness(db);
+  const shop = await ready(quality(h.deps, 'acme/shop', days()));
+  const zero = m(0, 0);
+  const none: Quality = {
+    repository: 'acme/made-up', window: 30, threshold: 70, pullRequests: 0, unreadable: 0, cut: { pulls: false, comments: false, runs: false },
+    rows: [20, 40, 70, 90].map((x) => ({ threshold: x, current: x === 70, safetyBlocks: zero, safetyFiles: zero, benefit: zero, focus: zero })),
+    stepped: [], ...NOTHING,
+  };
+  let from = h.sent.length;
+  assert.deepEqual(await quality(h.deps, 'Acme/Made-Up', days()), { now: at(0), state: 'ready', quality: none });
+  assert.deepEqual(kinds(h, from), ['repositoryKnown']);
+  assert.equal(h.deps.quality.kept(qualityKey('acme/made-up', 30, 70)), null);
+
+  // While a known repository is measured, a made-up name does not wait behind it; and made-up names push out nothing kept.
+  let release = (): void => {};
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  h.hook.before = async (text, params) => { if (kindOf(text) === 'closedPulls' && params[2] === 'web') await held; };
+  const web = quality(h.deps, 'acme/web', days());
+  from = h.sent.length;
+  for (let i = 0; i <= QUALITY_KEPT; i++) assert.equal((await ready(quality(h.deps, `acme/made-up-${i}`, days()))).pullRequests, 0);
+  assert.ok(kinds(h, from).every((k) => k === 'repositoryKnown' || k === 'closedPulls'));
+  assert.deepEqual(kinds(h, from).filter((k) => k === 'repositoryKnown').length, QUALITY_KEPT + 1);
+  assert.deepEqual(h.deps.quality.kept(qualityKey('acme/shop', 30, 70)), { state: 'ready', quality: shop });
+  release();
+  assert.equal((await web as QualityAnswer).state, 'ready');
+  await db.close();
+});
+
+test('the plan of a pull request reads its last run, then the runs at the heads its counted comments name, newest first, ten at most', () => {
+  const closed = new Date(at(0));
+  const H = (i: number): string => headOf(i);
+  const runs: PlanRun[] = [
+    { id: 1, head: H(1), started: new Date(at(-600)), size: 100 },
+    { id: 2, head: H(2), started: new Date(at(-500)), size: 200 },
+    { id: 3, head: H(2), started: new Date(at(-400)), size: 300 },
+    { id: 4, head: H(3), started: new Date(at(-300)), size: QUALITY_RESULT_BYTES + 1 },
+    { id: 5, head: H(6), started: new Date(at(-200)), size: 400 },
+    { id: 6, head: H(5), started: new Date(at(-100)), size: 50 },
+    { id: 7, head: H(7), started: new Date(at(100)), size: 60 },
+  ];
+  const c = (id: string, commit: string | null, over: Partial<LiveComment> = {}): LiveComment => ({
+    id, author: 'octo-guest', path: P, side: 'RIGHT', line: 40, startLine: null, fileLevel: false, commit, replyTo: null, ...over,
+  });
+  const comments = [
+    c('k1', H(1)), c('k2', H(2)), c('k3', H(3)), c('k5', H(5)), c('k4', H(4)), c('k0', null), c('k7', H(7)),
+    c('a6', H(6), { author: 'Octo-Dev' }), c('f6', H(6), { replyTo: '9001' }), c('n6', H(6), { path: null }),
+  ];
+  const plan = planOf({ number: 401, author: 'octo-dev', closed_at: closed }, runs, comments, new Set(['9001']));
+  assert.deepEqual(plan.last, { id: 6, head: H(5) });
+  assert.deepEqual(plan.read, [6, 4, 3, 1]);
+  assert.deepEqual([...plan.heads].sort(), [[H(1), 1], [H(2), 3], [H(3), 4], [H(5), 6]].sort());
+  assert.equal(plan.bytes, 50 + 300 + 100);
+  assert.deepEqual(plan.comments.map((x) => x.id), comments.map((x) => x.id));
+  assert.deepEqual([plan.number, plan.author, [...plan.findings]], [401, 'octo-dev', ['9001']]);
+
+  const many: PlanRun[] = Array.from({ length: 14 }, (_, i) => ({ id: i + 1, head: H(i + 1), started: new Date(at(-1000 + i)), size: 10 }));
+  const wide = planOf({ number: 9, author: null, closed_at: closed }, many, many.map((r) => c(`w${r.id}`, r.head)), new Set());
+  assert.deepEqual(wide.read, [14, 13, 12, 11, 10, 9, 8, 7, 6, 5]);
+  assert.equal(wide.read.length, QUALITY_GROUP);
+  assert.equal(wide.bytes, 100);
+
+  const empty = planOf({ number: 8, author: 'octo-dev', closed_at: closed }, [runs[6]!], [c('k7', H(7))], new Set());
+  assert.deepEqual([empty.last, empty.read, empty.heads.size, empty.bytes], [null, [], 0, 0]);
+});
+
 test('one computation runs at a time in the service, the same key is not queued twice, and a result is kept five minutes', async () => {
   const db = await testDb();
   await savePullRequest(db, facts(119, -DAY));
@@ -304,7 +430,8 @@ test('one computation runs at a time in the service, the same key is not queued 
   const [shop, web] = await Promise.all([quality(h.deps, 'acme/shop', days()), quality(h.deps, 'acme/web', days())]);
   assert.equal((shop as QualityAnswer).state, 'ready');
   assert.equal((web as QualityAnswer).quality!.repository, 'acme/web');
-  const ofRepo = (repo: string): number[] => h.sent.flatMap((s, i) => (s.params[2] === repo ? [i] : []));
+  // The computation's statements: whether the repository is known is asked by the request, before it waits.
+  const ofRepo = (repo: string): number[] => h.sent.flatMap((s, i) => (s.params[2] === repo && kindOf(s.text) !== 'repositoryKnown' ? [i] : []));
   const lastShop = Math.max(...ofRepo('shop'));
   const firstWeb = Math.min(...ofRepo('web'));
   assert.equal(kindOf(h.sent[lastShop]!.text), 'feedbackReasons');
@@ -381,7 +508,7 @@ test('a failure is kept for a minute, answered failed, and logged with its code'
   h.move(1);
   failing = false;
   await ready(quality(h.deps, 'acme/shop', days()));
-  assert.deepEqual(kinds(h, from)[0], 'closedPulls');
+  assert.deepEqual(kinds(h, from).slice(0, 2), ['repositoryKnown', 'closedPulls']);
   assert.equal(h.logs.length, 1);
   await db.close();
 });
@@ -394,7 +521,7 @@ test('a computation past sixty seconds stops as too slow', async () => {
   h.hook.before = (text) => { if (kindOf(text) === 'okRuns') h.move(QUALITY_DEADLINE_MS / 1000 + 1); };
   assert.deepEqual(await quality(h.deps, 'acme/shop', days()), { now: at(61), state: 'failed', quality: null });
   assert.deepEqual(h.logs, [{ event: 'quality_failed', reason: 'too_slow' }]);
-  assert.deepEqual(kinds(h), ['closedPulls', 'inlineCommentsOf', 'okRuns']);
+  assert.deepEqual(kinds(h), ['repositoryKnown', 'closedPulls', 'inlineCommentsOf', 'okRuns']);
   const again = harness(db);
   again.hook.before = (text) => { if (kindOf(text) === 'okRuns') again.move(61); };
   await assert.rejects(computeQuality(again.deps, 'acme/shop', 30, 70), (error: Error) => error.message === 'too_slow');
@@ -494,6 +621,7 @@ test('pull requests, comments and runs past their bounds are cut, and said so', 
 
 test('the window and the repository must be of their shape', async () => {
   const db = await testDb();
+  await savePullRequest(db, facts(119, -DAY));
   const h = harness(db);
   for (const [value, window] of [[undefined, 30], ['', 30], ['30', 30], ['7', 7], ['90', 90], ['all', 'all']] as const) {
     const q = await ready(quality(h.deps, 'acme/shop', days(value)));

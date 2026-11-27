@@ -8,6 +8,14 @@ import type { Db } from './types.ts';
 const keyOf = (repo: RepoKey): [string, string, string] => [repo.service, storable(repo.owner).toLowerCase(), storable(repo.repo).toLowerCase()];
 const listOf = (values: readonly number[]): string => JSON.stringify(values);
 
+/** Whether a pull request of the repository is stored: what makes it one of the known repositories. */
+export async function repositoryKnown(db: Db, repo: RepoKey): Promise<boolean> {
+  const rows = await db.query<{ known: boolean }>(
+    `select exists (select 1 from visto_ai.pull_requests where service = $1 and owner = $2 and repo = $3) as known`,
+    keyOf(repo));
+  return rows[0]?.known === true;
+}
+
 /** The repository's closed pull requests closed at or after `since`, the newest close first; at most `limit`. */
 export async function closedPulls(db: Db, repo: RepoKey, since: string, limit: number): Promise<Array<{ number: number; author: string | null; closed_at: Date }>> {
   return db.query(
@@ -18,10 +26,13 @@ export async function closedPulls(db: Db, repo: RepoKey, since: string, limit: n
     [...keyOf(repo), since, limit]);
 }
 
-/** The runs of those pull requests that did not fail, a nothing-new one included, by number then id from the highest; at most `limit`. No result is read. */
-export async function okRuns(db: Db, repo: RepoKey, numbers: readonly number[], limit: number): Promise<Array<{ id: number; number: number; head_sha: string; started_at: Date }>> {
+/**
+ * The runs of those pull requests that did not fail, a nothing-new one included, by number then id from the highest; at most `limit`.
+ * No result is read: `size` is its stored result's size as stored (`pg_column_size`, which reads no value).
+ */
+export async function okRuns(db: Db, repo: RepoKey, numbers: readonly number[], limit: number): Promise<Array<{ id: number; number: number; head_sha: string; started_at: Date; size: number }>> {
   return db.query(
-    `select id, number, head_sha, started_at from visto_ai.review_runs
+    `select id, number, head_sha, started_at, pg_column_size(result) as size from visto_ai.review_runs
      where service = $1 and owner = $2 and repo = $3 and number in (select (jsonb_array_elements_text($4::jsonb))::int) and outcome = 'ok'
      order by number desc, id desc
      limit $5`,

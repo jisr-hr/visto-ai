@@ -1,17 +1,18 @@
 // A repository's live score quality (main 6.6 "Live"; UI design 3.3 items 6 and 8, 3.4; calls 23 to 29), and the list of
 // repositories. The reviews and the webhooks share the database's few connections with the UI, so a computation is bounded in
 // what it reads, in what it holds and in how many run at once (call 26): one at a time in the whole service, one statement at a
-// time, the scores of at most QUALITY_GROUP runs held at once and dropped once counted, stopped past QUALITY_DEADLINE_MS, and kept.
+// time, the scores of at most QUALITY_GROUP runs (and about QUALITY_GROUP_BYTES stored, but for one pull request alone) held at
+// once and dropped once counted, stopped past QUALITY_DEADLINE_MS, and kept; a repository with no pull request stored is not measured.
 // Every answer is built field by field: no comment's body, author or id, no quote, no score's reason and no stored result leaves.
 import { approvalOf, repoSettingsFor } from '../config/load.ts';
 import { knownRepositories } from '../db/activity.ts';
 import type { RepoKey } from '../db/memory-records.ts';
 import {
-  auditedPulls, closedPulls, feedbackCounts, feedbackReasons, findingThreads, inlineCommentsOf, mergedReverts, okRuns, runScores,
+  auditedPulls, closedPulls, feedbackCounts, feedbackReasons, findingThreads, inlineCommentsOf, mergedReverts, okRuns, repositoryKnown, runScores,
 } from '../db/quality.ts';
 import { THRESHOLDS, addCounts, blockFlagged, countAt, share } from '../eval/backtest/metrics.ts';
 import type { Counts } from '../eval/backtest/metrics.ts';
-import { blockKey, liveCases, storedScores } from '../eval/live/labels.ts';
+import { blockKey, countedComments, liveCases, storedScores } from '../eval/live/labels.ts';
 import type { LiveComment, LiveFile, LivePull, LiveRun } from '../eval/live/labels.ts';
 import { codeOf } from '../shell/codes.ts';
 import type {
@@ -26,6 +27,8 @@ export const QUALITY_COMMENTS = 20000;
 export const QUALITY_RUNS = 1000;
 /** Runs whose scores one statement reads. */
 export const QUALITY_GROUP = 10;
+/** A statement of scores reads at most about this much stored: a group closes before a pull request that would take it past (call 26, as built). */
+export const QUALITY_GROUP_BYTES = 4 * 1024 * 1024;
 /** A stored result above this, as stored, is not read. */
 export const QUALITY_RESULT_BYTES = 2 * 1024 * 1024;
 export const QUALITY_DEADLINE_MS = 60_000;
@@ -120,7 +123,7 @@ export function qualityKey(repository: string, window: QualityWindow, threshold:
 }
 
 /** The constants above; a test gives lower ones. */
-export interface QualityBounds { resultBytes: number; comments: number; runRows: number; runs: number }
+export interface QualityBounds { resultBytes: number; comments: number; runRows: number; runs: number; groupBytes: number }
 
 const repoKeyOf = (name: string): RepoKey => {
   const slash = name.indexOf('/');
@@ -130,20 +133,87 @@ const sideOf = (side: string | null): 'LEFT' | 'RIGHT' | null => (side === 'LEFT
 const measureOf = (part: number, of: number): Measure => ({ share: share(part, of), part, of });
 const byPlace = (a: SteppedBlock, b: SteppedBlock): number => b.number - a.number || (a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
 
-/** A pull request to measure: the ids of its runs to read, its last run first, and what its labels are read from. */
-interface Planned {
+/** A run that did not fail, as `okRuns` reads it: `size` is its stored result's size as stored. */
+export interface PlanRun { id: number; head: string; started: Date; size: number }
+/** A pull request to measure: the ids of its runs to read, its last run first, what they hold as stored, and what its labels are read from. */
+export interface Planned {
   number: number; author: string | null;
-  last: { id: number; head: string } | null;
-  heads: Map<string, number>;   // each commented head whose run is read, and that run (the last run's head is its own)
+  last: { id: number; head: string } | null;   // its last run: the newest that did not fail, started at or before its close
+  heads: Map<string, number>;                  // each head a counted comment names whose run is read, and that run (the last run's head is its own)
   read: number[];
+  bytes: number;                               // the sizes as stored of the runs read whose result is read (at most `resultBytes` each)
   comments: LiveComment[]; findings: Set<string>;
+}
+
+/**
+ * What of a closed pull request is read (call 26): its last run, then the runs at the heads its counted comments name (the comments
+ * `liveCases` counts, by `countedComments`), each head's newest started at or before the close, newest first, other than the last
+ * run, at most QUALITY_GROUP in all. A head no run scored is not read: its comments label the last run's file.
+ */
+export function planOf(
+  pull: { number: number; author: string | null; closed_at: Date }, runs: readonly PlanRun[], comments: readonly LiveComment[],
+  findings: ReadonlySet<string>, resultBytes = QUALITY_RESULT_BYTES,
+): Planned {
+  const close = pull.closed_at.getTime();
+  const plan: Planned = {
+    number: pull.number, author: pull.author, last: null, heads: new Map(), read: [], bytes: 0, comments: [...comments], findings: new Set(findings),
+  };
+  const newest = new Map<string, PlanRun>();
+  let last: PlanRun | null = null;
+  for (const r of runs) {
+    if (r.started.getTime() > close) continue;
+    if (last === null || r.id > last.id) last = r;
+    if ((newest.get(r.head)?.id ?? -1) < r.id) newest.set(r.head, r);
+  }
+  if (last === null) return plan;
+  const counted = countedComments({ author: pull.author, comments: plan.comments, findingThreads: plan.findings });
+  const others: PlanRun[] = [];
+  for (const head of new Set(counted.flatMap((c) => (c.commit === null ? [] : [c.commit])))) {
+    const run = newest.get(head);
+    if (run === undefined) continue;
+    if (run.id === last.id) plan.heads.set(head, run.id);
+    else others.push(run);
+  }
+  // A pull request is never split across two groups, so it reads at most QUALITY_GROUP runs.
+  const chosen = others.sort((x, y) => y.id - x.id).slice(0, QUALITY_GROUP - 1);
+  for (const run of chosen) plan.heads.set(run.head, run.id);
+  const read = [last, ...chosen];
+  plan.last = { id: last.id, head: last.head };
+  plan.read = read.map((r) => r.id);
+  plan.bytes = read.reduce((n, r) => n + (r.size <= resultBytes ? r.size : 0), 0);
+  return plan;
+}
+
+const rowsOf = (thresholds: readonly number[], t: number, pulls: ReadonlyMap<number, Counts>, labelled: ReadonlyMap<number, Counts>): QualityRow[] =>
+  thresholds.map((x) => {
+    const p = pulls.get(x)!;
+    const l = labelled.get(x)!;
+    return {
+      threshold: x, current: x === t,
+      safetyBlocks: measureOf(l.blocksLeft, l.blocks), safetyFiles: measureOf(l.filesLeft, l.files),
+      benefit: measureOf(p.prsClear, p.prs), focus: measureOf(p.flaggedLines, p.totalLines),
+    };
+  });
+const thresholdsOf = (t: number): number[] => [...new Set([...THRESHOLDS, t])].sort((x, y) => x - y);
+const zeroCounts = (thresholds: readonly number[]): Map<number, Counts> => new Map(thresholds.map((x) => [x, countAt([], x)]));
+
+/** The answer of a repository with no pull request stored: nothing read, nothing kept. */
+function nothingStored(name: string, window: QualityWindow, t: number): Quality {
+  const thresholds = thresholdsOf(t);
+  return {
+    repository: name, window, threshold: t, pullRequests: 0, unreadable: 0, cut: { pulls: false, comments: false, runs: false },
+    rows: rowsOf(thresholds, t, zeroCounts(thresholds), zeroCounts(thresholds)), stepped: [],
+    reverts: { merged: 0, approved: 0 }, audits: { drawn: 0, needed: 0 }, feedback: { helpful: 0, notHelpful: 0, reasons: [] },
+  };
 }
 
 /** One repository's quality over a window at a threshold (calls 23 to 29); rejects `too_slow` past QUALITY_DEADLINE_MS. */
 export async function computeQuality(
   deps: InsightDeps, repository: string, window: QualityWindow, threshold: number, bounds: Partial<QualityBounds> = {},
 ): Promise<Quality> {
-  const b: QualityBounds = { resultBytes: QUALITY_RESULT_BYTES, comments: QUALITY_COMMENTS, runRows: QUALITY_RUN_ROWS, runs: QUALITY_RUNS, ...bounds };
+  const b: QualityBounds = {
+    resultBytes: QUALITY_RESULT_BYTES, comments: QUALITY_COMMENTS, runRows: QUALITY_RUN_ROWS, runs: QUALITY_RUNS, groupBytes: QUALITY_GROUP_BYTES, ...bounds,
+  };
   const began = deps.clock().getTime();
   // Checked before each statement: a statement under way is cut by the pool.
   const step = <T>(read: () => Promise<T>): Promise<T> =>
@@ -152,10 +222,10 @@ export async function computeQuality(
   const key = repoKeyOf(name);
   const since = windowStart(deps.clock(), window);
   const t = threshold;
-  const thresholds = [...new Set([...THRESHOLDS, t])].sort((x, y) => x - y);
+  const thresholds = thresholdsOf(t);
   const cut = { pulls: false, comments: false, runs: false };
-  const pullCounts = new Map<number, Counts>(thresholds.map((x) => [x, countAt([], x)]));
-  const labelCounts = new Map<number, Counts>(thresholds.map((x) => [x, countAt([], x)]));
+  const pullCounts = zeroCounts(thresholds);
+  const labelCounts = zeroCounts(thresholds);
   let stepped: SteppedBlock[] = [];
   const strict = new Set<number>();
   let measured = 0;
@@ -182,91 +252,68 @@ export async function computeQuality(
       });
       comments.set(c.number, list);
     }
-    const runs = new Map<number, Array<{ id: number; head: string; started: number }>>();
+    const runs = new Map<number, PlanRun[]>();
     for (const r of runRows.slice(0, b.runRows)) {
       const list = runs.get(r.number) ?? [];
-      list.push({ id: r.id, head: r.head_sha, started: r.started_at.getTime() });
+      list.push({ id: r.id, head: r.head_sha, started: r.started_at, size: r.size });
       runs.set(r.number, list);
     }
     const findings = new Map<number, Set<string>>();
     for (const f of threadRows) findings.set(f.number, (findings.get(f.number) ?? new Set()).add(f.comment_id));
+    const planned = pulls.map((p) => planOf(p, runs.get(p.number) ?? [], comments.get(p.number) ?? [], findings.get(p.number) ?? new Set(), b.resultBytes));
 
-    const planned: Planned[] = pulls.map((p) => {
-      const close = p.closed_at.getTime();
-      const own = comments.get(p.number) ?? [];
-      const plan: Planned = {
-        number: p.number, author: p.author, last: null, heads: new Map(), read: [], comments: own, findings: findings.get(p.number) ?? new Set(),
-      };
-      // The newest run that did not fail, started at or before the close; and at each head, that head's newest.
-      const newest = new Map<string, number>();
-      for (const r of runs.get(p.number) ?? []) {
-        if (r.started > close) continue;
-        if (plan.last === null || r.id > plan.last.id) plan.last = { id: r.id, head: r.head };
-        if ((newest.get(r.head) ?? -1) < r.id) newest.set(r.head, r.id);
-      }
-      if (plan.last === null) return plan;
-      const last = plan.last;
-      const commented = new Set(own.flatMap((c) => (c.commit === null ? [] : [c.commit])));
-      const others: Array<[string, number]> = [];
-      for (const head of commented) {
-        const id = newest.get(head);
-        if (id === undefined) continue;
-        if (id === last.id) plan.heads.set(head, id);
-        else others.push([head, id]);
-      }
-      // Its last run, then its commented heads' runs newest first, at most QUALITY_GROUP in all: a pull request is never split across two groups.
-      const chosen = others.sort((x, y) => y[1] - x[1]).slice(0, QUALITY_GROUP - 1);
-      for (const [head, id] of chosen) plan.heads.set(head, id);
-      plan.read = [last.id, ...chosen.map(([, id]) => id)];
-      return plan;
-    });
-
-    // One group: its runs' scores in one statement, its pull requests in one call of liveCases, counted, then dropped.
-    const measureGroup = async (group: Planned[]): Promise<void> => {
+    // One group: its runs' scores in one statement; each pull request then measured by one call of liveCases, counted, and dropped.
+    const measureGroup = async (group: readonly Planned[]): Promise<void> => {
       const rows = await step(() => runScores(deps.db, group.flatMap((p) => p.read), b.resultBytes));
       const scores = new Map<number, LiveFile[] | null>(rows.map((r) => [r.id, storedScores(r.scores)]));
-      const livePulls: LivePull[] = group.map((p) => {
+      for (const p of group) {
         const lastScores = scores.get(p.last!.id) ?? null;
-        if (lastScores === null) unreadable += 1;
-        const last: LiveRun | null = lastScores === null ? null : { id: p.last!.id, head: p.last!.head, scores: lastScores };
+        if (lastScores === null) { unreadable += 1; continue; }
+        const last: LiveRun = { id: p.last!.id, head: p.last!.head, scores: lastScores };
         const atHead = new Map<string, LiveRun>();
         for (const [head, id] of p.heads) {
-          if (last !== null && id === last.id) { atHead.set(head, last); continue; }
+          if (id === last.id) { atHead.set(head, last); continue; }
           const read = scores.get(id) ?? null;
           if (read !== null) atHead.set(head, { id, head, scores: read });
         }
-        return { number: p.number, author: p.author, threshold: t, last, atHead, comments: p.comments, findingThreads: p.findings };
-      });
-      const cases = liveCases(livePulls);
-      measured += cases.pulls.length;
-      for (const x of thresholds) {
-        pullCounts.set(x, addCounts(pullCounts.get(x)!, countAt(cases.pulls, x)));
-        labelCounts.set(x, addCounts(labelCounts.get(x)!, countAt(cases.labelled, x)));
-      }
-      const found: SteppedBlock[] = [];
-      for (const c of cases.labelled) {
-        const number = Number(c.key.slice(0, c.key.indexOf(':')));
-        for (const file of c.scores) {
-          for (const block of file.blocks) {
-            if (c.labels.blocks.get(blockKey(file.path, block.id))?.strict !== true || blockFlagged(file, block, t)) continue;
-            found.push({ path: file.path, number, score: block.entry?.score ?? file.fileLevel?.score ?? 0 });
+        const pull: LivePull = { number: p.number, author: p.author, threshold: t, last, atHead, comments: p.comments, findingThreads: p.findings };
+        const cases = liveCases([pull]);
+        measured += cases.pulls.length;
+        for (const x of thresholds) {
+          pullCounts.set(x, addCounts(pullCounts.get(x)!, countAt(cases.pulls, x)));
+          labelCounts.set(x, addCounts(labelCounts.get(x)!, countAt(cases.labelled, x)));
+        }
+        const found: SteppedBlock[] = [];
+        for (const c of cases.labelled) {
+          for (const file of c.scores) {
+            for (const block of file.blocks) {
+              if (c.labels.blocks.get(blockKey(file.path, block.id))?.strict !== true || blockFlagged(file, block, t)) continue;
+              found.push({ path: file.path, number: p.number, score: block.entry?.score ?? file.fileLevel?.score ?? 0 });
+            }
           }
         }
+        if (found.length > 0) stepped = [...stepped, ...found].sort(byPlace).slice(0, STEPPED_SHOWN);
+        if (cases.strict.size > 0) strict.add(p.number);
       }
-      stepped = [...stepped, ...found].sort(byPlace).slice(0, STEPPED_SHOWN);
-      for (const n of cases.strict) strict.add(n);
     };
 
+    // A group closes before a pull request that would take it past QUALITY_GROUP runs or `groupBytes` stored; a pull request
+    // alone above `groupBytes` is a group of its own.
     let group: Planned[] = [];
     let inGroup = 0;
+    let groupBytes = 0;
     let read = 0;
     for (const p of planned) {
       const n = p.read.length;
       if (n === 0) continue;
       if (read + n > b.runs) { cut.runs = true; break; }
-      if (inGroup + n > QUALITY_GROUP) { await measureGroup(group); group = []; inGroup = 0; }
+      if (group.length > 0 && (inGroup + n > QUALITY_GROUP || groupBytes + p.bytes > b.groupBytes)) {
+        await measureGroup(group);
+        group = []; inGroup = 0; groupBytes = 0;
+      }
       group.push(p);
       inGroup += n;
+      groupBytes += p.bytes;
       read += n;
     }
     if (group.length > 0) await measureGroup(group);
@@ -284,19 +331,10 @@ export async function computeQuality(
   const votes = await step(() => feedbackCounts(deps.db, key, since));
   const reasons = await step(() => feedbackReasons(deps.db, key, since, REASONS_SHOWN));
 
-  const rows: QualityRow[] = thresholds.map((x) => {
-    const p = pullCounts.get(x)!;
-    const l = labelCounts.get(x)!;
-    return {
-      threshold: x, current: x === t,
-      safetyBlocks: measureOf(l.blocksLeft, l.blocks), safetyFiles: measureOf(l.filesLeft, l.files),
-      benefit: measureOf(p.prsClear, p.prs), focus: measureOf(p.flaggedLines, p.totalLines),
-    };
-  });
   return {
     repository: name, window, threshold: t,
     pullRequests: measured, unreadable, cut,
-    rows, stepped: stepped.map((s) => ({ path: s.path, number: s.number, score: s.score })),
+    rows: rowsOf(thresholds, t, pullCounts, labelCounts), stepped: stepped.map((s) => ({ path: s.path, number: s.number, score: s.score })),
     reverts: { merged: ofWindow.length, approved: ofWindow.filter((r) => r.approved).length },
     audits,
     feedback: { helpful: votes.up, notHelpful: votes.down, reasons: reasons.map((r) => ({ reason: r.reason, count: r.count })) },
@@ -310,11 +348,21 @@ export async function qualityOf(deps: InsightDeps, repository: string, window: Q
   return deps.quality.measure(qualityKey(name, window, threshold), () => computeQuality(deps, name, window, threshold), waitMs);
 }
 
+/**
+ * The answer of the quality route. What is kept is answered; else a repository with no pull request stored is answered at once
+ * with none, neither queued nor kept, so names made up cannot take the cache's places or the queue; else it is measured.
+ */
 export async function quality(deps: InsightDeps, repository: string, query: URLSearchParams): Promise<QualityAnswer | 'bad_request'> {
   const name = repository.toLowerCase();
   const window = WINDOWS.get(query.get('days') ?? '');
   if (!REPOSITORY.test(name) || window === undefined) return 'bad_request';
-  const measured = await qualityOf(deps, name, window, QUALITY_WAIT_MS);
+  const threshold = repoSettingsFor(deps.inForce(), name).scoreThreshold;
+  let measured = deps.quality.kept(qualityKey(name, window, threshold));
+  if (measured === null) {
+    measured = await repositoryKnown(deps.db, repoKeyOf(name))
+      ? await qualityOf(deps, name, window, QUALITY_WAIT_MS)
+      : { state: 'ready', quality: nothingStored(name, window, threshold) };
+  }
   return { now: deps.clock().toISOString(), state: measured.state, quality: measured.state === 'ready' ? measured.quality : null };
 }
 
