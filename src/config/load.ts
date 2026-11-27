@@ -62,7 +62,10 @@ export interface DeploymentConfig {
   scorer: ScorerConfig | null;
   app: { id: string; privateKey: string; webhookSecret: string } | null;
   database: { url: string } | null;
-  /** The value of the variable `auditKey` names; present only when `auditKey` is written. Never logged, stored or posted. */
+  /**
+   * The value of the variable `auditKey` names; present only when `auditKey` is written (else the service generates a key and
+   * keeps it in its database). Never logged, stored or posted.
+   */
   auditKey?: string;
   server: { port: number };
   /** Present only when `ui` writes an address, names an account or writes a team. */
@@ -203,19 +206,6 @@ function approvalWritten(score: ApprovalKeys | undefined): { approval?: Partial<
   return Object.keys(approval).length === 0 ? {} : { approval };
 }
 
-export const AUDIT_KEY_NEEDED = 'must be written while autoApprove is true with an auditShare above 0';
-
-/**
- * Whether the defaults, or some override merged with them as `repoSettingsFor` merges it, have approval on with a share
- * above 0 (-0 is 0): the audit sample is then drawn, and it needs the key.
- */
-function auditKeyNeeded(repositories: { defaults: { score: ApprovalKeys }; overrides: Record<string, { score?: ApprovalKeys | undefined }> }): boolean {
-  const draws = (a: ApprovalSettings): boolean => a.enabled && a.auditShare > 0;
-  const defaults = approvalWritten(repositories.defaults.score).approval;
-  if (draws({ ...APPROVAL_OFF, ...defaults })) return true;
-  return Object.values(repositories.overrides).some((o) => draws({ ...APPROVAL_OFF, ...defaults, ...approvalWritten(o.score).approval }));
-}
-
 const UI_NEEDS = 'must be written when ui names accounts or a team';
 
 /** The UI is on when `ui` writes an address, names at least one account or writes a team. */
@@ -292,9 +282,7 @@ export function parseDocument(doc: unknown, env: Record<string, string | undefin
     throw new ConfigError(texts, details);
   }
   const raw = result.data;
-  // Needed with no key written fails closed, dry run or not: one issue, however many repositories need it.
-  const keyIssues = raw.auditKey === undefined && auditKeyNeeded(raw.repositories) ? [at(['auditKey'], AUDIT_KEY_NEEDED)] : [];
-  // What sign-in needs fails closed the same way: each key missing is named, dry run or not, and no value is quoted.
+  // What sign-in needs fails closed: each key missing is named, dry run or not, and no value is quoted.
   const uiIssues = raw.ui !== undefined && githubOn(raw.ui)
     ? [
       raw.ui.publicUrl === undefined ? at(['ui', 'publicUrl'], UI_NEEDS) : null,
@@ -302,7 +290,7 @@ export function parseDocument(doc: unknown, env: Record<string, string | undefin
       raw.app?.clientSecret === undefined ? at(['app', 'clientSecret'], UI_NEEDS) : null,
     ].filter((i) => i !== null)
     : [];
-  const writtenIssues = [...gateBranchIssues(raw.repositories), ...keyIssues, ...uiIssues];
+  const writtenIssues = [...gateBranchIssues(raw.repositories), ...uiIssues];
   if (writtenIssues.length > 0) throw failWith(writtenIssues);
   const varName = raw.model.apiKey.env;
   const apiKey = env[varName];
@@ -369,7 +357,7 @@ export function parseDocument(doc: unknown, env: Record<string, string | undefin
     if (!/^postgres(ql)?:\/\//.test(url) || !URL.canParse(url)) throw failWith([at(['database', 'url'], 'must be a postgres URL')]);
     database = { url };
   }
-  // Resolved whenever it is written, needed or not.
+  // Resolved whenever it is written, whatever the repositories say.
   let auditKey: string | undefined;
   if (raw.auditKey !== undefined) {
     const auditVar = raw.auditKey.env;

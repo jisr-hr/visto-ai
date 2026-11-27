@@ -438,7 +438,7 @@ async function harness(options: Options = {}) {
 }
 
 /** The log entries of a stop, without those every start writes. */
-const ofStop = (logged: Array<Record<string, unknown>>) => logged.filter((e) => e.event !== 'recovery' && e.event !== 'model_check' && e.event !== 'app_check');
+const ofStop = (logged: Array<Record<string, unknown>>) => logged.filter((e) => !['audit_key', 'recovery', 'model_check', 'app_check'].includes(e.event as string));
 
 type Harness = Awaited<ReturnType<typeof harness>>;
 /** `h`'s database migrated, and the settings of a start on BASE_YAML (or `yaml`), checked with ENV (or `env`); the UI on when that YAML writes `ui`. */
@@ -919,7 +919,7 @@ test('when a review job has left the runner the check is asked for and decided',
     await off.until(async () => (await jobOf(off.db, id)).status === 'done');
     await off.flush();
     assert.deepEqual([await off.gateJobs(), gateEntries(off.logged), off.checked], [[], [], []]);
-    assert.deepEqual(off.logged.map((e) => e.event), ['recovery', ...swept, 'model_check', 'app_check', 'readback', 'review']);
+    assert.deepEqual(off.logged.map((e) => e.event), ['audit_key', 'recovery', ...swept, 'model_check', 'app_check', 'readback', 'review']);
     assert.deepEqual(off.logged.filter((e) => e.event === 'gate_sweep'), swept.map(() => ({ event: 'gate_sweep', asked: 0 })));
   }
 });
@@ -981,7 +981,7 @@ test('the sweep comes after the recovery and before the listener, and not in dry
   let atListen: unknown[] = [];
   h.onListen = async () => { atListen = h.logged.map((e) => e.event); };
   await (await h.start()).settled;
-  assert.deepEqual(atListen, ['recovery', 'gate_sweep']);
+  assert.deepEqual(atListen, ['audit_key', 'recovery', 'gate_sweep']);
   assert.deepEqual(h.logged.filter((e) => e.event === 'gate_sweep'), [{ event: 'gate_sweep', asked: 1 }]);
   await h.until(() => h.written().length > 0);
   assert.deepEqual(said(h), [['h1', 'Waiting for /done']]);
@@ -1487,7 +1487,7 @@ test('with no module the service starts, reviews and logs as before, and an addr
   const h = await harness({ dryRun: false, extensions: [] });
   await (await h.start()).settled;
   const atStart = h.logged.map((e) => e.event);
-  assert.deepEqual(atStart, ['recovery', 'model_check', 'app_check']);
+  assert.deepEqual(atStart, ['audit_key', 'recovery', 'model_check', 'app_check']);
   const answer = await h.request('POST', '/extensions/x/y', null);
   assert.deepEqual([answer.status, answer.body], [404, 'not_found']);
   assert.deepEqual(await h.webhook(pr('opened'), 'd1'), { status: 202, body: 'accepted' });
@@ -2090,31 +2090,86 @@ test('a push on an approved pull request withdraws its approval in its own lane'
   assert.deepEqual([h.inputs.length, (await pending(h.db, 'review')).map((j) => [j.reason, j.status])], [1, [['opened', 'done'], ['synchronize', 'pending']]]);
 });
 
-test('the service hands the review job the audit key the config names', async () => {
+/** The generated secrets the database keeps, as [name, value, made at]. */
+const generatedSecrets = async (db: Db): Promise<string[][]> => (await db.query<{ name: string; value: string; created_at: Date }>(
+  'select name, value, created_at from visto_ai.generated_secrets order by name')).map((r) => [r.name, r.value, r.created_at.toISOString()]);
+
+test('the service hands the review job the audit key the config names, or else the one its database keeps', async () => {
   // Under the key V holds, acme/shop 7 is drawn above 18.8899: at 18.88 it is approved, at 18.9 it is drawn. Without the key both would be drawn.
   // approvalRows reads only approved rows, so an audited one is read here by a query of its own.
   const decided = (db: Db) => db.query<{ approved: boolean; approval_code: string | null }>(
     'select approved, approval_code from visto_ai.review_runs where number = 7 and published order by id');
-  for (const [share, approved, code] of [['18.88', true, 'approved'], ['18.9', false, 'audit_sample']] as const) {
-    const seen = approvalsFake();
-    const yaml = `auditKey: { env: V }\nrepositories:\n  defaults: { score: { autoApprove: true, auditShare: ${share} } }\n`;
-    const h = await harness({ dryRun: false, repositoriesYaml: yaml, threads: [], result: approvable(), approvals: seen.approvals });
-    h.live = liveAt('h1');
-    await (await h.start()).settled;
-    await h.webhook(pr('opened'), 'd1');
-    // A job's line is the last thing it writes; an approval's withdraw job, stored with it, then runs at once.
-    await h.until(() => h.logged.some((e) => e.event === 'review'));
-    if (approved) await h.until(async () => (await withdrawRows(h.db)).some((j) => j.status === 'done'));
-    await h.flush();
-    assert.deepEqual((await decided(h.db)).map((r) => [r.approved, r.approval_code]), [[approved, code]], share);
-    const line = h.logged.find((e) => e.event === 'review')!;
-    assert.deepEqual([line.approved, line.approval], [approved, code], share);
-    // Posted once. The approval is read back by its withdraw job; the audited review is no approval: nothing stands, and no withdraw job is asked.
-    assert.deepEqual(h.writes.filter((w) => w[0] === 'publishReview'), [['publishReview', 'h1']], share);
-    assert.deepEqual(seen.calls, approved ? [['staleApprovals', '99', 'main'], ['readReview', '99', '501']] : [['staleApprovals', '99', 'main']], share);
-    assert.deepEqual((await withdrawRows(h.db)).map((j) => [j.status, j.outcome]), approved ? [['done', 'kept']] : [], share);
-    assert.equal(JSON.stringify(h.logged).includes(ENV.V), false, share);
+  for (const from of ['config.yml', 'database'] as const) {
+    for (const [share, approved, code] of [['18.88', true, 'approved'], ['18.9', false, 'audit_sample']] as const) {
+      const label = `${from} ${share}`;
+      const seen = approvalsFake();
+      const yaml = `${from === 'config.yml' ? 'auditKey: { env: V }\n' : ''}repositories:\n  defaults: { score: { autoApprove: true, auditShare: ${share} } }\n`;
+      const h = await harness({ dryRun: false, repositoriesYaml: yaml, threads: [], result: approvable(), approvals: seen.approvals });
+      if (from === 'database') {
+        // The key an earlier start kept: this start draws with it.
+        await migrate(h.db, loadMigrations(MIGRATIONS_DIR));
+        await h.db.query("insert into visto_ai.generated_secrets (name, value, created_at) values ('audit_key', $1, $2)", [ENV.V, at(-60)]);
+      }
+      const before = h.queries.length;
+      h.live = liveAt('h1');
+      await (await h.start()).settled;
+      await h.webhook(pr('opened'), 'd1');
+      // A job's line is the last thing it writes; an approval's withdraw job, stored with it, then runs at once.
+      await h.until(() => h.logged.some((e) => e.event === 'review'));
+      if (approved) await h.until(async () => (await withdrawRows(h.db)).some((j) => j.status === 'done'));
+      await h.flush();
+      assert.deepEqual((await decided(h.db)).map((r) => [r.approved, r.approval_code]), [[approved, code]], label);
+      const line = h.logged.find((e) => e.event === 'review')!;
+      assert.deepEqual([line.approved, line.approval], [approved, code], label);
+      // Posted once. The approval is read back by its withdraw job; the audited review is no approval: nothing stands, and no withdraw job is asked.
+      assert.deepEqual(h.writes.filter((w) => w[0] === 'publishReview'), [['publishReview', 'h1']], label);
+      assert.deepEqual(seen.calls, approved ? [['staleApprovals', '99', 'main'], ['readReview', '99', '501']] : [['staleApprovals', '99', 'main']], label);
+      assert.deepEqual((await withdrawRows(h.db)).map((j) => [j.status, j.outcome]), approved ? [['done', 'kept']] : [], label);
+      // The start says where the key came from, never the key. With the key in the file the service sent no statement to the table.
+      assert.deepEqual(h.logged.filter((e) => e.event === 'audit_key'), [{ event: 'audit_key', from }], label);
+      assert.equal(JSON.stringify(h.logged).includes(ENV.V), false, label);
+      assert.equal(h.queries.slice(before).some((q) => q.includes('generated_secrets')), from === 'database', label);
+      assert.deepEqual(await generatedSecrets(h.db), from === 'config.yml' ? [] : [['audit_key', ENV.V, at(-60)]], label);
+    }
   }
+});
+
+test('with no audit key in the file the first start generates one of 64 hexadecimal characters and keeps it, and a later start keeps the same', async () => {
+  const h = await harness();
+  const first = await h.start();
+  await first.settled;
+  const stored = await generatedSecrets(h.db);
+  assert.equal(stored.length, 1);
+  const [name, value, made] = stored[0]!;
+  assert.deepEqual([name, made], ['audit_key', at(0)]);
+  assert.match(value!, /^[0-9a-f]{64}$/);
+  assert.deepEqual(h.logged.filter((e) => e.event === 'audit_key'), [{ event: 'audit_key', from: 'database' }]);
+  await first.stop();
+  h.now = at(60);
+  await (await h.start()).settled;
+  assert.deepEqual(await generatedSecrets(h.db), stored);
+  assert.deepEqual(h.logged.filter((e) => e.event === 'audit_key'), [{ event: 'audit_key', from: 'database' }, { event: 'audit_key', from: 'database' }]);
+  // No line holds the key, nor a part of it.
+  assert.equal(JSON.stringify(h.logged).includes(value!.slice(0, 16)), false);
+
+  // Another database: another key.
+  const other = await harness();
+  await (await other.start()).settled;
+  const second = await generatedSecrets(other.db);
+  assert.match(second[0]![1]!, /^[0-9a-f]{64}$/);
+  assert.notEqual(second[0]![1], value);
+});
+
+test('when the audit key cannot be kept the start rejects as when a migration does: nothing listens, and the database is closed', async () => {
+  const h = await harness({ failQuery: 'visto_ai.generated_secrets' });
+  await assert.rejects(h.start(), { message: 'db_down' });
+  assert.equal(h.events.includes('listen'), false);
+  assert.deepEqual(h.events.slice(-2).sort(), ['close', 'release']);
+  assert.equal(h.logged.some((e) => e.event === 'audit_key'), false);
+  // With the key in the file the table is not read, so the same statement failing changes nothing.
+  const keyed = await harness({ failQuery: 'visto_ai.generated_secrets', repositoriesYaml: 'auditKey: { env: V }\n' });
+  await (await keyed.start()).settled;
+  assert.deepEqual(keyed.logged.filter((e) => e.event === 'audit_key'), [{ event: 'audit_key', from: 'config.yml' }]);
 });
 
 test('at start a standing approval whose withdrawal failed is asked for again on an open pull request, and nothing is logged when none is', async () => {
@@ -2130,7 +2185,7 @@ test('at start a standing approval whose withdrawal failed is asked for again on
   let atListen: unknown[] = [];
   h.onListen = async () => { atListen = h.logged.map((e) => e.event); };
   await (await h.start()).settled;
-  assert.deepEqual(atListen, ['recovery', 'gate_sweep', 'withdraw_sweep']);
+  assert.deepEqual(atListen, ['audit_key', 'recovery', 'gate_sweep', 'withdraw_sweep']);
   assert.deepEqual(h.logged.filter((e) => e.event === 'withdraw_sweep'), [{ event: 'withdraw_sweep', asked: 1 }]);
   await h.until(async () => (await approvalRows(h.db))[0]!.dismissed_by !== null);
   assert.deepEqual((await approvalRows(h.db)).map((r) => [r.dismissed_by, r.dismiss_failure]), [['app', null], [null, 'github_403']]);

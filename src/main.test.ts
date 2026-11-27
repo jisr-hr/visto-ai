@@ -311,14 +311,14 @@ test('each step after the lock that fails releases the lock and closes the datab
 
 test('a start refused for its config writes each issue as a config line, then start_failed, and ends 1', async () => {
   const refused = new ConfigError([
-    'auditKey: must be written when a repository turns automatic approval on',
-    'Saved in the UI: repositories.defaults.score.autoApprove; with them config.yml does not pass.',
+    'repositories.defaults.gate.branches: must name at least one branch when the gate is enabled',
+    'Saved in the UI: repositories.defaults.gate.enabled; with them config.yml does not pass.',
   ]);
   const lines: string[] = [];
   startFailed(refused, (line) => { lines.push(line); });
   assert.deepEqual(lines, [
-    'config: auditKey: must be written when a repository turns automatic approval on',
-    'config: Saved in the UI: repositories.defaults.score.autoApprove; with them config.yml does not pass.',
+    'config: repositories.defaults.gate.branches: must name at least one branch when the gate is enabled',
+    'config: Saved in the UI: repositories.defaults.gate.enabled; with them config.yml does not pass.',
     'start_failed',
   ]);
   lines.length = 0;
