@@ -3,7 +3,7 @@ title: A second scorer
 description: By default the review model also scores the changed blocks.
 ---
 
-By default the review model also scores the changed blocks. You can name a separate decision model to score them instead. It is off unless you write the `scorer` block. The scorer answers for blocks only: a file moved to another directory with no content change keeps the review model's score. Its scores have their own history: naming a scorer, or dropping it, scores every open pull request's blocks afresh once (see [Scores kept across reviews](scores-across-reviews.md)). [config.example.yml](../../config.example.yml) shows the keys, with a placeholder model name.
+By default the review model also scores the changed blocks. You can name a separate decision model to score them instead. It is off unless you write the `scorer` block. Once the service has started, an admin can switch it off, change its model and time limit, and, while it is on, its endpoint in the UI's Settings, under Model; whether it is on and its endpoint are read at the next start, its model and time limit at the next review. Switching it on from Settings needs the file to write `scorer.apiKey`, since a key is never set there (see [Configuration](configuration.md)). The scorer answers for blocks only: a file moved to another directory with no content change keeps the review model's score. Its scores have their own history: naming a scorer, or dropping it, scores every open pull request's blocks afresh once (see [Scores kept across reviews](scores-across-reviews.md)). [config.example.yml](../../config.example.yml) shows the keys, with a placeholder model name.
 
 The adapter speaks the decisions endpoint of OpenRouter and was built against the Jev decision model.
 

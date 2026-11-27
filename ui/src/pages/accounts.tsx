@@ -1,4 +1,4 @@
-// Settings, which opens on Accounts (the password design 4.2, 4.3 and 4.7; calls 9, 12 and 25): the table of the accounts, New
+// The Accounts section of Settings (the password design 4.2, 4.3 and 4.7; calls 9, 12 and 25): the table of the accounts, New
 // account, and per row its role changed, its password reset and its removal, asked in the row first. A one-time password is
 // shown once, kept in this page's state only, until Done or the page is left: it is never written to storage, the address or
 // the console. After each change (or a not_found, or a make that may have made its account all the same) the list is read again;
@@ -7,7 +7,6 @@ import { useEffect, useRef, useState } from 'react';
 import type { FormEvent, ReactNode } from 'react';
 import { RequestFailed } from '../api.ts';
 import type { Account, Accounts, OneTime, Role } from '../api-types.ts';
-import { PageHeader } from '../components/layout.tsx';
 import { Badge } from '../components/ui/badge.tsx';
 import { Button } from '../components/ui/button.tsx';
 import { Input } from '../components/ui/input.tsx';
@@ -26,7 +25,6 @@ const CARD_TITLE = 'm-0 text-base font-semibold';
 const LINE = 'text-[13px] text-muted';
 const COLUMNS = ['Name', 'Signs in with', 'Role', 'Last sign-in', 'Made', 'Actions'] as const;
 
-const SUB = 'Who may open the service, and what they may do. The other settings come in a later plan.';
 const HELP = '1 to 39 characters: lower-case letters, digits, dots, underscores and hyphens, starting with a letter or a digit.';
 const BAD_NAME = 'A name is 1 to 39 characters: lower-case letters, digits, dots, underscores and hyphens, starting with a letter or a digit.';
 // What each refusal of a change says, by its code.
@@ -183,8 +181,8 @@ function AccountLine({ account, now, asking, sending, change }: { account: Accou
   );
 }
 
-/** The page, for a signed-in admin (the app shows anyone else the not-found page here). */
-export function AccountsPage() {
+/** The section, on the Settings page of a signed-in admin (the app shows anyone else the not-found page there). */
+export function AccountsSection() {
   const { api, me } = useApp();
   // The latest read of the list; a failed one drops what was shown.
   const [read, setRead] = useState<{ data: Accounts | null; failed: boolean }>({ data: null, failed: false });
@@ -305,136 +303,133 @@ export function AccountsPage() {
 
   const data = read.data;
   return (
-    <>
-      <PageHeader title="Settings" sub={SUB} />
-      <section data-slot="card" aria-labelledby="accounts-title" className={CARD}>
-        <div className={CARD_HEADER}>
-          <div className="flex items-center gap-2.5">
-            <h2 id="accounts-title" className={CARD_TITLE}>
-              Accounts
-            </h2>
-            {data === null ? null : <Badge tone="muted">{plural(data.accounts.length, 'account', 'accounts')}</Badge>}
-          </div>
-          {making ? null : (
-            <Button ref={newAccount} type="button" variant="primary" onClick={() => setMaking(true)}>
-              New account
-            </Button>
-          )}
+    <section id="accounts" data-slot="card" aria-labelledby="accounts-title" className={CARD}>
+      <div className={CARD_HEADER}>
+        <div className="flex items-center gap-2.5">
+          <h2 id="accounts-title" className={CARD_TITLE}>
+            Accounts
+          </h2>
+          {data === null ? null : <Badge tone="muted">{plural(data.accounts.length, 'account', 'accounts')}</Badge>}
         </div>
-        {making ? (
-          <form aria-label="New account" className="flex flex-wrap items-end gap-3 border-t border-border px-5 py-4" onSubmit={make}>
-            <Field id="account-name" label="Name">
-              {/* Opened by New account, which is gone with it: focus comes here. */}
-              <Input
-                id="account-name"
-                autoComplete="off"
-                autoCapitalize="none"
-                autoFocus
-                aria-describedby="account-name-help"
-                value={name}
-                onChange={(event) => setName(event.target.value)}
-              />
-            </Field>
-            <Field id="account-role" label="Role">
-              <Select id="account-role" value={role} onChange={(event) => setRole(event.target.value === 'admin' ? 'admin' : 'viewer')}>
-                <option value="viewer">Viewer</option>
-                <option value="admin">Admin</option>
-              </Select>
-            </Field>
-            <Button type="submit" variant="primary" disabled={sending !== null}>
-              {sending === 'make' ? 'Making' : 'Make the account'}
+        {making ? null : (
+          <Button ref={newAccount} type="button" variant="primary" onClick={() => setMaking(true)}>
+            New account
+          </Button>
+        )}
+      </div>
+      {making ? (
+        <form aria-label="New account" className="flex flex-wrap items-end gap-3 border-t border-border px-5 py-4" onSubmit={make}>
+          <Field id="account-name" label="Name">
+            {/* Opened by New account, which is gone with it: focus comes here. */}
+            <Input
+              id="account-name"
+              autoComplete="off"
+              autoCapitalize="none"
+              autoFocus
+              aria-describedby="account-name-help"
+              value={name}
+              onChange={(event) => setName(event.target.value)}
+            />
+          </Field>
+          <Field id="account-role" label="Role">
+            <Select id="account-role" value={role} onChange={(event) => setRole(event.target.value === 'admin' ? 'admin' : 'viewer')}>
+              <option value="viewer">Viewer</option>
+              <option value="admin">Admin</option>
+            </Select>
+          </Field>
+          <Button type="submit" variant="primary" disabled={sending !== null}>
+            {sending === 'make' ? 'Making' : 'Make the account'}
+          </Button>
+          <Button
+            type="button"
+            onClick={() => {
+              closeForm();
+              setAlert(null);
+              focusNext.current = () => newAccount.current;
+            }}
+          >
+            Cancel
+          </Button>
+          <p id="account-name-help" className="w-full text-[13px] text-muted">
+            {HELP}
+          </p>
+        </form>
+      ) : null}
+      {shown === null ? null : (
+        <div role="status" className="flex flex-col gap-2 border-t border-border bg-subtle px-5 py-4">
+          <strong className="text-sm">{`One-time password for ${shown.name}`}</strong>
+          <code className="font-mono text-[15px]">{shown.password}</code>
+          <p className="text-[13px] text-muted">
+            {`Shown once. ${shown.name} signs in with it once, then chooses a password. It expires ${utc(shown.expiresAt)}.`}
+          </p>
+          <div className="flex flex-wrap gap-2">
+            <Button type="button" id={COPY_ID} onClick={() => void copy(shown.password)}>
+              {shown.copy === 'copied' ? 'Copied' : 'Copy'}
             </Button>
+            <Button type="button" onClick={() => done(shown.from)}>
+              Done
+            </Button>
+          </div>
+          {shown.copy === 'refused' ? <p className="text-[13px] text-bad">{REFUSED_COPY}</p> : null}
+        </div>
+      )}
+      {alert === null ? null : (
+        <p role="alert" className="border-t border-border px-5 py-3 text-sm text-bad">
+          {alert}
+        </p>
+      )}
+      {data === null ? (
+        read.failed ? (
+          <div className="flex flex-wrap items-center gap-3 px-5 py-3">
+            <p className="text-sm text-muted">The accounts could not be read.</p>
             <Button
               type="button"
               onClick={() => {
-                closeForm();
-                setAlert(null);
-                focusNext.current = () => newAccount.current;
+                setRead({ data: null, failed: false });
+                readAgain();
               }}
             >
-              Cancel
+              Try again
             </Button>
-            <p id="account-name-help" className="w-full text-[13px] text-muted">
-              {HELP}
-            </p>
-          </form>
-        ) : null}
-        {shown === null ? null : (
-          <div role="status" className="flex flex-col gap-2 border-t border-border bg-subtle px-5 py-4">
-            <strong className="text-sm">{`One-time password for ${shown.name}`}</strong>
-            <code className="font-mono text-[15px]">{shown.password}</code>
-            <p className="text-[13px] text-muted">
-              {`Shown once. ${shown.name} signs in with it once, then chooses a password. It expires ${utc(shown.expiresAt)}.`}
-            </p>
-            <div className="flex flex-wrap gap-2">
-              <Button type="button" id={COPY_ID} onClick={() => void copy(shown.password)}>
-                {shown.copy === 'copied' ? 'Copied' : 'Copy'}
-              </Button>
-              <Button type="button" onClick={() => done(shown.from)}>
-                Done
-              </Button>
-            </div>
-            {shown.copy === 'refused' ? <p className="text-[13px] text-bad">{REFUSED_COPY}</p> : null}
           </div>
-        )}
-        {alert === null ? null : (
-          <p role="alert" className="border-t border-border px-5 py-3 text-sm text-bad">
-            {alert}
-          </p>
-        )}
-        {data === null ? (
-          read.failed ? (
-            <div className="flex flex-wrap items-center gap-3 px-5 py-3">
-              <p className="text-sm text-muted">The accounts could not be read.</p>
-              <Button
-                type="button"
-                onClick={() => {
-                  setRead({ data: null, failed: false });
-                  readAgain();
-                }}
-              >
-                Try again
-              </Button>
-            </div>
-          ) : (
-            <p className="px-5 py-3 text-sm text-muted">Reading the accounts.</p>
-          )
         ) : (
-          <div className="overflow-x-auto">
-            <Table>
-              <TableHeader>
+          <p className="px-5 py-3 text-sm text-muted">Reading the accounts.</p>
+        )
+      ) : (
+        <div className="overflow-x-auto">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                {COLUMNS.map((column) => (
+                  <TableHead key={column} scope="col">
+                    {column}
+                  </TableHead>
+                ))}
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {data.accounts.length === 0 ? (
                 <TableRow>
-                  {COLUMNS.map((column) => (
-                    <TableHead key={column} scope="col">
-                      {column}
-                    </TableHead>
-                  ))}
+                  <TableCell colSpan={COLUMNS.length} className="text-muted">
+                    No account yet.
+                  </TableCell>
                 </TableRow>
-              </TableHeader>
-              <TableBody>
-                {data.accounts.length === 0 ? (
-                  <TableRow>
-                    <TableCell colSpan={COLUMNS.length} className="text-muted">
-                      No account yet.
-                    </TableCell>
-                  </TableRow>
-                ) : (
-                  data.accounts.map((account) => (
-                    <AccountLine
-                      key={account.id}
-                      account={account}
-                      now={data.now}
-                      asking={asking === account.id}
-                      sending={sending !== null}
-                      change={changesOf(account)}
-                    />
-                  ))
-                )}
-              </TableBody>
-            </Table>
-          </div>
-        )}
-      </section>
-    </>
+              ) : (
+                data.accounts.map((account) => (
+                  <AccountLine
+                    key={account.id}
+                    account={account}
+                    now={data.now}
+                    asking={asking === account.id}
+                    sending={sending !== null}
+                    change={changesOf(account)}
+                  />
+                ))
+              )}
+            </TableBody>
+          </Table>
+        </div>
+      )}
+    </section>
   );
 }

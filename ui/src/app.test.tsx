@@ -3,7 +3,7 @@ import { userEvent } from '@testing-library/user-event';
 import { afterEach, expect, test, vi } from 'vitest';
 import { createApi, RequestFailed, usePoll } from './api.ts';
 import type { Api } from './api.ts';
-import type { Account, Accounts, Activity, Me, OneTime, Reviews, SignInStep } from './api-types.ts';
+import type { Account, Accounts, Activity, Me, OneTime, Reviews, SettingsSave, SignInStep } from './api-types.ts';
 import { App } from './app.tsx';
 
 // The page of a screen still to come, as it is, which also keeps the API the app gave the pages: no page calls every method
@@ -20,6 +20,7 @@ vi.mock('./pages/later.tsx', async (importOriginal) => {
 });
 
 const NOW = '2026-03-01T10:00:00.000Z';
+const SAVE: SettingsSave = { version: 14, changes: [{ scope: 'global', path: 'learning', value: true }] };
 const ME: Me = { name: 'octo-lead', kind: 'github', role: 'admin', csrf: 'csrf-token-for-tests', mode: 'live', repositories: ['acme/billing', 'acme/infra', 'acme/shop', 'acme/web'] };
 const ACTIVITY: Activity = { now: NOW, places: { reviews: 2, withdrawals: 2 }, paused: null, jobs: [], withdrawals: [] };
 const REVIEWS: Reviews = { now: NOW, windowDays: 30, total: 0, reviews: [], next: null };
@@ -87,6 +88,22 @@ function fakeApi(over: Partial<Api> = {}) {
     pullReviews: (repository, number) => {
       calls.push(['pullReviews', repository, number]);
       return over.pullReviews ? over.pullReviews(repository, number) : Promise.resolve({ now: NOW, total: 0, reviews: [] });
+    },
+    settings: () => {
+      calls.push(['settings']);
+      return over.settings ? over.settings() : Promise.reject(new RequestFailed(500, 'not_expected'));
+    },
+    saveSettings: (csrf, save) => {
+      calls.push(['saveSettings', csrf, save]);
+      return over.saveSettings ? over.saveSettings(csrf, save) : Promise.reject(new RequestFailed(500, 'not_expected'));
+    },
+    settingChanges: (before) => {
+      calls.push(['settingChanges', before]);
+      return over.settingChanges ? over.settingChanges(before) : Promise.reject(new RequestFailed(500, 'not_expected'));
+    },
+    settingsExport: () => {
+      calls.push(['settingsExport']);
+      return over.settingsExport ? over.settingsExport() : Promise.reject(new RequestFailed(500, 'not_expected'));
     },
   };
   return { api, calls };
@@ -248,6 +265,10 @@ test('a 401 from any method of the API the pages are given shows the sign-in pag
     ['removeAccount', (api) => api.removeAccount(ME.csrf, 3), ['removeAccount', ME.csrf, 3]],
     ['review', (api) => api.review(9001), ['review', 9001]],
     ['pullReviews', (api) => api.pullReviews('acme/shop', 128), ['pullReviews', 'acme/shop', 128]],
+    ['settings', (api) => api.settings(), ['settings']],
+    ['saveSettings', (api) => api.saveSettings(ME.csrf, SAVE), ['saveSettings', ME.csrf, SAVE]],
+    ['settingChanges', (api) => api.settingChanges(8977), ['settingChanges', 8977]],
+    ['settingsExport', (api) => api.settingsExport(), ['settingsExport']],
   ];
   // Every method there is.
   expect(each.map(([name]) => name).sort()).toEqual(Object.keys(createApi()).sort());

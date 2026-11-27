@@ -87,3 +87,32 @@ export interface OneReview {
 }
 export interface PullReview { run: number; ordinal: number; at: string }
 export interface PullReviews { now: string; total: number; reviews: PullReview[] }
+
+// -- the settings (the plan "The UI's Settings"; UI design 3.2, 4 and 5; calls 12, 15 to 18, 22 to 24 and 27) --------------
+export type SettingValue = null | boolean | number | string | SettingValue[] | { [key: string]: SettingValue };
+export interface SettingSource { by: 'config.yml' | 'ui'; name: string | null; at: string }
+/** One setting: its value (the saved one when written, else the default's), where the saved one came from, and what a save of it waits for. */
+export interface Setting { written: boolean; value: SettingValue; source: SettingSource | null; restart: boolean; waits: boolean }
+export interface RepositorySettings { name: string; settings: Record<string, Setting> }
+export type SecretKind = 'model_key' | 'scorer_key' | 'app_private_key' | 'webhook_secret' | 'app_client_secret' | 'database' | 'audit_key' | 'alert_webhook' | 'extension' | 'mcp_header';
+/** A secret as the screen shows it: what it is for and the variable that holds it, never its value; `variable` null: not set. */
+export interface SecretState { kind: SecretKind; of: string | null; variable: string | null }
+export interface SettingsView {
+  now: string; version: number;
+  global: Record<string, Setting>; defaults: Record<string, Setting>; repositories: RepositorySettings[];
+  scorer: { on: boolean; waits: boolean };
+  /** Where the keys are sent: set in config.yml only (no admin can change it here); `scorer` is read from the file (its default when the block writes none), so it shows while the scorer is off; null only when the file has no scorer block. */
+  endpoints: { model: string; scorer: string | null };
+  secrets: SecretState[];
+  access: { publicUrl: string; github: boolean; accounts: string[]; team: string | null };
+}
+export interface SettingsSave { version: number; changes: Array<{ scope: string; path: string; value?: SettingValue }> }
+export interface SettingIssue { scope: string | null; path: string | null; message: string }
+export interface SettingsInvalid { error: 'invalid'; issues: SettingIssue[] }
+export interface SettingChangeRow {
+  id: number; at: string; by: 'config.yml' | 'ui'; name: string | null; scope: string; path: string;
+  /** The value's JSON text, cut at 200 characters; null: not written. */
+  before: string | null; after: string | null;
+}
+export interface SettingChanges { changes: SettingChangeRow[]; next: number | null }
+export interface SettingsExport { text: string }

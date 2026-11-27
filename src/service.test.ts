@@ -11,14 +11,18 @@ import { NO_COUNTS, recordEvaluation } from './db/gate.ts';
 import { markPublished, recordRun } from './db/review-runs.ts';
 import type { RunRecord } from './db/review-runs.ts';
 import { markDismissFailed } from './db/approvals.ts';
+import { settingsVersion } from './db/settings.ts';
 import { dismissMessage } from './approval/text.ts';
 import { beat, readHeartbeat } from './db/heartbeat.ts';
-import { serviceConfig, parseConfig } from './config/load.ts';
+import { parseConfig, parseDocument, readYaml, repoSettingsFor, serviceConfig } from './config/load.ts';
+import type { ServiceConfig } from './config/load.ts';
 import type { AppIdentity, FeatureOff, ForgeApprovals, ForgeChecks, ForgeEvent, ForgeWriter, HookDelivery, LivePullRequest, OwnCheck, PostedComment, PullRequestAction, PullRequestFacts, ReviewThread, Source } from './forge/types.ts';
 import type { BlockScore, ModelRequest, ModelResponse, ReviewDeps, ReviewInput, ReviewResult } from './engine/types.ts';
 import { approvalsFor, BEAT_MS, CLOSE_WAIT_MS, DRAIN_WAIT_MS, gateForge, startService, STOP_WAIT_MS, TICK_MS, UPKEEP_MS, WITHDRAW_CONCURRENCY } from './service.ts';
 import type { Listening, ServiceDeps } from './service.ts';
 import type { RequestLike, ResponseLike } from './shell/http.ts';
+import { startSettings } from './shell/settings.ts';
+import type { AskedChange, Settings } from './shell/settings.ts';
 import { checkText } from './gate/check.ts';
 import type { LoadedExtension } from './extensions/types.ts';
 import { createFeedback } from './shell/feedback.ts';
@@ -135,6 +139,8 @@ async function harness(options: Options = {}) {
   const inputs: ReviewInput[] = [];
   /** The dependencies each review was given, in the order of `inputs`. */
   const reviewDeps: ReviewDeps[] = [];
+  /** The settings each review's engine was asked for with, in order. */
+  const engineSettings: unknown[] = [];
   const fetched: string[] = [];
   const listedSince: string[] = [];
   const logged: Array<Record<string, unknown>> = [];
@@ -195,7 +201,7 @@ async function harness(options: Options = {}) {
   const lock: InstanceLock = { release: async () => { events.push('release'); } };
 
   const h = {
-    db, queries, allQueries, reviewDeps, modelRequests, events, order, lacksCalls, gateCalls, approvalCalls, uiTeamCalls, checked, held, timers, inputs, fetched, listedSince, logged, writes,
+    db, queries, allQueries, reviewDeps, engineSettings, modelRequests, events, order, lacksCalls, gateCalls, approvalCalls, uiTeamCalls, checked, held, timers, inputs, fetched, listedSince, logged, writes,
     port: 0,
     /** What the clock reads; a test may move it. */
     now: options.now ?? at(0),
@@ -217,22 +223,26 @@ async function harness(options: Options = {}) {
     releaseReview: () => { releaseReview(); },
     reviewed: () => reviewed,
     published: () => published,
-    start: async () => {
-      const yaml = options.repositoriesYaml ?? (options.gate === true ? GATE_YAML : undefined);
-      // A second `limits:` would be a duplicate key too: the concurrency goes into the one there is.
-      const baseYaml = options.queueConcurrency === undefined
-        ? BASE_YAML
-        : BASE_YAML.replace('limits:\n  spendPerDay: 50\n', `limits:\n  spendPerDay: 50\n  queueConcurrency: ${options.queueConcurrency}\n`);
-      // A second `app:` would be a duplicate key: the client id and secret go into the one there is.
-      const base = options.uiYaml !== undefined
-        ? serviceConfig(parseConfig(
-          baseYaml.replace('  webhookSecret: { env: S }\n', '  webhookSecret: { env: S }\n  clientId: Iv1.0123456789abcdef\n  clientSecret: { env: C }\n') + (yaml ?? '') + options.uiYaml,
-          { ...ENV, C: 'client-secret-for-tests-only' }))
-        : yaml === undefined && options.queueConcurrency === undefined ? config : serviceConfig(parseConfig(baseYaml + (yaml ?? ''), ENV));
-      const dry = options.dryRun ?? options.gate !== true;
-      const chosen = options.toolChoice === undefined ? base : { ...base, model: { ...base.model, toolChoice: options.toolChoice } };
-      const learned = options.learning === true ? { ...chosen, learning: true } : chosen;
-      const service = await startService(dry ? learned : { ...learned, dryRun: false }, {
+    /** With `settings`, the service starts on `settings.atStart` and is given them; no option that builds the config is read. */
+    start: async (settings?: Settings) => {
+      const configOf = (): ServiceConfig => {
+        const yaml = options.repositoriesYaml ?? (options.gate === true ? GATE_YAML : undefined);
+        // A second `limits:` would be a duplicate key too: the concurrency goes into the one there is.
+        const baseYaml = options.queueConcurrency === undefined
+          ? BASE_YAML
+          : BASE_YAML.replace('limits:\n  spendPerDay: 50\n', `limits:\n  spendPerDay: 50\n  queueConcurrency: ${options.queueConcurrency}\n`);
+        // A second `app:` would be a duplicate key: the client id and secret go into the one there is.
+        const base = options.uiYaml !== undefined
+          ? serviceConfig(parseConfig(
+            baseYaml.replace('  webhookSecret: { env: S }\n', '  webhookSecret: { env: S }\n  clientId: Iv1.0123456789abcdef\n  clientSecret: { env: C }\n') + (yaml ?? '') + options.uiYaml,
+            { ...ENV, C: 'client-secret-for-tests-only' }))
+          : yaml === undefined && options.queueConcurrency === undefined ? config : serviceConfig(parseConfig(baseYaml + (yaml ?? ''), ENV));
+        const dry = options.dryRun ?? options.gate !== true;
+        const chosen = options.toolChoice === undefined ? base : { ...base, model: { ...base.model, toolChoice: options.toolChoice } };
+        const learned = options.learning === true ? { ...chosen, learning: true } : chosen;
+        return dry ? learned : { ...learned, dryRun: false };
+      };
+      const service = await startService(settings === undefined ? configOf() : settings.atStart, {
       db, appInfo,
       reader: { read: () => ({ ok: true as const, delivery: delivered, name: current.kind, action: current.kind === 'pull_request' ? current.action : null, event: current }) },
       clock: () => new Date(h.now),
@@ -342,7 +352,7 @@ async function harness(options: Options = {}) {
         timers.push(timer);
         return () => { timer.cancelled = true; };
       },
-      engineDeps: (source) => ({ source }) as ReviewDeps,
+      engineDeps: (source, given) => { engineSettings.push(given); return ({ source }) as ReviewDeps; },
       model: {
         complete: async (request) => {
           modelRequests.push(request);
@@ -365,6 +375,7 @@ async function harness(options: Options = {}) {
       pullRequestUrl: (ref) => `https://git.example.test/${ref.owner}/${ref.repo}/pull/${ref.number}`,
       ...(options.approvals === undefined ? {} : { approvals: options.approvals }),
       ...(options.ui === undefined ? {} : { ui: options.ui }),
+      ...(settings === undefined ? {} : { settings }),
       });
       started.push(service);
       return service;
@@ -415,6 +426,22 @@ async function harness(options: Options = {}) {
 
 /** The log entries of a stop, without those every start writes. */
 const ofStop = (logged: Array<Record<string, unknown>>) => logged.filter((e) => e.event !== 'recovery' && e.event !== 'model_check' && e.event !== 'app_check');
+
+type Harness = Awaited<ReturnType<typeof harness>>;
+/** `h`'s database migrated, and the settings of a start on BASE_YAML (or `yaml`), checked with ENV (or `env`); the UI on when that YAML writes `ui`. */
+async function settingsOf(h: Harness, yaml: string = BASE_YAML, env: Record<string, string | undefined> = ENV): Promise<Settings> {
+  await migrate(h.db, loadMigrations(MIGRATIONS_DIR));
+  const file = readYaml(yaml);
+  return startSettings({
+    db: h.db, file, check: (document) => serviceConfig(parseDocument(document, env)), clock: () => new Date(h.now), log: (e) => { h.logged.push(e); },
+    uiOn: typeof file === 'object' && file !== null && (file as { ui?: unknown }).ui !== undefined,
+  });
+}
+/** Saves `changes` on the newest version, as an admin; the outcome must be saved. */
+async function saveNow(h: Harness, settings: Settings, changes: AskedChange[]): Promise<void> {
+  const outcome = await settings.save(await settingsVersion(h.db), changes, 'octo-admin');
+  assert.equal(outcome.kind, 'saved');
+}
 
 test('start takes the lock, then migrates and recovers, then listens', async () => {
   const h = await harness();
@@ -2534,4 +2561,146 @@ test('the service hashes at the cost it is given: an account made through the AP
   const rows = await h.db.query<{ name: string; password_hash: string }>(
     "select name, password_hash from visto_ai.ui_accounts where name in ('octo-new', 'octo-viewer') order by name");
   assert.deepEqual(rows.map((r) => [r.name, r.password_hash.slice(0, 'scrypt$4$1$1$'.length)]), [['octo-new', 'scrypt$4$1$1$'], ['octo-viewer', 'scrypt$4$1$1$']]);
+});
+
+test('a review reads the settings in force when it starts, and keeps them to its end', async () => {
+  const h = await harness({ holdReview: true });
+  const settings = await settingsOf(h);
+  const service = await h.start(settings);
+  await service.settled;
+  await h.webhook(pr('opened'), 'd1');
+  await h.reviewed();
+  assert.equal(h.inputs[0]!.repoConfig.scoreThreshold, 70);
+  // Saved while the review is under way.
+  await saveNow(h, settings, [{ scope: 'defaults', path: 'score.threshold', value: 55 }, { scope: 'global', path: 'limits.inputTokensPerCall', value: 50000 }]);
+  h.releaseReview();
+  await h.until(async () => (await unfinishedJobs(h.db)).length === 0);
+  assert.equal(h.engineSettings[0], settings.atStart);
+  assert.equal((h.engineSettings[0] as ServiceConfig).repositories.defaults.scoreThreshold, 70);
+  assert.equal(h.inputs[0]!.limits.inputTokensPerCall, 200000);
+  // The next review starts on what was saved.
+  h.live = { ...LIVE, info: { ...LIVE.info, ref: { ...REF, number: 8 } } };
+  await h.webhook(pr('opened', { ref: { ...REF, number: 8 } }), 'd2');
+  await h.until(() => h.inputs.length === 2);
+  assert.deepEqual([h.inputs[1]!.repoConfig.scoreThreshold, h.inputs[1]!.limits.inputTokensPerCall], [55, 50000]);
+  assert.equal(h.engineSettings[1], settings.inForce());
+  assert.equal((h.engineSettings[1] as ServiceConfig).repositories.defaults.scoreThreshold, 55);
+});
+
+/** A result whose one block of a.ts, line 3, is scored 85 under a threshold of 70: with inline notes on, it is given a note. */
+const flagged = (): ReviewResult => ({
+  ...okResult(),
+  scores: [{
+    path: 'a.ts', previousPath: null, diffHash: 'd', changeSummary: '', changedLines: 1, wholeFile: null, fileLevel: null, finalScore: 85, covered: true,
+    blocks: [{
+      id: 'B1', hunk: 'B1', hunkHash: 'hA', hash: 'hA', changedLines: 1, span: { side: 'RIGHT', first: 3, last: 3 },
+      lines: { old: [], new: [] } as unknown as BlockScore['lines'], entry: { score: 85, category: 'calculation', reason: 'Totals.' },
+    }],
+  }],
+  verdict: { threshold: 70, needsHuman: true, highest: 85 },
+});
+test('a review the model is answering when a save comes publishes what the settings at its start said', async () => {
+  const h = await harness({ holdReview: true, github: true, result: flagged() });
+  const yaml = `${BASE_YAML.replace('dryRun: true\n', 'dryRun: false\n')}repositories:\n  defaults:\n    score: { inlineNotes: true }\n`;
+  const settings = await settingsOf(h, yaml);
+  assert.equal(settings.atStart.dryRun, false);
+  const service = await h.start(settings);
+  await service.settled;
+  await h.webhook(pr('opened'), 'd1');
+  await h.reviewed();
+  // The model has not answered: the notes, read after its answer, are switched off now.
+  await saveNow(h, settings, [{ scope: 'defaults', path: 'score.inlineNotes', value: false }]);
+  assert.equal(repoSettingsFor(settings.inForce(), 'acme/shop').inlineNotes, false);
+  h.releaseReview();
+  await h.published();
+  await h.until(() => h.logged.some((e) => e.event === 'review'));
+  // Posted with the finding's comment and the block's note, as at the review's start.
+  const bodies = h.threads!.map((t) => t.comments[0]!.body);
+  assert.deepEqual([bodies.length, bodies.filter((b) => b.startsWith('**Human review:**')).length], [2, 1]);
+});
+
+test('an event reads the repository settings saved before it', async () => {
+  const h = await harness();
+  const settings = await settingsOf(h);
+  const service = await h.start(settings);
+  await service.settled;
+  await saveNow(h, settings, [{ scope: 'defaults', path: 'ignoredAuthors', value: ['octo-dev'] }]);
+  await h.webhook(pr('opened'), 'd1');
+  await h.runTimer(TICK_MS);
+  assert.deepEqual([h.inputs.length, (await unfinishedJobs(h.db)).length], [0, 0]);
+});
+
+test('a start-time setting saved waits for the next start: the review stays dry and the concurrency and the model\'s time limit stay', async () => {
+  const h = await harness();
+  const settings = await settingsOf(h);
+  const service = await h.start(settings);
+  await service.settled;
+  await saveNow(h, settings, [
+    { scope: 'global', path: 'dryRun', value: false }, { scope: 'global', path: 'model.timeoutSeconds', value: 100 },
+    { scope: 'global', path: 'limits.queueConcurrency', value: 5 },
+  ]);
+  await h.webhook(pr('opened'), 'd1');
+  await h.reviewed();
+  await h.until(async () => (await unfinishedJobs(h.db)).length === 0);
+  assert.deepEqual(h.writes.filter((w) => w[0] === 'publishReview'), []);
+  assert.equal(h.inputs[0]!.limits.modelTimeoutSeconds, 240);
+  const given = h.engineSettings[0] as ServiceConfig;
+  assert.deepEqual([given.dryRun, given.limits.queueConcurrency, given.model.timeoutSeconds], [true, 2, 240]);
+  // What the next start runs on.
+  assert.deepEqual([settings.saved().config.dryRun, settings.saved().config.limits.queueConcurrency], [false, 5]);
+});
+
+test('the daily spend limit and the batches of a review saved are read at the next look and the next review', async () => {
+  const h = await harness();
+  const settings = await settingsOf(h);
+  await recordRun(h.db, run({ startedAt: at(0), usage: { ...run().usage, cost: 30 } }));
+  const service = await h.start(settings);
+  await service.settled;
+  await saveNow(h, settings, [{ scope: 'global', path: 'limits.batchesPerReview', value: 3 }]);
+  await h.webhook(pr('opened'), 'd1');
+  await h.reviewed();
+  await h.until(async () => (await unfinishedJobs(h.db)).length === 0);
+  assert.equal(h.inputs[0]!.limits.batchesPerReview, 3);
+  // Under the limit of the file (50); over the one saved (25): the next review does not start.
+  await saveNow(h, settings, [{ scope: 'global', path: 'limits.spendPerDay', value: 25 }]);
+  h.live = { ...LIVE, info: { ...LIVE.info, ref: { ...REF, number: 8 } } };
+  await h.webhook(pr('opened', { ref: { ...REF, number: 8 } }), 'd2');
+  await h.runTimer(TICK_MS);
+  await h.runTimer(TICK_MS);
+  assert.equal(h.inputs.length, 1);
+  const limited = h.logged.filter((e) => e.event === 'alert' && e.code === 'spend_limit');
+  assert.deepEqual(limited.map((e) => e.limit), [25]);
+});
+
+test('without settings the service runs on the config it was given, as before', async () => {
+  const h = await harness();
+  const service = await h.start();
+  await service.settled;
+  await h.webhook(pr('opened'), 'd1');
+  await h.reviewed();
+  assert.equal(h.engineSettings.length, 1);
+  assert.equal(h.engineSettings[0], config);
+});
+
+test('with the UI on and settings given, an admin saves a setting and the next review reads it', async () => {
+  const h = await harness({ ui: passwordOnly().ui });
+  const settings = await settingsOf(h, `${BASE_YAML}ui:\n  publicUrl: https://visto.example.test\n`);
+  await (await h.start(settings)).settled;
+  await passwordAccountOf(h.db, 'octo-admin', 'admin');
+  const signed = await h.request('POST', '/api/auth/password', Buffer.from(JSON.stringify({ name: 'octo-admin', password: PASSWORD })), FROM_THE_PAGE);
+  assert.equal(signed.status, 200);
+  const cookie = cookieOf(signed.headers['set-cookie']);
+  const { csrf } = JSON.parse((await h.request('GET', '/api/me', Buffer.from(''), { cookie })).body) as Me;
+  const read = await h.request('GET', '/api/settings', Buffer.from(''), { cookie });
+  assert.equal(read.status, 200);
+  const view = JSON.parse(read.body) as { version: number; access: unknown; defaults: Record<string, { value: unknown }> };
+  assert.equal(view.defaults['score.threshold']!.value, 70);
+  assert.deepEqual(view.access, { publicUrl: 'https://visto.example.test', github: false, accounts: [], team: null });
+  const saved = await h.request('PUT', '/api/settings', Buffer.from(JSON.stringify({ version: view.version, changes: [{ scope: 'defaults', path: 'score.threshold', value: 55 }] })),
+    { cookie, 'x-visto-csrf': csrf, 'content-type': 'application/json' });
+  assert.equal(saved.status, 200);
+  assert.equal((JSON.parse(saved.body) as typeof view).defaults['score.threshold']!.value, 55);
+  await h.webhook(pr('opened'), 'd1');
+  await h.reviewed();
+  assert.equal(h.inputs[0]!.repoConfig.scoreThreshold, 55);
 });

@@ -8,15 +8,17 @@ export function storableOrNull(text: string | null): string | null {
   return text === null ? null : storable(text);
 }
 
-/** JSON text Postgres accepts as jsonb: every string in `value`, keys included, passed through storable(). */
+/** `value` with every string in it, keys included, passed through storable(). */
+export function storableValue(value: unknown): unknown {
+  if (typeof value === 'string') return storable(value);
+  if (Array.isArray(value)) return value.map(storableValue);
+  if (typeof value === 'object' && value !== null) {
+    return Object.fromEntries(Object.entries(value).map(([k, x]) => [storable(k), storableValue(x)]));
+  }
+  return value;
+}
+
+/** JSON text Postgres accepts as jsonb: storableValue(value) as JSON. */
 export function storableJson(value: unknown): string {
-  const clean = (v: unknown): unknown => {
-    if (typeof v === 'string') return storable(v);
-    if (Array.isArray(v)) return v.map(clean);
-    if (typeof v === 'object' && v !== null) {
-      return Object.fromEntries(Object.entries(v).map(([k, x]) => [storable(k), clean(x)]));
-    }
-    return v;
-  };
-  return JSON.stringify(clean(value));
+  return JSON.stringify(storableValue(value));
 }

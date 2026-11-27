@@ -1,9 +1,10 @@
 # Deployment configuration. Copy to config.local.yml (git-ignored) and adjust.
 # An unknown key anywhere in this file is an error.
 # A secret is never written here; it is named by reference: { env: VARIABLE_NAME }.
+# Once the service has started, dryRun, learning, limits, the model's and the scorer's settings (not their keys or their baseUrl, which only this file sets) and repositories live in its database too, and an admin changes them in the UI's Settings; a setting changed here wins at the next start (docs/guide/configuration.md).
 
 model:
-  # Base URL of the chat-completions endpoint.
+  # Base URL of the chat-completions endpoint. Only this file sets it: the key is sent there.
   baseUrl: https://openrouter.ai/api/v1
   # The API key, read from this environment variable (sent as a bearer token).
   apiKey: { env: OPENROUTER_API_KEY }
@@ -72,7 +73,7 @@ learning: false
 # Naming one sends the reviewed code to that provider too, and then
 # repositories.defaults.score.threshold must be written below.
 # scorer:
-#   # Base URL of the scorer's API.
+#   # Base URL of the scorer's API. Only this file sets it: the key is sent there.
 #   baseUrl: https://openrouter.ai/api/alpha
 #   # The environment variable that holds the scorer's key.
 #   apiKey: { env: SCORER_API_KEY }
@@ -163,7 +164,7 @@ repositories:
     primaryBranches: [main, master]
     # Pull requests by these logins are not reviewed. It is [dependabot[bot]] when not written.
     ignoredAuthors: ['dependabot[bot]']
-    # Only pull requests that target one of these branches are reviewed; empty means every branch.
+    # Only pull requests that target one of these branches are reviewed; empty or * means every branch.
     baseBranches: []
     # How a new head of a pull request that already has a review is reviewed.
     #   full:        reads every file again, and costs about what a first review costs.

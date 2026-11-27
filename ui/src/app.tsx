@@ -9,12 +9,12 @@ import type { Api } from './api.ts';
 import type { Me } from './api-types.ts';
 import { Layout, REVIEW_PATH } from './components/layout.tsx';
 import { Button } from './components/ui/button.tsx';
-import { AccountsPage } from './pages/accounts.tsx';
 import { ActivityPage } from './pages/activity.tsx';
 import { Later } from './pages/later.tsx';
 import { NotFound } from './pages/not-found.tsx';
 import { PasswordPage } from './pages/password.tsx';
 import { ReviewNotFound, ReviewPage, runOfPath } from './pages/review.tsx';
+import { SettingsPage } from './pages/settings.tsx';
 import { SignIn } from './pages/sign-in.tsx';
 import { navigate, useLocation } from './router.tsx';
 
@@ -50,7 +50,7 @@ function Page({ path, me }: { path: string; me: Me }) {
     case '/ui/memory':
       return <Later title="Memory" />;
     case '/ui/settings':
-      return me.role === 'admin' ? <AccountsPage /> : <NotFound />;
+      return me.role === 'admin' ? <SettingsPage /> : <NotFound />;
     case '/ui/password':
       return me.kind === 'password' ? <PasswordPage /> : <NotFound />;
     case '/ui/signin':
@@ -128,6 +128,10 @@ export function App({ api }: { api: Api }) {
       removeAccount: (csrf, id) => watch(api.removeAccount(csrf, id)),
       review: (run) => watch(api.review(run)),
       pullReviews: (repository, number) => watch(api.pullReviews(repository, number)),
+      settings: () => watch(api.settings()),
+      saveSettings: (csrf, save) => watch(api.saveSettings(csrf, save)),
+      settingChanges: (before) => watch(api.settingChanges(before)),
+      settingsExport: () => watch(api.settingsExport()),
     };
   }, [api]);
 

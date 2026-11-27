@@ -52,6 +52,22 @@ function fakeApi(over: Over = {}) {
       calls.push(['pullReviews', repository, number]);
       return over.pullReviews ? over.pullReviews(repository, number) : Promise.resolve(PULL);
     },
+    settings: () => {
+      calls.push(['settings']);
+      return nope();
+    },
+    saveSettings: (csrf, save) => {
+      calls.push(['saveSettings', csrf, save]);
+      return nope();
+    },
+    settingChanges: (before) => {
+      calls.push(['settingChanges', before]);
+      return nope();
+    },
+    settingsExport: () => {
+      calls.push(['settingsExport']);
+      return nope();
+    },
   };
   const named = (name: string): unknown[][] => calls.filter(([n]) => n === name);
   return { api, named };

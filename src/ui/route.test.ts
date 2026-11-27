@@ -1,6 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createHash } from 'node:crypto';
+import { createHash, generateKeyPairSync } from 'node:crypto';
+import { parseDocument, readYaml, serviceConfig } from '../config/load.ts';
+import { settingsVersion } from '../db/settings.ts';
+import { startSettings } from '../shell/settings.ts';
 import { enqueueJob } from '../db/jobs.ts';
 import { savePullRequest } from '../db/pull-requests.ts';
 import { recordRun } from '../db/review-runs.ts';
@@ -45,6 +48,29 @@ const error = (status: number, code: string, extra: Record<string, string> = {})
 const INDEX: UiFile = { body: Buffer.from('<!doctype html><title>Visto AI</title>'), type: 'text/html; charset=utf-8' };
 const FILES: UiFiles = new Map([['/ui/index.html', INDEX]]);
 
+const PEM = generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey.export({ type: 'pkcs8', format: 'pem' }) as string;
+const SETTINGS_ENV = {
+  OPENROUTER_API_KEY: 'model-key-for-tests-only', WEBHOOK_SECRET: 'webhook-secret-for-tests-only', APP_PRIVATE_KEY: PEM,
+  DATABASE_URL: 'postgres://visto:db-password-for-tests@db.example.test/visto',
+};
+const SETTINGS_YAML = `model:
+  apiKey: { env: OPENROUTER_API_KEY }
+  model: vendor/model-a
+app:
+  id: 12345
+  privateKey: { env: APP_PRIVATE_KEY }
+  webhookSecret: { env: WEBHOOK_SECRET }
+database:
+  url: { env: DATABASE_URL }
+ui:
+  publicUrl: https://visto.example.test
+limits:
+  spendPerDay: 50
+repositories:
+  defaults:
+    score: { threshold: 70 }
+`;
+
 interface Sent { query?: string; cookie?: string; csrf?: string; body?: string; origin?: string; type?: string }
 interface Harness {
   db: Db; api: ApiDeps; logs: Array<Record<string, unknown>>;
@@ -58,7 +84,7 @@ interface Harness {
 }
 
 /** `github` false: a route with GitHub sign-in off, and auth given no sign-in. `changesOf`: the account changes the route is given, from the real ones. */
-async function harness(github = true, changesOf: (real: AccountChanges) => AccountChanges = (real) => real): Promise<Harness> {
+async function harness(github = true, changesOf: (real: AccountChanges) => AccountChanges = (real) => real, withSettings = false): Promise<Harness> {
   const real = await testDb();
   const logs: Array<Record<string, unknown>> = [];
   const statements: string[] = [];
@@ -90,9 +116,16 @@ async function harness(github = true, changesOf: (real: AccountChanges) => Accou
     db, clock, dryRun: true, reviewPlaces: 2, withdrawPlaces: 2, holds: () => true, paused: async () => null,
     pullRequestUrl: (ref) => `https://github.example.test/${ref.owner}/${ref.repo}/pull/${ref.number}`,
   };
+  const settings = !withSettings ? undefined : await startSettings({
+    db, file: readYaml(SETTINGS_YAML), check: (d) => serviceConfig(parseDocument(d, SETTINGS_ENV)), clock, log, uiOn: true,
+  });
+  logs.length = 0;
   const route = createUiRoute({
     auth, passwords: createPasswordAuth({ db, clock, log, cost: COST }), accounts: changesOf(createAccountChanges({ db, clock, log, cost: COST })), api, files: FILES,
     ui: { publicUrl: 'https://visto.example.test', github }, log,
+    ...(settings === undefined ? {} : {
+      settings: { db, clock, settings, log, access: { publicUrl: 'https://visto.example.test', github, accounts: ['octo-lead'], team: null } },
+    }),
   });
   const send: Harness['send'] = (method, path, sent = {}) => route({
     method, path, query: sent.query ?? '', body: sent.body === undefined ? Buffer.alloc(0) : Buffer.from(sent.body),
@@ -756,5 +789,129 @@ test('a handler of the review routes that fails is internal_error, logged with i
     { event: 'ui_failed', route: 'pull_reviews', reason: 'db_down' },
   ]);
   h.failing.text = null;
+  await h.db.close();
+});
+
+// -- the settings routes (the plan "The UI's Settings", task 6) --------------------------------------------------------
+
+/** An admin's session on a harness with settings: its cookie and token. */
+async function adminSession(h: Harness): Promise<{ cookie: string; csrf: string }> {
+  await account(h, 'octo-admin', 'admin');
+  const { cookie, id } = await passwordSignIn(h, 'octo-admin');
+  return { cookie, csrf: tokenOf(id) };
+}
+const putOf = (version: number, changes: unknown[]): string => JSON.stringify({ version, changes });
+const recordLength = async (h: Harness): Promise<number> => (await h.db.query('select 1 from visto_ai.setting_changes')).length;
+
+test('an admin reads the settings, saves a change, reads the record and the export', async () => {
+  const h = await harness(true, (real) => real, true);
+  const { cookie, csrf } = await adminSession(h);
+  const read = await h.send('GET', '/api/settings', { cookie });
+  assert.deepEqual([read.status, read.headers], [200, JSON_HEADERS]);
+  const view = JSON.parse(String(read.body)) as { version: number; defaults: Record<string, { value: unknown }> };
+  assert.equal(view.defaults['score.threshold']!.value, 70);
+  const saved = await h.send('PUT', '/api/settings', { cookie, csrf, type: JSON_TYPE, body: putOf(view.version, [{ scope: 'defaults', path: 'score.threshold', value: 65 }]) });
+  assert.deepEqual([saved.status, saved.headers], [200, JSON_HEADERS]);
+  const after = JSON.parse(String(saved.body)) as { version: number; defaults: Record<string, { value: unknown; source: { name: string } }> };
+  assert.deepEqual([after.version, after.defaults['score.threshold']!.value, after.defaults['score.threshold']!.source.name], [view.version + 1, 65, 'octo-admin']);
+  const changes = await h.send('GET', '/api/settings/changes', { cookie });
+  assert.equal(changes.status, 200);
+  const record = JSON.parse(String(changes.body)) as { changes: Array<{ path: string; before: string; after: string; by: string; name: string }>; next: null };
+  assert.deepEqual([record.changes[0]!.path, record.changes[0]!.before, record.changes[0]!.after, record.changes[0]!.by, record.changes[0]!.name], ['score.threshold', '70', '65', 'ui', 'octo-admin']);
+  assert.equal((await h.send('GET', '/api/settings/changes', { cookie, query: 'before=x' })).status, 400);
+  const exported = await h.send('GET', '/api/settings/export', { cookie });
+  assert.equal(exported.status, 200);
+  assert.match((JSON.parse(String(exported.body)) as { text: string }).text, /threshold: 65/);
+  await h.db.close();
+});
+
+test('a viewer is refused every settings route as forbidden, and a save without the token is csrf first', async () => {
+  const h = await harness(true, (real) => real, true);
+  const { cookie } = await h.signIn();
+  const id = SESSION_ID_OF.exec(cookie)?.[1] ?? '';
+  for (const [method, path] of [['GET', '/api/settings'], ['GET', '/api/settings/changes'], ['GET', '/api/settings/export']] as const) {
+    assert.deepEqual(await h.send(method, path, { cookie }), error(403, 'forbidden'), path);
+  }
+  const body = putOf(0, [{ scope: 'defaults', path: 'newHead' }]);
+  assert.deepEqual(await h.send('PUT', '/api/settings', { cookie, csrf: tokenOf(id), type: JSON_TYPE, body }), error(403, 'forbidden'));
+  assert.deepEqual(await h.send('PUT', '/api/settings', { cookie, type: JSON_TYPE, body }), error(403, 'csrf'));
+  assert.deepEqual(await h.send('PUT', '/api/settings', { type: JSON_TYPE, body }), error(401, 'signed_out'));
+  assert.deepEqual(await h.send('GET', '/api/settings'), error(401, 'signed_out'));
+  await h.db.close();
+});
+
+test('a save is refused with each issue at its setting, as changed when another came first, and as bad_request when its body is not of its shape; nothing is stored then', async () => {
+  const h = await harness(true, (real) => real, true);
+  const { cookie, csrf } = await adminSession(h);
+  const version = await settingsVersion(h.db);
+  const length = await recordLength(h);
+  const put = (body: string, type = JSON_TYPE) => h.send('PUT', '/api/settings', { cookie, csrf, type, body });
+  const before = h.logs.length;
+
+  const invalid = await put(putOf(version, [{ scope: 'defaults', path: 'gate.enabled', value: true }]));
+  assert.deepEqual([invalid.status, invalid.headers], [422, JSON_HEADERS]);
+  const body = JSON.parse(String(invalid.body)) as { error: string; issues: Array<{ scope: unknown; path: unknown; message: string }> };
+  assert.equal(body.error, 'invalid');
+  assert.ok(body.issues.some((issue) => issue.scope === 'defaults' && issue.path === 'gate.branches'), JSON.stringify(body.issues));
+  assert.equal(await recordLength(h), length);
+
+  assert.deepEqual(await put(putOf(version - 1, [{ scope: 'defaults', path: 'score.threshold', value: 66 }])), { status: 409, headers: JSON_HEADERS, body: '{"error":"changed"}' });
+  assert.equal(await recordLength(h), length);
+
+  assert.deepEqual(await put(putOf(version, [{ scope: 'defaults', path: 'nope', value: 1 }])), error(400, 'bad_request'));
+  assert.deepEqual(await put('[]'), error(400, 'bad_request'));
+  assert.deepEqual(await put('{', JSON_TYPE), error(400, 'bad_request'));
+  assert.deepEqual(await put(putOf(version, [{ scope: 'defaults', path: 'newHead' }]), 'text/plain'), error(415, 'not_json'));
+  assert.equal(await recordLength(h), length);
+
+  const lines = h.logs.slice(before).filter((e) => e.event === 'settings_save');
+  assert.deepEqual(lines, [{ event: 'settings_save', outcome: 'invalid', changes: 1 }, { event: 'settings_save', outcome: 'changed', changes: 1 }]);
+  assert.equal(h.logs.slice(before).length, 2);
+  assert.ok(!JSON.stringify(h.logs).includes('octo-admin'));
+  await h.db.close();
+});
+
+test('a save that fails after the version check is internal_error, logged as settings_save with its short code only', async () => {
+  const h = await harness(true, (real) => real, true);
+  const { cookie, csrf } = await adminSession(h);
+  const version = await settingsVersion(h.db);
+  h.failing.text = 'insert into visto_ai.settings ';
+  const before = h.logs.length;
+  assert.deepEqual(await h.send('PUT', '/api/settings', { cookie, csrf, type: JSON_TYPE, body: putOf(version, [{ scope: 'defaults', path: 'score.threshold', value: 66 }]) }), error(500, 'internal_error'));
+  assert.deepEqual(h.logs.slice(before), [{ event: 'ui_failed', route: 'settings_save', reason: 'db_down' }]);
+  for (const [path, text, route] of [['/api/settings', 'from visto_ai.settings order by scope', 'settings'], ['/api/settings/changes', 'from visto_ai.setting_changes where', 'settings_changes']] as const) {
+    h.failing.text = text;
+    const mark = h.logs.length;
+    assert.deepEqual(await h.send('GET', path, { cookie }), error(500, 'internal_error'), path);
+    assert.deepEqual(h.logs.slice(mark), [{ event: 'ui_failed', route, reason: 'db_down' }]);
+  }
+  h.failing.text = null;
+  await h.db.close();
+});
+
+test('the settings route takes GET and PUT, and refuses another with both in allow', async () => {
+  const h = await harness(true, (real) => real, true);
+  const { cookie, csrf } = await adminSession(h);
+  h.statements.length = 0;
+  for (const [method, path, allow] of [
+    ['DELETE', '/api/settings', 'GET, PUT'], ['POST', '/api/settings', 'GET, PUT'], ['PATCH', '/api/settings', 'GET, PUT'],
+    ['POST', '/api/settings/export', 'GET'], ['PUT', '/api/settings/changes', 'GET'],
+  ] as const) {
+    assert.deepEqual(await h.send(method, path, { cookie, csrf }), error(405, 'method_not_allowed', { allow }), `${method} ${path}`);
+  }
+  assert.deepEqual(h.statements, []);
+  assert.equal(METHODS.get('/api/settings'), 'GET, PUT');
+  await h.db.close();
+});
+
+test('without settings given, the four routes are not found and read nothing', async () => {
+  const h = await harness();
+  const { cookie } = await h.signIn();
+  const id = SESSION_ID_OF.exec(cookie)?.[1] ?? '';
+  h.statements.length = 0;
+  for (const [method, path] of [['GET', '/api/settings'], ['PUT', '/api/settings'], ['GET', '/api/settings/changes'], ['GET', '/api/settings/export'], ['DELETE', '/api/settings']] as const) {
+    assert.deepEqual(await h.send(method, path, { cookie, csrf: tokenOf(id), type: JSON_TYPE, body: '{}' }), error(404, 'not_found'), `${method} ${path}`);
+  }
+  assert.deepEqual(h.statements, []);
   await h.db.close();
 });

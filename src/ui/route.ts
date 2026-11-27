@@ -19,17 +19,24 @@ import { fileAnswer } from './files.ts';
 import type { UiFiles } from './files.ts';
 import { SECURITY_HEADERS, json, redirect } from './headers.ts';
 import type { PasswordAuth } from './password-auth.ts';
+import { saveOf, saveSettings, settingChanges, settingsExport, settingsView } from './settings.ts';
+import type { SettingsApiDeps } from './settings.ts';
 
 /** The fixed name a failed handler is logged with (call 30). */
-type Handler = 'me' | 'activity' | 'reviews' | 'signout' | 'ways' | 'own_password' | 'accounts' | 'account_new' | 'account_role' | 'account_reset' | 'account_remove' | 'review' | 'pull_reviews';
+type Handler = 'me' | 'activity' | 'reviews' | 'signout' | 'ways' | 'own_password' | 'accounts' | 'account_new' | 'account_role' | 'account_reset' | 'account_remove' | 'review' | 'pull_reviews'
+  | 'settings' | 'settings_save' | 'settings_changes' | 'settings_export';
 
-/** The API's paths, each with the one method it answers. A path here with no case of its own below is not found. */
+/** The API's paths, each with the methods it answers (one, or several as `GET, PUT`). A path here with no case of its own below is not found. */
 export const METHODS: ReadonlyMap<string, string> = new Map([
   ['/api/auth/ways', 'GET'], ['/api/auth/start', 'GET'], ['/api/auth/callback', 'GET'],
   ['/api/auth/password', 'POST'], ['/api/auth/first-password', 'POST'], ['/api/auth/signout', 'POST'],
   ['/api/me', 'GET'], ['/api/me/password', 'POST'], ['/api/activity', 'GET'], ['/api/reviews', 'GET'],
   ['/api/accounts', 'GET'], ['/api/accounts/new', 'POST'], ['/api/accounts/role', 'POST'], ['/api/accounts/reset', 'POST'], ['/api/accounts/remove', 'POST'],
+  ['/api/settings', 'GET, PUT'], ['/api/settings/changes', 'GET'], ['/api/settings/export', 'GET'],
 ]);
+
+/** The settings' paths: with no settings given they are not found. */
+const SETTINGS_PATHS: ReadonlySet<string> = new Set(['/api/settings', '/api/settings/changes', '/api/settings/export']);
 
 /** The paths of one review and of a pull request's reviews: a run, and an owner, a repo and a number, written as a person types them. */
 export const ONE_REVIEW = /^\/api\/reviews\/([1-9][0-9]{0,9})$/;
@@ -108,7 +115,7 @@ const ADMIN_CHANGE: Needs = { change: true, admin: true };
 
 export function createUiRoute(deps: {
   auth: Auth; passwords: PasswordAuth; accounts: AccountChanges; api: ApiDeps; files: UiFiles;
-  ui: { publicUrl: string; github: boolean }; log: (entry: Record<string, unknown>) => void;
+  ui: { publicUrl: string; github: boolean }; settings?: SettingsApiDeps; log: (entry: Record<string, unknown>) => void;
 }): UiRoute {
   const { auth, passwords, accounts, api, files } = deps;
 
@@ -163,13 +170,17 @@ export function createUiRoute(deps: {
     account: accountOf(made.account, api.clock(), session.accountId), oneTimePassword: made.oneTimePassword, expiresAt: made.expiresAt,
   });
 
-  /** An account change behind a session, the token and the admin role, with a body of its shape (rule 1). */
+  /** An admin's change (an account's or the settings') behind a session, the token and the admin role, with a body of its shape (rule 1). */
   function change<T>(request: UiRequest, handler: Handler, shape: (body: Body) => T | null, work: (session: Session, given: T) => Promise<UiAnswer>): Promise<UiAnswer> {
     return behindSession(request, handler, ADMIN_CHANGE, (session) => withBody(request, async (body) => {
       const given = shape(body);
       return given === null ? refused(400, 'bad_request') : work(session, given);
     }));
   }
+
+  /** A save: an admin's change with a body of its shape, by the session's login. */
+  const saveRoute = (request: UiRequest): Promise<UiAnswer> =>
+    change(request, 'settings_save', saveOf, (session, save) => saveSettings(deps.settings!, session.login, save));
 
   return async (request) => {
     const { method, path } = request;
@@ -196,7 +207,9 @@ export function createUiRoute(deps: {
     const allowed = METHODS.get(path);
     if (allowed === undefined) return refused(404, 'not_found');
     // Before any read: a known path with another method is refused whoever asks.
-    if (method !== allowed) return refused(405, 'method_not_allowed', { allow: allowed });
+    // The settings routes are there only when the settings are given.
+    if (SETTINGS_PATHS.has(path) && deps.settings === undefined) return refused(404, 'not_found');
+    if (!allowed.split(', ').includes(method)) return refused(405, 'method_not_allowed', { allow: allowed });
     switch (path) {
       case '/api/auth/ways':
         return guarded('ways', async () => json(200, { github: deps.ui.github } satisfies Ways));
@@ -250,6 +263,15 @@ export function createUiRoute(deps: {
           const gone = await accounts.remove(actorOf(session), id);
           return typeof gone === 'string' ? refusal(gone) : noContent();
         });
+      case '/api/settings':
+        return method === 'PUT' ? saveRoute(request) : behindSession(request, 'settings', ADMIN_READ, async () => json(200, await settingsView(deps.settings!)));
+      case '/api/settings/changes':
+        return behindSession(request, 'settings_changes', ADMIN_READ, async () => {
+          const found = await settingChanges(deps.settings!, new URLSearchParams(request.query));
+          return found === 'bad_request' ? refused(400, 'bad_request') : json(200, found);
+        });
+      case '/api/settings/export':
+        return behindSession(request, 'settings_export', ADMIN_READ, async () => json(200, settingsExport(deps.settings!)));
       default:
         // A path of METHODS with no case of its own reads nothing.
         return refused(404, 'not_found');

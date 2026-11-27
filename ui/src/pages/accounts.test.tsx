@@ -110,6 +110,22 @@ function fakeApi(over: Partial<Api> = {}) {
       calls.push(['pullReviews', repository, number]);
       return over.pullReviews ? over.pullReviews(repository, number) : Promise.resolve({ now: NOW, total: 0, reviews: [] });
     },
+    settings: () => {
+      calls.push(['settings']);
+      return over.settings ? over.settings() : Promise.reject(new RequestFailed(500, 'not_expected'));
+    },
+    saveSettings: (csrf, save) => {
+      calls.push(['saveSettings', csrf, save]);
+      return over.saveSettings ? over.saveSettings(csrf, save) : Promise.reject(new RequestFailed(500, 'not_expected'));
+    },
+    settingChanges: (before) => {
+      calls.push(['settingChanges', before]);
+      return over.settingChanges ? over.settingChanges(before) : Promise.reject(new RequestFailed(500, 'not_expected'));
+    },
+    settingsExport: () => {
+      calls.push(['settingsExport']);
+      return over.settingsExport ? over.settingsExport() : Promise.reject(new RequestFailed(500, 'not_expected'));
+    },
   };
   const sent = (name: string): unknown[][] => calls.filter(([called]) => called === name);
   return { api, calls, sent };
@@ -193,7 +209,7 @@ test('the accounts are listed with how they sign in, their role, their last sign
 
   const title = await screen.findByRole('heading', { level: 1, name: 'Settings' });
   expect(classes(title)).toEqual(words(heading));
-  const sub = screen.getByText('Who may open the service, and what they may do. The other settings come in a later plan.');
+  const sub = screen.getByText('Saved settings apply from the next review. A review already running keeps the settings it started with.');
   expect(sub.tagName).toBe('P');
   expect(classes(sub)).toEqual(words(subLine));
   expect(screen.getAllByRole('heading', { level: 1 })).toEqual([title]);
