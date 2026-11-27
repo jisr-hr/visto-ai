@@ -217,3 +217,16 @@ test('an answer holds no field the screens do not show', async () => {
   assert.ok(hl.open.length === 1 && hl.recent.length === 1);
   for (const answer of [o, hl]) assert.ok(!JSON.stringify(answer).includes('model-key-for-tests-only'));
 });
+
+test('health passes over an extension part whose time no ISO time writes', async () => {
+  const db = await testDb();
+  const started: StartedWith = { dryRun: false, learning: true, scorer: true, mcpServers: [], extensions: [{ name: 'example', parts: ['notify'] }] };
+  const h = harness(db, { started });
+  await writeHealth(db, { kind: 'extension', name: 'example', part: 'notify', ok: true, code: null, missing: null, at: at(-60) });
+  await db.query("update visto_ai.dependency_health set seen_at = 'infinity' where name = 'example'");
+  const a = await health(h.deps);
+  const extension = a.dependencies.find((d) => d.kind === 'extension')!;
+  assert.equal(extension.seenAt, null);
+  assert.equal(extension.status, 'working');
+  await db.close();
+});

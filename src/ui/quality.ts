@@ -56,6 +56,8 @@ export interface QualityCache {
   measure(key: string, compute: () => Promise<Quality>, waitMs: number): Promise<Measured>;
   /** Whether the cache was stopped: a computation asks before each of its statements. */
   stopped(): boolean;
+  /** How many requests are held waiting for a computation (for tests: none once each wait has ended). */
+  waiting(): number;
   /**
    * The service's stop (call 26, as built, last fix): from now on no computation starts, the one under way ends before its next
    * statement, and every request waiting is answered `computing` at once; what is kept is still answered. Resolves once the one
@@ -69,13 +71,16 @@ const COMPUTING: Measured = { state: 'computing' };
 const STOPPED = 'stopped';
 
 /** The computation's answer, or `computing` once `waitMs` has passed or the cache stops; the computation goes on either way. */
-async function waitFor(job: Promise<Measured>, waitMs: number, stopping: Promise<Measured>): Promise<Measured> {
+async function waitFor(job: Promise<Measured>, waitMs: number, waiting: Set<() => void>): Promise<Measured> {
   let timer: ReturnType<typeof setTimeout> | undefined;
-  const waited = new Promise<Measured>((resolve) => { timer = setTimeout(() => resolve(COMPUTING), waitMs); });
+  let answer = (): void => {};
+  const waited = new Promise<Measured>((resolve) => { answer = () => resolve(COMPUTING); timer = setTimeout(answer, waitMs); });
+  waiting.add(answer);
   try {
-    return await Promise.race([job, waited, stopping]);
+    return await Promise.race([job, waited]);
   } finally {
     clearTimeout(timer);
+    waiting.delete(answer);
   }
 }
 
@@ -85,8 +90,7 @@ export function createQualityCache(deps: { clock: () => Date; log: (entry: Recor
   const pending = new Map<string, Promise<Measured>>();
   let tail: Promise<unknown> = Promise.resolve();
   let stopped = false;
-  let answerWaiting = (): void => {};
-  const stopping = new Promise<Measured>((resolve) => { answerWaiting = () => resolve(COMPUTING); });
+  const waiting = new Set<() => void>();
 
   const keptFor = (key: string): Measured | null => {
     const entry = kept.get(key);
@@ -136,12 +140,13 @@ export function createQualityCache(deps: { clock: () => Date; log: (entry: Recor
         tail = job.then(() => undefined, () => undefined);
         pending.set(key, job);
       }
-      return waitFor(job, waitMs, stopping);
+      return waitFor(job, waitMs, waiting);
     },
     stopped: () => stopped,
+    waiting: () => waiting.size,
     stop() {
       stopped = true;
-      answerWaiting();
+      for (const answer of waiting) answer();
       return tail.then(() => undefined);
     },
   };

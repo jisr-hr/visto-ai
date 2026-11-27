@@ -145,7 +145,7 @@ export async function health(deps: InsightDeps): Promise<Health> {
     const partRows = extension.parts.flatMap((part) => (part === 'alert' ? [] : [find('extension', extension.name, part)])).filter((r): r is HealthRow => r !== undefined);
     const failing = partRows.find((r) => r.status === 'failing');
     const decisive = failing ?? partRows.find((r) => r.status === 'ok');
-    const seen = partRows.map((r) => r.seen_at.getTime());
+    const seen = partRows.flatMap((r) => { const t = r.seen_at instanceof Date ? r.seen_at.getTime() : Number.NaN; return Number.isFinite(t) ? [t] : []; });
     dependencies.push({
       kind: 'extension', name: extension.name, model: null,
       status: failing !== undefined ? 'failing' : decisive !== undefined ? 'working' : 'unknown',

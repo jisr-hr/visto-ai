@@ -867,3 +867,26 @@ test('an answer holds no field the screens do not show', async () => {
   assert.ok(REASONS_SHOWN === 5 && STEPPED_SHOWN === 20 && QUALITY_KEPT === 100);
   await db.close();
 });
+
+test('the cache holds no waiter once a request is answered, by the computation or the wait running out', async () => {
+  const db = await testDb();
+  await savePullRequest(db, facts(119, -DAY));
+  const h = harness(db);
+  const done = await ready(quality(h.deps, 'acme/shop', days('7')));
+  assert.equal(h.deps.quality.waiting(), 0);
+  // Answered by its computation.
+  const answered = h.deps.quality.measure('quick', () => Promise.resolve(done), 1000);
+  assert.equal(h.deps.quality.waiting(), 1);
+  assert.equal((await answered).state, 'ready');
+  assert.equal(h.deps.quality.waiting(), 0);
+  // Answered `computing` because its wait ran out while the computation is held.
+  let release = (): void => {};
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  const slow = h.deps.quality.measure('slow', async () => { await held; return done; }, 5);
+  assert.equal(h.deps.quality.waiting(), 1);
+  assert.deepEqual(await slow, { state: 'computing' });
+  assert.equal(h.deps.quality.waiting(), 0);
+  release();
+  await h.deps.quality.stop();
+  await db.close();
+});
