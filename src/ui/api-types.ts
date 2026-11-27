@@ -114,3 +114,23 @@ export interface SettingChangeRow {
 }
 export interface SettingChanges { changes: SettingChangeRow[]; next: number | null }
 export interface SettingsExport { text: string }
+
+// -- live score quality and the repositories (the plan "The UI's Overview, Repositories and Memory"; calls 23 to 29) ---------
+export type WindowDays = 7 | 30 | 90;
+export type QualityWindow = WindowDays | 'all';
+/** `share`: `part` of `of`, three decimals; null when `of` is 0. */
+export interface Measure { share: number | null; part: number; of: number }
+export interface ApprovalShort { enabled: boolean; threads: 'strict' | 'gate'; auditShare: number }
+export interface QualityRow { threshold: number; current: boolean; safetyBlocks: Measure; safetyFiles: Measure; benefit: Measure; focus: Measure }
+export interface SteppedBlock { path: string; number: number; score: number }
+export interface Quality {
+  repository: string; window: QualityWindow; threshold: number;
+  pullRequests: number; unreadable: number; cut: { pulls: boolean; comments: boolean; runs: boolean };
+  rows: QualityRow[]; stepped: SteppedBlock[];
+  reverts: { merged: number; approved: number }; audits: { drawn: number; needed: number };
+  feedback: { helpful: number; notHelpful: number; reasons: Array<{ reason: string; count: number }> };
+}
+export type QualityState = 'ready' | 'computing' | 'failed';
+/** `quality` only when `state` is ready. */
+export interface QualityAnswer { now: string; state: QualityState; quality: Quality | null }
+export interface Repositories { now: string; repositories: string[] }
