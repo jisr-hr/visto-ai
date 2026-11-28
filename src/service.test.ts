@@ -2763,7 +2763,7 @@ test('with the UI on and settings given, an admin saves a setting and the next r
   assert.equal(read.status, 200);
   const view = JSON.parse(read.body) as { version: number; access: unknown; defaults: Record<string, { value: unknown }> };
   assert.equal(view.defaults['score.threshold']!.value, 70);
-  assert.deepEqual(view.access, { publicUrl: 'https://visto.example.test', github: false, accounts: [], team: null });
+  assert.deepEqual(view.access, { publicUrl: 'https://visto.example.test', github: false, accounts: [], teams: [] });
   const saved = await h.request('PUT', '/api/settings', Buffer.from(JSON.stringify({ version: view.version, changes: [{ scope: 'defaults', path: 'score.threshold', value: 55 }] })),
     { cookie, 'x-visto-csrf': csrf, 'content-type': 'application/json' });
   assert.equal(saved.status, 200);

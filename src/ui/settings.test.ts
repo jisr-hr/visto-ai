@@ -44,7 +44,7 @@ const SCORER_YAML = `${FILE_YAML}scorer:
   apiKey: { env: SCORER_API_KEY }
   model: vendor/scorer-a
 `;
-const ACCESS = { publicUrl: 'https://visto.example.test', github: true, accounts: ['octo-lead'], team: null };
+const ACCESS = { publicUrl: 'https://visto.example.test', github: true, accounts: ['octo-lead'], teams: [] };
 const check = (d: unknown): ServiceConfig => serviceConfig(parseDocument(d, ENV));
 const at = (seconds: number): string => new Date(Date.parse('2026-03-01T10:00:00.000Z') + seconds * 1000).toISOString();
 
@@ -185,7 +185,7 @@ test("no answer holds a secret's value or a field the screen does not show", asy
   }
   assert.deepEqual(Object.keys(view.repositories[0]!), ['name', 'settings']);
   assert.deepEqual(Object.keys(view.endpoints), ['model', 'scorer']);
-  assert.deepEqual(Object.keys(view.access), ['publicUrl', 'github', 'accounts', 'team']);
+  assert.deepEqual(Object.keys(view.access), ['publicUrl', 'github', 'accounts', 'teams']);
   assert.deepEqual(view.secrets.map((s) => [s.kind, s.variable]), [
     ['model_key', 'OPENROUTER_API_KEY'], ['scorer_key', 'SCORER_API_KEY'], ['app_private_key', 'APP_PRIVATE_KEY'], ['webhook_secret', 'WEBHOOK_SECRET'],
     ['app_client_secret', null], ['database', 'DATABASE_URL'], ['audit_key', 'AUDIT_KEY'], ['alert_webhook', null],

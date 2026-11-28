@@ -90,7 +90,7 @@ export async function settingsView(deps: SettingsApiDeps): Promise<SettingsView>
     endpoints: { model: settings.atStart.model.baseUrl, scorer: scorerEndpoint(settings.file) },
     secrets: secretsOf(settings.file).map((secret) => ({ kind: secret.kind, of: secret.of, variable: secret.variable })),
     access: {
-      publicUrl: deps.access.publicUrl, github: deps.access.github, accounts: [...deps.access.accounts], team: deps.access.team,
+      publicUrl: deps.access.publicUrl, github: deps.access.github, accounts: [...deps.access.accounts], teams: [...deps.access.teams],
     },
   };
 }
