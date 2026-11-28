@@ -35,6 +35,9 @@ export interface ResponseLike {
   getHeaderNames?(): string[];
   removeHeader?(name: string): unknown;
   destroy?(): unknown;
+  /** Node's: whether the answer has been handed to the system whole; with `once`, a stop waits for it. */
+  writableFinished?: boolean;
+  once?(event: 'finish' | 'close', listener: () => void): unknown;
 }
 
 const HEADERS = { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' };
@@ -290,9 +293,23 @@ export function createListener(
     return answer(res, { status: 404, body: 'not_found' });
   }
 
+  /**
+   * Settles once the answer is sent whole or its connection is gone: a stop that closes every connection after `idle` must not
+   * cut an answer still being sent (the save that restarts the service, to a slow browser). At once for a response with no
+   * events, or one already sent.
+   */
+  function sent(res: ResponseLike): Promise<void> {
+    if (res.once === undefined || res.writableFinished !== false) return Promise.resolve();
+    return new Promise((done) => {
+      res.once!('finish', done);
+      res.once!('close', done);
+    });
+  }
+
   function listener(req: RequestLike, res: ResponseLike): void {
     const p: Promise<void> = serve(req, res)
       .catch(() => answer(res, { status: 500, body: 'internal_error' }))
+      .then(() => sent(res))
       .then(() => { handling.delete(p); });
     handling.add(p);
   }

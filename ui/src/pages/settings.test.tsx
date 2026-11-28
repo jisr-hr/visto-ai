@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, within } from '@testing-library/react';
 import { userEvent } from '@testing-library/user-event';
 import { afterEach, expect, test, vi } from 'vitest';
 import { RequestFailed } from '../api.ts';
@@ -6,6 +6,7 @@ import type { Api } from '../api.ts';
 import type { Activity, Me, Reviews, Setting, SettingSource, SettingsView, SettingValue } from '../api-types.ts';
 import { App } from '../app.tsx';
 import { LABELS, whereOf } from './settings-parts.tsx';
+import { RESTART_LATE_MS, RESTART_POLL_MS } from './settings.tsx';
 
 const NOW = '2026-03-01T10:00:00.000Z';
 const ME: Me = { name: 'octo-admin', kind: 'password', role: 'admin', csrf: 'csrf-1', mode: 'live', repositories: ['acme/shop'] };
@@ -33,13 +34,14 @@ const GLOBAL: Record<string, Setting> = {
   'model.prices': written({ inputPerMillion: 1, cachedInputPerMillion: 0.1, outputPerMillion: 4 }),
   'model.extraBody': byDefault({}),
   'model.extraHeaders': byDefault({}),
-  'scorer.model': written('vendor/decision-model', FILE, { restart: true }),
+  'scorer.model': written('vendor/decision-model'),
   'scorer.timeoutSeconds': written(120),
 };
 
 function viewOf(over: { version?: number; global?: Record<string, Setting>; access?: SettingsView['access']; scorer?: SettingsView['scorer'] } = {}): SettingsView {
   return {
     now: NOW,
+    started: '2026-03-01T09:00:00.000Z',
     version: over.version ?? 14,
     global: { ...GLOBAL, ...over.global },
     defaults: {},
@@ -49,6 +51,7 @@ function viewOf(over: { version?: number; global?: Record<string, Setting>; acce
     secrets: [
       { kind: 'model_key', of: null, variable: 'OPENROUTER_API_KEY' },
       { kind: 'scorer_key', of: null, variable: 'SCORER_API_KEY' },
+      { kind: 'audit_key', of: null, variable: null },
       { kind: 'alert_webhook', of: null, variable: null },
       { kind: 'extension', of: 'example, option secret', variable: 'EXAMPLE_SECRET' },
       { kind: 'mcp_header', of: 'docs', variable: 'DOCS_TOKEN' },
@@ -62,7 +65,7 @@ const VIEW = viewOf();
 function fakeApi(over: Partial<Api> = {}) {
   const calls: unknown[][] = [];
   const api: Api = {
-    me: () => Promise.resolve(ME),
+    me: over.me ?? (() => Promise.resolve(ME)),
     activity: () => Promise.resolve(ACTIVITY),
     reviews: () => Promise.resolve(REVIEWS),
     signOut: () => Promise.resolve(),
@@ -142,7 +145,10 @@ const section = (name: string): HTMLElement => screen.getByRole('region', { name
 
 const SUB = 'Saved settings apply from the next review. A review already running keeps the settings it started with.';
 
-afterEach(() => visit('/'));
+afterEach(() => {
+  vi.useRealTimers();
+  visit('/');
+});
 
 async function open(over: Partial<Api> = {}) {
   visit('/ui/settings');
@@ -307,6 +313,120 @@ test('a save refused shows each issue at its setting and all of them at the top,
   expect(screen.getByText('1 unsaved change')).toBeInTheDocument();
   expect(screen.getByRole('switch', { name: 'Learning' })).toHaveAttribute('aria-checked', 'true');
   expect(screen.queryByRole('status')).toBeNull();
+});
+
+test('a save refused only by issues at no setting says so without pointing at the settings', async () => {
+  const user = userEvent.setup();
+  const { api } = fakeApi({
+    saveSettings: () => Promise.resolve({ kind: 'invalid', issues: [{ scope: null, path: null, message: 'scorer.apiKey: must be written when scorer is set' }] }),
+  });
+  visit('/ui/settings');
+  render(<App api={api} />);
+  await screen.findByRole('region', { name: 'General' });
+  await user.click(screen.getByRole('switch', { name: 'Learning' }));
+  await user.click(screen.getByRole('button', { name: 'Save changes' }));
+
+  const alert = await screen.findByRole('alert');
+  expect(alert).toHaveTextContent(/^Not saved:scorer\.apiKey: must be written when scorer is set$/);
+});
+
+test('a change to a setting read at start says that saving restarts the service, and one to another setting does not', async () => {
+  const user = userEvent.setup();
+  const { api } = fakeApi();
+  visit('/ui/settings');
+  render(<App api={api} />);
+  await screen.findByRole('region', { name: 'General' });
+  await user.clear(screen.getByLabelText('Daily spend limit'));
+  await user.type(screen.getByLabelText('Daily spend limit'), '45');
+  expect(screen.queryByText('Saving this restarts the service.')).toBeNull();
+  await user.click(screen.getByRole('switch', { name: 'Learning' }));
+  expect(screen.getByText('Saving this restarts the service.')).toBeInTheDocument();
+});
+
+test('switching the second scorer off or on says that saving restarts the service, and changing its model does not', async () => {
+  const user = userEvent.setup();
+  const { api } = fakeApi();
+  visit('/ui/settings');
+  render(<App api={api} />);
+  await screen.findByRole('region', { name: 'Model' });
+  await user.clear(screen.getByLabelText('Scorer model'));
+  await user.type(screen.getByLabelText('Scorer model'), 'vendor/decision-model-2');
+  expect(screen.queryByText('Saving this restarts the service.')).toBeNull();
+  await user.click(screen.getByRole('switch', { name: LABELS['scorer.model']! }));
+  expect(screen.getByText('Saving this restarts the service.')).toBeInTheDocument();
+});
+
+test('a save that restarts the service says so, waits for it to come back, then reads the settings again', async () => {
+  vi.useFakeTimers();
+  const back: SettingsView = { ...viewOf({ version: 15, global: { learning: written(true, UI, { restart: true }) } }), started: '2026-03-01T10:05:00.000Z' };
+  let reads = 0;
+  let mes = 0;
+  const { api, sent } = fakeApi({
+    me: () => Promise.resolve(++mes === 1 ? ME : { ...ME, mode: 'dry_run' }),
+    settings: () => {
+      reads += 1;
+      // The first read, then two the restart leaves unanswered, one while the old start still drains, then the new start.
+      if (reads === 2 || reads === 3) return Promise.reject(new TypeError('Failed to fetch'));
+      return Promise.resolve(reads < 5 ? VIEW : back);
+    },
+    saveSettings: () => Promise.resolve({ kind: 'saved', view: viewOf({ version: 15, global: { learning: written(true, UI, { restart: true, waits: true }) } }), restarting: true }),
+  });
+  visit('/ui/settings');
+  render(<App api={api} />);
+  await act(() => vi.advanceTimersByTimeAsync(0));
+  // The record and the export are not read while the service restarts, and are read again once it is back.
+  const recordReads = (): number => sent('settingChanges').length + sent('settingsExport').length;
+  const beforeBack = recordReads();
+  fireEvent.click(screen.getByRole('switch', { name: 'Learning' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+  await act(() => vi.advanceTimersByTimeAsync(0));
+  expect(screen.getByRole('status')).toHaveTextContent(
+    'Saved. The service is restarting to apply it: the reviews running now finish first, then it starts again on the saved settings. This page reads them again once it is back.',
+  );
+  expect(screen.getByRole('button', { name: 'Save changes' })).toBeDisabled();
+  expect(reads).toBe(1);
+  expect(recordReads()).toBe(beforeBack);
+  await act(() => vi.advanceTimersByTimeAsync(RESTART_POLL_MS * 3));
+  expect(reads).toBe(4);
+  expect(screen.getByRole('status')).toHaveTextContent(/^Saved\. The service is restarting/);
+  expect(recordReads()).toBe(beforeBack);
+  await act(() => vi.advanceTimersByTimeAsync(RESTART_POLL_MS));
+  expect(reads).toBe(5);
+  await act(() => vi.advanceTimersByTimeAsync(0));
+  expect(recordReads()).toBeGreaterThan(beforeBack);
+  expect(screen.getByRole('status')).toHaveTextContent('The service restarted. The saved settings are in force.');
+  // Who is signed in is read again: the sidebar's mode is the new start's.
+  await act(() => vi.advanceTimersByTimeAsync(0));
+  expect(mes).toBe(2);
+  expect(within(screen.getByRole('complementary')).getByText('Dry run')).toBeInTheDocument();
+  // Back: nothing more is read for the restart.
+  await act(() => vi.advanceTimersByTimeAsync(RESTART_POLL_MS * 3));
+  expect(reads).toBe(5);
+  vi.useRealTimers();
+});
+
+test('a restart that does not come back within its limit says to read the service\'s logs, and stops asking', async () => {
+  vi.useFakeTimers();
+  let reads = 0;
+  const { api } = fakeApi({
+    // After the first read, one that fails, then one that never answers.
+    settings: () => (++reads === 1 ? Promise.resolve(VIEW) : reads === 2 ? Promise.reject(new TypeError('Failed to fetch')) : new Promise<SettingsView>(() => {})),
+    saveSettings: () => Promise.resolve({ kind: 'saved', view: viewOf({ version: 15 }), restarting: true }),
+  });
+  visit('/ui/settings');
+  render(<App api={api} />);
+  await act(() => vi.advanceTimersByTimeAsync(0));
+  fireEvent.click(screen.getByRole('switch', { name: 'Learning' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+  await act(() => vi.advanceTimersByTimeAsync(0));
+  await act(() => vi.advanceTimersByTimeAsync(RESTART_LATE_MS));
+  expect(screen.getByRole('status')).toHaveTextContent(
+    'Saved, but the service has not come back after 15 minutes. Its logs say why; this page reads the settings again when you reload it.',
+  );
+  const asked = reads;
+  await act(() => vi.advanceTimersByTimeAsync(RESTART_POLL_MS * 3));
+  expect(reads).toBe(asked);
+  vi.useRealTimers();
 });
 
 test('a save that met another keeps the changes and reads the settings again', async () => {
@@ -504,6 +624,9 @@ test('the secrets show only their variable and whether it is set, and Access sho
   expect(classes(within(row('Model key')).getByText('OPENROUTER_API_KEY'))).toEqual(words('font-mono text-[12.5px] text-muted'));
   expect(row('Alert webhook')).toHaveTextContent(/^Alert webhookNot set, alerts are shown here only$/);
   expect(classes(within(row('Alert webhook')).getByText('Not set, alerts are shown here only'))).toEqual(words('inline-flex items-center gap-1.5 whitespace-nowrap rounded-full px-2 py-0.5 text-xs leading-5 font-medium bg-subtle text-muted'));
+  // An audit key the file does not write is the one the service generated.
+  expect(row('Audit key')).toHaveTextContent(/^Audit keyGenerated by the service, kept in its database$/);
+  expect(within(row('Audit key')).getByText('Generated by the service, kept in its database')).toHaveClass('bg-ok-bg', 'text-ok');
   expect(row('Extension example, option secret')).toHaveTextContent('EXAMPLE_SECRET');
   expect(row('MCP server docs')).toHaveTextContent('DOCS_TOKEN');
   expect(within(secrets).getAllByText('Set')).toHaveLength(4);

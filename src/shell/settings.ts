@@ -25,6 +25,8 @@ export type SaveOutcome =
   | { kind: 'invalid'; issues: SettingIssue[] };
 
 export interface Settings {
+  /** When this start read the settings (ISO): a restart gives a newer one. */
+  readonly started: string;
   /** The file's document as read at this start. */
   readonly file: unknown;
   /** The editable part this start left in the database. */
@@ -114,7 +116,8 @@ export async function startSettings(deps: StartDeps): Promise<Settings> {
   const { db, file, check, clock, log } = deps;
   // Compared and stored as the database keeps them, so a value it would change is not seen as changed at every start.
   const now = new Map([...editableOf(file)].map(([key, value]) => [key, storableValue(value) as SettingValue]));
-  const started = await db.transaction((tx) => sync(tx, deps, now, clock().toISOString()));
+  const startedAt = clock().toISOString();
+  const started = await db.transaction((tx) => sync(tx, deps, now, startedAt));
   log({ event: 'settings', from_file: started.fromFile, from_ui: started.fromUi });
   const startEditable = started.part;
   let held = { version: started.version, editable: startEditable, saved: started.config, inForce: started.config };
@@ -145,7 +148,6 @@ export async function startSettings(deps: StartDeps): Promise<Settings> {
       const current = new Map(stored);
       let changed = 0;
       let last = version;
-      let restart = scorerOn(next) !== scorerOn(startEditable);
       for (const c of changes) {
         const key = settingKey(c.scope, c.path);
         const before = current.get(key);
@@ -160,8 +162,11 @@ export async function startSettings(deps: StartDeps): Promise<Settings> {
         }
         last = await recordSettingChange(tx, { at, by: 'ui', name: by, scope: c.scope, path: c.path, before, after });
         changed += 1;
-        if (c.scope === GLOBAL && AT_START.has(c.path)) restart = true;
       }
+      // A restart is asked while something saved waits for one, as the view says it (`waits`): a setting read at start that
+      // differs from the start's, or the second scorer on or off unlike at the start.
+      const restart = scorerOn(next) !== scorerOn(startEditable)
+        || [...AT_START].some((path) => !sameValue(startEditable.get(settingKey(GLOBAL, path)), next.get(settingKey(GLOBAL, path))));
       return { kind: 'saved', changed, restart, version: last, editable: next, saved, inForce };
     });
     if (result.kind !== 'saved') {
@@ -175,6 +180,7 @@ export async function startSettings(deps: StartDeps): Promise<Settings> {
   }
 
   return {
+    started: startedAt,
     file,
     startEditable,
     atStart: started.config,

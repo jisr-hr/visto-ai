@@ -214,14 +214,18 @@ function log(entry: Record<string, unknown>): void {
   process.stdout.write(JSON.stringify(entry) + '\n');
 }
 
+/** The code the process ends with after a restart asked from the UI: its supervisor (a restart policy) starts it again. */
+export const RESTART_CODE = 75;
+
 /**
  * Runs `start` and stops what it started on the first signal, also one that arrives before `start` has resolved.
  * A second signal calls exit(1). A start that rejects logs { event: 'start_failed', ...describeFailure } and resolves 1.
- * Resolves 0 after a stop.
+ * Resolves 0 after a stop. `start` is given `restart`, which stops the service the same way and resolves RESTART_CODE; it is
+ * asked once, and a signal before the stop has ended wins (0). A restart after a signal changes nothing.
  */
 // PM-drain: the first signal stops the service cleanly, a second one ends the process at once.
 export function runUntilSignal(
-  start: () => Promise<{ stop(): Promise<void> }>,
+  start: (restart: () => void) => Promise<{ stop(): Promise<void> }>,
   signals: { on(listener: () => void): void; off(listener: () => void): void },
   exit: (code: number) => void,
   log: (entry: Record<string, unknown>) => void,
@@ -229,10 +233,15 @@ export function runUntilSignal(
   return new Promise<number>((resolve) => {
     let count = 0;
     let service: { stop(): Promise<void> } | null = null;
+    // What a clean stop ends with, once a signal (0) or a restart (RESTART_CODE) has asked for one; read when the stop ends.
+    let ending: number | null = null;
+    let stopping = false;
     const finish = (code: number): void => { signals.off(onSignal); resolve(code); };
     const stop = (running: { stop(): Promise<void> }): void => {
+      if (stopping) return;
+      stopping = true;
       running.stop().then(
-        () => 0,
+        () => ending ?? 0,
         (error: unknown) => { log({ event: 'stop_failed', ...describeFailure(error) }); return 1; },
       ).then(finish);
     };
@@ -240,13 +249,20 @@ export function runUntilSignal(
       count += 1;
       if (count > 1) { exit(1); return; }
       log({ event: 'stopping' });
+      ending = 0;
+      if (service !== null) stop(service);
+    }
+    function restart(): void {
+      if (ending !== null) return;
+      log({ event: 'restarting' });
+      ending = RESTART_CODE;
       if (service !== null) stop(service);
     }
     signals.on(onSignal);
-    start().then(
+    start(restart).then(
       (started) => {
         service = started;
-        if (count > 0) stop(started);
+        if (ending !== null) stop(started);
       },
       (error: unknown) => {
         log({ event: 'start_failed', ...describeFailure(error) });
@@ -288,7 +304,7 @@ export async function main(argv: string[], env: Record<string, string | undefine
     on: (listener: () => void): void => { process.on('SIGTERM', listener); process.on('SIGINT', listener); },
     off: (listener: () => void): void => { process.off('SIGTERM', listener); process.off('SIGINT', listener); },
   };
-  const code = await runUntilSignal(async () => {
+  const code = await runUntilSignal(async (restart) => {
     try {
       const { fetch } = globalThis;
       // Every GitHub adapter is given the fetch with a time limit; the model, the scorer, the MCP servers and the alerts keep their own.
@@ -370,6 +386,8 @@ export async function main(argv: string[], env: Record<string, string | undefine
           return () => { clearInterval(timer); };
         },
         settings,
+        // A save that leaves a setting read at start waiting stops the service and ends the process with RESTART_CODE.
+        restart,
         // Each review's model client and scorer are made from the settings it runs on (call 19).
         engineDeps: (source, c) => ({ source, ...engine, ...clientsFor(c ?? settings.atStart, { fetch, sleep }) }),
         // The judge's calls go through a model client made as the reviews' are, with its fallbacks, prices and request extras,

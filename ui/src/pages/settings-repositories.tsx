@@ -73,7 +73,8 @@ function Pane({ form, scope }: { form: Form; scope: string }) {
   const under = form.shown(DEFAULTS, 'score.threshold').value;
   const mode = text('gate.mode');
   const thread = text('score.approvalThreads');
-  const keySet = form.view.secrets.some((secret) => secret.kind === 'audit_key' && secret.variable !== null);
+  // The key the file writes; with none, the service generates one at its first start and keeps it in its database.
+  const keyInFile = form.view.secrets.some((secret) => secret.kind === 'audit_key' && secret.variable !== null);
   const inRepository = scope !== DEFAULTS;
   return (
     <div className="flex min-w-0 shrink grow-[999] basis-[480px] flex-col gap-5">
@@ -304,15 +305,9 @@ function Pane({ form, scope }: { form: Form; scope: string }) {
             >
               <NumberField form={form} scope={scope} path="score.auditShare" id="r-audit-in" className="max-w-[120px]" />
               <span className="text-muted">%</span>
-              {keySet ? (
-                <Badge tone="ok" dot>
-                  Audit key set
-                </Badge>
-              ) : (
-                <Badge tone="warn" dot>
-                  Audit key not set
-                </Badge>
-              )}
+              <Badge tone="ok" dot>
+                {keyInFile ? 'Audit key from config.yml' : 'Audit key generated'}
+              </Badge>
             </Row>
             <p className="mt-1 mb-2 text-[13px] text-muted">
               It approves only where the base branch&apos;s rules dismiss stale approvals, and never a draft or a pull request from a fork.

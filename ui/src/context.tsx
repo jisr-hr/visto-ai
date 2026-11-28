@@ -4,7 +4,11 @@ import { createContext, useContext } from 'react';
 import type { Api } from './api.ts';
 import type { Activity, ActivityJob, Me } from './api-types.ts';
 
-export interface AppContextValue { api: Api; me: Me; activity: Activity | null; activityFailed: boolean }
+export interface AppContextValue {
+  api: Api; me: Me; activity: Activity | null; activityFailed: boolean;
+  /** Reads who is signed in again (the mode, once the service has restarted); a failure keeps who was. */
+  readMe?: () => void;
+}
 
 export const AppContext = createContext<AppContextValue | null>(null);
 

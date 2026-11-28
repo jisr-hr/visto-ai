@@ -88,7 +88,7 @@ export function App({ api }: { api: Api }) {
 
   // The API the pages read: one of its reads answered 401 signs the person out here; one answered 403 forbidden reads who is
   // signed in again.
-  const watched = useMemo<Api>(() => {
+  const { watched, readMe } = useMemo<{ watched: Api; readMe: () => void }>(() => {
     /** Whether `last` is still signed in as the session that asked, by its token; nobody signed in at the asking (null) never is. */
     const still = (last: State, asked: string | null): boolean => last.kind === 'signed_in' && last.me.csrf === asked;
     /**
@@ -114,7 +114,7 @@ export function App({ api }: { api: Api }) {
         throw error;
       });
     };
-    return {
+    const watchedApi: Api = {
       me: () => watch(api.me()),
       activity: () => watch(api.activity()),
       reviews: (query) => watch(api.reviews(query)),
@@ -141,6 +141,7 @@ export function App({ api }: { api: Api }) {
       memory: (query) => watch(api.memory(query)),
       switchMemory: (csrf, id, on) => watch(api.switchMemory(csrf, id, on)),
     };
+    return { watched: watchedApi, readMe: readAgain };
   }, [api]);
 
   if (state.kind === 'reading') return <div aria-busy="true"></div>;
@@ -174,7 +175,7 @@ export function App({ api }: { api: Api }) {
     );
   }
   return (
-    <Layout api={watched} me={state.me} onSignedOut={() => setState({ kind: 'signed_out' })}>
+    <Layout api={watched} me={state.me} readMe={readMe} onSignedOut={() => setState({ kind: 'signed_out' })}>
       <Page path={path} me={state.me} />
     </Layout>
   );
