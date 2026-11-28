@@ -126,10 +126,17 @@ export function prepareRun(command: string, inputName: string, argv: string[], e
 const projectFolder = (): string => resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 
 async function replay(argv: string[], env: Record<string, string | undefined>, out: (line: string) => void): Promise<void> {
-  const setup = prepareRun('replay', 'cases', argv, env, [], ['plain']);
+  const setup = prepareRun('replay', 'cases', argv, env, ['lessons'], ['plain']);
+  const lessonsPath = setup.options.lessons;
+  if (lessonsPath !== undefined) {
+    outsideProject(lessonsPath, projectFolder(), 'lessons');
+    if (setup.flags.has('plain')) throw new UsageError('usage: --lessons cannot be used with --plain');
+  }
   const { cases, sha256 } = readable('cases', () => loadCases(setup.inputPath));
+  const lessonsFile = lessonsPath === undefined ? undefined : readable('lessons', () => loadLessons(lessonsPath));
   const { inputPath, outDir, label, maxCases, maxCost, concurrency, config, deps } = setup;
-  const file = await runReplay({ outDir, label, maxCases, maxCost, concurrency, config, deps, cases, casesFile: inputPath, casesSha256: sha256, plain: setup.flags.has('plain') });
+  const lessons = lessonsPath === undefined || lessonsFile === undefined ? {} : { lessons: { file: lessonsFile.file, path: lessonsPath, sha256: lessonsFile.sha256 } };
+  const file = await runReplay({ outDir, label, maxCases, maxCost, concurrency, config, deps, cases, casesFile: inputPath, casesSha256: sha256, plain: setup.flags.has('plain'), ...lessons });
   out(`cases ${file.summary.cases}, failed ${file.summary.failed_cases}, not started ${file.cases_not_started}, total_cost ${file.summary.total_cost}`);
   if (file.stopped_reason !== null) out(`stopped: ${file.stopped_reason}`);
 }

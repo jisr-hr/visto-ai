@@ -873,3 +873,24 @@ test('lesson-cases writes the cases, prints counts and one line each, and --only
   assert.deepEqual(shownLines, lines);                                          // the counts are of all three
   assert.deepEqual(loadCases(f.out).cases.map((c) => c.pr_number), [9]);
 });
+
+test('replay takes --lessons outside the project, refuses it with --plain and cases without a date, and says so before any case starts', async () => {
+  const folder = mkdtempSync(tmpdir() + '/');
+  writeFileSync(join(folder, 'config.yml'), 'model:\n  apiKey: { env: MODEL_KEY }\n  model: vendor/model-a\n');
+  const cases = join(folder, 'cases.jsonl');
+  writeFileSync(cases, JSON.stringify({
+    repo: 'acme/shop', pr_number: 7, head_sha: 'abcdef0123456789', compare_base: 'base000', title: 'Add things', body: '', branch: 'topic', base_branch: 'main', author: 'ana',
+    labels: [{ comment_id: '1', path: 'src/a.ts', line: 2, side: 'RIGHT', severity: 'major', label: 'valid' }],
+  }) + '\n');
+  const lessons = join(folder, 'lessons.json');
+  writeFileSync(lessons, JSON.stringify({
+    version: 1, findings_file: 'f.jsonl', findings_sha256: 'a'.repeat(64), exported_at: '2026-03-20T08:00:00.000Z',
+    setting: { model: 'm', fallbacks: [], toolChoice: 'forced' }, rules_sha256: 'b'.repeat(64), complete: true, end: null, nights: 0, first_night: null, last_night: null, cost: 0, verdicts: [], lessons: [],
+  }));
+  const args = (extra: string[]): string[] => ['replay', '--cases', cases, '--out', join(folder, 'out'), '--label', 'one', '--config', join(folder, 'config.yml'), '--force', ...extra];
+  const env = { GITHUB_TOKEN: 't', MODEL_KEY: 'k' };
+  assert.deepEqual(await run(args(['--lessons', join(projectRoot, 'l.json')]), env), [2, ['usage: --lessons must be outside the project folder']]);
+  assert.deepEqual(await run(args(['--lessons', lessons, '--plain']), env), [2, ['usage: --lessons cannot be used with --plain']]);
+  assert.deepEqual(await run(args(['--lessons', join(folder, 'missing.json')]), env), [2, ['usage: cannot read --lessons']]);
+  assert.deepEqual(await run(args(['--lessons', lessons]), env), [1, ['case_without_date']]);
+});

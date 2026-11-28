@@ -10,6 +10,7 @@ import type { EvalCase } from './cases.ts';
 import { assertOutsideProject, replayCase, runReplay, sampleUnmatched, toReviewInput } from './replay.ts';
 import { METRICS } from './score.ts';
 import type { CaseScore, ReplayFinding } from './score.ts';
+import type { LessonsFile } from './lessons/lessons-file.ts';
 
 const config: DeploymentConfig = {
   model: {
@@ -310,4 +311,75 @@ test('runReplay with plain records plain: true in summary.json, and runs the con
   const written = JSON.parse(readFileSync(join(args.outDir, 'summary.json'), 'utf8')) as { plain: boolean };
   assert.equal(written.plain, true);
   assert.equal((await runReplay(baseArgs())).plain, false);
+});
+
+// Lessons as of each case.
+const LESSON_TEXT = 'Discounts apply before tax in this shop, so a finding on the order of the two is wrong.';
+const OWN_TEXT = 'Rounding half up is intended in this shop and is not a defect to report on invoices.';
+const lessonRow = (ref: string, number: number, text: string, createdAt: string) => ({
+  ref, repo: 'acme/shop', number, reply: 'r', path: 'src/a.ts', text, createdAt, madeAt: createdAt, expiresAt: '2026-06-01T00:00:00.000Z',
+});
+const lessonsOf = (lessons: ReturnType<typeof lessonRow>[], sha = 'c'.repeat(64)): { file: LessonsFile; path: string; sha256: string } => ({
+  file: {
+    version: 1, findings_file: 'findings.jsonl', findings_sha256: 'a'.repeat(64), exported_at: '2026-03-20T08:00:00.000Z',
+    setting: { model: 'vendor/model-a', fallbacks: [], toolChoice: 'forced' }, rules_sha256: 'b'.repeat(64),
+    complete: true, end: null, nights: 3, first_night: null, last_night: null, cost: 0, verdicts: [], lessons,
+  },
+  path: '/somewhere/else/lessons.json', sha256: sha,
+});
+const dated = (pr: number, at: string): EvalCase => mkCase(pr, { review_at: at });
+
+function recordingDeps(): { deps: ReviewDeps; requests: string[] } {
+  const requests: string[] = [];
+  const deps = stubDeps();
+  const inner = deps.model;
+  deps.model = { complete: (r) => { requests.push(JSON.stringify(r.messages)); return inner.complete(r); } };
+  return { deps, requests };
+}
+
+test('a replay with lessons reviews each case as of its date with the lessons of other pull requests, and records how lessons did', async () => {
+  const lessons = lessonsOf([lessonRow('8:r', 8, LESSON_TEXT, '2026-03-04T00:00:00.000Z'), lessonRow('7:r', 7, OWN_TEXT, '2026-03-04T00:00:00.000Z')]);
+  const { deps, requests } = recordingDeps();
+  const args = baseArgs({ deps, cases: [dated(7, '2026-03-05T10:00:00.000Z')], lessons });
+  const s = await runReplay(args);
+  const sent = requests.join('\n');
+  assert.ok(sent.includes(LESSON_TEXT));
+  assert.ok(!sent.includes(OWN_TEXT));
+  const row = JSON.parse(readFileSync(join(args.outDir, 'results.jsonl'), 'utf8').trim()) as { lessons: unknown };
+  assert.deepEqual(row.lessons, { status: 'ok', code: 'ok', shown: 1 });
+  assert.equal(s.lessons_sha256, 'c'.repeat(64));
+  assert.equal(s.lessons_file, '/somewhere/else/lessons.json');
+  // before the lesson was made, nothing is shown
+  const early = recordingDeps();
+  await runReplay(baseArgs({ deps: early.deps, cases: [dated(7, '2026-03-03T10:00:00.000Z')], lessons }));
+  assert.ok(!early.requests.join('\n').includes(LESSON_TEXT));
+});
+
+test('a replay without lessons is what it was', async () => {
+  const { deps, requests } = recordingDeps();
+  const args = baseArgs({ deps });
+  const s = await runReplay(args);
+  assert.equal(requests.length, 3);
+  assert.ok(requests.every((r) => !r.includes('lesson')));
+  for (const line of readFileSync(join(args.outDir, 'results.jsonl'), 'utf8').trim().split('\n')) assert.ok(!('lessons' in (JSON.parse(line) as object)));
+  assert.ok(!Object.keys(s).some((k) => k.startsWith('lessons_')));
+  assert.ok(!readFileSync(join(args.outDir, 'summary.md'), 'utf8').includes('Lessons'));
+});
+
+test('a replay with lessons refuses a case without a date and the plain control', async () => {
+  const lessons = lessonsOf([]);
+  const args = baseArgs({ cases: [dated(7, '2026-03-05T10:00:00.000Z'), mkCase(8)], lessons });
+  await assert.rejects(runReplay(args), /^Error: case_without_date$/);
+  assert.ok(!existsSync(join(args.outDir, 'results.jsonl')));
+  await assert.rejects(runReplay(baseArgs({ cases: [dated(7, '2026-03-05T10:00:00.000Z')], lessons, plain: true })), /^Error: lessons_with_plain$/);
+});
+
+test('the summary counts the cases by how lessons did, and summary.md says so in one line', async () => {
+  const lessons = lessonsOf([lessonRow('8:r', 8, LESSON_TEXT, '2026-03-04T00:00:00.000Z')]);
+  const args = baseArgs({ cases: [dated(7, '2026-03-05T10:00:00.000Z'), dated(9, '2026-03-03T10:00:00.000Z')], lessons });
+  const s = await runReplay(args);
+  assert.deepEqual(s.lessons_cases, { ok: 1, empty: 1, skipped: 0, error: 0, none: 0 });
+  const md = readFileSync(join(args.outDir, 'summary.md'), 'utf8');
+  assert.ok(md.endsWith('Lessons: as of each case, from lessons.json. Cases shown a lesson: 1 of 2; with none to show: 1; not shown: 0; failed: 0; not asked: 0.\n'));
+  assert.ok(!md.includes('somewhere'));
 });
