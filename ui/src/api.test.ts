@@ -3,7 +3,7 @@ import { createApi, RequestFailed } from './api.ts';
 import type { SettingChanges, SettingsExport, SettingsSave, SettingsView } from './api-types.ts';
 
 const VIEW: SettingsView = {
-  now: '2026-03-01T10:00:00.000Z', version: 14, global: {}, defaults: {}, repositories: [],
+  now: '2026-03-01T10:00:00.000Z', started: '2026-03-01T09:00:00.000Z', version: 14, global: {}, defaults: {}, repositories: [],
   scorer: { on: false, waits: false }, endpoints: { model: 'https://llm.example.test/v1', scorer: null }, secrets: [], access: { publicUrl: 'https://visto.example.test', github: true, accounts: [], team: null },
 };
 const SAVE: SettingsSave = { version: 14, changes: [{ scope: 'global', path: 'learning', value: true }] };
@@ -25,11 +25,13 @@ test('the settings calls send what the service reads and read what it answers', 
   const exported: SettingsExport = { text: 'learning: true\n' };
 
   answers.push(
-    jsonOf(200, VIEW), jsonOf(200, VIEW), jsonOf(422, { error: 'invalid', issues }), jsonOf(409, { error: 'changed' }), jsonOf(422, { error: 'too_long' }),
+    jsonOf(200, VIEW), jsonOf(200, VIEW), jsonOf(200, { ...VIEW, restarting: true }), jsonOf(422, { error: 'invalid', issues }), jsonOf(409, { error: 'changed' }), jsonOf(422, { error: 'too_long' }),
     jsonOf(200, changes), jsonOf(200, changes), jsonOf(200, exported),
   );
   expect(await api.settings()).toEqual(VIEW);
-  expect(await api.saveSettings('tok', SAVE)).toEqual({ kind: 'saved', view: VIEW });
+  expect(await api.saveSettings('tok', SAVE)).toEqual({ kind: 'saved', view: VIEW, restarting: false });
+  // The view keeps none of the answer's own field.
+  expect(await api.saveSettings('tok', SAVE)).toEqual({ kind: 'saved', view: VIEW, restarting: true });
   expect(await api.saveSettings('tok', SAVE)).toEqual({ kind: 'invalid', issues });
   await expect(api.saveSettings('tok', SAVE)).rejects.toEqual(new RequestFailed(409, 'changed'));
   await expect(api.saveSettings('tok', SAVE)).rejects.toEqual(new RequestFailed(422, 'too_long'));
@@ -43,7 +45,7 @@ test('the settings calls send what the service reads and read what it answers', 
   };
   expect(seen).toEqual([
     ['/api/settings', get],
-    ['/api/settings', put], ['/api/settings', put], ['/api/settings', put], ['/api/settings', put],
+    ['/api/settings', put], ['/api/settings', put], ['/api/settings', put], ['/api/settings', put], ['/api/settings', put],
     ['/api/settings/changes?before=8977', get],
     ['/api/settings/changes', get],
     ['/api/settings/export', get],

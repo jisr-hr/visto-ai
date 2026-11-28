@@ -10,7 +10,7 @@ const set = (value: Setting['value'], written = false): Setting => ({
   written, value, source: written ? { by: 'ui', name: 'octo-lead', at: '2026-03-01T10:00:00.000Z' } : null, restart: false, waits: false,
 });
 const VIEW: SettingsView = {
-  now: '2026-03-01T10:00:00.000Z', version: 14,
+  now: '2026-03-01T10:00:00.000Z', started: '2026-03-01T09:00:00.000Z', version: 14,
   global: { learning: set(false), 'extra.map': set({ b: 1, a: 2 }, true) },
   defaults: { 'score.threshold': set(60), 'score.mode': set('full', true) },
   repositories: [{ name: 'acme/shop', settings: { 'score.threshold': set(60), 'score.mode': set('light', true) } }],

@@ -1,4 +1,6 @@
+import { randomBytes } from 'node:crypto';
 import { loadMigrations, MIGRATIONS_DIR, migrate } from './db/migrate.ts';
+import { storedAuditKey } from './db/generated-secrets.ts';
 import { beat, readHeartbeat } from './db/heartbeat.ts';
 import { markDismissFailed, standingApprovals } from './db/approvals.ts';
 import { askGate, askWithdraw, deleteFinishedJobs } from './db/jobs.ts';
@@ -71,6 +73,8 @@ export interface ServiceDeps {
   every: (ms: number, work: () => Promise<void>) => () => void;
   /** Absent: the settings are `config`, which never changes. Given: `config` is `settings.atStart`. */
   settings?: Settings;
+  /** Stops this service and starts the process again; a save from the UI that leaves a setting waiting for a restart calls it. */
+  restart?: () => void;
   /** The engine's dependencies for one review, from the settings it runs on (the service always gives them). */
   engineDeps: (source: Source, settings?: ServiceConfig) => ReviewDeps;
   review: (input: ReviewInput, deps: ReviewDeps) => Promise<ReviewResult>;
@@ -138,7 +142,7 @@ export function approvalsFor(dryRun: boolean, approvals: ForgeApprovals | undefi
 }
 
 /**
- * Takes the lock, migrates, recovers, then listens; the work that follows listening is not waited for.
+ * Takes the lock, migrates, reads the audit key, recovers, then listens; the work that follows listening is not waited for.
  * `settled` resolves when the work that follows listening has had its first try: the key check, the app check, with learning on the learning work's start and the judge's row (the first pass is not waited for, and no run of the judge starts), the redelivery attempt and, when that worked, the first beat.
  * `stop` drains the three runners (at most DRAIN_WAIT_MS between them), closes the listener and waits for requests in flight (at most STOP_WAIT_MS),
  * beats once more, waits for alerts and the status store's writes (at most ALERT_TIMEOUT_MS), closes the store, then the database, and releases the lock. It never rejects.
@@ -198,15 +202,17 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps): Pr
     ...(memory === null ? {} : memory),
     // How the second scorer did, told by each review that had one (call 12).
     scorerHealth: { noted: (ok, code) => { status.noted({ kind: 'scorer', name: '', part: '', ok, code }); } },
-    // The audit key goes to the review job and to nothing else.
-    ...(config.auditKey === undefined ? {} : { auditKey: config.auditKey }),
   };
+  /** The audit key: the file's when it writes one, else the one the database keeps, read at start before anything listens. */
+  let auditKey = config.auditKey;
   /**
    * A review job's dependencies on the settings `c`, given when its runner starts it, so that it keeps them to its end (call 20):
    * its repository settings, its limits and its engine (main makes the model client and the scorer from them).
    */
   const reviewDepsAt = (c: ServiceConfig): ReviewJobDeps => ({
     ...reviewBase,
+    // The audit key goes to the review job and to nothing else.
+    ...(auditKey === undefined ? {} : { auditKey }),
     settingsFor: (name) => repoSettingsFor(c, name),
     limits: { inputTokensPerCall: c.limits.inputTokensPerCall, batchesPerReview: c.limits.batchesPerReview, modelTimeoutSeconds: c.model.timeoutSeconds },
     engineDeps: (source) => deps.engineDeps(source, c),
@@ -382,6 +388,7 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps): Pr
       settings: {
         db, clock, settings: deps.settings, log: say,
         access: { publicUrl: ui.access.publicUrl, github: ui.signIn !== null, accounts: ui.access.accounts, team: ui.access.team },
+        ...(deps.restart === undefined ? {} : { restart: deps.restart }),
       },
     }),
   });
@@ -399,7 +406,7 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps): Pr
     ...(uiRoute === null ? {} : { ui: uiRoute }),
   });
 
-  // 1 to 4: the lock, the migrations, the recovery, the listener.
+  // 1 to 4: the lock, the migrations and the audit key, the recovery, the listener.
   let lock: InstanceLock | null;
   try {
     lock = await deps.takeLock();
@@ -415,6 +422,14 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps): Pr
   let listening: Listening;
   try {
     await migrate(db, loadMigrations(MIGRATIONS_DIR));
+    // With no key in the file, the first start generates one and the database keeps it: every later start reads that one.
+    // A key in the file wins, and the table is then not read. The line says where the key came from, never the key.
+    if (auditKey === undefined) {
+      auditKey = await storedAuditKey(db, () => randomBytes(32).toString('hex'), clock().toISOString());
+      say({ event: 'audit_key', from: 'database' });
+    } else {
+      say({ event: 'audit_key', from: 'config.yml' });
+    }
     await recoverJobs(db, clock(), say);
     // The checks the record and the config disagree on, or that a review left under way, are asked for.
     if (gateLive) say({ event: 'gate_sweep', asked: await sweepGate(db, settingsFor, clock().toISOString()) });
