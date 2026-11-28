@@ -330,7 +330,7 @@ test('github is refused while the config has GitHub sign-in off, on stderr with 
         const file = join(folder, 'off.yml');
         writeFileSync(file, text);
         const config = parseConfig(text, env);
-        assert.ok(config.ui === undefined || (config.ui.accounts.length === 0 && config.ui.team === null), what);
+        assert.ok(config.ui === undefined || (config.ui.accounts.length === 0 && config.ui.teams.length === 0), what);
         const label = `${what}, ${database === '' ? 'no database' : 'a database'}`;
         assert.deepEqual(await runMainApart(['github', '--config', file, '--login', 'octo-lead', '--role', 'admin'], env), [1, [], ['github sign-in is off']], label);
         assert.deepEqual(await runMainApart(['github', '--role', 'viewer', '--login', 'octo-dev', '--config', file], env), [1, [], ['github sign-in is off']], label);

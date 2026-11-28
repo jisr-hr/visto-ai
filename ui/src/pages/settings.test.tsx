@@ -56,7 +56,7 @@ function viewOf(over: { version?: number; global?: Record<string, Setting>; acce
       { kind: 'extension', of: 'example, option secret', variable: 'EXAMPLE_SECRET' },
       { kind: 'mcp_header', of: 'docs', variable: 'DOCS_TOKEN' },
     ],
-    access: over.access ?? { publicUrl: 'https://visto.example.test', github: true, accounts: ['octo-lead', 'octo-dev'], team: null },
+    access: over.access ?? { publicUrl: 'https://visto.example.test', github: true, accounts: ['octo-lead', 'octo-dev'], teams: [] },
   };
 }
 const VIEW = viewOf();
@@ -634,8 +634,8 @@ test('the secrets show only their variable and whether it is set, and Access sho
 
   const access = section('Access');
   expect(within(rowOf('Address')).getByText('https://visto.example.test')).toHaveClass('font-mono');
-  expect(within(rowOf('Team that may sign in through GitHub')).getByText('None')).toBeInTheDocument();
-  expect(within(rowOf('Team that may sign in through GitHub')).getByText('Its active members may sign in through the GitHub App, as viewers until an admin says otherwise. Set in config.yml.')).toBeInTheDocument();
+  expect(within(rowOf('Teams that may sign in through GitHub')).getByText('None')).toBeInTheDocument();
+  expect(within(rowOf('Teams that may sign in through GitHub')).getByText('Their active members may sign in through the GitHub App, as viewers until an admin says otherwise. Set in config.yml.')).toBeInTheDocument();
   const accounts = rowOf('Accounts that may sign in through GitHub');
   expect(within(accounts).getByText('octo-lead')).toBeInTheDocument();
   expect(within(accounts).getByText('octo-dev')).toBeInTheDocument();
@@ -643,20 +643,21 @@ test('the secrets show only their variable and whether it is set, and Access sho
   expect(within(access).queryByText(/Sign-in through GitHub is off/)).toBeNull();
 });
 
-test('Access names the team, or says GitHub sign-in is off', async () => {
-  const team = viewOf({ access: { publicUrl: 'https://visto.example.test', github: true, accounts: [], team: 'acme/visto-admins' } });
+test('Access names the teams, or says GitHub sign-in is off', async () => {
+  const team = viewOf({ access: { publicUrl: 'https://visto.example.test', github: true, accounts: [], teams: ['acme/visto-admins', 'acme/backend'] } });
   const first = await open({ settings: () => Promise.resolve(team) });
   expect(first).toBeDefined();
-  expect(within(rowOf('Team that may sign in through GitHub')).getByText('acme/visto-admins')).toHaveClass('font-mono');
+  expect(within(rowOf('Teams that may sign in through GitHub')).getByText('acme/visto-admins')).toHaveClass('font-mono');
+  expect(within(rowOf('Teams that may sign in through GitHub')).getByText('acme/backend')).toHaveClass('font-mono');
   expect(within(rowOf('Accounts that may sign in through GitHub')).getByText('None')).toBeInTheDocument();
 });
 
 test('GitHub sign-in off says so in place of the two rows', async () => {
-  const off = viewOf({ access: { publicUrl: 'https://visto.example.test', github: false, accounts: [], team: null } });
+  const off = viewOf({ access: { publicUrl: 'https://visto.example.test', github: false, accounts: [], teams: [] } });
   await open({ settings: () => Promise.resolve(off) });
   const access = section('Access');
   expect(within(access).getByText('Sign-in through GitHub is off: config.yml names neither accounts nor a team.')).toBeInTheDocument();
-  expect(within(access).queryByText('Team that may sign in through GitHub')).toBeNull();
+  expect(within(access).queryByText('Teams that may sign in through GitHub')).toBeNull();
   expect(within(access).queryByText('Accounts that may sign in through GitHub')).toBeNull();
   expect(within(access).getByText('Address')).toBeInTheDocument();
 });

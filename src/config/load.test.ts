@@ -1058,7 +1058,7 @@ test('the UI is off unless ui writes an address or names accounts or a team, and
 
 test('ui with only an address is on with password sign-in alone, and needs no client id or secret', () => {
   const block = "ui: { publicUrl: 'https://visto.example.test/' }\n";
-  const alone = { accounts: [], team: null, publicUrl: 'https://visto.example.test', clientId: null, clientSecret: null };
+  const alone = { accounts: [], teams: [], publicUrl: 'https://visto.example.test', clientId: null, clientSecret: null };
   const c = parseConfig(`${SERVICE_YAML}${block}`, ENV);
   assert.deepEqual(c.ui, alone);
   assert.equal(githubSignInOn(c.ui!), false);
@@ -1085,15 +1085,19 @@ test('an address written alone that is not one is refused by name, and quotes no
 test('ui with accounts or a team is read with the client id, the client secret from its variable and the public address as an origin', () => {
   const sign = { clientId: 'Iv1.0123456789abcdef', clientSecret: 'client-secret-for-tests-only' };
   const named = parseConfig(`${UI_APP}ui: { accounts: [octo-lead], publicUrl: 'https://visto.example.test/' }\n`, UI_ENV);
-  assert.deepEqual(named.ui, { accounts: ['octo-lead'], team: null, publicUrl: 'https://visto.example.test', ...sign });
+  assert.deepEqual(named.ui, { accounts: ['octo-lead'], teams: [], publicUrl: 'https://visto.example.test', ...sign });
   assert.deepEqual(named.app, APP_THREE);
   assert.equal(Object.keys(named.app!).length, 3);
   const team = parseConfig(`${UI_APP}ui: { team: acme/reviewers, publicUrl: http://localhost:8080 }\n`, UI_ENV);
-  assert.deepEqual(team.ui, { accounts: [], team: 'acme/reviewers', publicUrl: 'http://localhost:8080', ...sign });
+  assert.deepEqual(team.ui, { accounts: [], teams: ['acme/reviewers'], publicUrl: 'http://localhost:8080', ...sign });
   assert.equal(Object.keys(team.app!).length, 3);
+  // A list of teams is read in the order written.
+  const teams = parseConfig(`${UI_APP}ui: { team: [acme/backend, acme/frontend], publicUrl: http://localhost:8080 }\n`, UI_ENV);
+  assert.deepEqual(teams.ui, { accounts: [], teams: ['acme/backend', 'acme/frontend'], publicUrl: 'http://localhost:8080', ...sign });
+  assert.equal(githubSignInOn(teams.ui!), true);
   for (const [written, origin] of [['http://127.0.0.1', 'http://127.0.0.1'], ['https://visto.example.test:8443', 'https://visto.example.test:8443']] as const) {
     const c = parseConfig(`${UI_APP}ui: { accounts: [octo-lead], team: acme/reviewers, publicUrl: '${written}' }\n`, UI_ENV);
-    assert.deepEqual(c.ui, { accounts: ['octo-lead'], team: 'acme/reviewers', publicUrl: origin, ...sign }, written);
+    assert.deepEqual(c.ui, { accounts: ['octo-lead'], teams: ['acme/reviewers'], publicUrl: origin, ...sign }, written);
   }
 });
 
@@ -1143,6 +1147,8 @@ test('an account that is not a login, and a team that is not org/slug, are refus
   const bad: Array<[string, string]> = [
     ['accounts: [octo_lead]', 'ui.accounts'], ["accounts: ['']", 'ui.accounts'], [`accounts: [${logins(101)}]`, 'ui.accounts'],
     [`accounts: [${'a'.repeat(40)}]`, 'ui.accounts'], ['team: acme', 'ui.team'], ["team: 'acme/re viewers'", 'ui.team'],
+    ['team: []', 'ui.team'], ['team: [acme/reviewers, acme]', 'ui.team'],
+    [`team: [${Array.from({ length: 11 }, (_, i) => `acme/t${i}`).join(', ')}]`, 'ui.team'],
   ];
   for (const [body, where] of bad) {
     const issues = uiIssuesOf(`${UI_APP}ui: { ${body}, publicUrl: https://visto.example.test }\n`, UI_ENV);
@@ -1190,7 +1196,7 @@ test("the example's ui block, uncommented with the app's client id and secret, r
   };
   const c = parseConfig(text, env);
   assert.deepEqual(c.ui, {
-    accounts: ['octo-lead'], team: 'acme/reviewers', publicUrl: 'https://visto.example.test',
+    accounts: ['octo-lead'], teams: ['acme/reviewers'], publicUrl: 'https://visto.example.test',
     clientId: 'Iv1.0123456789abcdef', clientSecret: env.APP_CLIENT_SECRET,
   });
 });
