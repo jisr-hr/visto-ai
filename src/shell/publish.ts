@@ -39,6 +39,8 @@ export interface ApprovalContext {
   rule: ApprovalThreads; clearByReply: boolean; threshold: number;
   runs: StoredRun[] | null;                                      // every run of the pull request, this one included; null: could not be read
   stored: Array<StoredComment & { run: number }> | null;         // the app's stored comments; null: could not be read
+  /** The gate's check name where the gate enforces on this base branch; null elsewhere. A branch that requires it holds condition 8. */
+  enforcedCheck: (baseBranch: string) => string | null;
   drawn: () => boolean;   // 6.5: asked once, last, only when every other condition held; a throw or any answer but false is drawn
 }
 
@@ -84,12 +86,14 @@ async function decide(deps: PublishDeps, ref: PullRequestRef, installation: stri
   if (deps.approvals === undefined) return { code: 'rule_unreadable', detail: 'internal_error' };
   let rule: unknown;
   try {
-    rule = await deps.approvals.staleApprovals(ref, installation, info.baseBranch);
+    // Where the gate enforces, a branch that requires its check also holds a new commit until the commit is reviewed.
+    const check = ctx.enforcedCheck(info.baseBranch);
+    rule = await deps.approvals.staleApprovals(ref, installation, info.baseBranch, check ?? undefined);
   } catch (error) {
     return { code: 'rule_unreadable', detail: codeOf(error) };
   }
-  // Any answer but the two is no answer.
-  if (rule !== 'dismissed') return rule === 'kept' ? { code: 'rule_off' } : { code: 'rule_unreadable', detail: 'internal_error' };
+  // Any answer but the three is no answer.
+  if (rule !== 'dismissed' && rule !== 'gated') return rule === 'kept' ? { code: 'rule_off' } : { code: 'rule_unreadable', detail: 'internal_error' };
 
   // 6. The audit sample, asked once and last: only an answer of exactly false approves; any other, or a throw, sends it to a person.
   let drawn: unknown;

@@ -15,7 +15,8 @@ export type CheckPlan =
   | { state: 'failed'; code: string; evaluated: boolean }   // evaluated: the head has its review and the check could not be decided
   | { state: 'skipped'; actor: string; reason: string }
   | { state: 'bypassed' }
-  | { state: 'unwithdrawn'; code: string };      // an approval of the app's that could not be dismissed stands
+  | { state: 'unwithdrawn'; code: string }       // an approval of the app's that could not be dismissed stands
+  | { state: 'withdrawing' };                    // an approval of the app's of another head or base branch stands, its withdrawal under way
 
 export interface CheckFacts {
   gating: 'enforce' | 'shadow' | 'bypass';
@@ -25,6 +26,7 @@ export interface CheckFacts {
   paused: string | null;                         // why reviews are paused, when a job is pending
   runs: StoredRun[];
   unwithdrawn?: string | null;                   // the code of a standing approval's recorded withdrawal failure; absent or null: none
+  withdrawing?: boolean;                         // an approval of another head or base branch stands; absent: none
 }
 
 const isObject = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -36,6 +38,8 @@ export function planBefore(facts: CheckFacts): CheckPlan | null {
   if (facts.unwithdrawn !== undefined && facts.unwithdrawn !== null) {
     return { state: 'unwithdrawn', code: isShortCode(facts.unwithdrawn) ? facts.unwithdrawn : 'internal_error' };
   }
+  // A stale approval may count toward the approvals the branch requires: nothing passes while it stands, a skip included.
+  if (facts.withdrawing === true) return { state: 'withdrawing' };
   if (facts.skip !== null) return { state: 'skipped', actor: facts.skip.actor, reason: facts.skip.reason };
   if (facts.job === 'running') return { state: 'reviewing' };
   if (facts.job === 'pending') return facts.paused !== null ? { state: 'paused', code: facts.paused } : { state: 'reviewing' };
@@ -203,6 +207,12 @@ export function checkText(plan: CheckPlan, meta: CheckMeta): CheckText {
         "Dismiss that approval on the pull request's page. The service also tries again at the next commit, the next review of this pull request and its next start, and this check is decided again once the approval is gone.",
       ]);
     }
+    case 'withdrawing':
+      // No skip line: a skip does not pass it.
+      return make('in_progress', null, 'Withdrawing an earlier approval', [
+        'This reviewer approved an earlier commit of this pull request, or another base branch, and is dismissing that approval. While it stands it may count toward the approvals this branch requires, so this check waits, and a skip does not pass it.',
+        'The check is decided again once the approval is gone, usually within seconds. If it cannot be dismissed, this check fails and says why.',
+      ]);
   }
 }
 

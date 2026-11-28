@@ -331,6 +331,32 @@ test('a recorded failure to withdraw fails the check, outranks a skip and a revi
   assert.deepEqual(countsOf(unwithdrawn), NO_COUNTS);
 });
 
+test('a standing approval of another head or base branch holds the check: after a recorded failure and bypass, before a skip and a review', () => {
+  const skip = { actor: 'octo-lead', reason: 'hotfix' };
+  for (const over of [{}, { skip }, { job: 'running' as const }, { job: 'pending' as const, paused: 'spend_limit' }, { runs: [run(1)] }, { gating: 'shadow' as const, skip }]) {
+    assert.deepEqual(planBefore(facts({ ...over, withdrawing: true })), { state: 'withdrawing' }, JSON.stringify(over));
+  }
+  assert.deepEqual(planBefore(facts({ gating: 'bypass', skip, withdrawing: true })), { state: 'bypassed' });
+  assert.deepEqual(planBefore(facts({ unwithdrawn: 'github_403', withdrawing: true })), { state: 'unwithdrawn', code: 'github_403' });
+  for (const none of [{}, { withdrawing: false }]) {
+    assert.deepEqual(planBefore(facts({ ...none, skip })), { state: 'skipped', actor: 'octo-lead', reason: 'hotfix' });
+    assert.equal(planBefore(facts({ ...none, runs: [run(1)] })), null);
+  }
+  assert.deepEqual(countsOf({ state: 'withdrawing' }), NO_COUNTS);
+});
+
+test('the text of a withdrawal under way is pinned, in progress, and has no skip line', () => {
+  const summary = [
+    'This reviewer approved an earlier commit of this pull request, or another base branch, and is dismissing that approval. While it stands it may count toward the approvals this branch requires, so this check waits, and a skip does not pass it.',
+    'The check is decided again once the approval is gone, usually within seconds. If it cannot be dismissed, this check fails and says why.',
+  ].join('\n\n');
+  for (const m of [meta(), meta({ canSkip: true })]) {
+    const text = checkText({ state: 'withdrawing' }, m);
+    assert.deepEqual(text, { status: 'in_progress', conclusion: null, title: 'Withdrawing an earlier approval', summary });
+    assert.ok(!text.summary.includes(SKIP));
+  }
+});
+
 test('the text of a failed withdrawal is pinned and has no skip line', () => {
   const summary = (code: string): string => [
     `This reviewer approved an earlier commit of this pull request, or gave an approval it no longer stands behind, and could not dismiss it (\`${code}\`). While it stands it may count toward the approvals this branch requires, so this check fails.`,

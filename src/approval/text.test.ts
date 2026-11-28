@@ -25,8 +25,8 @@ test('each code has its sentence, pinned whole', () => {
   assert.equal(said('threads_unreadable'), `${NOT}the review threads of this pull request could not be read (\`github_403\`).`);
   assert.equal(said('open_thread', 'strict'), `${NOT}a major or blocker thread of this reviewer is still open, or its comment is gone. Here a thread counts as closed when a review verified a fix in changed code, or when it is resolved and someone other than the author, with access to the repository, replied in it.`);
   assert.equal(said('open_thread', 'gate'), `${NOT}a major or blocker thread of this reviewer is still open, or its comment is gone.`);
-  assert.equal(said('rule_unreadable'), `${NOT}the reviewer could not read whether the base branch dismisses an approval when new commits are pushed (\`github_403\`).`);
-  assert.equal(said('rule_off'), `${NOT}the base branch does not dismiss an approval when new commits are pushed. The reviewer approves only where a ruleset or the branch protection of the base branch dismisses stale approvals.`);
+  assert.equal(said('rule_unreadable'), `${NOT}the reviewer could not read whether the base branch dismisses an approval when new commits are pushed, or requires the merge gate's check (\`github_403\`).`);
+  assert.equal(said('rule_off'), `${NOT}the base branch does not dismiss an approval when new commits are pushed, nor hold a new commit to the merge gate. The reviewer approves only where a ruleset or the branch protection of the base branch dismisses stale approvals, or, where the gate enforces, requires the gate's check from this reviewer.`);
   assert.equal(said('refused'), `${NOT}GitHub refused this review as an approval (\`github_403\`), so it was posted as a comment.`);
   assert.equal(dismissMessage(META.head), 'This approval was for commit abcdef123456. A new commit, a change of the base branch, or a later review of this reviewer that does not approve means it no longer holds.');
   // The thread rule changes only the open thread's sentence.

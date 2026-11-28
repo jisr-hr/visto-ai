@@ -686,9 +686,36 @@ test('a gate job on a pull request whose approval could not be dismissed writes 
   assert.deepEqual(await statusOf(same), ['done', 'synced']);
 });
 
+test('a standing approval of another head or base branch holds the check until it is dismissed, and a skip does not pass it', async () => {
+  // The approval of h1 stands after a push to h2, its withdrawal not yet done: the skip of h2 waits for it.
+  const h = await harness({ live: liveOf({ head: 'h2' }), check: WAITING_CHECK });
+  const approval = await postedRun(h.db, '501', true);
+  await recordSkip(h.db, { ref: REF, headSha: 'h2', actor: 'octo-lead', reason: 'hotfix', commentId: '41', at: at(0) });
+  await h.run();
+  assert.deepEqual(writes(h).map((w) => [w.commit, w.status, w.conclusion, w.title]), [['h2', 'in_progress', null, 'Withdrawing an earlier approval']]);
+  assert.deepEqual((await rows(h.db)).map((r) => [r.head_sha, r.mode, r.state, r.code]), [['h2', 'enforce', 'withdrawing', null]]);
+  assert.deepEqual(await statusOf(h), ['done', 'synced']);
+  assert.equal(threadReads(h), 0);
+  // Once it is dismissed, by anyone, the check is decided again: here the skip of h2 lets it through.
+  assert.equal(await markDismissed(h.db, approval, at(6), 'app'), true);
+  await again(h, 7);
+  assert.deepEqual(writes(h).map((w) => [w.commit, w.conclusion, w.title]).at(-1), ['h2', 'success', 'Skipped by @octo-lead']);
+
+  // An approval of the live head on another base branch holds it too; one of the live head and base branch does not.
+  const retargeted = await harness({ live: liveOf({ baseBranch: 'dev' }), settings: withGate({ branches: ['main', 'dev'] }) });
+  await postedRun(retargeted.db, '501', true);
+  await retargeted.run();
+  assert.deepEqual((await rows(retargeted.db)).map((r) => r.state), ['withdrawing']);
+  const same = await harness({ live: liveOf({ head: 'h2' }) });
+  await postedRun(same.db, '501', true, 'h2');
+  await same.run();
+  assert.notEqual((await rows(same.db))[0]?.state, 'withdrawing');
+});
+
 test('with no failed withdrawal the evaluation is what it was', async () => {
   // Each case is run twice, on the same runs: posted as comments, and posted as approvals none of which carries a
-  // failure that stands (one with none, one whose failure ended with its dismissal, one of another pull request).
+  // failure that stands or holds the check (one of the live head with none, one whose failure ended with its dismissal,
+  // one of another pull request).
   const cases: Array<[string, Parameters<typeof harness>[0], (db: Db) => Promise<void>]> = [
     ['waiting', { live: liveOf({ head: 'h2' }) }, async () => {}],
     ['blocked', { threads: [[thread()]] }, async (db) => { await storeComment(db, await storeRun(db), 'major'); }],
@@ -704,7 +731,9 @@ test('with no failed withdrawal the evaluation is what it was', async () => {
     for (const approvals of [false, true]) {
       const h = await harness(options);
       await setup(h.db);
-      await postedRun(h.db, '601', approvals, 'h0');
+      // Of the live head and base branch, on another merge base, so that it is not the head's review.
+      const standing = await storeRun(h.db, { headSha: options?.live instanceof Error ? 'h1' : options?.live?.info.headSha ?? 'h1', baseSha: 'merge-old', findings: [], publish: false });
+      await markPublished(h.db, standing, { reviewId: '601', publishedAt: at(2), body: 'A review.', inlineDropped: false, approved: approvals, approvalCode: approvals ? 'approved' : null });
       const ended = await postedRun(h.db, '602', approvals, 'h0');
       const other = await postedRun(h.db, '603', approvals, 'h1', 8);
       if (approvals) {

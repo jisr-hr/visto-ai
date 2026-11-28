@@ -21,18 +21,30 @@ function branchOf(value: string): string {
   return encodeURIComponent(value);
 }
 
-// Whether a ruleset's pull request rule dismisses an approval when new commits are pushed. Every item is checked first:
-// a list with one item of another shape says nothing.
-function rulesDismiss(items: unknown[]): boolean {
-  let dismisses = false;
-  for (const item of items) {
-    if (!isObject(item) || typeof item.type !== 'string') throw bad();
-    if (item.type === 'pull_request' && isObject(item.parameters) && item.parameters.dismiss_stale_reviews_on_push === true) dismisses = true;
-  }
-  return dismisses;
+type Rule = 'dismissed' | 'gated' | 'kept';
+
+// Whether a list of required checks names `check` with this app as its only source: a check any source may report
+// does not hold a merge to the gate.
+function requires(list: unknown, appKey: 'integration_id' | 'app_id', check: string | undefined, appId: string): boolean {
+  return check !== undefined && Array.isArray(list)
+    && list.some((c) => isObject(c) && c.context === check && typeof c[appKey] === 'number' && String(c[appKey]) === appId);
 }
 
-export function createGithubApprovals(opts: { auth: AppAuth; fetch: typeof fetch; apiBase?: string }): ForgeApprovals {
+// What a ruleset's rules say: a pull request rule that dismisses an approval when new commits are pushed, else the check
+// required from this app. Every item is checked first: a list with one item of another shape says nothing.
+function rulesSay(items: unknown[], check: string | undefined, appId: string): Rule {
+  let dismisses = false;
+  let gated = false;
+  for (const item of items) {
+    if (!isObject(item) || typeof item.type !== 'string') throw bad();
+    if (!isObject(item.parameters)) continue;
+    if (item.type === 'pull_request' && item.parameters.dismiss_stale_reviews_on_push === true) dismisses = true;
+    if (item.type === 'required_status_checks' && requires(item.parameters.required_status_checks, 'integration_id', check, appId)) gated = true;
+  }
+  return dismisses ? 'dismissed' : gated ? 'gated' : 'kept';
+}
+
+export function createGithubApprovals(opts: { auth: AppAuth; appId: string; fetch: typeof fetch; apiBase?: string }): ForgeApprovals {
   const apiBase = (opts.apiBase ?? 'https://api.github.com').replace(/\/+$/, '');
 
   // The repository's name and the pull request's number are checked before a token is asked for.
@@ -64,19 +76,21 @@ export function createGithubApprovals(opts: { auth: AppAuth; fetch: typeof fetch
     }
   }
 
-  // Whether the branch's classic protection dismisses stale approvals. A 404 is no protection.
-  async function protectionDismisses(http: ReturnType<typeof createGithubHttp>, url: string): Promise<boolean> {
+  // What the branch's classic protection says, as the rules do. A 404 is no protection.
+  async function protectionSays(http: ReturnType<typeof createGithubHttp>, url: string, check: string | undefined): Promise<Rule> {
     const res = await http.send('GET', url, JSON_ACCEPT);
-    if (res.status === 404) return false;
+    if (res.status === 404) return 'kept';
     if (res.status !== 200) throw new Error(`github_${res.status}`);
     const body = await jsonOf(res);
     if (!isObject(body)) throw bad();
     const reviews = body.required_pull_request_reviews;
-    return isObject(reviews) && reviews.dismiss_stale_reviews === true;
+    if (isObject(reviews) && reviews.dismiss_stale_reviews === true) return 'dismissed';
+    const checks = body.required_status_checks;
+    return isObject(checks) && requires(checks.checks, 'app_id', check, opts.appId) ? 'gated' : 'kept';
   }
 
   return {
-    async staleApprovals(ref: PullRequestRef, installation: string, branch: string): Promise<'dismissed' | 'kept'> {
+    async staleApprovals(ref: PullRequestRef, installation: string, branch: string, check?: string): Promise<Rule> {
       digits(installation);
       const name = branchOf(branch);
       const { http } = await httpFor(installation, ref);
@@ -84,12 +98,14 @@ export function createGithubApprovals(opts: { auth: AppAuth; fetch: typeof fetch
       // Either form saying so is enough; a form that could not be read is no answer, and the first failure is the one given.
       let failure: unknown = null;
       try {
-        if (rulesDismiss(await http.paged(`${repo}/rules/branches/${name}`, MAX_RULE_PAGES))) return 'dismissed';
+        const said = rulesSay(await http.paged(`${repo}/rules/branches/${name}`, MAX_RULE_PAGES), check, opts.appId);
+        if (said !== 'kept') return said;
       } catch (error) {
         failure = error;
       }
       try {
-        if (await protectionDismisses(http, `${repo}/branches/${name}/protection`)) return 'dismissed';
+        const said = await protectionSays(http, `${repo}/branches/${name}/protection`, check);
+        if (said !== 'kept') return said;
       } catch (error) {
         if (failure === null) failure = error;
       }
