@@ -194,8 +194,9 @@ export interface ForgeChecks {
 
 export interface ForgeApprovals {
   /** 'dismissed' when an active ruleset's pull request rule, or the branch protection, dismisses an approval when new commits are pushed;
-   *  'kept' when both were read and neither does. Rejects with a short code when neither said so and one could not be read. */
-  staleApprovals(ref: PullRequestRef, installation: string, branch: string): Promise<'dismissed' | 'kept'>;
+   *  else 'gated' when `check` is given and either requires a check of that name that only this app may report; 'kept' when both
+   *  were read and neither says so. Rejects with a short code when neither said so and one could not be read. */
+  staleApprovals(ref: PullRequestRef, installation: string, branch: string, check?: string): Promise<'dismissed' | 'gated' | 'kept'>;
   /** One review as the git service holds it now; its commit is null when the service gives none. null when it answers that there is none. Rejects with a short code. */
   readReview(ref: PullRequestRef, installation: string, reviewId: string): Promise<{ state: OwnReviewState; commit: string | null } | null>;
   /** Dismisses one review. Sent once. Rejects with a short code and says nothing about whether it took effect. */

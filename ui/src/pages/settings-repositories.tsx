@@ -274,7 +274,7 @@ function Pane({ form, scope }: { form: Form; scope: string }) {
               <span>
                 Visto AI posts the review as an approval only when every file is reviewed, nothing is at or above the threshold, no major or blocker finding it
                 raised is still open, the pull request is not a draft or from a fork, and the base branch&apos;s rules on GitHub dismiss old approvals when new
-                commits are pushed. Any new commit takes the approval back.
+                commits are pushed, or the merge gate enforces on the branch and its rules require the gate&apos;s check. Any new commit takes the approval back.
               </span>
             </div>
             <Row
@@ -310,7 +310,7 @@ function Pane({ form, scope }: { form: Form; scope: string }) {
               </Badge>
             </Row>
             <p className="mt-1 mb-2 text-[13px] text-muted">
-              It approves only where the base branch&apos;s rules dismiss stale approvals, and never a draft or a pull request from a fork.
+              It approves only where the base branch&apos;s rules dismiss stale approvals or require the enforced gate&apos;s check, and never a draft or a pull request from a fork.
             </p>
           </>
         ) : null}

@@ -22,6 +22,18 @@ export async function standingApprovals(db: Db, ref: PullRequestRef): Promise<St
   return rows.map((r) => ({ run: r.run, reviewId: r.review_id, headSha: r.head_sha, baseBranch: r.base_branch, failure: r.dismiss_failure }));
 }
 
+/** Whether a standing approval of another head or base branch than these stands: one the withdraw job dismisses (a null base branch is another). */
+export async function staleApprovalStands(db: Db, ref: PullRequestRef, headSha: string, baseBranch: string): Promise<boolean> {
+  const rows = await db.query(
+    `select 1 from visto_ai.review_runs
+     where service = $1 and owner = $2 and repo = $3 and number = $4
+       and published and not dry_run and approved and dismissed_at is null and review_id is not null
+       and (head_sha <> $5 or base_branch is distinct from $6)
+     limit 1`,
+    [...keyOf(ref), storable(headSha), storable(baseBranch)]);
+  return rows.length === 1;
+}
+
 /** Whether the pull request has a standing approval; with `reviewId`, one posted as that review. */
 export async function hasStandingApproval(db: Db, ref: PullRequestRef, reviewId?: string): Promise<boolean> {
   const rows = await db.query(

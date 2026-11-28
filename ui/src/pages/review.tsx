@@ -111,6 +111,9 @@ function GateSentence({ gate }: { gate: GateShown }): ReactElement {
     case 'unwithdrawn':
       rest = <>{' fails: an earlier approval is not withdrawn'}{withCode(gate.code)}{'.'}</>;
       break;
+    case 'withdrawing':
+      rest = ' waits: an earlier approval is being withdrawn.';
+      break;
     case 'closed':
       rest = ' was not written: the pull request is closed.';
       break;
