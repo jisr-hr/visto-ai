@@ -1,7 +1,7 @@
 // The operator's export (plan "evals with lessons", calls 4, 5, 16): the findings of published runs, the replies under
 // them and the later verdicts of their threads, read in one read-only transaction and written to one file, mode 600,
 // outside the project. It writes nothing to the database. Nothing it prints holds a reply, a finding, a path or a login.
-import { chmodSync, existsSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, rmSync, writeFileSync } from 'node:fs';
 
 import { isApplied } from '../../db/migrate.ts';
 import type { Db } from '../../db/types.ts';
@@ -28,7 +28,8 @@ export async function exportFindings(db: Db, now: Date): Promise<FindingsFile> {
   return db.transaction(async (tx) => {
     await tx.query('set transaction isolation level repeatable read, read only');
     const rows = await tx.query<FindingRow>(
-      `select c.service, c.owner, c.repo, c.number, r.id as run, r.head_sha, r.base_sha, r.started_at, r.result -> 'findings' as findings,
+      `select c.service, c.owner, c.repo, c.number, r.id as run, r.head_sha, r.base_sha, r.started_at,
+              case when row_number() over (partition by r.id order by c.id) = 1 then r.result -> 'findings' end as findings,
               c.comment_id, c.path, c.side, c.line, c.severity, c.quote
        from visto_ai.review_comments c
        join visto_ai.review_runs r on r.id = c.run
@@ -67,11 +68,14 @@ export async function exportFindings(db: Db, now: Date): Promise<FindingsFile> {
       list.push({ run: x.run, started_at: x.started_at.toISOString(), published_at: x.published_at === null ? null : x.published_at.toISOString(), verdict: x.verdict });
       later.set(keyOf(x.service, x.comment_id), list);
     }
+    // The run's findings come once, on its first comment's row (the rows are in run order).
+    const findingsOfRun = new Map<number, unknown>();
+    for (const x of rows) if (!findingsOfRun.has(x.run)) findingsOfRun.set(x.run, x.findings);
     const findings: ExportedFinding[] = rows.map((x) => ({
       repo: `${x.owner}/${x.repo}`, pr_number: x.number,
       run: { id: x.run, head_sha: x.head_sha, base_sha: x.base_sha, started_at: x.started_at.toISOString() },
       comment_id: x.comment_id, path: x.path, side: x.side, line: x.line, severity: x.severity,
-      finding: findingBody({ path: x.path, side: x.side, line: x.line, severity: x.severity, quote: x.quote }, x.findings),
+      finding: findingBody({ path: x.path, side: x.side, line: x.line, severity: x.severity, quote: x.quote }, findingsOfRun.get(x.run)),
       replies: replies.get(keyOf(x.service, x.comment_id)) ?? [],
       later: later.get(keyOf(x.service, x.comment_id)) ?? [],
     }));
@@ -84,8 +88,9 @@ export async function exportCommand(db: Db, out: string, force: boolean, now: Da
   if (!(await isApplied(db, '0003_publishing'))) throw new Error('database_not_migrated');
   if (!force && existsSync(out)) throw new Error('out_exists');
   const file = await exportFindings(db, now);
+  if (force) rmSync(out, { force: true });          // a new file, so it is never written wide
   try {
-    writeFileSync(out, findingsText(file), { mode: 0o600, flag: force ? 'w' : 'wx' });
+    writeFileSync(out, findingsText(file), { mode: 0o600, flag: 'wx' });
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'EEXIST') throw new Error('out_exists');
     throw error;

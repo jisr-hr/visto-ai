@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -114,4 +114,14 @@ test('nothing printed or in summary.md holds a reply, a finding, a lesson, a quo
   const hay = lines.join('\n') + '\n' + readFileSync(join(out, 'summary.md'), 'utf8');
   for (const secret of [BODY, QUOTE, LESSON, FINDING, PATH, input, out, 'acme', 'shop', 'ana', 'r1']) assert.ok(!hay.includes(secret), secret);
   assert.match(lines[0]!, /^nights \d+, judged \d+, lessons \d+, given up \d+, waiting \d+, calls \d+, asked now \d+, cost [\d.]+, spent now [\d.]+$/);
+});
+
+test('a run that dies leaves no lessons.json or summary.md of an older run behind', async () => {
+  const out = tmp();
+  await judgeReplies(args(three(), out, fake().client));
+  assert.ok(existsSync(join(out, 'lessons.json')) && existsSync(join(out, 'summary.md')));
+  writeFileSync(join(out, 'answers.jsonl'), 'not json\n');
+  await assert.rejects(judgeReplies(args(three(), out, fake().client)), { message: 'bad_answers_line_1' });
+  assert.equal(existsSync(join(out, 'lessons.json')), false);
+  assert.equal(existsSync(join(out, 'summary.md')), false);
 });

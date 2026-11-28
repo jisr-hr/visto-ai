@@ -3,7 +3,7 @@
 // and short codes, never a reply, a finding, a lesson, a quote, a path or a login.
 import { createHash } from 'node:crypto';
 import { basename, join } from 'node:path';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, rmSync } from 'node:fs';
 
 import type { ModelClient } from '../../engine/types.ts';
 import { askJudge, JUDGE_RULES, JUDGE_TOOL } from '../../memory/judge.ts';
@@ -21,6 +21,8 @@ export interface JudgeRepliesArgs {
 export async function judgeReplies(args: JudgeRepliesArgs): Promise<string[]> {
   const { file, sha256 } = loadFindings(args.findingsPath);
   mkdirSync(args.outDir, { recursive: true });
+  // A run that dies must not leave the last run's complete file for `replay`, `backtest` and `memory-count` to read.
+  for (const name of ['lessons.json', 'summary.md']) rmSync(join(args.outDir, name), { force: true });
   const kept = keptAsk(join(args.outDir, 'answers.jsonl'), args.setting, (input) =>
     askJudge(args.model, input, args.token(), args.setting.toolChoice === 'auto', args.timeoutMs));
   const sim = await simulateNights(file, kept.ask, () => (kept.spent() >= args.maxCost ? 'spend_limit' : null));

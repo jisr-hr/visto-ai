@@ -1,6 +1,6 @@
 // The composition root: the only place real clients are built.
 import { randomBytes } from 'node:crypto';
-import { chmodSync, existsSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ConfigError, contractFile, loadConfig } from '../config/load.ts';
@@ -290,8 +290,9 @@ function scoreCompareCommand(argv: string[], out: (line: string) => void): void 
   if (lessonsMode) out('comparing lessons');
   out(`compared: ${both.length} cases that both runs hold with the status ok; in one run only: ${oneOnly}; in both runs but not ok in one: ${notOk}`);
   for (const warning of warnings) if (warning !== null) out(warning);
-  out(`shown memory: ${shown.size}; none to show: ${empty.size}; other: ${otherCount}; of the cases shown memory, with another number of model calls: ${otherCalls}`);
-  out('Cases shown memory: the numbers of each run, each with its count n and its step, the smallest difference that count can show (focus, a share of lines, has its count of pull requests and no step):');
+  const what = lessonsMode ? 'a lesson' : 'memory';
+  out(`shown ${what}: ${shown.size}; none to show: ${empty.size}; other: ${otherCount}; of the cases shown ${what}, with another number of model calls: ${otherCalls}`);
+  out(`Cases shown ${what}: the numbers of each run, each with its count n and its step, the smallest difference that count can show (focus, a share of lines, has its count of pull requests and no step):`);
   out(`| threshold | run | ${NUMBER_NAMES.join(' | ')} |`);
   out(`| ${['threshold', 'run', ...NUMBER_NAMES].map(() => '---').join(' | ')} |`);
   for (const t of [...THRESHOLDS, 'own' as const]) {
@@ -300,10 +301,10 @@ function scoreCompareCommand(argv: string[], out: (line: string) => void): void 
       out(`| ${t} | ${name} | ${NUMBER_NAMES.map((x) => cellOf(x, m[x], m[`${x}_n`])).join(' | ')} |`);
     }
   }
-  out('Cases shown memory: moves from the baseline to the candidate:');
+  out(`Cases shown ${what}: moves from the baseline to the candidate:`);
   for (const line of moveLines(scoreMoves(only(base.scores, shown), only(cand.scores, shown), THRESHOLDS))) out(line);
   if (noise !== null) {
-    out('Noise: moves from the baseline to the second baseline on the cases shown memory:');
+    out(`Noise: moves from the baseline to the second baseline on the cases shown ${what}:`);
     for (const line of moveLines(scoreMoves(only(base.scores, shown), only(noise.scores, shown), THRESHOLDS))) out(line);
   }
   out('Cases with none to show: their requests were the same in both runs, so what moved is noise:');
@@ -419,8 +420,9 @@ function lessonCasesCommand(argv: string[], out: (line: string) => void): void {
   const found = lessonCases(history.cases, findings.file, lessons.file);
   const shown = new Set(found.rows.filter((r) => r.shown > 0).map((r) => r.key));
   const kept = parsed.flags.has('only-shown') ? found.cases.filter((c) => shown.has(caseKey(c))) : found.cases;
+  if (force) rmSync(outPath, { force: true });
   try {
-    writeFileSync(outPath, kept.map((c) => JSON.stringify(c) + '\n').join(''), { mode: 0o600, flag: force ? 'w' : 'wx' });
+    writeFileSync(outPath, kept.map((c) => JSON.stringify(c) + '\n').join(''), { mode: 0o600, flag: 'wx' });
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'EEXIST') throw new Error('out_exists');
     throw error;

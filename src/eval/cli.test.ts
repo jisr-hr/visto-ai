@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import test from 'node:test';
@@ -869,9 +869,11 @@ test('lesson-cases writes the cases, prints counts and one line each, and --only
   assert.equal(statSync(f.out).mode & 0o777, 0o600);
   assert.deepEqual(lines.join('\n').includes('t7'), false);
 
+  chmodSync(f.out, 0o644);
   const [, shownLines] = await run([...base, '--only-shown', '--force'], {});
   assert.deepEqual(shownLines, lines);                                          // the counts are of all three
   assert.deepEqual(loadCases(f.out).cases.map((c) => c.pr_number), [9]);
+  assert.equal(statSync(f.out).mode & 0o777, 0o600);                            // a forced file is a new one, never wide
 });
 
 test('replay takes --lessons outside the project, refuses it with --plain and cases without a date, and says so before any case starts', async () => {
@@ -959,7 +961,9 @@ test('score-compare compares lessons only between runs with the same memory, and
   assert.equal(code, 0);
   assert.equal(lines[0], 'comparing lessons');
   assert.equal(lines[1], 'compared: 4 cases that both runs hold with the status ok; in one run only: 0; in both runs but not ok in one: 0');
-  assert.equal(lines[2], 'shown memory: 2; none to show: 1; other: 1; of the cases shown memory, with another number of model calls: 0');
+  assert.equal(lines[2], 'shown a lesson: 2; none to show: 1; other: 1; of the cases shown a lesson, with another number of model calls: 0');
+  assert.ok(lines.includes('Cases shown a lesson: moves from the baseline to the candidate:'));
+  assert.ok(!lines.some((l) => l.includes('shown memory')));
   const [okSame] = await run(['score-compare', memA, compareDir('cl-both-a', candidate, candidateRows, { ...mem('a'), ...les })]);
   assert.equal(okSame, 0);
   assert.deepEqual(await run(['score-compare', memA, compareDir('cl-both-b', candidate, candidateRows, { ...mem('b'), ...les })]), [1, ['different_memory']]);
