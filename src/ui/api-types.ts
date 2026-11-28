@@ -105,7 +105,7 @@ export interface SettingsView {
   /** Where the keys are sent: set in config.yml only (no admin can change it here); `scorer` is read from the file (its default when the block writes none), so it shows while the scorer is off; null only when the file has no scorer block. */
   endpoints: { model: string; scorer: string | null };
   secrets: SecretState[];
-  access: { publicUrl: string; github: boolean; accounts: string[]; team: string | null };
+  access: { publicUrl: string; github: boolean; accounts: string[]; teams: string[] };
 }
 /** The answer to a save: the settings as they now are, and whether the service is restarting for one that waits. */
 export type SettingsSaved = SettingsView & { restarting: boolean };

@@ -359,7 +359,7 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps): Pr
   // sign-in is on when the file names an account or a team and the service was given a sign-in, which is read only then.
   const ui = config.ui === undefined || deps.ui === undefined ? null : {
     // Who may open it and the address only: the client secret stays with the adapter.
-    access: { accounts: config.ui.accounts, team: config.ui.team, publicUrl: config.ui.publicUrl },
+    access: { accounts: config.ui.accounts, teams: config.ui.teams, publicUrl: config.ui.publicUrl },
     signIn: githubSignInOn(config.ui) ? deps.ui.signIn : null, files: deps.ui.files,
     cost: deps.ui.passwordCost,
   };
@@ -387,7 +387,7 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps): Pr
     ...(deps.settings === undefined ? {} : {
       settings: {
         db, clock, settings: deps.settings, log: say,
-        access: { publicUrl: ui.access.publicUrl, github: ui.signIn !== null, accounts: ui.access.accounts, team: ui.access.team },
+        access: { publicUrl: ui.access.publicUrl, github: ui.signIn !== null, accounts: ui.access.accounts, teams: ui.access.teams },
         ...(deps.restart === undefined ? {} : { restart: deps.restart }),
       },
     }),
@@ -496,8 +496,8 @@ export async function startService(config: ServiceConfig, deps: ServiceDeps): Pr
 
   async function appCheck(): Promise<void> {
     if (ending) return;
-    // With GitHub sign-in on and a team named, the UI reads its members (call 27); else nothing of it is asked for.
-    const lacking = await deps.appInfo.lacks(config.dryRun, gateUseOf(config), approvalUseOf(config), ui !== null && ui.signIn !== null && ui.access.team !== null);
+    // With GitHub sign-in on and a team named, the UI reads their members (call 27); else nothing of it is asked for.
+    const lacking = await deps.appInfo.lacks(config.dryRun, gateUseOf(config), approvalUseOf(config), ui !== null && ui.signIn !== null && ui.access.teams.length > 0);
     if (ending) return;
     // The app's state, then every open feature_off cleared, before what is still missing is raised and stored again (call 10).
     status.appChecked(lacking);

@@ -24,7 +24,7 @@ export const MAX_LIVE_STATES = 1000;
 export interface AuthDeps {
   db: Db;
   // Never the client id or secret, which only the adapter holds: the config's `ui` itself is refused by type.
-  ui: Pick<UiConfig, 'accounts' | 'team' | 'publicUrl'> & { clientId?: never; clientSecret?: never };
+  ui: Pick<UiConfig, 'accounts' | 'teams' | 'publicUrl'> & { clientId?: never; clientSecret?: never };
   signIn: ForgeSignIn | null;   // null: GitHub sign-in off
   checks: Pick<ForgeChecks, 'isTeamMember'>;
   clock: () => Date; log: (entry: Record<string, unknown>) => void;
@@ -115,14 +115,22 @@ export function createAuth(deps: AuthDeps): Auth {
   const random = deps.random ?? ((): string => randomBytes(32).toString('base64url'));
   const callback = `${deps.ui.publicUrl}/api/auth/callback`;
   const accounts = new Set(deps.ui.accounts.map((login) => login.toLowerCase()));
-  const team = deps.ui.team;
+  const teams = deps.ui.teams;
   let sweptAt: number | null = null;
 
-  // Call 11: a login named in the file, else an active member of the team, read through the app's installation on its
-  // organisation. Anything that cannot be read refuses.
+  // Call 11: a login named in the file, else an active member of one of the teams. Every team is read at once; the first one
+  // written that answers yes lets the person in. With no yes, a team that could not be read refuses as it does alone.
   async function wayIn(signIn: ForgeSignIn, login: string): Promise<{ via: string } | Ending> {
     if (accounts.has(login.toLowerCase())) return { via: 'account' };
-    if (team === null) return refuse('not_allowed');
+    const answers = await Promise.all(teams.map((team) => memberOf(signIn, team, login)));
+    const at = answers.indexOf(true);
+    if (at >= 0) return { via: teams[at]! };
+    return answers.find((answer) => answer !== false && answer !== true) ?? refuse('not_allowed');
+  }
+
+  // Whether the login is an active member of the team, read through the app's installation on its organisation; an Ending
+  // when it cannot be read.
+  async function memberOf(signIn: ForgeSignIn, team: string, login: string): Promise<boolean | Ending> {
     let installation: string | null;
     try {
       installation = await signIn.orgInstallation(team.split('/')[0] ?? '');
@@ -130,14 +138,12 @@ export function createAuth(deps: AuthDeps): Auth {
       return refuse('unverified', codeOf(error));
     }
     if (installation === null) return refuse('unverified', 'not_installed');
-    let member: boolean;
     try {
       // The gate's adapter tries a call again and waits up to a minute each time: the sign-in waits for it 10 seconds at most.
-      member = await inTime(deps.checks.isTeamMember(installation, team, login));
+      return (await inTime(deps.checks.isTeamMember(installation, team, login))) === true;
     } catch (error) {
       return refuse('unverified', codeOf(error));
     }
-    return member === true ? { via: team } : refuse('not_allowed');
   }
 
   async function decide(signIn: ForgeSignIn, query: URLSearchParams, cookies: Record<string, string>): Promise<Ending> {
@@ -194,7 +200,7 @@ export function createAuth(deps: AuthDeps): Auth {
   // Call 11: the way a session was let in must still hold in this config, whatever else the config names.
   function stillHolds(row: { login: string; via: string }): boolean {
     if (row.via === 'account') return accounts.has(row.login.toLowerCase());
-    return team !== null && row.via.toLowerCase() === team.toLowerCase();
+    return teams.some((team) => row.via.toLowerCase() === team.toLowerCase());
   }
 
   // A password account's session holds while it is one, whatever the file names; a GitHub account's while its way in holds.

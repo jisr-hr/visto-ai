@@ -334,12 +334,18 @@ function Access({ access }: { access: SettingsView['access'] }) {
         <>
           <PlainRow
             id="l-team"
-            label="Team that may sign in through GitHub"
-            help="Its active members may sign in through the GitHub App, as viewers until an admin says otherwise. Set in config.yml."
+            label="Teams that may sign in through GitHub"
+            help="Their active members may sign in through the GitHub App, as viewers until an admin says otherwise. Set in config.yml."
           >
-            {access.team === null ? none : <span className={MONO}>{access.team}</span>}
+            {access.teams.length === 0
+              ? none
+              : access.teams.map((team) => (
+                  <span key={team} className={CHIP}>
+                    {team}
+                  </span>
+                ))}
           </PlainRow>
-          <PlainRow id="l-logins" label="Accounts that may sign in through GitHub" help="GitHub logins named in config.yml, beside the team.">
+          <PlainRow id="l-logins" label="Accounts that may sign in through GitHub" help="GitHub logins named in config.yml, beside the teams.">
             {access.accounts.length === 0
               ? none
               : access.accounts.map((login) => (
