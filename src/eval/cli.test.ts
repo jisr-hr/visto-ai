@@ -894,3 +894,93 @@ test('replay takes --lessons outside the project, refuses it with --plain and ca
   assert.deepEqual(await run(args(['--lessons', join(folder, 'missing.json')]), env), [2, ['usage: cannot read --lessons']]);
   assert.deepEqual(await run(args(['--lessons', lessons]), env), [1, ['case_without_date']]);
 });
+
+// ---- lessons in the backtest, its count and its comparisons (plan "evals with lessons", task 7) ----
+function lessonsJson(folder: string, name = 'lessons.json', lessons: unknown[] = []): string {
+  const path = join(folder, name);
+  writeFileSync(path, JSON.stringify({
+    version: 1, findings_file: 'findings.jsonl', findings_sha256: 'a'.repeat(64), exported_at: '2026-03-20T08:00:00.000Z',
+    setting: { model: 'm', fallbacks: [], toolChoice: 'forced' }, rules_sha256: 'b'.repeat(64), complete: true, end: null, nights: 0,
+    first_night: null, last_night: null, cost: 0, verdicts: [], lessons,
+  }));
+  return path;
+}
+
+test('a backtest with lessons is refused with a scorer in the config, and inside the project', async () => {
+  const folder = mkdtempSync(tmpdir() + '/');
+  const history = join(folder, 'history.jsonl');
+  writeFileSync(history, serializeCase(historyCase(1, '2026-03-01T12:00:00Z')) + '\n');
+  const lessons = lessonsJson(folder);
+  const config = join(folder, 'config.yml');
+  writeFileSync(config, 'model:\n  apiKey: { env: MODEL_KEY }\n  model: vendor/model-a\nscorer:\n  apiKey: { env: MODEL_KEY }\n  model: vendor/decider\nrepositories:\n  defaults:\n    score:\n      threshold: 80\n');
+  const env = { GITHUB_TOKEN: 't', MODEL_KEY: 'k' };
+  const base = ['backtest', '--history', history, '--out', join(folder, 'out'), '--label', 'x', '--config', config];
+  assert.deepEqual(await run([...base, '--lessons', lessons], env), [2, ['usage: --lessons cannot be used with a scorer in the config']]);
+  assert.deepEqual(await run([...base, '--lessons', join(projectRoot, 'l.json')], env), [2, ['usage: --lessons must be outside the project folder']]);
+});
+
+test('memory-count with lessons counts the cases shown a lesson and those with a labelled file, and keeps its other lines', async () => {
+  const folder = mkdtempSync(tmpdir() + '/');
+  const history = join(folder, 'history.jsonl');
+  const memory = join(folder, 'memory.jsonl');
+  const lead = { kind: 'inline' as const, id: 'm3', author: 'octo-lead', bot: false, association: 'member' as const, at: '2026-03-06T10:00:00Z', body: 'x', commit: 'head30000000', path: TAX, side: 'RIGHT' as const, line: 2 };
+  writeFileSync(memory, serializeCase(historyCase(1, '2026-03-01T12:00:00Z')) + '\n');
+  writeFileSync(history, [historyCase(2, '2026-03-05T12:00:00Z'), historyCase(3, '2026-03-06T12:00:00Z', [lead])].map(serializeCase).join('\n') + '\n');
+  const lessons = lessonsJson(folder, 'lessons.json', [{
+    ref: '20:r20', repo: 'acme/shop', number: 20, reply: 'r20', path: TAX, createdAt: '2026-03-02T00:00:00.000Z', madeAt: '2026-03-02T00:00:00.000Z',
+    expiresAt: '2026-09-01T00:00:00.000Z', text: 'Discounts apply before tax in this shop, so a finding on the order of the two is wrong.',
+  }]);
+  // --memory stays required unless --lessons is given
+  assert.deepEqual(await run(['memory-count', '--history', history], {}), [2, ['usage: memory-count needs --memory']]);
+  const [code, out] = await run(['memory-count', '--history', history, '--lessons', lessons], {});
+  assert.equal(code, 0);
+  assert.equal(out[0], 'cases 2, with a line 0, with a labelled file that got a line 0');
+  assert.deepEqual(out.slice(-3), [
+    'lessons: cases shown a lesson 2, with a labelled file 1',
+    'acme/shop#2@head20000000: lessons 1', 'acme/shop#3@head30000000: lessons 1',
+  ]);
+  const [both, withMemory] = await run(['memory-count', '--history', history, '--memory', memory, '--lessons', lessons], {});
+  assert.equal(both, 0);
+  assert.equal(withMemory.filter((l) => l.startsWith('lessons: ')).length, 1);
+  const [, without] = await run(['memory-count', '--history', history, '--memory', memory], {});
+  assert.equal(without.some((l) => l.startsWith('lessons: ')), false);
+});
+
+test('score-compare compares lessons only between runs with the same memory, and refuses the rest', async () => {
+  const mem = (n: string) => ({ memory_file: `/elsewhere/${n}.jsonl`, memory_sha256: (n === 'a' ? '1' : '2').repeat(64) });
+  const les = { lessons_file: '/elsewhere/lessons.json', lessons_sha256: '3'.repeat(64) };
+  const ls = (status: string) => ({ status, code: status, lines: 0, lessons: { status, code: status, shown: status === 'ok' ? 1 : 0 } });
+  const rows = (status: (i: number) => string): Row[] => ['k1', 'k2', 'k3', 'k4'].map((key, i) => ({ key, status: 'ok', calls: 1, memory: ls(status(i)) as never }));
+  const candidateRows = rows((i) => (i < 2 ? 'ok' : i === 2 ? 'empty' : 'skipped'));
+  const none = compareDir('cl-none', baseline, baseRows);
+  const memA = compareDir('cl-mem-a', baseline, baseRows, mem('a'));
+  const lessOnly = compareDir('cl-less', candidate, candidateRows, les);
+  const [code, lines] = await run(['score-compare', none, lessOnly]);
+  assert.equal(code, 0);
+  assert.equal(lines[0], 'comparing lessons');
+  assert.equal(lines[1], 'compared: 4 cases that both runs hold with the status ok; in one run only: 0; in both runs but not ok in one: 0');
+  assert.equal(lines[2], 'shown memory: 2; none to show: 1; other: 1; of the cases shown memory, with another number of model calls: 0');
+  const [okSame] = await run(['score-compare', memA, compareDir('cl-both-a', candidate, candidateRows, { ...mem('a'), ...les })]);
+  assert.equal(okSame, 0);
+  assert.deepEqual(await run(['score-compare', memA, compareDir('cl-both-b', candidate, candidateRows, { ...mem('b'), ...les })]), [1, ['different_memory']]);
+  assert.deepEqual(await run(['score-compare', compareDir('cl-base-less', baseline, baseRows, les), lessOnly]), [1, ['baseline_with_lessons']]);
+  // the old refusals hold
+  assert.deepEqual(await run(['score-compare', none, compareDir('cl-nomem', candidate, candRows)]), [1, ['candidate_without_memory']]);
+  assert.deepEqual(await run(['score-compare', memA, compareDir('cl-mem-b', candidate, candRows, mem('b'))]), [1, ['baseline_with_memory']]);
+  assert.deepEqual(await run(['score-compare', none, compareDir('cl-hist', candidate, candidateRows, { ...les, history_sha256: '0'.repeat(64) })]), [1, ['different_history_files']]);
+  assert.deepEqual(await run(['score-compare', none, compareDir('cl-noise-b', candidate, candidateRows, les), '--noise', compareDir('cl-noise-l', baseline, baseRows, les)]), [1, ['different_lessons']]);
+});
+
+test('score-noise refuses two runs whose lessons differ, one with lessons and one without included', async () => {
+  const sha = 'c'.repeat(64);
+  const x = { lessons_file: '/elsewhere/x.json', lessons_sha256: '1'.repeat(64) };
+  const y = { lessons_file: '/elsewhere/y.json', lessons_sha256: '2'.repeat(64) };
+  let n = 0;
+  const dirOf = (extra: Record<string, unknown>): string => runDir(`les-${n++}`, sha, '', extra);
+  const pairs: Array<[Record<string, unknown>, Record<string, unknown>]> = [[{}, x], [x, {}], [x, y]];
+  for (const [p, q] of pairs) {
+    assert.deepEqual(await run(['score-noise', dirOf(p), dirOf(q)]), [1, ['different_lessons']]);
+  }
+  const [code] = await run(['score-noise', dirOf(x), dirOf(x)]);
+  assert.equal(code, 0);
+});

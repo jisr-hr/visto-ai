@@ -23,6 +23,7 @@ import { readCaseScores, runBacktest } from './backtest/run.ts';
 import type { BacktestSummary } from './backtest/run.ts';
 import { runJudge } from './judge/run.ts';
 import { loadHistory } from './history/file.ts';
+import type { HistoryCase } from './history/file.ts';
 import { runImport } from './history/import.ts';
 import { seedCommand } from './history/seed.ts';
 import { lessonCases } from './lessons/cases.ts';
@@ -142,19 +143,33 @@ async function replay(argv: string[], env: Record<string, string | undefined>, o
 }
 
 async function backtest(argv: string[], env: Record<string, string | undefined>, out: (line: string) => void): Promise<void> {
-  const setup = prepareRun('backtest', 'history', argv, env, ['memory']);
+  const setup = prepareRun('backtest', 'history', argv, env, ['memory', 'lessons']);
   const memoryPath = setup.options.memory;
+  const lessonsPath = setup.options.lessons;
   if (memoryPath !== undefined) {
     outsideProject(memoryPath, projectFolder(), 'memory');
     // With a scorer memory is not asked: every case would be skipped (call 4).
     if (setup.config.scorer !== null) throw new UsageError('usage: --memory cannot be used with a scorer in the config');
   }
+  if (lessonsPath !== undefined) {
+    outsideProject(lessonsPath, projectFolder(), 'lessons');
+    // With a scorer the score does not come from the model that is shown lessons (call 11).
+    if (setup.config.scorer !== null) throw new UsageError('usage: --lessons cannot be used with a scorer in the config');
+  }
   const { cases, sha256 } = readable('history', () => loadHistory(setup.inputPath));
   const memoryFile = memoryPath === undefined ? undefined : readable('memory', () => loadHistory(memoryPath));
   const { inputPath, outDir, label, maxCases, maxCost, concurrency, config, deps } = setup;
-  const memory = memoryPath === undefined || memoryFile === undefined
+  const lessonsFile = lessonsPath === undefined ? undefined : readable('lessons', () => loadLessons(lessonsPath));
+  // With --lessons alone the memory holds no records; the file's name and hash are the memory file's, absent without --memory.
+  const memory = memoryFile === undefined && lessonsFile === undefined
     ? {}
-    : { memory: { of: historyMemory(memoryFile.cases).of, file: memoryPath, sha256: memoryFile.sha256 } };
+    : {
+      memory: {
+        of: historyMemory(memoryFile?.cases ?? [], lessonsFile?.file).of,
+        ...(memoryPath === undefined || memoryFile === undefined ? {} : { file: memoryPath, sha256: memoryFile.sha256 }),
+        ...(lessonsPath === undefined || lessonsFile === undefined ? {} : { lessons: { file: lessonsPath, sha256: lessonsFile.sha256 } }),
+      },
+    };
   const summary = await runBacktest({ outDir, label, maxCases, maxCost, concurrency, config, deps, cases, historyFile: inputPath, historySha256: sha256, ...memory });
   out(`cases ${summary.cases}, failed ${summary.failed_cases}, not started ${summary.cases_not_started}, total_cost ${summary.total_cost}`);
   if (summary.stopped_reason !== null) out(`stopped: ${summary.stopped_reason}`);
@@ -166,7 +181,7 @@ function readRun(dir: string): { summary: BacktestSummary; scores: CaseScores[] 
   return { summary, scores: readableAs('the run directory', () => readCaseScores(join(dir, 'scores.jsonl'))) };
 }
 
-interface RunRow { key: string; status: string; calls: number; memory: string | null }
+interface RunRow { key: string; status: string; calls: number; memory: string | null; lessons: string | null }
 
 // A run's results.jsonl: the key, the status, the model calls and the memory status of each case.
 function readRows(dir: string): RunRow[] {
@@ -182,7 +197,9 @@ function readRows(dir: string): RunRow[] {
     }
     const memory = typeof row.memory === 'object' && row.memory !== null && typeof (row.memory as { status?: unknown }).status === 'string'
       ? (row.memory as { status: string }).status : null;
-    rows.push({ key: row.key, status: row.status, calls: row.calls, memory });
+    const inner = typeof row.memory === 'object' && row.memory !== null ? (row.memory as { lessons?: unknown }).lessons : undefined;
+    const lessons = typeof inner === 'object' && inner !== null && typeof (inner as { status?: unknown }).status === 'string' ? (inner as { status: string }).status : null;
+    rows.push({ key: row.key, status: row.status, calls: row.calls, memory, lessons });
   });
   return rows;
 }
@@ -190,12 +207,14 @@ function readRows(dir: string): RunRow[] {
 const modelsOf = (s: BacktestSummary): string => (Array.isArray(s.models) ? s.models.join(', ') : '');
 
 // The refusals two runs share before their scores are compared; returns the warning on their models, or null.
-function sameRuns(first: BacktestSummary, second: BacktestSummary, memory: boolean): string | null {
+function sameRuns(first: BacktestSummary, second: BacktestSummary, memory: boolean, lessons = false): string | null {
   if (first.history_sha256 !== second.history_sha256) throw new Error('different_history_files');
   if (first.contract_sha256 !== second.contract_sha256) throw new Error('different_contracts');
   if ((first.scorer ?? null) !== (second.scorer ?? null)) throw new Error('different_scorers');
   // A run with memory against one without, or two built from different memory files, measure memory and not noise.
   if (memory && (first.memory_sha256 ?? null) !== (second.memory_sha256 ?? null)) throw new Error('different_memory');
+  // Two runs whose lessons differ, one with lessons and one without included, measure lessons and not noise.
+  if (lessons && (first.lessons_sha256 ?? null) !== (second.lessons_sha256 ?? null)) throw new Error('different_lessons');
   return modelsOf(first) === modelsOf(second) ? null : `warning: the runs were answered by different models: ${modelsOf(first)}; ${modelsOf(second)}`;
 }
 
@@ -204,7 +223,7 @@ function scoreNoiseCommand(argv: string[], out: (line: string) => void): void {
   if (parsed.positional.length !== 2) throw new UsageError('usage: score-noise <run dir> <run dir>');
   const first = readRun(parsed.positional[0]!);
   const second = readRun(parsed.positional[1]!);
-  const warning = sameRuns(first.summary, second.summary, true);
+  const warning = sameRuns(first.summary, second.summary, true, true);
   if (warning !== null) out(warning);
   const rows = scoreNoise(first.scores, second.scores, THRESHOLDS);
   const share = (value: number | null): string => (value === null ? EM_DASH : String(value));
@@ -225,6 +244,7 @@ const counted = (value: number | null, n: number): string => `${dash(value)} (n=
 // focus is a share of lines, and its count is of pull requests: a step from that count would mislead, so none is printed.
 const cellOf = (name: typeof NUMBER_NAMES[number], value: number | null, n: number): string => (name === 'focus' ? `${dash(value)} (n=${n})` : counted(value, n));
 const hasMemory = (s: BacktestSummary): boolean => typeof s.memory_sha256 === 'string';
+const hasLessons = (s: BacktestSummary): boolean => typeof s.lessons_sha256 === 'string';
 
 const COMPARE_USAGE = 'usage: score-compare <baseline run dir> <candidate run dir> [--noise <second baseline run dir>]';
 
@@ -237,11 +257,16 @@ function scoreCompareCommand(argv: string[], out: (line: string) => void): void 
   const candRows = readRows(parsed.positional[1]!);
   const noisePath = parsed.options.get('noise');
   const noise = noisePath === undefined ? null : readRun(noisePath);
+  // A candidate with lessons against a baseline with none (call 14): the memory file is the same, or none in both.
+  const lessonsMode = hasLessons(cand.summary) && !hasLessons(base.summary);
   // The two runs differ in memory by design; the second baseline must be a run of the baseline's kind.
-  const warnings = [sameRuns(base.summary, cand.summary, false), noise === null ? null : sameRuns(base.summary, noise.summary, true)];
-  // The candidate is the run with memory, the baseline the one without; two runs with memory are compared by score-noise.
-  if (!hasMemory(cand.summary)) throw new Error('candidate_without_memory');
-  if (hasMemory(base.summary)) throw new Error('baseline_with_memory');
+  const warnings = [sameRuns(base.summary, cand.summary, lessonsMode), noise === null ? null : sameRuns(base.summary, noise.summary, true, true)];
+  if (hasLessons(base.summary)) throw new Error('baseline_with_lessons');
+  if (!lessonsMode) {
+    // The candidate is the run with memory, the baseline the one without; two runs with memory are compared by score-noise.
+    if (!hasMemory(cand.summary)) throw new Error('candidate_without_memory');
+    if (hasMemory(base.summary)) throw new Error('baseline_with_memory');
+  }
 
   const first = new Map(baseRows.map((r) => [r.key, r]));
   const second = new Map(candRows.map((r) => [r.key, r]));
@@ -255,12 +280,14 @@ function scoreCompareCommand(argv: string[], out: (line: string) => void): void 
     both.push(other);
   }
   for (const key of second.keys()) if (!first.has(key)) oneOnly += 1;
-  const shown = new Set(both.filter((r) => r.memory === 'ok').map((r) => r.key));
-  const empty = new Set(both.filter((r) => r.memory === 'empty').map((r) => r.key));
+  const statusOf = (r: RunRow): string | null => (lessonsMode ? r.lessons : r.memory);
+  const shown = new Set(both.filter((r) => statusOf(r) === 'ok').map((r) => r.key));
+  const empty = new Set(both.filter((r) => statusOf(r) === 'empty').map((r) => r.key));
   const otherCount = both.length - shown.size - empty.size;
   const otherCalls = both.filter((r) => shown.has(r.key) && first.get(r.key)!.calls !== r.calls).length;
   const only = (scores: CaseScores[], keys: Set<string>): CaseScores[] => scores.filter((c) => keys.has(c.key));
 
+  if (lessonsMode) out('comparing lessons');
   out(`compared: ${both.length} cases that both runs hold with the status ok; in one run only: ${oneOnly}; in both runs but not ok in one: ${notOk}`);
   for (const warning of warnings) if (warning !== null) out(warning);
   out(`shown memory: ${shown.size}; none to show: ${empty.size}; other: ${otherCount}; of the cases shown memory, with another number of model calls: ${otherCalls}`);
@@ -284,7 +311,7 @@ function scoreCompareCommand(argv: string[], out: (line: string) => void): void 
 }
 
 async function memoryCountCommand(argv: string[], out: (line: string) => void): Promise<void> {
-  const parsed = parse(argv, ['history', 'memory', 'max-cases'], []);
+  const parsed = parse(argv, ['history', 'memory', 'lessons', 'max-cases'], []);
   if (parsed.positional.length > 0) throw new UsageError('usage: memory-count takes no positional arguments');
   const get = (name: string): string => {
     const v = parsed.options.get(name);
@@ -292,19 +319,27 @@ async function memoryCountCommand(argv: string[], out: (line: string) => void): 
     return v;
   };
   const historyPath = get('history');
-  const memoryPath = get('memory');
+  const lessonsPath = parsed.options.get('lessons');
+  // --memory is required unless --lessons is given; with lessons alone the memory holds no records.
+  const memoryPath = lessonsPath === undefined ? get('memory') : parsed.options.get('memory');
   const maxCases = positive(parsed, 'max-cases', Number.POSITIVE_INFINITY);
   outsideProject(historyPath, projectFolder(), 'history');
-  outsideProject(memoryPath, projectFolder(), 'memory');
+  if (memoryPath !== undefined) outsideProject(memoryPath, projectFolder(), 'memory');
+  if (lessonsPath !== undefined) outsideProject(lessonsPath, projectFolder(), 'lessons');
   const history = readable('history', () => loadHistory(historyPath));
-  const memory = readable('memory', () => loadHistory(memoryPath));
-  const count = await memoryCount(history.cases.slice(0, maxCases), historyMemory(memory.cases));
+  const memory = memoryPath === undefined ? { cases: [] as HistoryCase[] } : readable('memory', () => loadHistory(memoryPath));
+  const lessons = lessonsPath === undefined ? undefined : readable('lessons', () => loadLessons(lessonsPath));
+  const count = await memoryCount(history.cases.slice(0, maxCases), historyMemory(memory.cases, lessons?.file), lessons?.file);
   out(`cases ${count.cases}, with a line ${count.with_lines}, with a labelled file that got a line ${count.with_labelled_line}`);
   for (const r of count.rows) {
     out(`${r.key}: records ${r.records}, lines ${r.lines}, changed ${r.changed}, near ${r.near}, labelled files ${r.labelled_files}, labelled with a line ${r.labelled_with_line}`);
   }
   out(`reverts named ${count.reverts.named}, with their pull request in the file ${count.reverts.held}, cases shown a reverted line ${count.reverts.cases}`);
   for (const r of count.reverts.rows) out(`${r.key}: reverted lines ${r.lines}`);
+  if (count.lessons !== undefined) {
+    out(`lessons: cases shown a lesson ${count.lessons.cases}, with a labelled file ${count.lessons.with_labelled_file}`);
+    for (const r of count.lessons.rows) out(`${r.key}: lessons ${r.lessons}`);
+  }
 }
 
 // The importer's database output (7.5, call 29): reads a history file, never the git service, and never migrates.

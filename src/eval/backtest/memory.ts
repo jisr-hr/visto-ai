@@ -7,12 +7,15 @@ import type { FileScore } from '../../engine/score/types.ts';
 import type { Memory } from '../../engine/types.ts';
 import { revertedNumber, revertsOf } from '../../memory/reverts.ts';
 import type { Revert } from '../../memory/reverts.ts';
+import { lessonsFor } from '../../memory/lessons.ts';
 import { createMemory, RECORDS_READ, REVERTS_READ } from '../../memory/select.ts';
 import type { LiveRecord } from '../../memory/select.ts';
 import { signalsOf } from '../../memory/signals.ts';
 import type { PersonComment, Signal } from '../../memory/signals.ts';
 import { historyKey } from '../history/file.ts';
 import type { HistoryActivity, HistoryCase } from '../history/file.ts';
+import { lessonsAt } from '../lessons/lessons-file.ts';
+import type { LessonsFile } from '../lessons/lessons-file.ts';
 import { labelCase } from './labels.ts';
 
 export interface HistoryMemory {
@@ -32,6 +35,8 @@ export interface MemoryCount {
   cases: number; with_lines: number; with_labelled_line: number; rows: MemoryCountRow[];
   // cases: the cases that would be shown at least one reverted line; rows: those cases, in the file's order, each with its number of reverted lines
   reverts: { named: number; held: number; cases: number; rows: Array<{ key: string; lines: number }> };
+  // Only when lessons are given. cases: the cases that would be shown at least one lesson; with_labelled_file: of those, the ones with a labelled file; rows: those cases, in the file's order.
+  lessons?: { cases: number; with_labelled_file: number; rows: Array<{ key: string; lessons: number }> };
 }
 
 interface Held { signal: Signal; created: number; expires: number }
@@ -104,7 +109,7 @@ function revertsOfFile(cases: HistoryCase[]): { byRepo: Map<string, Map<string, 
   return { byRepo, named, held };
 }
 
-export function historyMemory(cases: HistoryCase[]): HistoryMemory {
+export function historyMemory(cases: HistoryCase[], lessons?: LessonsFile): HistoryMemory {
   // Derived once, by repository. A pull request held twice gives each record once, as the database's unique source reference would.
   const byRepo = new Map<string, Map<string, Held>>();
   for (const c of cases) {
@@ -143,6 +148,8 @@ export function historyMemory(cases: HistoryCase[]): HistoryMemory {
             .sort((x, y) => y.created - x.created);
           return Promise.resolve(live.slice(0, REVERTS_READ + 1).map((h) => revertRecordOf(h.revert)));
         },
+        // Only with lessons: the file's lessons live at the date, as the service is asked; the case's own are dropped by createMemory.
+        ...(lessons === undefined ? {} : { lessons: (at: Date) => Promise.resolve(lessonsAt(lessons, c.repo, at)) }),
       }, c.pr_number);
     },
     records(c) {
@@ -164,9 +171,11 @@ function unscored(c: HistoryCase): FileScore[] {
 }
 
 /** For each case, with no model and no network: what memory would show for the files of its last head. */
-export async function memoryCount(cases: HistoryCase[], memory: HistoryMemory): Promise<MemoryCount> {
+export async function memoryCount(cases: HistoryCase[], memory: HistoryMemory, lessons?: LessonsFile): Promise<MemoryCount> {
   const rows: MemoryCountRow[] = [];
   const reverted: Array<{ key: string; lines: number }> = [];
+  const shownLessons: Array<{ key: string; lessons: number }> = [];
+  let lessonsLabelled = 0;
   for (const c of cases) {
     const files = c.final_files.map((f) => ({ path: f.path, previousPath: f.previous_path }));
     const blocks = await memory.of(c).blocks(files, new Date(c.review_at), new AbortController().signal);
@@ -183,6 +192,15 @@ export async function memoryCount(cases: HistoryCase[], memory: HistoryMemory): 
     });
     const revertedLines = blocks.pullRequest.filter((l) => l.reverted === true).length;
     if (revertedLines > 0) reverted.push({ key: historyKey(c), lines: revertedLines });
+    if (lessons !== undefined) {
+      // The lessons live at the case's date, without its own pull request's, for its final files.
+      const live = lessonsAt(lessons, c.repo, new Date(c.review_at)).filter((l) => l.number !== c.pr_number);
+      const shown = lessonsFor(files, live).lessons.length;
+      if (shown > 0) {
+        shownLessons.push({ key: historyKey(c), lessons: shown });
+        if (labelled.length > 0) lessonsLabelled += 1;
+      }
+    }
   }
   const file = memory.reverts();
   return {
@@ -191,5 +209,6 @@ export async function memoryCount(cases: HistoryCase[], memory: HistoryMemory): 
     with_labelled_line: rows.filter((r) => r.labelled_with_line > 0).length,
     rows,
     reverts: { named: file.named, held: file.held, cases: reverted.length, rows: reverted },
+    ...(lessons === undefined ? {} : { lessons: { cases: shownLessons.length, with_labelled_file: lessonsLabelled, rows: shownLessons } }),
   };
 }
