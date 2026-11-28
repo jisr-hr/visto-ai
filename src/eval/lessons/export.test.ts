@@ -14,9 +14,14 @@ import type { RunRecord } from '../../db/review-runs.ts';
 import { pgliteDb } from '../../db/pglite.ts';
 import { testDb } from '../../db/testing.ts';
 import type { Db } from '../../db/types.ts';
+import type { ModelClient, ModelResponse } from '../../engine/types.ts';
 import type { PullRequestRef } from '../../forge/types.ts';
+import { askJudge } from '../../memory/judge.ts';
+import { judgeOnce } from '../../shell/judge.ts';
+import type { Judged } from '../../shell/judge.ts';
 import { exportCommand, exportFindings } from './export.ts';
 import { parseFindings } from './findings.ts';
+import { simulateNights } from './nights.ts';
 
 const REF: PullRequestRef = { service: 'github', owner: 'acme', repo: 'shop', number: 7 };
 const NOW = new Date('2026-03-20T08:00:00.000Z');
@@ -180,5 +185,105 @@ test('the export command prints counts and no reply, finding, path or login', as
   assert.match(line, /^findings \d+, with replies \d+, replies \d+, pull requests \d+$/);
   assert.equal(line, 'findings 1, with replies 1, replies 2, pull requests 1');
   for (const secret of ['ana', 'bo', 'src/a.ts', 'Rounds', 'says']) assert.ok(!line.includes(secret), secret);
+  await db.close();
+});
+
+// The parity of the two stores (call 6; Review Focus 2): the service's night over the database, and the eval's nights over
+// its export, asked with the same answers, keep the same verdicts and make the same lessons.
+const TAX = { path: 'src/billing/tax.ts', side: 'RIGHT', line: 12, severity: 'major', quote: 'total = round(sum)', body: 'Rounds before the discount is taken off.' };
+const CART = { path: 'src/cart/cache.ts', side: 'RIGHT', line: 4, severity: 'minor', quote: 'return cache.get(id)', body: 'This read can return a stale cart after a write.' };
+const TAX_BODY = 'We round half up here on purpose, as the invoices require it.';
+const CART_BODY = 'The cache is cleared by the caller on every write, so a stale read cannot happen here.';
+const CART_AGAIN = 'Callers clear the cache on every write, so stale reads of the cart cannot occur.';
+const TAX_LESSON = 'A rounding finding on invoice totals is wrong: invoices round half up on purpose.';
+const CART_LESSON = 'A stale read finding on the cart cache is wrong: its callers clear it on every write.';
+const CART_RESTATED = 'Stale read findings on the cart cache are wrong, because callers clear the cache on every write.';
+
+const judgeUsage = { calls: 1, inputTokens: 100, outputTokens: 10, cachedTokens: 0, cost: 0.25 };
+const answer = (args: Record<string, unknown>): ModelResponse =>
+  ({ toolName: 'submit_verdict', toolArguments: JSON.stringify(args), text: null, model: 'm', provider: null, usage: judgeUsage });
+/** A judge that answers by the words of the reply it is sent, and by nothing else. */
+const byWords: ModelClient = {
+  complete: async (request) => {
+    const sent = request.messages[1]!.content;
+    if (sent.includes('maybe')) return { toolName: null, toolArguments: null, text: 'It looks fine to me.', model: 'm', provider: null, usage: judgeUsage };
+    if (sent.includes('round half up')) return answer({ classification: 'valid_pushback', lesson: TAX_LESSON, quote: 'round half up here on purpose' });
+    if (sent.includes('cleared by the caller')) return answer({ classification: 'valid_pushback', lesson: CART_LESSON, quote: 'cleared by the caller on every write' });
+    if (sent.includes('stale reads of the cart')) return answer({ classification: 'valid_pushback', lesson: CART_RESTATED, quote: 'clear the cache on every write' });
+    return answer({ classification: 'noise', lesson: null, quote: null });
+  },
+};
+
+test('a database and its export judged night by night with the same answers give the same verdicts and the same lessons', async () => {
+  const WEB: PullRequestRef = { service: 'github', owner: 'acme', repo: 'web', number: 8 };
+  const db = await testDb();
+  // Every run is recorded and then published: a comment is stored only once its run is published.
+  const shop = await publish(db, { startedAt: '2026-03-01T08:00:00.000Z', result: { findings: [TAX] } }, 'rv-s1');
+  await recordComments(db, shop, REF, [
+    posted({ commentId: 'c-tax', path: TAX.path, line: TAX.line, quote: TAX.quote }),
+    posted({ commentId: 'c-lost', path: 'src/billing/fees.ts', line: 3, quote: 'fee = 0' }),   // no stored finding says it
+  ]);
+  const web = await publish(db, { ref: WEB, startedAt: '2026-03-01T08:30:00.000Z', result: { findings: [CART] } }, 'rv-w1');
+  await recordComments(db, web, WEB, [posted({ commentId: 'c-cart', path: CART.path, line: CART.line, severity: CART.severity, quote: CART.quote })]);
+  // A later review of acme/shop 7 kept c-tax open. It is published before the first night: the database holds it from the
+  // start, and the service never sees a run from the future.
+  await publish(db, { headSha: 'h2', startedAt: '2026-03-01T20:00:00.000Z', result: { findings: [], threadVerdicts: [{ commentId: 'c-tax', verdict: 'open' }] } }, 'rv-s2');
+
+  const onShop = (id: string, author: string, association: Activity['association'], at: string, replyTo: string, body: string): Activity =>
+    reply(id, author, association, at, { replyTo, body, path: replyTo === 'c-tax' ? TAX.path : 'src/billing/fees.ts' });
+  const onWeb = (id: string, author: string, association: Activity['association'], at: string, body: string): Activity =>
+    ({ ...reply(id, author, association, at, { replyTo: 'c-cart', body, path: CART.path, line: CART.line }), ref: WEB });
+  await recordActivity(db, onShop('r-1', 'ana', 'member', '2026-03-01T12:00:00.000Z', 'c-tax', TAX_BODY));    // before the later review: it disagrees
+  await recordActivity(db, onWeb('r-2', 'cy', 'none', '2026-03-01T13:00:00.000Z', CART_BODY));                  // a stranger
+  await recordActivity(db, onShop('r-3', 'bo', 'member', '2026-03-01T14:00:00.000Z', 'c-tax', 'Hmm, maybe; I will look again tomorrow.'));   // never a verdict
+  await recordActivity(db, onShop('r-4', 'ana', 'member', '2026-03-01T21:00:00.000Z', 'c-tax', TAX_BODY));    // after the later review began: a lesson
+  await recordActivity(db, onShop('r-5', 'bo', 'member', '2026-03-02T09:00:00.000Z', 'c-tax', '> it is intended, see the spec'));   // no words of its own
+  await recordActivity(db, onShop('r-6', 'ana', 'member', '2026-03-02T10:00:00.000Z', 'c-lost', TAX_BODY));   // its finding is unknown
+  await recordActivity(db, onWeb('r-7', 'bo', 'collaborator', '2026-03-02T11:00:00.000Z', CART_BODY));          // a lesson in acme/web
+  await recordActivity(db, onWeb('r-8', 'ana', 'member', '2026-03-03T09:00:00.000Z', CART_AGAIN));              // restates r-7's
+
+  const exported = await exportFindings(db, new Date('2026-03-05T09:00:00.000Z'));
+
+  // The service: one run a night, a few minutes after 00:00.
+  const ran: Judged[] = [];
+  for (const day of ['2026-03-02', '2026-03-03', '2026-03-04', '2026-03-05']) {
+    ran.push(await judgeOnce({
+      db, clock: () => new Date(`${day}T00:05:00.000Z`), model: byWords, token: () => 'tok123', auto: false, timeoutMs: 60_000, paused: async () => null,
+    }));
+  }
+  assert.ok(ran.every((r) => r.complete));
+
+  // The eval: the nights over the export, asked through the same judge.
+  const sim = await simulateNights(exported, (_reply, input) => askJudge(byWords, input, 'tok123', false, 60_000), () => null);
+  assert.equal(sim.complete, true);
+  assert.equal(sim.nights, 4);
+  assert.equal(sim.calls, ran.reduce((n, r) => n + r.calls, 0));
+
+  const stored = await db.query<{ reply: string; classification: string | null; outcome: string; attempts: number }>(
+    'select reply, classification, outcome, attempts from visto_ai.reply_verdicts order by reply');
+  const simulated = sim.verdicts
+    .map((v) => ({ reply: v.reply, classification: v.classification, outcome: v.outcome, attempts: v.attempts }))
+    .sort((a, b) => (a.reply < b.reply ? -1 : a.reply > b.reply ? 1 : 0));
+  assert.deepEqual(simulated, stored);
+  assert.deepEqual(stored.map((v) => [v.reply, v.classification, v.outcome, v.attempts]), [
+    ['r-1', 'valid_pushback', 'review_disagreed', 0],
+    ['r-2', 'valid_pushback', 'no_access', 0],
+    ['r-3', null, 'unjudged', 3],
+    ['r-4', 'valid_pushback', 'lesson', 0],
+    ['r-5', 'noise', 'no_own_words', 0],
+    ['r-6', null, 'finding_unknown', 3],
+    ['r-7', 'valid_pushback', 'lesson', 0],
+    ['r-8', 'valid_pushback', 'restates', 0],
+  ]);
+
+  const made = (await db.query<{ repo: string; source_ref: string; path: string; lesson: string; created_at: Date }>(
+    "select owner || '/' || repo as repo, source_ref, path, lesson, created_at from visto_ai.memory_records where kind = 'lesson' order by source_ref"))
+    .map((x) => [x.repo, x.source_ref, x.path, x.lesson, x.created_at.toISOString()]);
+  const kept = sim.lessons.map((l) => [l.repo, l.ref, l.path, l.text, l.createdAt]).sort((a, b) => (a[1]! < b[1]! ? -1 : 1));
+  assert.deepEqual(kept, made);
+  assert.deepEqual(made, [
+    ['acme/shop', '7:r-4', TAX.path, TAX_LESSON, '2026-03-02T00:00:00.000Z'],
+    ['acme/web', '8:r-7', CART.path, CART_LESSON, '2026-03-03T00:00:00.000Z'],
+  ]);
   await db.close();
 });
