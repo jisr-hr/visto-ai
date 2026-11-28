@@ -243,7 +243,7 @@ test("automatic approval shows its rules while on, the thread rule's help, and w
   expect(share.getByText('Audit key from config.yml')).toHaveClass('bg-ok-bg', 'text-ok');
   expect(screen.getByLabelText('Audit share')).toHaveClass('max-w-[120px]');
   expect(
-    screen.getByText("It approves only where the base branch's rules dismiss stale approvals, and never a draft or a pull request from a fork."),
+    screen.getByText("It approves only where the base branch's rules dismiss stale approvals or require the enforced gate's check, and never a draft or a pull request from a fork."),
   ).toHaveClass('mt-1', 'mb-2', 'text-[13px]', 'text-muted');
   fireEvent.change(screen.getByLabelText('Audit share'), { target: { value: '7' } });
   await user.click(screen.getByRole('button', { name: 'Save changes' }));

@@ -1,5 +1,5 @@
 import type { RepoSettings } from '../config/load.ts';
-import { failedDismissal } from '../db/approvals.ts';
+import { failedDismissal, staleApprovalStands } from '../db/approvals.ts';
 import { lastEvaluation, NO_COUNTS, recordEvaluation, skipOf } from '../db/gate.ts';
 import type { GateCounts, GateState } from '../db/gate.ts';
 import { askGate, finishJob, requeueJob, reviewJobsOf } from '../db/jobs.ts';
@@ -74,7 +74,8 @@ export async function planNow(deps: GateJobDeps, args: {
   const job = underWay(jobs, args.gating, deps.reviewing(args.ref));
   const paused = job === 'pending' ? await deps.paused() : null;
   const runs = await listRuns(db, args.ref);
-  const before = planBefore({ gating: args.gating, head, base, skip, job, paused, runs, unwithdrawn });
+  const withdrawing = await staleApprovalStands(db, args.ref, head, args.live.info.baseBranch);
+  const before = planBefore({ gating: args.gating, head, base, skip, job, paused, runs, unwithdrawn, withdrawing });
   if (before !== null) return { plan: before, run: null };
   const reviewed = reviewedRun(runs, head, base);
   if (reviewed === null) return { plan: { state: 'failed', code: 'internal_error', evaluated: true }, run: null };

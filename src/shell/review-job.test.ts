@@ -2676,11 +2676,11 @@ const paragraphOf = (code: ApprovalCode, head = 'h1'): string => approvalParagra
 const LINKS = { lineUrl: () => 'https://git.example.test/x', commentUrl: (id: string) => `https://git.example.test/c/${id}` };
 
 /** Gives the harness's deps an approvals fake whose branch rule answers `rule`, and an onWithdraw that counts its calls. */
-function approving(h: Harness, rule: 'dismissed' | 'kept' = 'dismissed'): { calls: unknown[][]; woken: () => number } {
+function approving(h: Harness, rule: 'dismissed' | 'gated' | 'kept' = 'dismissed'): { calls: unknown[][]; woken: () => number } {
   const calls: unknown[][] = [];
   let woken = 0;
   const approvals: ForgeApprovals = {
-    staleApprovals: async (_ref, _installation, branch) => { calls.push(['staleApprovals', branch]); return rule; },
+    staleApprovals: async (_ref, _installation, branch, check) => { calls.push(check === undefined ? ['staleApprovals', branch] : ['staleApprovals', branch, check]); return rule; },
     readReview: async () => { calls.push(['readReview']); throw new Error('not_expected'); },
     dismissReview: async () => { calls.push(['dismissReview']); throw new Error('not_expected'); },
   };
@@ -2743,6 +2743,17 @@ test('with approval off the job records, posts and logs what it did', async () =
   // With the approvals at hand, and with approval written but off: the same drafts, rows and lines.
   assert.deepEqual(await runOf(9, SETTINGS, true), bare);
   assert.deepEqual(await runOf(10, { ...SETTINGS, approval: { enabled: false, threads: 'strict', auditShare: 0 } }, true), bare);
+});
+
+test("the rule is read with the gate's check where the gate enforces on the base branch, and without it where it does not", async () => {
+  const cases = [['enforce', 41, [['staleApprovals', 'main', 'AI Review']]], ['shadow', 42, [['staleApprovals', 'main']]]] as const;
+  for (const [mode, number, expected] of cases) {
+    const settings: RepoSettings = { ...APPROVING, gate: { ...APPROVING.gate, enabled: true, branches: ['main'], mode } };
+    const h = await manualJob({ pullRequest: number, settings, live: LIVE_OK, result: approvable() });
+    const seen = approving(h, 'gated');
+    await runReviewJob(h.job, h.deps);
+    assert.deepEqual([seen.calls, h.drafts[0]?.event], [expected, 'approve'], mode);
+  }
 });
 
 test('an approval is recorded with its code, and a withdraw job is stored with it', async () => {
