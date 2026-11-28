@@ -35,6 +35,7 @@ The merge gate is a check that the service writes on a pull request's head commi
 | `Skipped by @<login>` | completed, `success` | The skip team skipped this commit |
 | `Gate bypassed` | completed, `success` | The repository is in `bypass` |
 | `Earlier approval not withdrawn (<code>)` | completed, `failure` | An approval of the app's own that the service could not dismiss still stands, whatever a skip or a review says (see [Automatic approval](automatic-approval.md)) |
+| `Withdrawing an earlier approval` | in progress | An approval of the app's own of another head or base branch still stands and is being dismissed, whatever a skip or a review says |
 
 GitHub does not reopen a completed check run: an update that asks for `queued` or `in_progress` is answered and changes neither its status nor its conclusion. So when a completed check must wait or review again (a `/review` or a `/done` on a head whose check is decided, or leaving `bypass`), the service writes a new run of the same name on the commit. GitHub then lists, and the pull request counts, only the newest run of that name; the older one stays on the commit. An update from `queued` or `in_progress` to any state, and from one conclusion to another, is made in place.
 

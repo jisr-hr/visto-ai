@@ -69,11 +69,11 @@ function harness(options: Options = {}) {
     },
   } as unknown as ForgeAccess;
   const approvals: ForgeApprovals = {
-    staleApprovals: async (_ref, _installation, branch) => {
-      calls.push(['staleApprovals', branch]);
+    staleApprovals: async (_ref, _installation, branch, check) => {
+      calls.push(check === undefined ? ['staleApprovals', branch] : ['staleApprovals', branch, check]);
       const rule = 'rule' in options ? options.rule : 'dismissed';
       if (rule instanceof Error) throw rule;
-      return rule as 'dismissed' | 'kept';
+      return rule as 'dismissed' | 'gated' | 'kept';
     },
     readReview: () => Promise.reject(new Error('not_expected')),
     dismissReview: () => Promise.reject(new Error('not_expected')),
@@ -371,7 +371,7 @@ const recordedWith = (result: ReviewResult, meta: { trigger?: 'automatic' | 'man
 const RUN_OK = recordedWith(approvable());
 /** An earlier review of the pull request, published as review 480. */
 const EARLIER: StoredRun = { ...RUN_OK, id: 3, job: 2, published: true, reviewId: '480', publishedAt: at(0) };
-const ctx = (over: Partial<ApprovalContext> = {}): ApprovalContext => ({ rule: 'strict', clearByReply: true, threshold: 70, runs: [RUN_OK], stored: [], drawn: () => false, ...over });
+const ctx = (over: Partial<ApprovalContext> = {}): ApprovalContext => ({ rule: 'strict', clearByReply: true, threshold: 70, runs: [RUN_OK], stored: [], enforcedCheck: () => null, drawn: () => false, ...over });
 const para = (decided: ApprovalCode, more: { code?: string; rule?: ApprovalThreads } = {}): string =>
   approvalParagraph(decided, { head: 'h1', threshold: 70, rule: more.rule ?? 'strict', ...(more.code === undefined ? {} : { code: more.code }) });
 /** The body this job renders for `result` with the paragraph `p`. */
@@ -675,6 +675,25 @@ test("under the gate rule with clearing by reply off a person's reply clears not
   const on = onHarness({ approval: ctx({ rule: 'gate', clearByReply: true, runs: [EARLIER, RUN_OK], stored: [STORED_MAJOR] }), threads });
   const cleared = await publishRun(on.deps, on.args);
   assert.deepEqual(cleared.kind === 'published' && cleared.approval, { approved: true, code: 'approved', dismissed: false });
+});
+
+test('where the gate enforces on the base branch its check is named to the rule read, and a branch that requires it is approved', async () => {
+  const enforcedCheck = (base: string): string | null => (base === 'main' ? 'AI Review' : null);
+  const gated = onHarness({ approval: ctx({ enforcedCheck }), rule: 'gated' });
+  const body = withPara(approvable(), para('approved'));
+  assert.deepEqual(await publishRun(gated.deps, gated.args), {
+    kind: 'published', reviewId: '501', body, inlineDropped: false, notesDropped: false, adopted: false, approval: { approved: true, code: 'approved', dismissed: false },
+  });
+  assert.deepEqual(gated.calls.find((c) => c[0] === 'staleApprovals'), ['staleApprovals', 'main', 'AI Review']);
+  assert.equal(gated.drafts[0]!.event, 'approve');
+  // Neither dismissing nor requiring it: rule_off, as before.
+  const kept = onHarness({ approval: ctx({ enforcedCheck }), rule: 'kept' });
+  const out = await publishRun(kept.deps, kept.args);
+  assert.deepEqual(out.kind === 'published' && out.approval, { approved: false, code: 'rule_off', dismissed: false });
+  // On a base branch the gate does not enforce on, no check is named.
+  const other = onHarness({ approval: ctx({ enforcedCheck }), live: { ...LIVE_OK, info: { ...LIVE_OK.info, baseBranch: 'release/1.0' } } });
+  await publishRun(other.deps, other.args);
+  assert.deepEqual(other.calls.find((c) => c[0] === 'staleApprovals'), ['staleApprovals', 'release/1.0']);
 });
 
 test('a rule answer that is neither dismissed nor kept is no answer, and the review is not approved', async () => {

@@ -921,6 +921,7 @@ export async function runReviewJob(job: Job, deps: ReviewJobDeps): Promise<void>
           // The newest review that could not be read stands for a record that cannot be: never approved.
           runs: newestUnread ? null : await orNull(() => listRuns(db, job.ref)),
           stored: await orNull(() => listComments(db, job.ref)),
+          enforcedCheck: (base) => (gatingOf(settings, base) === 'enforce' ? settings.gate.checkName : null),
           // The audit sample (6.5), with the share as the settings read now and the deployment's key: asked by the decision last.
           drawn: () => drawnForAudit(deps.auditKey, job.ref, approval.auditShare),
         };

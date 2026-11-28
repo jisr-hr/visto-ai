@@ -7,6 +7,8 @@ import { revertedNumber } from '../../memory/reverts.ts';
 import { historyKey } from '../history/file.ts';
 import type { HistoryActivity, HistoryCase } from '../history/file.ts';
 import { importPullRequest } from '../history/import.ts';
+import type { LessonsFile } from '../lessons/lessons-file.ts';
+import type { SimLesson } from '../lessons/nights.ts';
 import { historyMemory, memoryCount, personComments } from './memory.ts';
 
 const TAX = 'src/billing/tax.ts';
@@ -422,4 +424,42 @@ test('a case\'s own records of reverts take no place among those read, as the se
   const some = await cut.of(x).blocks(files, new Date(x.review_at), signal);
   assert.deepEqual(some.pullRequest.map((l) => l.ref), [`106:reverts:6:${TAX}`]);
   assert.equal(some.cut.records, true);
+});
+
+// ---- lessons as of each case (plan "evals with lessons", task 7) ----
+const LESSON_TEXT = 'Discounts apply before tax in this shop, so a finding on the order of the two is wrong.';
+const lessonOf = (number: number, madeAt: string, over: Partial<SimLesson> = {}): SimLesson => ({
+  ref: `${number}:r${number}`, repo: 'acme/shop', number, reply: `r${number}`, path: TAX, text: LESSON_TEXT,
+  createdAt: madeAt, madeAt, expiresAt: '2026-09-01T00:00:00.000Z', ...over,
+});
+const lessonsFileOf = (lessons: SimLesson[]): LessonsFile => ({
+  version: 1, findings_file: 'findings.jsonl', findings_sha256: 'a'.repeat(64), exported_at: '2026-03-20T08:00:00.000Z',
+  setting: { model: 'vendor/model-a', fallbacks: [], toolChoice: 'forced' }, rules_sha256: 'b'.repeat(64),
+  complete: true, end: null, nights: 1, first_night: null, last_night: null, cost: 0, verdicts: [], lessons,
+});
+
+test('a backtest case is shown the lessons live at its date, of other pull requests of its repository', async () => {
+  const c = mkCase(7, [TAX], '2026-03-05T12:00:00Z');
+  const file = lessonsFileOf([
+    lessonOf(8, '2026-03-04T00:00:00.000Z'), lessonOf(7, '2026-03-04T00:00:00.000Z'), lessonOf(9, '2026-03-06T00:00:00.000Z'),
+    lessonOf(10, '2026-03-04T00:00:00.000Z', { repo: 'acme/web' }),
+  ]);
+  const memory = historyMemory([], file).of(c);
+  const shown = await memory.lessons!([{ path: TAX, previousPath: null }], new Date(c.review_at), signal);
+  assert.deepEqual(shown.lessons.map((l) => l.ref), ['8:r8']);
+  // without lessons the memory has none to ask
+  assert.equal(historyMemory([]).of(c).lessons, undefined);
+});
+
+test('memoryCount with lessons counts the cases shown a lesson and those of them with a labelled file', async () => {
+  const labelled = mkCase(7, [TAX], '2026-03-05T12:00:00Z', [comment('c1', TAX, '2026-03-05T10:00:00Z', { author: 'octo-lead', commit: 'head70000000' })]);
+  const plain = mkCase(8, [TAX], '2026-03-05T13:00:00Z');
+  const elsewhere = mkCase(9, ['docs/readme.md'], '2026-03-05T14:00:00Z');
+  const file = lessonsFileOf([lessonOf(11, '2026-03-04T00:00:00.000Z')]);
+  const cases = [labelled, plain, elsewhere];
+  const count = await memoryCount(cases, historyMemory([]), file);
+  assert.equal(count.lessons!.cases, 3 - 1);
+  assert.equal(count.lessons!.with_labelled_file, 1);
+  assert.deepEqual(count.lessons!.rows, [{ key: historyKey(labelled), lessons: 1 }, { key: historyKey(plain), lessons: 1 }]);
+  assert.equal((await memoryCount(cases, historyMemory([]))).lessons, undefined);
 });

@@ -4,6 +4,7 @@ import { createGithubApprovals, MAX_RULE_PAGES } from './approvals.ts';
 import type { AppAuth } from './app-auth.ts';
 
 const REF = { service: 'github', owner: 'acme', repo: 'shop', number: 7 } as const;
+const APP_ID = '321';
 const auth: AppAuth = { appToken: () => 'jwt', installationToken: async (id) => `tok-${id}` };
 const json = (value: unknown, status = 200): Response => new Response(JSON.stringify(value), { status });
 /** Answers by "<METHOD> <path and query>"; an unknown one is 404. Records each request. */
@@ -18,7 +19,7 @@ function github(routes: Record<string, () => Response>) {
     seen.push(entry);
     return (routes[`${method} ${path}`] ?? (() => json({ message: 'Not Found' }, 404)))();
   };
-  return { seen, approvals: createGithubApprovals({ auth, fetch: stub as typeof fetch }) };
+  return { seen, approvals: createGithubApprovals({ auth, appId: APP_ID, fetch: stub as typeof fetch }) };
 }
 
 const RULES = (branch: string, page = 1) => `/repos/acme/shop/rules/branches/${branch}?per_page=100&page=${page}`;
@@ -126,7 +127,68 @@ test('a branch with a slash is sent encoded, and a rules list that fills its las
   assert.deepEqual(long.seen.map((s) => s.path), [...Array.from({ length: 10 }, (_, i) => RULES('main', i + 1)), PROTECTION('main')]);
 });
 
-const REVIEW = 'GET /repos/acme/shop/pulls/7/reviews/501';
+const requiredChecks = (...checks: unknown[]) => ({ type: 'required_status_checks', parameters: { strict_required_status_checks_policy: false, required_status_checks: checks } });
+const protectionChecks = (...checks: unknown[]) => ({ required_status_checks: { strict: false, contexts: [], checks } });
+
+test("with the gate's check named, a ruleset that requires it from this app says gated, and the protection is not read", async () => {
+  const { approvals, seen } = github({
+    [`GET ${RULES('dev')}`]: () => json([{ type: 'pull_request', parameters: { dismiss_stale_reviews_on_push: false } }, requiredChecks({ context: 'build' }, { context: 'AI Review', integration_id: 321 })]),
+    [`GET ${PROTECTION('dev')}`]: () => json(protectionWith(false)),
+  });
+  assert.equal(await approvals.staleApprovals(REF, '99', 'dev', 'AI Review'), 'gated');
+  assert.deepEqual(seen.map((s) => s.path), [RULES('dev')]);
+  // Unnamed, the same rules say nothing of the gate.
+  const unnamed = github({ [`GET ${RULES('dev')}`]: () => json([requiredChecks({ context: 'AI Review', integration_id: 321 })]), [`GET ${PROTECTION('dev')}`]: () => json({}, 404) });
+  assert.equal(await unnamed.approvals.staleApprovals(REF, '99', 'dev'), 'kept');
+  // A rule that dismisses stale reviews is said first.
+  const both = github({ [`GET ${RULES('dev')}`]: () => json([requiredChecks({ context: 'AI Review', integration_id: 321 }), dismissing]) });
+  assert.equal(await both.approvals.staleApprovals(REF, '99', 'dev', 'AI Review'), 'dismissed');
+});
+
+test('a required check holds only when it is the named one and only this app may report it', async () => {
+  for (const check of [
+    { context: 'AI Review' }, { context: 'AI Review', integration_id: null }, { context: 'AI Review', integration_id: 322 },
+    { context: 'AI Review', integration_id: '321' }, { context: 'ai review', integration_id: 321 }, { context: 'Build', integration_id: 321 }, 'AI Review', null,
+  ]) {
+    const { approvals } = github({ [`GET ${RULES('dev')}`]: () => json([requiredChecks(check)]), [`GET ${PROTECTION('dev')}`]: () => json({}, 404) });
+    assert.equal(await approvals.staleApprovals(REF, '99', 'dev', 'AI Review'), 'kept', JSON.stringify(check));
+  }
+  // Parameters of another shape say nothing either.
+  for (const rule of [{ type: 'required_status_checks' }, { type: 'required_status_checks', parameters: { required_status_checks: 'AI Review' } }]) {
+    const { approvals } = github({ [`GET ${RULES('dev')}`]: () => json([rule]), [`GET ${PROTECTION('dev')}`]: () => json({}, 404) });
+    assert.equal(await approvals.staleApprovals(REF, '99', 'dev', 'AI Review'), 'kept', JSON.stringify(rule));
+  }
+});
+
+test("the branch protection's required check from this app says gated; its contexts, which any source may report, do not", async () => {
+  const cases: Array<[unknown, 'gated' | 'kept']> = [
+    [protectionChecks({ context: 'AI Review', app_id: 321 }), 'gated'],
+    [protectionChecks({ context: 'AI Review', app_id: null }), 'kept'],
+    [protectionChecks({ context: 'AI Review', app_id: 9 }), 'kept'],
+    [{ required_status_checks: { strict: true, contexts: ['AI Review'], checks: [] } }, 'kept'],
+    [{ ...protectionWith(false), ...protectionChecks({ context: 'AI Review', app_id: 321 }) }, 'gated'],
+  ];
+  for (const [protection, expected] of cases) {
+    const { approvals, seen } = github({ [`GET ${RULES('main')}`]: () => json([]), [`GET ${PROTECTION('main')}`]: () => json(protection) });
+    assert.equal(await approvals.staleApprovals(REF, '99', 'main', 'AI Review'), expected, JSON.stringify(protection));
+    assert.deepEqual(seen.map((s) => s.path), [RULES('main'), PROTECTION('main')]);
+  }
+  // A protection that dismisses stale approvals is said first.
+  const both = github({ [`GET ${RULES('main')}`]: () => json([]), [`GET ${PROTECTION('main')}`]: () => json({ ...protectionWith(true), ...protectionChecks({ context: 'AI Review', app_id: 321 }) }) });
+  assert.equal(await both.approvals.staleApprovals(REF, '99', 'main', 'AI Review'), 'dismissed');
+});
+
+test('either form saying gated is enough, whatever the other read did', async () => {
+  const rulesDenied = github({ [`GET ${RULES('main')}`]: () => json({ message: 'denied' }, 403), [`GET ${PROTECTION('main')}`]: () => json(protectionChecks({ context: 'AI Review', app_id: 321 })) });
+  assert.equal(await rulesDenied.approvals.staleApprovals(REF, '99', 'main', 'AI Review'), 'gated');
+  const protectionDenied = github({ [`GET ${RULES('main')}`]: () => json([requiredChecks({ context: 'AI Review', integration_id: 321 })]), [`GET ${PROTECTION('main')}`]: () => json({ message: 'denied' }, 403) });
+  assert.equal(await protectionDenied.approvals.staleApprovals(REF, '99', 'main', 'AI Review'), 'gated');
+  // Neither saying so, with one denied: no answer.
+  const neither = github({ [`GET ${RULES('main')}`]: () => json([]), [`GET ${PROTECTION('main')}`]: () => json({ message: 'denied' }, 403) });
+  await assert.rejects(neither.approvals.staleApprovals(REF, '99', 'main', 'AI Review'), /^Error: github_403$/);
+});
+
+const REVIEW ='GET /repos/acme/shop/pulls/7/reviews/501';
 test('a review is read with its state and commit, and a 404 is null', async () => {
   for (const [state, expected] of [['APPROVED', 'approved'], ['DISMISSED', 'dismissed'], ['COMMENTED', 'commented'], ['CHANGES_REQUESTED', 'other']] as const) {
     const { approvals, seen } = github({ [REVIEW]: () => json({ id: 501, state, commit_id: 'h1', body: 'Review text' }) });
@@ -193,7 +255,7 @@ test("a dismissal carries the writer's headers and a JSON content type, and a re
     seen.push(init?.redirect);
     return new Response(null, { status: 301, headers: { location: 'https://api.github.com/repositories/1/pulls/7/reviews/501/dismissals' } });
   };
-  const approvals = createGithubApprovals({ auth, fetch: stub as typeof fetch });
+  const approvals = createGithubApprovals({ auth, appId: APP_ID, fetch: stub as typeof fetch });
   await assert.rejects(approvals.dismissReview(REF, '99', '501', MESSAGE), /^Error: github_301$/);
   assert.deepEqual(seen, ['manual']);
   assert.deepEqual(
@@ -206,7 +268,7 @@ test('an id or an installation that is not digits is refused before any request,
   let asked = 0;
   const counting: AppAuth = { appToken: () => 'jwt', installationToken: async () => { asked += 1; return 'tok'; } };
   const seen: string[] = [];
-  const approvals = createGithubApprovals({ auth: counting, fetch: (async (url: string | URL | Request) => { seen.push(String(url)); return json({}); }) as typeof fetch });
+  const approvals = createGithubApprovals({ auth: counting, appId: APP_ID, fetch: (async (url: string | URL | Request) => { seen.push(String(url)); return json({}); }) as typeof fetch });
   const bad = /^Error: github_bad_path$/;
   await assert.rejects(approvals.readReview(REF, '99', 'x'), bad);
   await assert.rejects(approvals.readReview(REF, '99', '5/01'), bad);
@@ -230,7 +292,7 @@ test('an id or an installation that is not digits is refused before any request,
   const answers = [() => json({ message: secret }, 500), () => json({ message: secret }, 422), () => json({ state: secret }), () => json([secret]),
     () => new Response(secret, { status: 200 }), () => { throw new Error(secret); }];
   for (const answer of answers) {
-    const leaking = createGithubApprovals({ auth: leaky, fetch: (async () => answer()) as typeof fetch });
+    const leaking = createGithubApprovals({ auth: leaky, appId: APP_ID, fetch: (async () => answer()) as typeof fetch });
     const calls = [leaking.staleApprovals(REF, '99', 'main'), leaking.readReview(REF, '99', '501'), leaking.dismissReview(REF, '99', '501', MESSAGE)];
     for (const call of calls) {
       const error = await call.then(() => null, (e: unknown) => e);
