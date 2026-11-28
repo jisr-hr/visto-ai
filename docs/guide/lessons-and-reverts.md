@@ -5,7 +5,7 @@ description: A lesson is one sentence a model writes from a reply a person wrote
 
 ## Lessons
 
-A lesson is one sentence a model writes from a reply a person wrote under one of the reviewer's findings, when the reply showed that the finding was wrong. Later reviews of that repository are shown it as data for 90 days, so that they leave out a finding of the kind it says was wrong. Lessons are made and shown only with `learning: true`. **What lessons do to findings and to the score is not measured:** no eval shows a lesson yet.
+A lesson is one sentence a model writes from a reply a person wrote under one of the reviewer's findings, when the reply showed that the finding was wrong. Later reviews of that repository are shown it as data for 90 days, so that they leave out a finding of the kind it says was wrong. Lessons are made and shown only with `learning: true`. **What lessons do to findings and to the score is not measured:** the evals can show a lesson (see [Measuring lessons](#measuring-lessons)), but the measurement has not been run on a deployment's data.
 
 What an operator must know:
 
@@ -47,6 +47,57 @@ from visto_ai.judge_calls group by 1, 2, 3 order by 3 desc, 1, 2;
 - **A stop.** A run under way is told, starts no further call, asks no second time for a reply whose first answer was no verdict, and sends the database nothing more; the stop waits for it at most 5 seconds before the database closes. A call answered after the stop is in the run's line and the spend guard is told of it, but nothing is written for it: its reply is judged again, and its cost is in no sum.
 - **What is not followed.** A reply edited or deleted later: a lesson made from it stays until it is switched off or expires. A lesson that is confirmed again is not renewed. Two lessons that disagree both stand. A stored result that lists one comment twice among its thread verdicts gives the veto one of the two. Two services running the judge at once on one database would write its cost twice; one service runs one judge, and a second instance stops at once.
 - **The migration.** Lessons add one migration, `0011_lessons`: the tables `reply_verdicts` and `judge_calls`, and on `memory_records` a column for a lesson's text. It is applied whether or not learning is on. A previous release refuses to start on a database that has it. `eval:seed-memory` now ends with `database_not_migrated` on a database that has not had it, where it asked for `0010_memory`.
+
+## Measuring lessons
+
+The evals can be shown lessons as of each case. The lessons they are shown are made by the eval, from an export of a deployment's findings and the replies under them, and not read from the deployment's own records. **Nothing here has been run on a deployment's data yet, so what a lesson does to findings and to the score is still not measured.** What follows is how to measure it, step by step, and what the measurement cannot show.
+
+What an operator must know:
+
+- **The export, and who runs it.** Only the person who runs the deployment can make it, since it is the one command here that connects to a database:
+
+```bash
+npm run eval:export-findings -- --config config.local.yml --out ../export.jsonl
+```
+
+  It reads in one read-only transaction and writes nothing to the database. It refuses a database that has not had migration `0003_publishing` (`database_not_migrated`) and an `--out` that already exists unless `--force` is given (`out_exists`). The file must be outside the project folder, and it is written mode 600. It holds, for every finding comment of a published run (not a note): the run's id, head, base and start; the finding's text; every inline comment that replies to it, with its writer's association with the repository; and every later published run of the pull request that kept a verdict for the thread. It holds no login, no title, no description and no record of memory. It is private: it holds finding texts and replies, and nobody but the operator should hand it on without reading it. It prints `findings <n>, with replies <n>, replies <n>, pull requests <n>`.
+- **The history file of the same window.** `eval:import-history` (see [Backtest](backtest.md)) over the same repository and the same dates. The export holds no description and no branch, and the replay cases need them; a pull request that is not in the history file gets no case. The history file holds merged pull requests only.
+- **The judge of replies.** `eval:judge-replies` asks the model again for every reply in the export, with the code the service's nightly judge uses, and runs the service's nights over the export: each 00:00 UTC from the day after the earliest reply up to the 00:00 of the export's day, as if learning had been on from the first reply. The deployment's own lessons and verdicts are not read, and the judge does not answer as it did at night, so the lessons made are the eval's, not the deployment's.
+
+```bash
+npm run eval:judge-replies -- --findings ../export.jsonl --config config.local.yml --out ../lessons --max-cost 2
+```
+
+  It makes paid model calls, one for each reply and one more for an answer with no verdict, with the review model, `model.toolChoice` and `model.timeoutSeconds` of the config. `--max-cost` is 2 USD by default and counts only what that run spends. It needs no `GITHUB_TOKEN`. It writes `lessons.json` (mode 600) and `summary.md` (counts only) in `--out`, and `answers.jsonl` (mode 600). **Every answer is kept** in `answers.jsonl`, keyed by the reply, the attempt, the model, its fallbacks, the tool choice and the judge's input, so a second run asks only what is not kept, and a changed rule, finding text, reply, model, fallback or tool choice asks the affected replies again. A failure at the provider is never kept. It prints `nights <n>, judged <n>, lessons <n>, given up <n>, waiting <n>, calls <n>, asked now <n>, cost <n>, spent now <n>`, and `stopped: <reason>` when the run did not finish.
+- **A run that is cut is refused.** A night that ended for any reason but `done` or the lesson cap, or in which a call failed at the provider, or a run stopped by `--max-cost`, stops the simulation and writes `lessons.json` with `complete: false`. `lesson-cases`, `replay`, `backtest` and `memory-count` refuse it with `lessons_incomplete`. Run the command again with the same `--out`: it pays only for what is not kept. A lessons file that does not parse is `bad_lessons_file`.
+- **A lesson is live from the night that made it.** A review at a date is shown the lessons made at or before that date, from the 00:00 after their reply, and not yet expired (90 days). A later verdict counts at a night only when its run started after the reply and was published before that night. A case is never shown a lesson made from a reply on its own pull request, nor one made from a reply written on its own day.
+- **The cases, and the count.** `eval:lesson-cases` joins the export, the lessons file and the history file, calls no model and reads no network, and writes the replay's case file:
+
+```bash
+npm run eval:lesson-cases -- --history ../history.jsonl --findings ../export.jsonl --lessons ../lessons/lessons.json --out ../lesson-cases.jsonl
+```
+
+  It refuses a lessons file made from another export (`different_export`) and an existing `--out` without `--force` (`out_exists`); the case file is written mode 600. It prints `cases <n>, labels valid <n> invalid <n>, cases shown a lesson <n>, invalid labels in them <n>, skipped not in history <n>, no base <n>, same head <n>`, then a line `<key>: lessons <n>, invalid <n>, valid <n>` for each case. `--only-shown` writes only the cases the count says would be shown a lesson. One case is made for each published run of a pull request the history file holds, with at least one labelled finding, at the run's head, against its base, dated by the run's start (`review_at`). Its title, description, branches and author are the history file's, found by repository (compared in lower case) and number. A run with no base is skipped (`no_base`), and a second run at a head that already made a case is skipped (`same_head`). The case is reviewed whole at the run's head, though the run itself may have been an incremental review.
+- **The labels.** The first decisive reply, in time order, by a person with access labels the finding: `valid_pushback` makes it `invalid`; `confirmed_fix` and `invalid_pushback` make it `valid`. With no decisive reply, the newest later verdict of the thread is read, whatever its time: `fixed` makes it `valid`. Anything else gives no label. A label carries the comment's id, path, side, line and severity, and no text. A label is a model's reading of a reply and not a person's; a stranger's reply labels nothing. The judge that makes lessons also makes the labels, but a case is never shown the lesson made from the reply that labelled it.
+- **The floors, before any paid run.** The count says how many cases would be shown a lesson, and how many `invalid` labels are in them, with the history file's final files standing for the files the review is handed, so it can be off by the files that changed between the run's head and the merge. A paid replay is worth making only with at least 20 cases shown a lesson and 10 `invalid` labels in them; a paid backtest, with at least 20 cases shown a lesson (`eval:memory-count --lessons`, below) and 10 labelled files. These are starting values, as the memory count's were, and not a finding. With fewer, a paid run cannot show anything, whatever lessons do.
+- **The four runs.** Two baselines (no lessons), two candidates (with them), each pair on the same file and config, so that the noise between two identical runs is known:
+
+```bash
+npm run eval:replay -- --cases ../lesson-cases.jsonl --out ../runs/off-1 --label off-1 --config config.local.yml
+npm run eval:replay -- --cases ../lesson-cases.jsonl --out ../runs/off-2 --label off-2 --config config.local.yml
+npm run eval:replay -- --cases ../lesson-cases.jsonl --lessons ../lessons/lessons.json --out ../runs/on-1 --label on-1 --config config.local.yml
+npm run eval:compare -- ../runs/off-1/summary.json ../runs/on-1/summary.json --noise ../runs/off-2/summary.json
+```
+
+  The same four runs are made on the history file with `eval:backtest` and `--lessons`, and compared with `eval:score-compare` (see [Backtest](backtest.md)). A difference smaller than the noise between the two baselines is no finding, and "no measurable effect" may mean "too few cases".
+- **What the eval cannot show.**
+  - The lessons are the eval's, made by a judge that does not answer as it did at night; a deployment's own lessons are not these.
+  - The eval cannot tell a lesson a team switched off. One a team rejected in the deployment is shown in the eval, which can only make lessons look worse than they are.
+  - The service runs a night at the first tick after 00:00, or an hour or more later after a retry or an outage; the eval runs it at 00:00. A review that starts in between is shown a lesson in the eval that the service had not made yet.
+  - The replay is shown lessons alone: its memory holds no signal and no revert, and its results hold no block scores. What a lesson does to the score is seen only in the backtest, on the history file's pull requests.
+  - A finding whose text cannot be told is exported with no text and the judge gives no verdict for it (`finding_unknown`).
+  - Neither comparison can tell a lesson that changed a finding from noise on a small count.
+- **What is printed and what is not.** The commands print counts, costs and short codes. No reply, finding, lesson text, quote, path or login is printed or logged, and `summary.md` holds none. A file that cannot be read is named by its line number only (`bad_findings_line_<n>`, `bad_answers_line_<n>`). `export-findings`, `judge-replies` and `lesson-cases` need no `GITHUB_TOKEN`, and every file they read or write must be outside the project folder.
 
 ## Reverts
 
