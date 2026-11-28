@@ -5,7 +5,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type {
   AccountAnswer, Accounts, Activity, ApiError, Health, Me, MemoryKind, MemorySwitched, MemoryView, OneReview, OneTime, Overview, PullReviews, QualityAnswer,
-  QualityWindow, Repositories, Reviews, Role, SettingChanges, SettingIssue, SettingsExport, SettingsInvalid, SettingsSave, SettingsView, SignInStep, Ways,
+  QualityWindow, Repositories, Reviews, Role, SettingChanges, SettingIssue, SettingsExport, SettingsInvalid, SettingsSave, SettingsSaved, SettingsView, SignInStep, Ways,
   WindowDays,
 } from './api-types.ts';
 
@@ -42,7 +42,8 @@ export interface Api {
   pullReviews(repository: string, number: number): Promise<PullReviews>;
   settings(): Promise<SettingsView>;
   /** 200 resolves saved with the new view; 422 holding issues resolves invalid; any other refusal rejects RequestFailed (409 'changed' among them). */
-  saveSettings(csrf: string, save: SettingsSave): Promise<{ kind: 'saved'; view: SettingsView } | { kind: 'invalid'; issues: SettingIssue[] }>;
+  /** `restarting`: the service stops once the save is answered, and starts again on the saved settings (absent: it does not). */
+  saveSettings(csrf: string, save: SettingsSave): Promise<{ kind: 'saved'; view: SettingsView; restarting?: boolean } | { kind: 'invalid'; issues: SettingIssue[] }>;
   settingChanges(before?: number): Promise<SettingChanges>;
   settingsExport(): Promise<SettingsExport>;
   overview(days: WindowDays): Promise<Overview>;
@@ -112,9 +113,12 @@ export function createApi(fetchFn?: typeof fetch): Api {
   };
 
   /** The save: a 422 with issues is an answer, its body read once; any other refusal is as `send` reads it. */
-  async function saveSettings(csrf: string, save: SettingsSave): Promise<{ kind: 'saved'; view: SettingsView } | { kind: 'invalid'; issues: SettingIssue[] }> {
+  async function saveSettings(csrf: string, save: SettingsSave): Promise<{ kind: 'saved'; view: SettingsView; restarting?: boolean } | { kind: 'invalid'; issues: SettingIssue[] }> {
     const response = await request('PUT', '/api/settings', { [CSRF_HEADER]: csrf }, save);
-    if (response.ok) return { kind: 'saved', view: await answerOf<SettingsView>(response) };
+    if (response.ok) {
+      const { restarting, ...view } = await answerOf<SettingsSaved>(response);
+      return { kind: 'saved', view, restarting: restarting === true };
+    }
     if (response.status === 422) {
       let body: unknown = null;
       try {

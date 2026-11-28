@@ -378,3 +378,15 @@ test('0017_overview adds the alerts, dependency health and who switched a record
     [{ source_ref: '7:h1:src/a.ts', status: 'active', switched_at: null, switched_by: null }]);
   await db.close();
 });
+test('0018_audit_key follows 0017_overview and makes the table of generated secrets, empty, that holds only the audit key', async () => {
+  const db = await testDb();
+  const names = (await db.query<{ name: string }>('select name from visto_ai.schema_migrations order by name')).map((r) => r.name);
+  assert.equal(names.indexOf('0018_audit_key'), names.indexOf('0017_overview') + 1);
+  assert.deepEqual(await db.query('select count(*)::int as n from visto_ai.generated_secrets'), [{ n: 0 }]);
+  const insert = (name: string, value: string) => db.query(
+    "insert into visto_ai.generated_secrets (name, value, created_at) values ($1, $2, '2026-03-01T10:00:00Z')", [name, value]);
+  await assert.rejects(insert('other', 'k'.repeat(32)));
+  await assert.rejects(insert('audit_key', 'k'.repeat(31)));
+  assert.deepEqual(await db.query('select count(*)::int as n from visto_ai.generated_secrets'), [{ n: 0 }]);
+  await db.close();
+});

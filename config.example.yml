@@ -117,8 +117,9 @@ learning: false
 
 # The audit sample's key (see auditShare under repositories), named by reference: the secret its draw is keyed with, so that
 # nobody without it can tell beforehand which pull request will be drawn. At least 32 characters, for example the output of
-# openssl rand -hex 32. Required while autoApprove is true with an auditShare above 0; a key written must be set. A new key draws
-# every pull request again.
+# openssl rand -hex 32. Optional: with none written, the service generates one at its first start and keeps it in its database
+# (visto_ai.generated_secrets), never shown, logged or exported. A key written must be set, and wins. Writing a key later, or
+# removing it, draws every pull request again.
 # auditKey: { env: AUDIT_KEY }
 
 # Optional extension modules: code of your own that the service loads once, at start. A module can give the reviewer
@@ -188,7 +189,7 @@ repositories:
     # author, with access, replied and it is resolved; gate, as the merge gate's rule clears it. It is strict when not written.
     # auditShare: of the pull requests autoApprove would approve, the percentage (0 to 100) sent to a person anyway as an audit sample,
     # drawn by a keyed hash of the pull request, so that pushing again does not draw it again; its review says it was drawn. It is 5 when
-    # not written, and 0 switches the sample off. Above 0, with autoApprove true, the top-level auditKey must be written.
+    # not written, and 0 switches the sample off. Its key is the top-level auditKey, or else the one the service generates.
     # score:
     #   threshold: 70
     #   inlineNotes: false
