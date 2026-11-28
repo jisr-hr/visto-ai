@@ -9,6 +9,7 @@ import { REVERTED_LINE_RULES } from '../../engine/context/memory.ts';
 import { SUBMIT_REVIEW } from '../../engine/model/submit-review.ts';
 import type { ChangedFile, ModelClient, ModelResponse, ReviewDeps, ScoreAnswer, Scorer, Source } from '../../engine/types.ts';
 import type { HistoryCase } from '../history/file.ts';
+import type { LessonsFile } from '../lessons/lessons-file.ts';
 import { historyMemory } from './memory.ts';
 import { readCaseScores, runBacktest, toBacktestInput } from './run.ts';
 import type { BacktestSummary } from './run.ts';
@@ -390,4 +391,41 @@ test('a case after a revert is sent the reverted line and its rule, and no word 
   for (const word of ['Double', 'Doubles', 'every customer']) assert.equal(all.includes(word), false, word);
   const rows = lines(join(args.outDir, 'results.jsonl')) as { key: string; memory: unknown }[];
   assert.deepEqual(rows.map((r) => r.memory), [{ status: 'ok', code: 'ok', lines: 1 }]);
+});
+
+const lessonsFile = (): LessonsFile => ({
+  version: 1, findings_file: 'findings.jsonl', findings_sha256: 'a'.repeat(64), exported_at: '2026-03-20T08:00:00.000Z',
+  setting: { model: 'vendor/model-a', fallbacks: [], toolChoice: 'forced' }, rules_sha256: 'b'.repeat(64),
+  complete: true, end: null, nights: 1, first_night: null, last_night: null, cost: 0, verdicts: [],
+  lessons: [{
+    ref: '20:r20', repo: 'acme/shop', number: 20, reply: 'r20', path: TAX, createdAt: '2026-03-02T00:00:00.000Z', madeAt: '2026-03-02T00:00:00.000Z',
+    expiresAt: '2026-09-01T00:00:00.000Z', text: 'Discounts apply before tax in this shop, so a finding on the order of the two is wrong.',
+  }],
+});
+
+test('a backtest with lessons records how lessons did on each row and counts them in its summary', async () => {
+  const a = memCase(7, TAX, '2026-03-05T12:00:00Z');
+  const b = memCase(8, 'docs/readme.md', '2026-03-06T12:00:00Z');
+  const early = memCase(9, TAX, '2026-03-01T12:00:00Z');
+  const cases = [a, b, early];
+  const args = baseArgs({
+    cases, concurrency: 1, deps: memoryDeps({ 7: TAX, 8: 'docs/readme.md', 9: TAX }),
+    memory: { of: historyMemory([], lessonsFile()).of, lessons: { file: '/elsewhere/lessons.json', sha256: 'e'.repeat(64) } },
+  });
+  const s = await runBacktest(args);
+  assert.deepEqual([s.lessons_file, s.lessons_sha256, s.lessons_cases], ['/elsewhere/lessons.json', 'e'.repeat(64), { ok: 1, empty: 2, skipped: 0, error: 0, none: 0 }]);
+  // with --lessons alone there is no memory file: none of the memory keys is written
+  assert.deepEqual(Object.keys(s).filter((k) => k.startsWith('memory')), []);
+  const rows = lines(join(args.outDir, 'results.jsonl')) as { key: string; memory: { lessons?: { status: string; shown: number } } }[];
+  const lessonsOf = (n: number): unknown => rows.find((r) => r.key.includes(`#${n}@`))!.memory.lessons;
+  assert.deepEqual([lessonsOf(7), lessonsOf(8), lessonsOf(9)].map((l) => (l as { status: string }).status), ['ok', 'empty', 'empty']);
+  assert.equal((lessonsOf(7) as { shown: number }).shown, 1);
+  const md = readFileSync(join(args.outDir, 'summary.md'), 'utf8');
+  assert.match(md, /\nLessons: as of each case, from lessons\.json\. Cases shown a lesson: 1 of 3; with none to show: 2; not shown: 0; failed: 0; not asked: 0\.\n$/);
+  assert.equal(md.includes('Memory:'), false);
+  // a run without lessons has no such line, and its rows have no lessons key
+  const plain = baseArgs({ cases, deps: memoryDeps({ 7: TAX, 8: 'lib/other.ts', 9: TAX }), memory: { of: historyMemory(cases).of, file: '/elsewhere/h.jsonl', sha256: 'f'.repeat(64) } });
+  await runBacktest(plain);
+  assert.equal(readFileSync(join(plain.outDir, 'summary.md'), 'utf8').includes('Lessons:'), false);
+  for (const r of lines(join(plain.outDir, 'results.jsonl')) as { memory: { lessons?: unknown } | null }[]) assert.equal(r.memory === null || !('lessons' in r.memory), true);
 });

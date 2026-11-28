@@ -20,8 +20,8 @@ const mcpTypesOnly = ['error', { patterns: [{ group: ['../engine/types.ts', '../
 const engineNodeForbidden = engineForbidden.flatMap((name) => [name, `node:${name}`]);
 // The memory part is pure: types and helpers of the engine, types of the git boundary, and its own files; no input or output.
 const memoryForbidden = [githubAdapter, '**/db/**', '**/shell/**', '**/eval/**', '**/gate/**', '**/extensions/**', '**/mcp/**', '**/main.ts', '**/service.ts'];
-// Only the eval's command line, the seed and the seed's test reach the database.
-const evalSeed = ['src/eval/history/seed.ts', 'src/eval/history/seed.test.ts'];
+// Only the eval's command line, the seed, the export and their tests reach the database.
+const evalSeed = ['src/eval/history/seed.ts', 'src/eval/history/seed.test.ts', 'src/eval/lessons/export.ts', 'src/eval/lessons/export.test.ts'];
 
 // Flat config does not merge a rule's options across blocks: each block carries every restriction for its files.
 export default tseslint.config(

@@ -1,5 +1,6 @@
 // Compares two run summaries, with an optional second run of the baseline as a noise band:
 // the band is the distance between the two baseline runs.
+import { basename } from 'node:path';
 import { METRICS } from './score.ts';
 import type { SummaryFile } from './replay.ts';
 
@@ -16,6 +17,8 @@ const labelOf = (file: SummaryFile, fallback: string): string => (typeof file.su
 export function compareSummaries(baseline: SummaryFile, candidate: SummaryFile, noise: SummaryFile | null): string {
   if (!baseline.cases_sha256 || !candidate.cases_sha256) throw new Error('missing_case_hash');
   if (baseline.cases_sha256 !== candidate.cases_sha256) throw new Error('different_case_files');
+  // Runs shown different lessons measure something else; the file name says nothing, its hash does.
+  if (baseline.lessons_sha256 !== undefined && candidate.lessons_sha256 !== undefined && baseline.lessons_sha256 !== candidate.lessons_sha256) throw new Error('different_lessons');
   const rows = METRICS.map((m) => {
     const b = valueOf(baseline, m.name);
     const c = valueOf(candidate, m.name);
@@ -31,7 +34,15 @@ export function compareSummaries(baseline: SummaryFile, candidate: SummaryFile, 
   return [
     `| metric | ${labelOf(baseline, 'baseline')} | ${labelOf(candidate, 'candidate')} | delta | |`, '| --- | --- | --- | --- | --- |', ...rows,
     ...warnings(baseline, candidate),
+    ...lessonsLine(baseline, candidate),
   ].join('\n');
+}
+
+// Only when a run has lessons: which file each run was shown.
+function lessonsLine(a: SummaryFile, b: SummaryFile): string[] {
+  if (a.lessons_sha256 === undefined && b.lessons_sha256 === undefined) return [];
+  const name = (f: SummaryFile): string => (f.lessons_sha256 === undefined || f.lessons_file === undefined ? 'none' : basename(f.lessons_file));
+  return [`lessons: ${name(a)}; ${name(b)}`];
 }
 
 // Conditions under which the two runs are not comparable as they stand.

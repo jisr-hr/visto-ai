@@ -533,7 +533,7 @@ Each block has a fixed size. What is cut is named in the audit list. The predece
 
 **Embeddings.** Lookups cannot match a brand-new file in a new directory. Similarity search over change summaries is the first experiment once memory is built and both evals have been re-run with it (stage 8 of the build order), judged on the safety number. Adopting it means moving to a Postgres image that includes the pgvector extension. That is the same database, and it adds no service.
 
-The engine sees memory through one read-only interface: given the changed files and an "as of" time, return the two blocks. Production backs it with the database. The eval backs it with records built from a local history file, so a backtest never touches a database.
+The engine sees memory through one read-only interface: given the changed files and an "as of" time, return the two blocks. Production backs it with the database. The eval backs it with records built from a local history file, so a backtest never touches a database. The eval also backs lessons, from a lessons file the eval made from a deployment's export: the lessons live at the case's date, never those of its own pull request.
 
 ### 7.5 History import (D19)
 
@@ -788,7 +788,7 @@ A deployment that ran the predecessor brings its history across with a one-off m
 
 ## 15. Evaluation
 
-Two commands. The findings replay arrives with stage 2 of the build order and the score backtest with stage 3. Memory joins both in stage 8. The score backtest first, after a count that calls no model; the findings replay in the plan after the lessons. The backtest's memory holds reverts as of each case; the findings replay with memory, and lessons in both evals, come in the plan after the reverts. Neither can write: the eval builds its source in a read-only mode in which any write call throws.
+Two commands. The findings replay arrives with stage 2 of the build order and the score backtest with stage 3. Memory joins both in stage 8. The score backtest first, after a count that calls no model. The backtest's memory holds reverts as of each case. Lessons join both evals from a deployment's export: the eval makes its own lessons from the export's findings and replies, by the service's rules, and the deployment's own records are not read. The findings replay is shown lessons alone, with no signals and no reverts; what a lesson does to the score is measured in the backtest. Neither can write: the eval builds its source in a read-only mode in which any write call throws.
 
 ### 15.1 Findings replay
 
@@ -801,6 +801,7 @@ What this eval can and cannot show:
 - **It shows "not worse".** Labels are comments an earlier reviewer made. A valid finding that nobody raised before has no label and scores nothing.
 - **It is noisy.** The same code run twice differs. Every new case file and every model change starts with two baseline runs, and their difference is the noise band.
 - **New findings need a person.** The command writes out a sample of unmatched major and blocker findings for hand labelling.
+- **Lessons as of each case.** A case file made from a deployment's export holds cases dated by the start of the published run each was made from, and labelled from the replies people wrote under that run's findings and from the later verdicts of their threads: a label is a model's reading of a reply, not a person's. A replay with lessons is shown those made before the case's date, never one made from its own pull request or from a reply written on its own day. It cannot tell a lesson a team switched off, so a rejected lesson is shown, which can only make lessons look worse than they are.
 - **A small case file shows only large effects.** The case file inherited from the predecessor has a few dozen cases, and on it the main metrics move by a few points between identical runs. A larger file is built before the replay is used to settle a close call.
 
 **When scoring joins the call.** Scoring shares the model call with findings and adds a long structured answer to it. When scoring is added (stage 3 of the build order), and whenever the scoring part of the contract changes, the findings replay is run again on the same case file. If a findings metric leaves the noise band for the worse, scoring moves to a model call of its own.
@@ -845,7 +846,7 @@ Each stage ends with something that can be measured or shown.
 5. **Gate.**
 6. **Extensions and MCP tools,** including feedback routes.
 7. **Shadow at the first deployment, then cut-over.** Tracked in that deployment's private repository. From here the first deployment runs on this project: findings, the gate, and the score shown in every review, with automatic approval off and no learned records yet. Capture is already storing the human activity that memory and the live numbers need.
-8. **Memory.** Records, learning, retrieval, and the importer's database output. Both evals are re-run with memory "as of" each case. An admin switches a record off or on in the UI's Memory screen, or in the database. A deployment may leave learning off in configuration until stage 10. Cut in four plans: memory for the score, lessons from replies and reverts, which are built, and the evals with lessons as of each case, which wait for a deployment: a history file holds no finding of this reviewer, so the lessons an eval needs can only be made from a deployment's own database.
+8. **Memory.** Records, learning, retrieval, and the importer's database output. Both evals are re-run with memory "as of" each case. An admin switches a record off or on in the UI's Memory screen, or in the database. A deployment may leave learning off in configuration until stage 10. Cut in four plans: memory for the score, lessons from replies, reverts, and the evals with lessons as of each case, all built.
 9. **Automatic approval and withdrawal.** Cut in two plans: approval, its record and its withdrawal, which is built, and the audit sample, which is built too.
 10. **UI.** Three screens: score numbers per repository, learned records with their kill switch, recent reviews with failures, feedback and dependency health. The UI is on when the deployment config writes its address (`ui.publicUrl`), and off with no address, account or team written. Sign-in is by password, with accounts of the UI's own, and also through the same app when the config names accounts or one team, which then limit who may sign in that way. Cut in three plans (UI design 7), the first in two. Password accounts and two roles, admin and viewer, are added beside GitHub sign-in.
 

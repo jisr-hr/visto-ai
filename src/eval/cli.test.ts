@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import test from 'node:test';
@@ -10,6 +11,7 @@ import type { CaseScores } from './backtest/metrics.ts';
 import { scoreMoves } from './backtest/noise.ts';
 import { A, B, block, C, file } from './backtest/test-cases.ts';
 import { main, prepareRun } from './cli.ts';
+import { loadCases } from './cases.ts';
 import { serializeCase } from './history/file.ts';
 import type { HistoryCase } from './history/file.ts';
 
@@ -477,6 +479,39 @@ test('the script eval:seed-memory runs the command seed-memory', () => {
   assert.equal(scripts['eval:seed-memory'], 'node src/eval/cli.ts seed-memory');
 });
 
+test('export-findings needs --config and --out, a database in the config, and an out path outside the project', async () => {
+  const folder = mkdtempSync(tmpdir() + '/');
+  const withDatabase = join(folder, 'deployment.yml');
+  writeFileSync(withDatabase, 'model:\n  apiKey: { env: MODEL_KEY }\n  model: vendor/model-a\ndatabase:\n  url: { env: DATABASE_URL }\n');
+  const withoutDatabase = join(folder, 'no-database.yml');
+  writeFileSync(withoutDatabase, 'model:\n  apiKey: { env: MODEL_KEY }\n  model: vendor/model-a\n');
+  const env = { MODEL_KEY: 'k', DATABASE_URL: 'postgres://export@db.invalid:5432/visto' };
+  const args = (over: Record<string, string> = {}, drop: string[] = []): string[] => {
+    const options: Record<string, string> = { config: withDatabase, out: join(folder, 'findings.jsonl'), ...over };
+    for (const name of drop) delete options[name];
+    return ['export-findings', ...Object.entries(options).flatMap(([k, v]) => [`--${k}`, v])];
+  };
+  const bad: [string, string[], string][] = [
+    ['no arguments', ['export-findings'], 'usage: export-findings needs --config'],
+    ['missing out', args({}, ['out']), 'usage: export-findings needs --out'],
+    ['out inside the project', args({ out: join(projectRoot, 'findings.jsonl') }), 'usage: --out must be outside the project folder'],
+    ['no database in the config', args({ config: withoutDatabase }), 'usage: export-findings needs a database in the config'],
+    ['config that does not exist', args({ config: join(folder, 'none.yml') }), 'usage: cannot read --config'],
+    ['positional argument', [...args(), 'extra'], 'usage: export-findings takes no positional arguments'],
+    ['unknown option', [...args(), '--history', 'x'], 'usage: unknown option --history'],
+  ];
+  for (const [name, argv, message] of bad) {
+    const [code, lines] = await run(argv, env);
+    assert.equal(code, 2, name);
+    assert.deepEqual(lines, [message], name);
+  }
+});
+
+test('the script eval:export-findings runs the command export-findings', () => {
+  const scripts = (JSON.parse(readFileSync(join(projectRoot, 'package.json'), 'utf8')) as { scripts: Record<string, string> }).scripts;
+  assert.equal(scripts['eval:export-findings'], 'node src/eval/cli.ts export-findings');
+});
+
 test('score-compare prints the count of focus and no step for it', async () => {
   const a = compareDir('focus-base', baseline, baseRows);
   const b = compareDir('focus-cand', candidate, candRows, WITH_MEMORY);
@@ -718,4 +753,238 @@ test('judge prints judge_failed, and a stopped line when the cost cap ended it',
   } finally {
     globalThis.fetch = realFetch;
   }
+});
+
+test('judge-replies needs --findings, --config and --out outside the project, a positive --max-cost and no GITHUB_TOKEN', async () => {
+  const folder = mkdtempSync(tmpdir() + '/');
+  const config = join(folder, 'deployment.yml');
+  writeFileSync(config, 'model:\n  apiKey: { env: MODEL_KEY }\n  model: vendor/model-a\n');
+  const args = (over: Record<string, string> = {}, drop: string[] = []): string[] => {
+    const options: Record<string, string> = { findings: join(folder, 'findings.jsonl'), config, out: join(folder, 'lessons'), ...over };
+    for (const name of drop) delete options[name];
+    return ['judge-replies', ...Object.entries(options).flatMap(([k, v]) => [`--${k}`, v])];
+  };
+  const bad: [string, string[], string][] = [
+    ['no findings', args({}, ['findings']), 'usage: judge-replies needs --findings'],
+    ['no config', args({}, ['config']), 'usage: judge-replies needs --config'],
+    ['no out', args({}, ['out']), 'usage: judge-replies needs --out'],
+    ['findings inside the project', args({ findings: join(projectRoot, 'findings.jsonl') }), 'usage: --findings must be outside the project folder'],
+    ['out inside the project', args({ out: join(projectRoot, 'lessons') }), 'usage: --out must be outside the project folder'],
+    ['max-cost zero', args({ 'max-cost': '0' }), 'usage: --max-cost must be a positive number'],
+    ['config that does not exist', args({ config: join(folder, 'none.yml') }), 'usage: cannot read --config'],
+    ['findings that does not exist', args(), 'usage: cannot read --findings'],
+    ['positional argument', [...args(), 'extra'], 'usage: judge-replies takes no positional arguments'],
+    ['unknown option', [...args(), '--history', 'x'], 'usage: unknown option --history'],
+  ];
+  for (const [name, argv, message] of bad) {
+    const [code, lines] = await run(argv, { MODEL_KEY: 'k' });
+    assert.equal(code, 2, name);
+    assert.deepEqual(lines, [message], name);
+  }
+});
+
+test('the script eval:judge-replies runs the command judge-replies', () => {
+  const scripts = (JSON.parse(readFileSync(join(projectRoot, 'package.json'), 'utf8')) as { scripts: Record<string, string> }).scripts;
+  assert.equal(scripts['eval:judge-replies'], 'node src/eval/cli.ts judge-replies');
+});
+
+// ---- lesson-cases ----
+
+function lessonCaseFiles(): { folder: string; history: string; findings: string; lessons: string; out: string } {
+  const folder = mkdtempSync(tmpdir() + '/');
+  const mk = (n: number): HistoryCase => ({
+    version: 1, repo: 'acme/shop', pr_number: n, title: `t${n}`, body: `b${n}`, author: 'ana', branch: `br${n}`, base_branch: 'main', merged_at: '2026-03-30T10:00:00.000Z',
+    review_head: `rh${n}`, review_base: `rb${n}`, review_at: '2026-03-04T10:00:00.000Z', reviewed_by_person: true, final_head: 'fh', final_base: 'fb',
+    final_files: [{ path: 'src/billing/tax.ts', previous_path: null, status: 'modified', patch: null }], activity: [],
+  });
+  const finding = (n: number, at: string): string => JSON.stringify({
+    version: 1, repo: 'acme/shop', pr_number: n, run: { id: n, head_sha: `head${n}`.padEnd(12, '0'), base_sha: `base${n}`, started_at: at },
+    comment_id: `c-${n}`, path: 'src/billing/tax.ts', side: 'RIGHT', line: 3, severity: 'major', finding: 'f',
+    replies: [{ id: `r-${n}`, order: 1, association: 'member', body: 'x', at: '2026-03-05T10:00:00.000Z' }], later: [],
+  });
+  const header = JSON.stringify({ version: 1, kind: 'findings_export', exported_at: '2026-03-20T08:00:00.000Z' });
+  const history = join(folder, 'history.jsonl');
+  const findings = join(folder, 'findings.jsonl');
+  const lessons = join(folder, 'lessons.json');
+  writeFileSync(history, [7, 8, 9].map((n) => serializeCase(mk(n))).join('\n') + '\n');
+  // 7 and 8 are run before the lesson was made (nothing shown); 9 after (shown one, an invalid label in it)
+  const text = [header, finding(7, '2026-02-04T10:00:00.000Z'), finding(8, '2026-02-05T10:00:00.000Z'), finding(9, '2026-03-04T10:00:00.000Z')].join('\n') + '\n';
+  writeFileSync(findings, text);
+  const verdicts = [7, 8, 9].map((n) => ({ repo: 'acme/shop', number: n, reply: `r-${n}`, finding: `c-${n}`, classification: 'valid_pushback', outcome: 'done', attempts: 1, night: '2026-03-06T00:00:00.000Z' }));
+  const lesson = { ref: '20:r', repo: 'acme/shop', number: 20, reply: 'r', path: 'src/billing/tax.ts', text: 'Invoices round half up on purpose, so a finding on the rounding of a total is wrong.', createdAt: '2026-03-01T00:00:00.000Z', madeAt: '2026-03-01T00:00:00.000Z', expiresAt: '2026-05-30T00:00:00.000Z' };
+  const body = (sha: string): string => JSON.stringify({
+    version: 1, findings_file: 'findings.jsonl', findings_sha256: sha, exported_at: '2026-03-20T08:00:00.000Z',
+    setting: { model: 'vendor/model-a', fallbacks: [], toolChoice: 'forced' }, rules_sha256: 'b'.repeat(64),
+    complete: true, end: null, nights: 1, first_night: null, last_night: null, cost: 0, verdicts, lessons: [lesson],
+  });
+  writeFileSync(lessons, body(createHash('sha256').update(text).digest('hex')));
+  writeFileSync(join(folder, 'other.json'), body('c'.repeat(64)));
+  return { folder, history, findings, lessons, out: join(folder, 'cases.jsonl') };
+}
+
+test('lesson-cases needs its files, outside the project, and refuses an existing out and another export', async () => {
+  const f = lessonCaseFiles();
+  const args = (over: Record<string, string> = {}, drop: string[] = []): string[] => {
+    const options: Record<string, string> = { history: f.history, findings: f.findings, lessons: f.lessons, out: f.out, ...over };
+    for (const name of drop) delete options[name];
+    return ['lesson-cases', ...Object.entries(options).flatMap(([k, v]) => [`--${k}`, v])];
+  };
+  const bad: [string, string[], string][] = [
+    ['no arguments', ['lesson-cases'], 'usage: lesson-cases needs --history'],
+    ['missing out', args({}, ['out']), 'usage: lesson-cases needs --out'],
+    ['history inside the project', args({ history: join(projectRoot, 'h.jsonl') }), 'usage: --history must be outside the project folder'],
+    ['findings inside the project', args({ findings: join(projectRoot, 'f.jsonl') }), 'usage: --findings must be outside the project folder'],
+    ['lessons inside the project', args({ lessons: join(projectRoot, 'l.json') }), 'usage: --lessons must be outside the project folder'],
+    ['out inside the project', args({ out: join(projectRoot, 'c.jsonl') }), 'usage: --out must be outside the project folder'],
+    ['lessons that do not exist', args({ lessons: join(f.folder, 'none.json') }), 'usage: cannot read --lessons'],
+    ['positional argument', [...args(), 'extra'], 'usage: lesson-cases takes no positional arguments'],
+    ['unknown option', [...args(), '--config', 'x'], 'usage: unknown option --config'],
+  ];
+  for (const [name, argv, message] of bad) {
+    const [code, lines] = await run(argv, {});
+    assert.equal(code, 2, name);
+    assert.deepEqual(lines, [message], name);
+  }
+  const [other, otherLines] = await run(args({ lessons: join(f.folder, 'other.json') }), {});
+  assert.deepEqual([other, otherLines], [1, ['different_export']]);
+  assert.equal(existsSync(f.out), false);
+  writeFileSync(f.out, 'kept');
+  assert.deepEqual(await run(args(), {}), [1, ['out_exists']]);
+  assert.equal(readFileSync(f.out, 'utf8'), 'kept');
+});
+
+test('lesson-cases writes the cases, prints counts and one line each, and --only-shown writes only the cases shown a lesson', async () => {
+  const f = lessonCaseFiles();
+  const base = ['lesson-cases', '--history', f.history, '--findings', f.findings, '--lessons', f.lessons, '--out', f.out];
+  const [code, lines] = await run(base, {});
+  assert.equal(code, 0);
+  assert.deepEqual(lines, [
+    'cases 3, labels valid 0 invalid 3, cases shown a lesson 1, invalid labels in them 1, skipped not in history 0, no base 0, same head 0',
+    'acme/shop#7@head70000000: lessons 0, invalid 1, valid 0',
+    'acme/shop#8@head80000000: lessons 0, invalid 1, valid 0',
+    'acme/shop#9@head90000000: lessons 1, invalid 1, valid 0',
+  ]);
+  const written = loadCases(f.out).cases;
+  assert.deepEqual(written.map((c) => [c.pr_number, c.review_at, c.review_round]), [[7, '2026-02-04T10:00:00.000Z', 1], [8, '2026-02-05T10:00:00.000Z', 1], [9, '2026-03-04T10:00:00.000Z', 1]]);
+  assert.equal(statSync(f.out).mode & 0o777, 0o600);
+  assert.deepEqual(lines.join('\n').includes('t7'), false);
+
+  chmodSync(f.out, 0o644);
+  const [, shownLines] = await run([...base, '--only-shown', '--force'], {});
+  assert.deepEqual(shownLines, lines);                                          // the counts are of all three
+  assert.deepEqual(loadCases(f.out).cases.map((c) => c.pr_number), [9]);
+  assert.equal(statSync(f.out).mode & 0o777, 0o600);                            // a forced file is a new one, never wide
+});
+
+test('replay takes --lessons outside the project, refuses it with --plain and cases without a date, and says so before any case starts', async () => {
+  const folder = mkdtempSync(tmpdir() + '/');
+  writeFileSync(join(folder, 'config.yml'), 'model:\n  apiKey: { env: MODEL_KEY }\n  model: vendor/model-a\n');
+  const cases = join(folder, 'cases.jsonl');
+  writeFileSync(cases, JSON.stringify({
+    repo: 'acme/shop', pr_number: 7, head_sha: 'abcdef0123456789', compare_base: 'base000', title: 'Add things', body: '', branch: 'topic', base_branch: 'main', author: 'ana',
+    labels: [{ comment_id: '1', path: 'src/a.ts', line: 2, side: 'RIGHT', severity: 'major', label: 'valid' }],
+  }) + '\n');
+  const lessons = join(folder, 'lessons.json');
+  writeFileSync(lessons, JSON.stringify({
+    version: 1, findings_file: 'f.jsonl', findings_sha256: 'a'.repeat(64), exported_at: '2026-03-20T08:00:00.000Z',
+    setting: { model: 'm', fallbacks: [], toolChoice: 'forced' }, rules_sha256: 'b'.repeat(64), complete: true, end: null, nights: 0, first_night: null, last_night: null, cost: 0, verdicts: [], lessons: [],
+  }));
+  const args = (extra: string[]): string[] => ['replay', '--cases', cases, '--out', join(folder, 'out'), '--label', 'one', '--config', join(folder, 'config.yml'), '--force', ...extra];
+  const env = { GITHUB_TOKEN: 't', MODEL_KEY: 'k' };
+  assert.deepEqual(await run(args(['--lessons', join(projectRoot, 'l.json')]), env), [2, ['usage: --lessons must be outside the project folder']]);
+  assert.deepEqual(await run(args(['--lessons', lessons, '--plain']), env), [2, ['usage: --lessons cannot be used with --plain']]);
+  assert.deepEqual(await run(args(['--lessons', join(folder, 'missing.json')]), env), [2, ['usage: cannot read --lessons']]);
+  assert.deepEqual(await run(args(['--lessons', lessons]), env), [1, ['case_without_date']]);
+});
+
+// ---- lessons in the backtest, its count and its comparisons (plan "evals with lessons", task 7) ----
+function lessonsJson(folder: string, name = 'lessons.json', lessons: unknown[] = []): string {
+  const path = join(folder, name);
+  writeFileSync(path, JSON.stringify({
+    version: 1, findings_file: 'findings.jsonl', findings_sha256: 'a'.repeat(64), exported_at: '2026-03-20T08:00:00.000Z',
+    setting: { model: 'm', fallbacks: [], toolChoice: 'forced' }, rules_sha256: 'b'.repeat(64), complete: true, end: null, nights: 0,
+    first_night: null, last_night: null, cost: 0, verdicts: [], lessons,
+  }));
+  return path;
+}
+
+test('a backtest with lessons is refused with a scorer in the config, and inside the project', async () => {
+  const folder = mkdtempSync(tmpdir() + '/');
+  const history = join(folder, 'history.jsonl');
+  writeFileSync(history, serializeCase(historyCase(1, '2026-03-01T12:00:00Z')) + '\n');
+  const lessons = lessonsJson(folder);
+  const config = join(folder, 'config.yml');
+  writeFileSync(config, 'model:\n  apiKey: { env: MODEL_KEY }\n  model: vendor/model-a\nscorer:\n  apiKey: { env: MODEL_KEY }\n  model: vendor/decider\nrepositories:\n  defaults:\n    score:\n      threshold: 80\n');
+  const env = { GITHUB_TOKEN: 't', MODEL_KEY: 'k' };
+  const base = ['backtest', '--history', history, '--out', join(folder, 'out'), '--label', 'x', '--config', config];
+  assert.deepEqual(await run([...base, '--lessons', lessons], env), [2, ['usage: --lessons cannot be used with a scorer in the config']]);
+  assert.deepEqual(await run([...base, '--lessons', join(projectRoot, 'l.json')], env), [2, ['usage: --lessons must be outside the project folder']]);
+});
+
+test('memory-count with lessons counts the cases shown a lesson and those with a labelled file, and keeps its other lines', async () => {
+  const folder = mkdtempSync(tmpdir() + '/');
+  const history = join(folder, 'history.jsonl');
+  const memory = join(folder, 'memory.jsonl');
+  const lead = { kind: 'inline' as const, id: 'm3', author: 'octo-lead', bot: false, association: 'member' as const, at: '2026-03-06T10:00:00Z', body: 'x', commit: 'head30000000', path: TAX, side: 'RIGHT' as const, line: 2 };
+  writeFileSync(memory, serializeCase(historyCase(1, '2026-03-01T12:00:00Z')) + '\n');
+  writeFileSync(history, [historyCase(2, '2026-03-05T12:00:00Z'), historyCase(3, '2026-03-06T12:00:00Z', [lead])].map(serializeCase).join('\n') + '\n');
+  const lessons = lessonsJson(folder, 'lessons.json', [{
+    ref: '20:r20', repo: 'acme/shop', number: 20, reply: 'r20', path: TAX, createdAt: '2026-03-02T00:00:00.000Z', madeAt: '2026-03-02T00:00:00.000Z',
+    expiresAt: '2026-09-01T00:00:00.000Z', text: 'Discounts apply before tax in this shop, so a finding on the order of the two is wrong.',
+  }]);
+  // --memory stays required unless --lessons is given
+  assert.deepEqual(await run(['memory-count', '--history', history], {}), [2, ['usage: memory-count needs --memory']]);
+  const [code, out] = await run(['memory-count', '--history', history, '--lessons', lessons], {});
+  assert.equal(code, 0);
+  assert.equal(out[0], 'cases 2, with a line 0, with a labelled file that got a line 0');
+  assert.deepEqual(out.slice(-3), [
+    'lessons: cases shown a lesson 2, with a labelled file 1',
+    'acme/shop#2@head20000000: lessons 1', 'acme/shop#3@head30000000: lessons 1',
+  ]);
+  const [both, withMemory] = await run(['memory-count', '--history', history, '--memory', memory, '--lessons', lessons], {});
+  assert.equal(both, 0);
+  assert.equal(withMemory.filter((l) => l.startsWith('lessons: ')).length, 1);
+  const [, without] = await run(['memory-count', '--history', history, '--memory', memory], {});
+  assert.equal(without.some((l) => l.startsWith('lessons: ')), false);
+});
+
+test('score-compare compares lessons only between runs with the same memory, and refuses the rest', async () => {
+  const mem = (n: string) => ({ memory_file: `/elsewhere/${n}.jsonl`, memory_sha256: (n === 'a' ? '1' : '2').repeat(64) });
+  const les = { lessons_file: '/elsewhere/lessons.json', lessons_sha256: '3'.repeat(64) };
+  const ls = (status: string) => ({ status, code: status, lines: 0, lessons: { status, code: status, shown: status === 'ok' ? 1 : 0 } });
+  const rows = (status: (i: number) => string): Row[] => ['k1', 'k2', 'k3', 'k4'].map((key, i) => ({ key, status: 'ok', calls: 1, memory: ls(status(i)) as never }));
+  const candidateRows = rows((i) => (i < 2 ? 'ok' : i === 2 ? 'empty' : 'skipped'));
+  const none = compareDir('cl-none', baseline, baseRows);
+  const memA = compareDir('cl-mem-a', baseline, baseRows, mem('a'));
+  const lessOnly = compareDir('cl-less', candidate, candidateRows, les);
+  const [code, lines] = await run(['score-compare', none, lessOnly]);
+  assert.equal(code, 0);
+  assert.equal(lines[0], 'comparing lessons');
+  assert.equal(lines[1], 'compared: 4 cases that both runs hold with the status ok; in one run only: 0; in both runs but not ok in one: 0');
+  assert.equal(lines[2], 'shown a lesson: 2; none to show: 1; other: 1; of the cases shown a lesson, with another number of model calls: 0');
+  assert.ok(lines.includes('Cases shown a lesson: moves from the baseline to the candidate:'));
+  assert.ok(!lines.some((l) => l.includes('shown memory')));
+  const [okSame] = await run(['score-compare', memA, compareDir('cl-both-a', candidate, candidateRows, { ...mem('a'), ...les })]);
+  assert.equal(okSame, 0);
+  assert.deepEqual(await run(['score-compare', memA, compareDir('cl-both-b', candidate, candidateRows, { ...mem('b'), ...les })]), [1, ['different_memory']]);
+  assert.deepEqual(await run(['score-compare', compareDir('cl-base-less', baseline, baseRows, les), lessOnly]), [1, ['baseline_with_lessons']]);
+  // the old refusals hold
+  assert.deepEqual(await run(['score-compare', none, compareDir('cl-nomem', candidate, candRows)]), [1, ['candidate_without_memory']]);
+  assert.deepEqual(await run(['score-compare', memA, compareDir('cl-mem-b', candidate, candRows, mem('b'))]), [1, ['baseline_with_memory']]);
+  assert.deepEqual(await run(['score-compare', none, compareDir('cl-hist', candidate, candidateRows, { ...les, history_sha256: '0'.repeat(64) })]), [1, ['different_history_files']]);
+  assert.deepEqual(await run(['score-compare', none, compareDir('cl-noise-b', candidate, candidateRows, les), '--noise', compareDir('cl-noise-l', baseline, baseRows, les)]), [1, ['different_lessons']]);
+});
+
+test('score-noise refuses two runs whose lessons differ, one with lessons and one without included', async () => {
+  const sha = 'c'.repeat(64);
+  const x = { lessons_file: '/elsewhere/x.json', lessons_sha256: '1'.repeat(64) };
+  const y = { lessons_file: '/elsewhere/y.json', lessons_sha256: '2'.repeat(64) };
+  let n = 0;
+  const dirOf = (extra: Record<string, unknown>): string => runDir(`les-${n++}`, sha, '', extra);
+  const pairs: Array<[Record<string, unknown>, Record<string, unknown>]> = [[{}, x], [x, {}], [x, y]];
+  for (const [p, q] of pairs) {
+    assert.deepEqual(await run(['score-noise', dirOf(p), dirOf(q)]), [1, ['different_lessons']]);
+  }
+  const [code] = await run(['score-noise', dirOf(x), dirOf(x)]);
+  assert.equal(code, 0);
 });
