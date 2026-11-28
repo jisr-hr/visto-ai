@@ -1,48 +1,30 @@
-// A night's run of the judge (7.2, 7.3, 12, calls 2, 6 to 17): it finds the replies to judge by what is stored, judges
-// one reply at a time, writes each verdict, its cost and its lesson in one transaction, stops at the cap of lessons,
-// at a stop, while reviews are paused and after failures at the provider, and records what it did. Logs hold counts,
-// a cost and short codes: never a reply's words, a finding, a lesson's text, a quote, a path or a login.
+// A night's run of the judge (7.2, 7.3, 12, calls 2, 6 to 17): the night's rules (`runNight`, src/memory/night.ts) run over
+// a store that is the database: it finds the replies to judge by what is stored, and writes each verdict, its cost and
+// its lesson in one transaction. This file keeps what is the service's own: the stop before a run begins, the log line,
+// the learning row and the nightly timer. Logs hold counts, a cost and short codes: never a reply's words, a finding, a
+// lesson's text, a quote, a path or a login.
 import { addToLearning, noteLearning, readLearning, startLearning } from '../db/learning.ts';
 import type { LearningState } from '../db/learning.ts';
 import { addRecords, standingLessons } from '../db/memory-records.ts';
 import type { NewRecord, RepoKey } from '../db/memory-records.ts';
 import { lessonsMadeSince, laterVerdict, noteVerdict, repliesToJudge } from '../db/reply-verdicts.ts';
-import type { QueuedReply } from '../db/reply-verdicts.ts';
 import { recordJudgeCall } from '../db/review-runs.ts';
 import type { Db } from '../db/types.ts';
-import { stripControl } from '../engine/context/untrusted.ts';
-import type { ModelClient, Usage } from '../engine/types.ts';
-import { askJudge, findingBody, lessonOf, restates } from '../memory/judge.ts';
-import type { Outcome } from '../memory/judge.ts';
-import { LESSON_DAYS, LESSONS_READ } from '../memory/lessons.ts';
+import type { ModelClient } from '../engine/types.ts';
+import { askJudge, findingBody } from '../memory/judge.ts';
+import { runNight } from '../memory/night.ts';
+import type { Judged, NightDeps, NightLesson, NightStore } from '../memory/night.ts';
 import { dayStart } from '../memory/select.ts';
-import { directoryOf, ownWords } from '../memory/signals.ts';
 import type { Alert } from './alerts.ts';
 import { codeOf } from './codes.ts';
 import { STALE_AFTER_MS } from './learning.ts';
 
+export { JUDGE_ATTEMPTS, JUDGE_FAILURES, JUDGE_REPLIES, JUDGE_STRANGERS, LESSONS_PER_RUN } from '../memory/night.ts';
+export type { Judged, RunEnd } from '../memory/night.ts';
+
 export const WORK_LESSONS = 'lessons';     // the row of the learning table this work writes
-export const JUDGE_REPLIES = 100;          // replies one run takes
-export const JUDGE_STRANGERS = 20;         // of those, the replies of strangers at most
-export const JUDGE_ATTEMPTS = 3;           // answers with no verdict after which a reply is retired
-export const LESSONS_PER_RUN = 10;
-export const JUDGE_FAILURES = 3;           // calls that fail at the provider in a row before a run ends for now
 export const NIGHT_RETRY_MS = 3_600_000;   // how long after a run that did not complete the next is tried
 export const ROW_WAIT_MS = 5_000;          // how long a tick waits for its read of the row
-
-export type RunEnd = 'done' | 'lesson_cap' | 'stopped' | 'spend_limit' | 'model_error' | 'auth' | 'no_credit' | 'rate_limited' | 'timeout' | 'provider';
-export interface Judged {
-  judged: number;      // replies that got a classification
-  lessons: number;     // lessons made
-  givenUp: number;     // replies retired
-  failed: number;      // calls that failed at the provider, or gave no verdict
-  calls: number; cost: number;   // requests answered, and what they cost
-  more: boolean;       // the run ended with replies it did not finish: the queue held more than it took, strangers were left over, or a reply it took got no verdict
-  end: RunEnd; complete: boolean;   // complete: the end is done or lesson_cap
-}
-
-const DAY_MS = 86_400_000;
-const WITH_ACCESS: ReadonlySet<unknown> = new Set(['owner', 'member', 'collaborator']);
 
 type Log = (entry: Record<string, unknown>) => void;
 
@@ -77,25 +59,45 @@ export async function judgeOnce(deps: Deps): Promise<Judged> {
   }
 }
 
-const repoOf = (r: QueuedReply): RepoKey => ({ service: r.ref.service, owner: r.ref.owner, repo: r.ref.repo });
+// The record of a lesson the night made (rule 9), as the memory table keeps it.
+const lessonRow = (l: NightLesson): NewRecord => ({
+  kind: 'lesson', sourceRef: l.sourceRef, number: l.number,
+  path: l.path, directory: l.directory, category: null, reason: null, missed: false,
+  excerpt: l.quote, comment: l.reply, lesson: l.text,
+  createdAt: l.createdAt, expiresAt: l.expiresAt,
+});
 
-// The record of a lesson (rule 9): live from the 00:00 UTC that follows the reply, for LESSON_DAYS days.
-function lessonRecord(r: QueuedReply, text: string, quote: string): NewRecord {
-  const created = dayStart(new Date(r.at)).getTime() + DAY_MS;
+// The night's store over the database. A verdict with no call is one statement; one with a call is one transaction of
+// the call, the verdict and its lesson, in that order.
+function databaseStore(db: Db): NightStore {
   return {
-    kind: 'lesson', sourceRef: `${r.ref.number}:${r.reply}`, number: r.ref.number,
-    path: r.path, directory: directoryOf(r.path), category: null, reason: null, missed: false,
-    excerpt: quote, comment: r.reply, lesson: text,
-    createdAt: new Date(created).toISOString(), expiresAt: new Date(created + LESSON_DAYS * DAY_MS).toISOString(),
+    replies: async (since, before, limit, maxAttempts) => (await repliesToJudge(db, since, before, limit, maxAttempts)).map((r) => ({
+      ref: r.ref, reply: r.reply, association: r.association, body: r.body, at: r.at,
+      finding: r.finding, path: r.path, side: r.side, line: r.line, severity: r.severity,
+      findingText: findingBody({ path: r.path, side: r.side, line: r.line, severity: r.severity, quote: r.quote }, r.findings),
+      attempts: r.attempts,
+    })),
+    lessonsMadeSince: (since) => lessonsMadeSince(db, since),
+    laterVerdict: (ref, finding, after) => laterVerdict(db, ref, finding, after),
+    standingLessons: (repo, at, limit) => standingLessons(db, repo, at, limit),
+    noteVerdict: async (v, call, lesson) => {
+      if (call === null && lesson === null) {
+        await noteVerdict(db, v);
+        return;
+      }
+      const repo: RepoKey = { service: v.ref.service, owner: v.ref.owner, repo: v.ref.repo };
+      await db.transaction(async (tx) => {
+        if (call !== null) await recordJudgeCall(tx, v.ref, v.reply, v.judgedAt, call);
+        await noteVerdict(tx, v);
+        if (lesson !== null) await addRecords(tx, repo, [lessonRow(lesson)]);
+      });
+    },
+    noteCall: (ref, reply, at, usage) => recordJudgeCall(db, ref, reply, at, usage),
   };
 }
 
-const runUsage = (u: Usage): Usage => ({ calls: u.calls, inputTokens: u.inputTokens, outputTokens: u.outputTokens, cachedTokens: u.cachedTokens, cost: u.cost });
-const finite = (n: unknown): number => (typeof n === 'number' && Number.isFinite(n) && n >= 0 ? n : 0);
-
 async function runOnce(deps: Deps, log: Log): Promise<Judged> {
   const { db } = deps;
-  const size = deps.replies ?? JUDGE_REPLIES;
   const stopping = (): boolean => {
     try {
       return deps.stopping?.() === true;
@@ -104,131 +106,31 @@ async function runOnce(deps: Deps, log: Log): Promise<Judged> {
     }
   };
   const now = (): string => deps.clock().toISOString();
-  const out: Judged = { judged: 0, lessons: 0, givenUp: 0, failed: 0, calls: 0, cost: 0, more: false, end: 'done', complete: false };
-  const finish = (): Judged => {
+  const finish = (out: Judged): Judged => {
     log({ event: 'lessons', judged: out.judged, lessons: out.lessons, given_up: out.givenUp, failed: out.failed, calls: out.calls, cost: out.cost, more: out.more, end: out.end });
     return out;
   };
   // A run stopped before it began reads nothing.
   if (stopping()) {
-    out.end = 'stopped';
-    return finish();
+    return finish({ judged: 0, lessons: 0, givenUp: 0, failed: 0, calls: 0, cost: 0, more: false, end: 'stopped', complete: false });
   }
 
-  // Rule 1: the run's day, fixed for the whole run.
-  const day = dayStart(deps.clock());
-  const since = new Date(day.getTime() - LESSON_DAYS * DAY_MS).toISOString();
-  const queue = await repliesToJudge(db, since, day.toISOString(), size + 1, JUDGE_ATTEMPTS);
-  out.more = queue.length > size;
-  const taken: QueuedReply[] = [];
-  let strangers = 0;
-  for (const r of queue.slice(0, size)) {
-    if (!WITH_ACCESS.has(r.association)) {
-      if (strangers >= JUDGE_STRANGERS) {
-        out.more = true;
-        continue;
-      }
-      strangers += 1;
-    }
-    taken.push(r);
-  }
+  // Rules 1 to 11: the night.
+  const night: NightDeps = {
+    clock: deps.clock,
+    ask: (_reply, input, stopped) => askJudge(deps.model, input, deps.token(), deps.auto, deps.timeoutMs, stopped),
+    paused: deps.paused,
+    ...(deps.noteUsage === undefined ? {} : { noteUsage: deps.noteUsage }),
+    ...(deps.stopping === undefined ? {} : { stopping: deps.stopping }),
+    ...(deps.replies === undefined ? {} : { replies: deps.replies }),
+  };
+  const out = await runNight(databaseStore(db), night);
 
-  // Rule 2: the cap, counted from the stored verdicts since the run's day began.
-  let made = await lessonsMadeSince(db, day.toISOString());
-  let inRow = 0;
-  let worked = 0;   // taken replies whose verdict was written
-  let end: RunEnd | null = made >= LESSONS_PER_RUN ? 'lesson_cap' : null;
-
-  for (const r of end === null ? taken : []) {
-    // Rule 3.
-    if (stopping()) { end = 'stopped'; break; }
-    const why = await deps.paused();
-    if (why !== null) { end = why === 'spend_limit' ? 'spend_limit' : 'model_error'; break; }
-
-    // Rule 4: a reply with no call.
-    if (stripControl(ownWords(r.body)).text.trim() === '') {
-      await noteVerdict(db, { ref: r.ref, reply: r.reply, finding: r.finding, classification: 'noise', outcome: 'no_own_words', attempts: r.attempts, judgedAt: now() });
-      out.judged += 1;
-      worked += 1;
-      continue;
-    }
-    const finding = findingBody({ path: r.path, side: r.side, line: r.line, severity: r.severity, quote: r.quote }, r.findings);
-    if (finding === null) {
-      await noteVerdict(db, { ref: r.ref, reply: r.reply, finding: r.finding, classification: null, outcome: 'finding_unknown', attempts: JUDGE_ATTEMPTS, judgedAt: now() });
-      out.givenUp += 1;
-      worked += 1;
-      continue;
-    }
-
-    // Rule 5: the call.
-    const asked = await askJudge(deps.model, { path: r.path, severity: r.severity, finding, reply: r.body }, deps.token(), deps.auto, deps.timeoutMs, stopping);
-    const answered = asked.usage.calls > 0;
-    if (answered) {
-      out.calls += finite(asked.usage.calls);
-      out.cost += finite(asked.usage.cost);
-      try {
-        deps.noteUsage?.({ inputTokens: asked.usage.inputTokens, outputTokens: asked.usage.outputTokens, cost: asked.usage.cost });
-      } catch {
-        // a guard that throws changes nothing
-      }
-    }
-    if (stopping()) { end = 'stopped'; break; }
-
-    if (!asked.ok && asked.code !== 'invalid_output') {
-      // Rule 6: a call that failed at the provider.
-      if (answered) await recordJudgeCall(db, r.ref, r.reply, now(), runUsage(asked.usage));
-      if (asked.code === 'auth' || asked.code === 'no_credit') { end = asked.code; break; }
-      out.failed += 1;
-      inRow += 1;
-      if (inRow >= JUDGE_FAILURES) { end = asked.code; break; }
-      continue;
-    }
-    inRow = 0;
-    const at = now();
-
-    if (!asked.ok) {
-      // Rule 7: an answer with no verdict.
-      const attempts = r.attempts + 1;
-      await db.transaction(async (tx) => {
-        await recordJudgeCall(tx, r.ref, r.reply, at, runUsage(asked.usage));
-        await noteVerdict(tx, { ref: r.ref, reply: r.reply, finding: r.finding, classification: null, outcome: 'unjudged', attempts, judgedAt: at });
-      });
-      out.failed += 1;
-      worked += 1;
-      if (attempts >= JUDGE_ATTEMPTS) out.givenUp += 1;
-      continue;
-    }
-
-    // Rule 8: a verdict.
-    const result = lessonOf(asked.value, { body: r.body, association: r.association }, r.path);
-    let outcome: Outcome = result.outcome;
-    if (result.outcome === 'lesson') {
-      const later = await laterVerdict(db, r.ref, r.finding, r.at);
-      if (later === 'open' || later === 'fixed') outcome = 'review_disagreed';
-      else if (restates(result.text, await standingLessons(db, repoOf(r), at, LESSONS_READ))) outcome = 'restates';
-    }
-    await db.transaction(async (tx) => {
-      await recordJudgeCall(tx, r.ref, r.reply, at, runUsage(asked.usage));
-      await noteVerdict(tx, { ref: r.ref, reply: r.reply, finding: r.finding, classification: asked.value.classification, outcome, attempts: r.attempts, judgedAt: at });
-      if (outcome === 'lesson' && result.outcome === 'lesson') await addRecords(tx, repoOf(r), [lessonRecord(r, result.text, result.quote)]);
-    });
-    out.judged += 1;
-    worked += 1;
-    if (outcome === 'lesson') {
-      out.lessons += 1;
-      made += 1;
-      if (made >= LESSONS_PER_RUN) { end = 'lesson_cap'; break; }
-    }
-  }
-
-  // Rule 11: the end. A stop found here too sends nothing more.
-  if (worked < taken.length) out.more = true;
-  out.end = end !== 'stopped' && stopping() ? 'stopped' : end ?? 'done';
-  out.complete = out.end === 'done' || out.end === 'lesson_cap';
+  // Rule 11: the learning row.
   const counts = { examined: out.judged, added: out.lessons, retired: out.givenUp, failed: out.failed };
   if (out.complete) await noteLearning(db, WORK_LESSONS, now(), counts);
   else if (out.end !== 'stopped') await addToLearning(db, WORK_LESSONS, now(), counts);
-  return finish();
+  return finish(out);
 }
 
 export interface Nightly {

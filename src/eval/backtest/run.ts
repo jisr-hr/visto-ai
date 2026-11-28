@@ -8,7 +8,7 @@ import { repoConfigFor } from '../../config/load.ts';
 import type { DeploymentConfig } from '../../config/load.ts';
 import { review } from '../../engine/review.ts';
 import type { FileScore } from '../../engine/score/types.ts';
-import type { Memory, MemoryStatus, ReviewDeps, ReviewInput, Verdict } from '../../engine/types.ts';
+import type { LessonsStatus, Memory, MemoryStatus, ReviewDeps, ReviewInput, Verdict } from '../../engine/types.ts';
 import { historyKey } from '../history/file.ts';
 import type { HistoryCase } from '../history/file.ts';
 import { runPool } from '../pool.ts';
@@ -30,6 +30,8 @@ export interface BacktestSummary {
   numbers: Numbers[]; // one per THRESHOLDS entry, then 'own'
   // Only in a run with memory: the history file memory was built from, and the rows counted by their memory status.
   memory_file?: string; memory_sha256?: string; memory_cases?: { ok: number; empty: number; skipped: number; error: number; none: number }; // none: rows with no status
+  // Only in a run with lessons: the file they were made in, its hash, and the rows counted by how lessons did.
+  lessons_file?: string; lessons_sha256?: string; lessons_cases?: { ok: number; empty: number; skipped: number; error: number; none: number };
 }
 
 interface ResultRow {
@@ -37,10 +39,11 @@ interface ResultRow {
   cost: number; tokens: number; duration_ms: number; calls: number; verdict: Verdict | null;
   blocks: number; blocks_unscored: number; files_flagged_whole: number;
   scorer_failed_files: number; // files the scorer failed on or was not asked about
-  memory?: MemoryStatus | null; // only in a run with memory: how memory did, or null when the review did not say
+  memory?: (MemoryStatus & { lessons?: LessonsStatus }) | null; // only in a run with memory or lessons: how memory (and lessons) did, or null when the review did not say
 }
 /** Memory as of each case, and the file it was built from. */
-export interface BacktestMemory { of(c: HistoryCase): Memory; file: string; sha256: string }
+// file and sha256 are the history file memory was built from: absent with --lessons alone. lessons: the lessons file, when asked.
+export interface BacktestMemory { of(c: HistoryCase): Memory; file?: string; sha256?: string; lessons?: { file: string; sha256: string } }
 interface ScoresLine {
   key: string; threshold: number; status: 'ok' | 'failed'; scores: readonly FileScore[];
   labels: { blocks: Record<string, Label>; files: Record<string, Label>; comments: Labels['comments']; final_missing: number };
@@ -88,7 +91,9 @@ async function backtestCase(c: HistoryCase, config: DeploymentConfig, deps: Revi
   const started = Date.now();
   const key = historyKey(c);
   // Without memory the row has no memory key, and the review is given the dependencies as they are.
-  const memoryOf = (s: MemoryStatus | undefined) => (memory === undefined ? {} : { memory: s === undefined ? null : { status: s.status, code: s.code, lines: s.lines } });
+  const memoryOf = (s: MemoryStatus | undefined) => (memory === undefined ? {} : {
+    memory: s === undefined ? null : { status: s.status, code: s.code, lines: s.lines, ...(memory.lessons === undefined || s.lessons === undefined ? {} : { lessons: s.lessons }) },
+  });
   try {
     const result = await review(toBacktestInput(c, config), memory === undefined ? deps : { ...deps, memory: memory.of(c) });
     const failed = result.status === 'failed';
@@ -158,7 +163,14 @@ function summaryMarkdown(summary: BacktestSummary): string {
     `Labelled blocks and files with no final patch: ${summary.final_missing}.\n` +
     `Scorer: ${summary.scorer ?? 'the review model'}\n` +
     (summary.scorer === null ? '' : `Files the scorer failed on or was not asked about: ${summary.scorer_failed_files}\n`) +
-    memoryLine(summary);
+    memoryLine(summary) + lessonsLine(summary);
+}
+
+function lessonsLine(summary: BacktestSummary): string {
+  const counts = summary.lessons_cases;
+  if (summary.lessons_file === undefined || counts === undefined) return '';
+  return `Lessons: as of each case, from ${basename(summary.lessons_file)}. Cases shown a lesson: ${counts.ok} of ${summary.cases}; ` +
+    `with none to show: ${counts.empty}; not shown: ${counts.skipped}; failed: ${counts.error}; not asked: ${counts.none}.\n`;
 }
 
 function memoryLine(summary: BacktestSummary): string {
@@ -175,12 +187,12 @@ function summaryTable(numbers: Numbers[]): string {
   return [header, header.map(() => '---'), ...rows].map((r) => `| ${r.join(' | ')} |`).join('\n') + '\n';
 }
 
-function memoryCases(done: Outcome[]): { ok: number; empty: number; skipped: number; error: number; none: number } {
+function memoryCases(done: Outcome[], of: (o: Outcome) => string | undefined = (o) => o.row.memory?.status): { ok: number; empty: number; skipped: number; error: number; none: number } {
   const counts = { ok: 0, empty: 0, skipped: 0, error: 0, none: 0 };
   for (const o of done) {
-    const status = o.row.memory?.status;
+    const status = of(o);
     // A row with no status, or one of no known state, is counted as not asked: the five always add up to the cases.
-    if (status !== undefined && Object.hasOwn(counts, status)) counts[status] += 1;
+    if (status !== undefined && Object.hasOwn(counts, status)) counts[status as keyof typeof counts] += 1;
     else counts.none += 1;
   }
   return counts;
@@ -243,7 +255,10 @@ export async function runBacktest(args: {
     comments,
     final_missing: finalMissing,
     numbers: [...THRESHOLDS, 'own' as const].map((t) => measure(scored, t)),
-    ...(args.memory === undefined ? {} : { memory_file: args.memory.file, memory_sha256: args.memory.sha256, memory_cases: memoryCases(done) }),
+    ...(args.memory?.file === undefined || args.memory.sha256 === undefined ? {} : { memory_file: args.memory.file, memory_sha256: args.memory.sha256, memory_cases: memoryCases(done) }),
+    ...(args.memory?.lessons === undefined ? {} : {
+      lessons_file: args.memory.lessons.file, lessons_sha256: args.memory.lessons.sha256, lessons_cases: memoryCases(done, (o) => o.row.memory?.lessons?.status),
+    }),
   };
   writeFileSync(join(args.outDir, 'summary.json'), JSON.stringify(summary, null, 2) + '\n');
   writeFileSync(join(args.outDir, 'summary.md'), summaryMarkdown(summary));

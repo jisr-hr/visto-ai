@@ -175,3 +175,16 @@ test('replay runs end to end under the blocked network, and prints nothing from 
   const printed = [...lines, ...stderr].join('\n');
   for (const text of privateText) assert.ok(!printed.includes(text), text);
 });
+
+const withLessons = (f: SummaryFile, name: string, sha: string): SummaryFile => ({ ...f, lessons_file: `/x/${name}`, lessons_sha256: sha });
+test('compare refuses two runs of different lessons, and names each run\'s lessons file only when one has lessons', () => {
+  const a = withLessons(base, 'lessons.json', '1'.repeat(64));
+  assert.throws(() => compareSummaries(a, withLessons(cand, 'lessons.json', '2'.repeat(64)), null), /^Error: different_lessons$/);
+  assert.throws(() => compareSummaries(a, withLessons(cand, 'other.json', '2'.repeat(64)), null), /^Error: different_lessons$/);
+  // the same bytes under another name are the same lessons
+  const same = compareSummaries(a, withLessons(cand, 'copy.json', '1'.repeat(64)), null).split('\n');
+  assert.equal(same[same.length - 1], 'lessons: lessons.json; copy.json');
+  const one = compareSummaries(base, withLessons(cand, 'lessons.json', '2'.repeat(64)), null).split('\n');
+  assert.equal(one[one.length - 1], 'lessons: none; lessons.json');
+  assert.ok(!compareSummaries(base, cand, null).includes('lessons:'));
+});
