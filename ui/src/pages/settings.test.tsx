@@ -361,7 +361,7 @@ test('a save that restarts the service says so, waits for it to come back, then 
   const back: SettingsView = { ...viewOf({ version: 15, global: { learning: written(true, UI, { restart: true }) } }), started: '2026-03-01T10:05:00.000Z' };
   let reads = 0;
   let mes = 0;
-  const { api } = fakeApi({
+  const { api, sent } = fakeApi({
     me: () => Promise.resolve(++mes === 1 ? ME : { ...ME, mode: 'dry_run' }),
     settings: () => {
       reads += 1;
@@ -374,6 +374,9 @@ test('a save that restarts the service says so, waits for it to come back, then 
   visit('/ui/settings');
   render(<App api={api} />);
   await act(() => vi.advanceTimersByTimeAsync(0));
+  // The record and the export are not read while the service restarts, and are read again once it is back.
+  const recordReads = (): number => sent('settingChanges').length + sent('settingsExport').length;
+  const beforeBack = recordReads();
   fireEvent.click(screen.getByRole('switch', { name: 'Learning' }));
   fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
   await act(() => vi.advanceTimersByTimeAsync(0));
@@ -382,11 +385,15 @@ test('a save that restarts the service says so, waits for it to come back, then 
   );
   expect(screen.getByRole('button', { name: 'Save changes' })).toBeDisabled();
   expect(reads).toBe(1);
+  expect(recordReads()).toBe(beforeBack);
   await act(() => vi.advanceTimersByTimeAsync(RESTART_POLL_MS * 3));
   expect(reads).toBe(4);
   expect(screen.getByRole('status')).toHaveTextContent(/^Saved\. The service is restarting/);
+  expect(recordReads()).toBe(beforeBack);
   await act(() => vi.advanceTimersByTimeAsync(RESTART_POLL_MS));
   expect(reads).toBe(5);
+  await act(() => vi.advanceTimersByTimeAsync(0));
+  expect(recordReads()).toBeGreaterThan(beforeBack);
   expect(screen.getByRole('status')).toHaveTextContent('The service restarted. The saved settings are in force.');
   // Who is signed in is read again: the sidebar's mode is the new start's.
   await act(() => vi.advanceTimersByTimeAsync(0));

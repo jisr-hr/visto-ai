@@ -507,7 +507,8 @@ export function SettingsPage() {
         if (badNow.current.size === 0) setEpoch((n) => n + 1);
         setRestart(answer.restarting === true ? { phase: 'waiting', from: answer.view.started } : null);
         setSaved(answer.restarting !== true);
-        setRecorded((n) => n + 1);
+        // A service about to restart answers no more reads: the record and the export are read again once it is back.
+        if (answer.restarting !== true) setRecorded((n) => n + 1);
       } else {
         setNotice({ kind: 'issues', issues: answer.issues });
       }
