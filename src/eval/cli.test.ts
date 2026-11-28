@@ -752,3 +752,36 @@ test('judge prints judge_failed, and a stopped line when the cost cap ended it',
     globalThis.fetch = realFetch;
   }
 });
+
+test('judge-replies needs --findings, --config and --out outside the project, a positive --max-cost and no GITHUB_TOKEN', async () => {
+  const folder = mkdtempSync(tmpdir() + '/');
+  const config = join(folder, 'deployment.yml');
+  writeFileSync(config, 'model:\n  apiKey: { env: MODEL_KEY }\n  model: vendor/model-a\n');
+  const args = (over: Record<string, string> = {}, drop: string[] = []): string[] => {
+    const options: Record<string, string> = { findings: join(folder, 'findings.jsonl'), config, out: join(folder, 'lessons'), ...over };
+    for (const name of drop) delete options[name];
+    return ['judge-replies', ...Object.entries(options).flatMap(([k, v]) => [`--${k}`, v])];
+  };
+  const bad: [string, string[], string][] = [
+    ['no findings', args({}, ['findings']), 'usage: judge-replies needs --findings'],
+    ['no config', args({}, ['config']), 'usage: judge-replies needs --config'],
+    ['no out', args({}, ['out']), 'usage: judge-replies needs --out'],
+    ['findings inside the project', args({ findings: join(projectRoot, 'findings.jsonl') }), 'usage: --findings must be outside the project folder'],
+    ['out inside the project', args({ out: join(projectRoot, 'lessons') }), 'usage: --out must be outside the project folder'],
+    ['max-cost zero', args({ 'max-cost': '0' }), 'usage: --max-cost must be a positive number'],
+    ['config that does not exist', args({ config: join(folder, 'none.yml') }), 'usage: cannot read --config'],
+    ['findings that does not exist', args(), 'usage: cannot read --findings'],
+    ['positional argument', [...args(), 'extra'], 'usage: judge-replies takes no positional arguments'],
+    ['unknown option', [...args(), '--history', 'x'], 'usage: unknown option --history'],
+  ];
+  for (const [name, argv, message] of bad) {
+    const [code, lines] = await run(argv, { MODEL_KEY: 'k' });
+    assert.equal(code, 2, name);
+    assert.deepEqual(lines, [message], name);
+  }
+});
+
+test('the script eval:judge-replies runs the command judge-replies', () => {
+  const scripts = (JSON.parse(readFileSync(join(projectRoot, 'package.json'), 'utf8')) as { scripts: Record<string, string> }).scripts;
+  assert.equal(scripts['eval:judge-replies'], 'node src/eval/cli.ts judge-replies');
+});

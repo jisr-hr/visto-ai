@@ -26,6 +26,8 @@ import { loadHistory } from './history/file.ts';
 import { runImport } from './history/import.ts';
 import { seedCommand } from './history/seed.ts';
 import { exportCommand } from './lessons/export.ts';
+import { loadFindings } from './lessons/findings.ts';
+import { judgeReplies } from './lessons/judge-replies.ts';
 import { assertOutsideProject, runReplay } from './replay.ts';
 import type { SummaryFile } from './replay.ts';
 
@@ -494,6 +496,33 @@ async function judgeCommand(argv: string[], env: Record<string, string | undefin
   if (summary.stopped_reason !== null) out(`stopped: ${summary.stopped_reason}, cases not judged ${summary.cases_not_judged}`);
 }
 
+// The eval's judge of replies: needs no GITHUB_TOKEN; paths outside the project; prints counts and codes only.
+async function judgeRepliesCommand(argv: string[], env: Record<string, string | undefined>, out: (line: string) => void): Promise<void> {
+  const parsed = parse(argv, ['findings', 'config', 'out', 'max-cost'], []);
+  if (parsed.positional.length > 0) throw new UsageError('usage: judge-replies takes no positional arguments');
+  const get = (name: string): string => {
+    const v = parsed.options.get(name);
+    if (v === undefined) throw new UsageError(`usage: judge-replies needs --${name}`);
+    return v;
+  };
+  const findingsPath = get('findings');
+  const configPath = get('config');
+  const outDir = get('out');
+  const maxCost = positive(parsed, 'max-cost', 2);
+  outsideProject(findingsPath, projectFolder(), 'findings');
+  outsideProject(outDir, projectFolder(), 'out');
+  const config = readable('config', () => loadConfig(configPath, env));
+  const sleep = (ms: number): Promise<void> => new Promise((done) => { setTimeout(done, ms); });
+  readable('findings', () => loadFindings(findingsPath));   // a file that cannot be read is a usage error, before any call
+  const lines = await judgeReplies({
+    findingsPath, outDir, maxCost,
+    setting: { model: config.model.model, fallbacks: [...config.model.fallbacks], toolChoice: config.model.toolChoice === 'auto' ? 'auto' : 'forced' },
+    model: createModelClient(config.model, { fetch: globalThis.fetch, sleep }),
+    token: () => randomBytes(8).toString('hex'), timeoutMs: config.model.timeoutSeconds * 1000,
+  });
+  for (const line of lines) out(line);
+}
+
 function compare(argv: string[], out: (line: string) => void): void {
   const parsed = parse(argv, ['noise'], []);
   if (parsed.positional.length !== 2) throw new UsageError('usage: compare <baseline summary.json> <candidate summary.json> [--noise <second baseline summary.json>]');
@@ -516,7 +545,8 @@ export async function main(argv: string[], env: Record<string, string | undefine
     else if (command === 'score-compare') scoreCompareCommand(rest, out);
     else if (command === 'seed-memory') await seedMemoryCommand(rest, env, out);
     else if (command === 'export-findings') await exportFindingsCommand(rest, env, out);
-    else throw new UsageError('usage: cli <replay|judge|compare|import-history|import-aacr|backtest|score-noise|memory-count|score-compare|seed-memory|export-findings> ...');
+    else if (command === 'judge-replies') await judgeRepliesCommand(rest, env, out);
+    else throw new UsageError('usage: cli <replay|judge|compare|import-history|import-aacr|backtest|score-noise|memory-count|score-compare|seed-memory|export-findings|judge-replies> ...');
     return 0;
   } catch (error) {
     if (error instanceof UsageError) { out(error.message); return 2; }
