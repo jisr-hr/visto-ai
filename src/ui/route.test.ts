@@ -113,7 +113,7 @@ async function harness(github = true, changesOf: (real: AccountChanges) => Accou
   const checks: Pick<ForgeChecks, 'isTeamMember'> = { isTeamMember: async () => false };
   const clock = (): Date => new Date(at(0));
   const log = (entry: Record<string, unknown>): void => { logs.push(entry); };
-  const auth = createAuth({ db, ui: { accounts: ['octo-lead'], team: null, publicUrl: 'https://visto.example.test' }, signIn: github ? signIn : null, checks, clock, log });
+  const auth = createAuth({ db, ui: { accounts: ['octo-lead'], teams: [], publicUrl: 'https://visto.example.test' }, signIn: github ? signIn : null, checks, clock, log });
   const api: ApiDeps = {
     db, clock, dryRun: true, reviewPlaces: 2, withdrawPlaces: 2, holds: () => true, paused: async () => null,
     pullRequestUrl: (ref) => `https://github.example.test/${ref.owner}/${ref.repo}/pull/${ref.number}`,
@@ -132,7 +132,7 @@ async function harness(github = true, changesOf: (real: AccountChanges) => Accou
       },
     }),
     ...(settings === undefined ? {} : {
-      settings: { db, clock, settings, log, access: { publicUrl: 'https://visto.example.test', github, accounts: ['octo-lead'], team: null } },
+      settings: { db, clock, settings, log, access: { publicUrl: 'https://visto.example.test', github, accounts: ['octo-lead'], teams: [] } },
     }),
   });
   const send: Harness['send'] = (method, path, sent = {}) => route({

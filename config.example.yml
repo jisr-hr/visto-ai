@@ -109,7 +109,8 @@ learning: false
 # /api/ answer 404. Its accounts are made by an admin in Settings, and the first admin by the command npm run accounts (docs/guide/the-ui.md).
 # accounts and team name who may also sign in through the GitHub App, as a viewer until an admin says otherwise; with either,
 # app.clientId and app.clientSecret must be written too, and on the app's settings page the callback URL is <publicUrl>/api/auth/callback.
-# With team, install the app on that organisation with Members read. Everyone signed in sees the activity of every repository.
+# team is one team or a list of up to 10 ([acme/backend, acme/frontend]); a member of any of them may sign in.
+# With team, install the app on each organisation it names with Members read. Everyone signed in sees the activity of every repository.
 # ui:
 #   publicUrl: https://visto.example.test
 #   accounts: [octo-lead]

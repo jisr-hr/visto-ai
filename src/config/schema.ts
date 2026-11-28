@@ -66,11 +66,14 @@ function isPublicUrl(value: string): boolean {
   return protocol === 'https:' || (protocol === 'http:' && (hostname === 'localhost' || hostname === '127.0.0.1'));
 }
 
+const uiTeam = z.string().regex(/^[A-Za-z0-9-]{1,39}\/[A-Za-z0-9._-]{1,100}$/, { message: 'must be <org>/<team-slug>' });
+
 /** Who may open the UI, read from the file only (section 4.1). */
 const ui = z
   .object({
     accounts: z.array(z.string().regex(/^[A-Za-z0-9-]{1,39}$/, { message: 'must be a GitHub login' })).max(100).default([]),
-    team: z.string().regex(/^[A-Za-z0-9-]{1,39}\/[A-Za-z0-9._-]{1,100}$/, { message: 'must be <org>/<team-slug>' }).optional(),
+    // One team, or a list of them: each sign-in reads every team listed.
+    team: z.union([uiTeam, z.array(uiTeam).min(1).max(10)]).optional(),
     publicUrl: z
       .string()
       .refine(isPublicUrl, { message: 'must be an https URL with no path, query or user, or http://localhost or http://127.0.0.1' })

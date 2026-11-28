@@ -42,8 +42,8 @@ export interface ScorerConfig { baseUrl: string; apiKey: string; model: string; 
 export interface UiConfig {
   /** As written. */
   accounts: string[];
-  /** "org/team-slug"; null when not written. */
-  team: string | null;
+  /** Each "org/team-slug" in the order written (`ui.team` written as one or as a list); empty when not written. */
+  teams: string[];
   /** The origin, with no trailing slash. */
   publicUrl: string;
   /** `app.clientId` as written. Null exactly when GitHub sign-in is off: ui names neither an account nor a team. */
@@ -54,7 +54,7 @@ export interface UiConfig {
 
 /** Whether ui names an account or a team, which turns GitHub sign-in on (its client id and secret are then written). */
 export function githubSignInOn(ui: UiConfig): ui is UiConfig & { clientId: string; clientSecret: string } {
-  return ui.accounts.length > 0 || ui.team !== null;
+  return ui.accounts.length > 0 || ui.teams.length > 0;
 }
 
 export interface DeploymentConfig {
@@ -209,12 +209,12 @@ function approvalWritten(score: ApprovalKeys | undefined): { approval?: Partial<
 const UI_NEEDS = 'must be written when ui names accounts or a team';
 
 /** The UI is on when `ui` writes an address, names at least one account or writes a team. */
-function uiOn<T extends { accounts: string[]; team?: string | undefined; publicUrl?: string | undefined }>(ui: T | undefined): ui is T {
+function uiOn<T extends { accounts: string[]; team?: string | string[] | undefined; publicUrl?: string | undefined }>(ui: T | undefined): ui is T {
   return ui !== undefined && (ui.publicUrl !== undefined || githubOn(ui));
 }
 
-/** GitHub sign-in is on when `ui` names at least one account or writes a team. */
-function githubOn(ui: { accounts: string[]; team?: string | undefined }): boolean {
+/** GitHub sign-in is on when `ui` names at least one account or writes a team (a list of them is never empty). */
+function githubOn(ui: { accounts: string[]; team?: string | string[] | undefined }): boolean {
   return ui.accounts.length > 0 || ui.team !== undefined;
 }
 
@@ -422,7 +422,7 @@ export function parseDocument(doc: unknown, env: Record<string, string | undefin
   if (uiOn(raw.ui) && publicUrl !== undefined) {
     const github = githubOn(raw.ui);
     ui = {
-      accounts: raw.ui.accounts, team: raw.ui.team ?? null, publicUrl: new URL(publicUrl).origin,
+      accounts: raw.ui.accounts, teams: raw.ui.team === undefined ? [] : [raw.ui.team].flat(), publicUrl: new URL(publicUrl).origin,
       clientId: github ? clientId ?? null : null, clientSecret: github ? clientSecret ?? null : null,
     };
   }
