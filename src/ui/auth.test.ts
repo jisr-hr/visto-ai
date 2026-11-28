@@ -176,7 +176,7 @@ async function harness(ui: Partial<Ui> = {}, fakes: Fakes = {}): Promise<Harness
     signOut: async (session) => seen(await auth.signOut(session)),
   });
   const made = (over: Partial<Ui>): Auth => recorded(createAuth({
-    db: spy(db), ui: { accounts: ['octo-lead'], team: null, publicUrl: PUBLIC_URL, ...over }, signIn, checks, clock: () => clock.now, log, random,
+    db: spy(db), ui: { accounts: ['octo-lead'], teams: [], publicUrl: PUBLIC_URL, ...over }, signIn, checks, clock: () => clock.now, log, random,
   }));
   const auth = made(ui);
   return {
@@ -326,13 +326,13 @@ test("GitHub's refusal, an account not named, a bot, and a team that cannot be r
   await alone.db.close();
 
   // A bot is not let in by its team either, which is not read for it.
-  const bots = await harness({ accounts: [], team: TEAM }, { installations: { acme: '99' }, members: { '99 acme/reviewers octo-ci': true } });
+  const bots = await harness({ accounts: [], teams: [TEAM] }, { installations: { acme: '99' }, members: { '99 acme/reviewers octo-ci': true } });
   assert.deepEqual((await bots.signIn('code-5')).answer, refused('not_allowed'));
   assert.deepEqual([...named(bots.calls, 'orgInstallation'), ...named(bots.calls, 'isTeamMember')], []);
   await bots.db.close();
 
   const team = (installations: Fakes['installations'], members: Fakes['members'] = {}): Promise<Harness> =>
-    harness({ accounts: ['octo-lead'], team: TEAM }, { installations, members });
+    harness({ accounts: ['octo-lead'], teams: [TEAM] }, { installations, members });
   const none = await team({ acme: null });
   assert.deepEqual((await none.signIn('code-3')).answer, refused('unverified'));
   assert.deepEqual(named(none.calls, 'isTeamMember'), []);
@@ -352,7 +352,7 @@ test("GitHub's refusal, an account not named, a bot, and a team that cannot be r
 });
 
 test("an active member of the team is let in through the organisation's installation; a member who is not active is not", async () => {
-  const h = await harness({ accounts: [], team: TEAM }, {
+  const h = await harness({ accounts: [], teams: [TEAM] }, {
     installations: { acme: '99', Acme: '99' },
     members: { '99 acme/reviewers octo-dev': true, '99 acme/reviewers octo-guest': false, '99 Acme/Reviewers octo-dev': true },
   });
@@ -362,13 +362,41 @@ test("an active member of the team is let in through the organisation's installa
     [['orgInstallation', 'acme'], ['isTeamMember', '99', 'acme/reviewers', 'octo-dev']]);
   assert.deepEqual((await h.signIn('code-4')).answer, refused('not_allowed'));
   // The way in is the team as the file writes it.
-  const written = await h.signIn('code-3', h.with({ accounts: [], team: 'Acme/Reviewers' }));
+  const written = await h.signIn('code-3', h.with({ accounts: [], teams: ['Acme/Reviewers'] }));
   assert.deepEqual(written.answer, letIn(nth(7)));
   assert.deepEqual(h.calls.slice(-2), [['orgInstallation', 'Acme'], ['isTeamMember', '99', 'Acme/Reviewers', 'octo-dev']]);
   assert.deepEqual((await sessions(h.db)).map((r) => r as { id_hash: string; login: string; via: string }).map((r) => [r.id_hash, r.login, r.via]).sort(),
     [[hex(C), 'octo-dev', 'acme/reviewers'], [hex(nth(7)), 'octo-dev', 'Acme/Reviewers']].sort());
   assert.deepEqual(signins(h.logs), [signin('ok'), signin('not_allowed'), signin('ok')]);
   await h.db.close();
+});
+
+test('with several teams every one is read, a member of any is let in through the first written that says yes, and a team not read refuses only when none says yes', async () => {
+  const OTHER = 'acme/platform';
+  const h = await harness({ accounts: [], teams: [TEAM, OTHER] }, {
+    installations: { acme: '99' },
+    members: { [`99 ${OTHER} octo-dev`]: true },
+  });
+  assert.deepEqual((await h.signIn('code-3')).answer, letIn(C));
+  assert.deepEqual(named(h.calls, 'isTeamMember'), [['isTeamMember', '99', TEAM, 'octo-dev'], ['isTeamMember', '99', OTHER, 'octo-dev']]);
+  assert.deepEqual((await sessions(h.db)).map((r) => (r as { via: string }).via), [OTHER]);
+  assert.deepEqual((await h.signIn('code-4')).answer, refused('not_allowed'));
+  // A member of both is let in through the first team written.
+  const both = await harness({ accounts: [], teams: [TEAM, OTHER] }, {
+    installations: { acme: '99' }, members: { [`99 ${TEAM} octo-dev`]: true, [`99 ${OTHER} octo-dev`]: true },
+  });
+  assert.deepEqual((await both.signIn('code-3')).answer, letIn(C));
+  assert.deepEqual((await sessions(both.db)).map((r) => (r as { via: string }).via), [TEAM]);
+  // A team that cannot be read: a yes from another still lets in; with no yes the sign-in is unverified, never not_allowed.
+  const broken = await harness({ accounts: [], teams: [TEAM, OTHER] }, {
+    installations: { acme: '99' }, members: { [`99 ${TEAM} octo-dev`]: new Error('github_403'), [`99 ${OTHER} octo-dev`]: true, [`99 ${TEAM} octo-guest`]: new Error('github_403') },
+  });
+  assert.deepEqual((await broken.signIn('code-3')).answer, letIn(C));
+  assert.deepEqual((await broken.signIn('code-4')).answer, refused('unverified'));
+  assert.deepEqual(signins([...h.logs, ...both.logs, ...broken.logs]), [
+    signin('ok'), signin('not_allowed'), signin('ok'), signin('ok'), signin('unverified', 'github_403'),
+  ]);
+  for (const x of [h, both, broken]) await x.db.close();
 });
 
 test('a login GitHub writes in another letter case than the file is let in, and its session reads back', async () => {
@@ -383,7 +411,7 @@ test('a login GitHub writes in another letter case than the file is let in, and 
 
 test('a refusal of the sign-in or of the installation read whose message is no short code is logged as internal_error, never its message', async () => {
   const odd = new Error(`odd ${CLIENT_SECRET}`);
-  const h = await harness({ accounts: [], team: TEAM }, { users: { ...USERS, 'code-7': odd }, installations: { acme: odd } });
+  const h = await harness({ accounts: [], teams: [TEAM] }, { users: { ...USERS, 'code-7': odd }, installations: { acme: odd } });
   assert.deepEqual((await h.signIn('code-7')).answer, refused('github'));
   assert.deepEqual((await h.signIn('code-3')).answer, refused('unverified'));
   assert.deepEqual(named(h.calls, 'orgInstallation'), [['orgInstallation', 'acme']]);
@@ -397,7 +425,7 @@ test('a refusal of the sign-in or of the installation read whose message is no s
 const turn = (): Promise<void> => new Promise((resolve) => { setImmediate(resolve); });
 
 test('a team read that answers nothing within 10 seconds is unverified as github_network, and the way back ends then, giving its place back', async (t) => {
-  const h = await harness({ accounts: [], team: TEAM }, { installations: { acme: '99' }, members: { '99 acme/reviewers octo-dev': 'never' } });
+  const h = await harness({ accounts: [], teams: [TEAM] }, { installations: { acme: '99' }, members: { '99 acme/reviewers octo-dev': 'never' } });
   const started = await h.auth.start();
   t.mock.timers.enable({ apis: ['setTimeout'] });
   let answer: UiAnswer | null = null;
@@ -418,7 +446,7 @@ test('a team read that answers nothing within 10 seconds is unverified as github
 
 test("the team read's limit leaves no timer running once the read has answered or failed", async () => {
   const timers = (): number => process.getActiveResourcesInfo().filter((name) => name === 'Timeout').length;
-  const h = await harness({ accounts: [], team: TEAM }, {
+  const h = await harness({ accounts: [], teams: [TEAM] }, {
     installations: { acme: '99' }, members: { '99 acme/reviewers octo-dev': true, '99 acme/reviewers octo-guest': new Error('github_403') },
   });
   const before = timers();
@@ -462,7 +490,7 @@ test('a session is read by its cookie, and stops being one when it expires or is
 });
 
 test('a session stops being one when the way it was let in no longer holds, with accounts and a team both named', async () => {
-  const h = await harness({ accounts: ['octo-lead'], team: TEAM }, { installations: { acme: '99' }, members: { '99 acme/reviewers octo-dev': true } });
+  const h = await harness({ accounts: ['octo-lead'], teams: [TEAM] }, { installations: { acme: '99' }, members: { '99 acme/reviewers octo-dev': true } });
   const lead = await h.signIn('code-1');
   const dev = await h.signIn('code-3');
   assert.deepEqual([lead.answer, dev.answer], [letIn(C), letIn(F)]);
@@ -472,11 +500,13 @@ test('a session stops being one when the way it was let in no longer holds, with
     [(await auth.sessionOf(cookie(C)))?.login ?? null, (await auth.sessionOf(cookie(F)))?.login ?? null];
 
   assert.deepEqual(await read(h.auth), ['octo-lead', 'octo-dev']);
-  assert.deepEqual(await read(h.with({ accounts: [], team: TEAM })), [null, 'octo-dev']);
-  assert.deepEqual(await read(h.with({ accounts: ['octo-lead'], team: 'acme/other' })), ['octo-lead', null]);
-  assert.deepEqual(await read(h.with({ accounts: ['octo-lead'], team: 'ACME/Reviewers' })), ['octo-lead', 'octo-dev']);
-  assert.deepEqual(await read(h.with({ accounts: ['OCTO-LEAD'], team: null })), ['octo-lead', null]);
-  assert.deepEqual(await read(h.with({ accounts: ['octo-dev'], team: null })), [null, null]);
+  assert.deepEqual(await read(h.with({ accounts: [], teams: [TEAM] })), [null, 'octo-dev']);
+  assert.deepEqual(await read(h.with({ accounts: ['octo-lead'], teams: ['acme/other'] })), ['octo-lead', null]);
+  assert.deepEqual(await read(h.with({ accounts: ['octo-lead'], teams: ['ACME/Reviewers'] })), ['octo-lead', 'octo-dev']);
+  // With several teams, a session holds while the team that let it in is still among them.
+  assert.deepEqual(await read(h.with({ accounts: ['octo-lead'], teams: ['acme/other', TEAM] })), ['octo-lead', 'octo-dev']);
+  assert.deepEqual(await read(h.with({ accounts: ['OCTO-LEAD'], teams: [] })), ['octo-lead', null]);
+  assert.deepEqual(await read(h.with({ accounts: ['octo-dev'], teams: [] })), [null, null]);
   // The rows are left.
   assert.equal(await count(h.db, 'ui_sessions'), 2);
   await h.db.close();
@@ -559,7 +589,7 @@ test('with GitHub sign-in off the start and the way back are not found, and read
   };
   const logs: Record<string, unknown>[] = [];
   const auth = createAuth({
-    db: spy, ui: { accounts: [], team: null, publicUrl: PUBLIC_URL }, signIn: null,
+    db: spy, ui: { accounts: [], teams: [], publicUrl: PUBLIC_URL }, signIn: null,
     checks: { isTeamMember: () => { seen.push('isTeamMember'); return Promise.resolve(true); } },
     clock: () => { seen.push('clock'); return at(0); }, log: (entry) => { logs.push(entry); }, random: () => { seen.push('random'); return A; },
   });
@@ -584,7 +614,7 @@ test("a password session reads by its kind, whatever the file's accounts say, an
   await createSession(h.db, { idHash: hex(id), login: 'octo-admin', via: 'password', accountId: admin.id, at: iso(0), expiresAt: iso(43200) });
   const expected = { login: 'octo-admin', idHash: hex(id), csrf: tokenOf(id), accountId: admin.id, kind: 'password', role: 'admin' };
   assert.deepEqual(await h.auth.sessionOf(cookie(id)), expected);
-  assert.deepEqual(await h.with({ accounts: ['octo-lead'], team: TEAM }).sessionOf(cookie(id)), expected);
+  assert.deepEqual(await h.with({ accounts: ['octo-lead'], teams: [TEAM] }).sessionOf(cookie(id)), expected);
 
   // A way in of the other kind holds for neither: a password account let in as a named login, a GitHub account as a password.
   const named = nth(10);
@@ -600,7 +630,7 @@ test("a password session reads by its kind, whatever the file's accounts say, an
 
   assert.equal((await deleteAccount(h.db, admin.id))?.id, admin.id);
   assert.equal(await h.auth.sessionOf(cookie(id)), null);
-  assert.equal(await h.with({ accounts: ['octo-lead'], team: TEAM }).sessionOf(cookie(id)), null);
+  assert.equal(await h.with({ accounts: ['octo-lead'], teams: [TEAM] }).sessionOf(cookie(id)), null);
   await h.db.close();
 });
 
@@ -678,7 +708,7 @@ test('a database step that rejects sends the browser to the sign-in page with fa
 });
 
 test('no log line or answer holds the code, the state, the verifier, the session id or the client secret, and no row holds any of them in clear', async () => {
-  const h = await harness({ accounts: ['octo-lead'], team: TEAM }, { installations: { acme: '99' }, members: { '99 acme/reviewers octo-dev': true } });
+  const h = await harness({ accounts: ['octo-lead'], teams: [TEAM] }, { installations: { acme: '99' }, members: { '99 acme/reviewers octo-dev': true } });
   const started = await h.auth.start();
   const stored = await states(h.db);
   assert.deepEqual(stored, [{ state_hash: hex(A), verifier_hash: hex(B), expires_at: iso(600) }]);
@@ -714,7 +744,7 @@ test('no log line or answer holds the code, the state, the verifier, the session
   const depKeys: Record<keyof AuthDeps, true> = { db: true, ui: true, signIn: true, checks: true, clock: true, log: true, random: true };
   assert.deepEqual(Object.keys(depKeys), ['db', 'ui', 'signIn', 'checks', 'clock', 'log', 'random']);
   const full: UiConfig = {
-    accounts: ['octo-lead'], team: null, publicUrl: 'https://visto.example.test', clientId: 'Iv1.0123456789abcdef', clientSecret: 'client-secret-for-tests-only',
+    accounts: ['octo-lead'], teams: [], publicUrl: 'https://visto.example.test', clientId: 'Iv1.0123456789abcdef', clientSecret: 'client-secret-for-tests-only',
   };
   // @ts-expect-error -- the client secret cannot be handed to sign-in
   const ui: AuthDeps['ui'] = full;

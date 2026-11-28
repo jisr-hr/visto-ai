@@ -14,7 +14,7 @@ const VIEW: SettingsView = {
   global: { learning: set(false), 'extra.map': set({ b: 1, a: 2 }, true) },
   defaults: { 'score.threshold': set(60), 'score.mode': set('full', true) },
   repositories: [{ name: 'acme/shop', settings: { 'score.threshold': set(60), 'score.mode': set('light', true) } }],
-  scorer: { on: false, waits: false }, endpoints: { model: 'https://llm.example.test/v1', scorer: null }, secrets: [], access: { publicUrl: 'https://visto.example.test', github: true, accounts: [], team: null },
+  scorer: { on: false, waits: false }, endpoints: { model: 'https://llm.example.test/v1', scorer: null }, secrets: [], access: { publicUrl: 'https://visto.example.test', github: true, accounts: [], teams: [] },
 };
 const EMPTY: Draft = new Map();
 

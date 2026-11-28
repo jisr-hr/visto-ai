@@ -4,7 +4,7 @@ import type { SettingChanges, SettingsExport, SettingsSave, SettingsView } from 
 
 const VIEW: SettingsView = {
   now: '2026-03-01T10:00:00.000Z', started: '2026-03-01T09:00:00.000Z', version: 14, global: {}, defaults: {}, repositories: [],
-  scorer: { on: false, waits: false }, endpoints: { model: 'https://llm.example.test/v1', scorer: null }, secrets: [], access: { publicUrl: 'https://visto.example.test', github: true, accounts: [], team: null },
+  scorer: { on: false, waits: false }, endpoints: { model: 'https://llm.example.test/v1', scorer: null }, secrets: [], access: { publicUrl: 'https://visto.example.test', github: true, accounts: [], teams: [] },
 };
 const SAVE: SettingsSave = { version: 14, changes: [{ scope: 'global', path: 'learning', value: true }] };
 
