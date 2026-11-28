@@ -1,6 +1,6 @@
 // The composition root: the only place real clients are built.
 import { randomBytes } from 'node:crypto';
-import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { chmodSync, existsSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ConfigError, contractFile, loadConfig } from '../config/load.ts';
@@ -13,7 +13,7 @@ import { createGithubHistorySource } from '../forge/github/history-source.ts';
 import { createGithubReadSource } from '../forge/github/read-source.ts';
 import { parseAacr, runAacrImport } from './aacr/convert.ts';
 import { compareSummaries } from './compare.ts';
-import { loadCases } from './cases.ts';
+import { caseKey, loadCases } from './cases.ts';
 import { historyMemory, memoryCount } from './backtest/memory.ts';
 import { THRESHOLDS, measure, share as shareOf } from './backtest/metrics.ts';
 import type { CaseScores } from './backtest/metrics.ts';
@@ -25,9 +25,11 @@ import { runJudge } from './judge/run.ts';
 import { loadHistory } from './history/file.ts';
 import { runImport } from './history/import.ts';
 import { seedCommand } from './history/seed.ts';
+import { lessonCases } from './lessons/cases.ts';
 import { exportCommand } from './lessons/export.ts';
 import { loadFindings } from './lessons/findings.ts';
 import { judgeReplies } from './lessons/judge-replies.ts';
+import { loadLessons } from './lessons/lessons-file.ts';
 import { assertOutsideProject, runReplay } from './replay.ts';
 import type { SummaryFile } from './replay.ts';
 
@@ -352,6 +354,40 @@ async function exportFindingsCommand(argv: string[], env: Record<string, string 
   }
 }
 
+// Dated, labelled replay cases from a deployment's export, the judge's lessons file and a history file: no model, no network.
+function lessonCasesCommand(argv: string[], out: (line: string) => void): void {
+  const parsed = parse(argv, ['history', 'findings', 'lessons', 'out'], ['only-shown', 'force']);
+  if (parsed.positional.length > 0) throw new UsageError('usage: lesson-cases takes no positional arguments');
+  const get = (name: string): string => {
+    const v = parsed.options.get(name);
+    if (v === undefined) throw new UsageError(`usage: lesson-cases needs --${name}`);
+    return v;
+  };
+  const historyPath = get('history');
+  const findingsPath = get('findings');
+  const lessonsPath = get('lessons');
+  const outPath = get('out');
+  for (const [name, path] of [['history', historyPath], ['findings', findingsPath], ['lessons', lessonsPath], ['out', outPath]] as const) outsideProject(path, projectFolder(), name);
+  const force = parsed.flags.has('force');
+  if (!force && existsSync(outPath)) throw new Error('out_exists');
+  const history = readable('history', () => loadHistory(historyPath));
+  const findings = readable('findings', () => loadFindings(findingsPath));
+  const lessons = readable('lessons', () => loadLessons(lessonsPath));
+  if (lessons.file.findings_sha256 !== findings.sha256) throw new Error('different_export');
+  const found = lessonCases(history.cases, findings.file, lessons.file);
+  const shown = new Set(found.rows.filter((r) => r.shown > 0).map((r) => r.key));
+  const kept = parsed.flags.has('only-shown') ? found.cases.filter((c) => shown.has(caseKey(c))) : found.cases;
+  try {
+    writeFileSync(outPath, kept.map((c) => JSON.stringify(c) + '\n').join(''), { mode: 0o600, flag: force ? 'w' : 'wx' });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'EEXIST') throw new Error('out_exists');
+    throw error;
+  }
+  chmodSync(outPath, 0o600);
+  out(`cases ${found.cases.length}, labels valid ${found.labels.valid} invalid ${found.labels.invalid}, cases shown a lesson ${found.shown_cases}, invalid labels in them ${found.shown_invalid}, skipped not in history ${found.skipped.not_in_history}, no base ${found.skipped.no_base}, same head ${found.skipped.same_head}`);
+  for (const r of found.rows) out(`${r.key}: lessons ${r.shown}, invalid ${r.invalid}, valid ${r.valid}`);
+}
+
 // A file that cannot be read is a usage error; one that is read but invalid is not.
 function readable<T>(name: string, load: () => T): T {
   return readableAs(`--${name}`, load);
@@ -546,7 +582,8 @@ export async function main(argv: string[], env: Record<string, string | undefine
     else if (command === 'seed-memory') await seedMemoryCommand(rest, env, out);
     else if (command === 'export-findings') await exportFindingsCommand(rest, env, out);
     else if (command === 'judge-replies') await judgeRepliesCommand(rest, env, out);
-    else throw new UsageError('usage: cli <replay|judge|compare|import-history|import-aacr|backtest|score-noise|memory-count|score-compare|seed-memory|export-findings|judge-replies> ...');
+    else if (command === 'lesson-cases') lessonCasesCommand(rest, out);
+    else throw new UsageError('usage: cli <replay|judge|compare|import-history|import-aacr|backtest|score-noise|memory-count|score-compare|seed-memory|export-findings|judge-replies|lesson-cases> ...');
     return 0;
   } catch (error) {
     if (error instanceof UsageError) { out(error.message); return 2; }

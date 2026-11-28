@@ -5,7 +5,7 @@ import type { Side } from '../forge/types.ts';
 
 export type LabelKind = 'valid' | 'invalid' | 'first' | 'late' | 'escaped';
 export interface Label { comment_id: string; path: string; line: number | null; side: Side; severity: string; label: LabelKind; tolerance?: number; first_head?: boolean; same_head?: boolean; text?: string; start_line?: number }
-export interface EvalCase { repo: string; pr_number: number; head_sha: string; compare_base: string; title: string; body: string; branch: string; base_branch: string; author: string; labels: Label[]; review_round?: number }
+export interface EvalCase { repo: string; pr_number: number; head_sha: string; compare_base: string; title: string; body: string; branch: string; base_branch: string; author: string; labels: Label[]; review_round?: number; review_at?: string }
 
 const KINDS: readonly string[] = ['valid', 'invalid', 'first', 'late', 'escaped'];
 
@@ -83,6 +83,7 @@ function parseCase(raw: unknown): EvalCase {
     labels: (labels as unknown[]).map(parseLabel),
   };
   if (o['review_round'] !== undefined) c.review_round = need(Number.isInteger(o['review_round']), o['review_round'] as number);
+  if (o['review_at'] !== undefined) c.review_at = need(typeof o['review_at'] === 'string' && Number.isFinite(Date.parse(o['review_at'])), o['review_at'] as string);
   return c;
 }
 

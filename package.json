@@ -23,6 +23,7 @@
     "eval:seed-memory": "node src/eval/cli.ts seed-memory",
     "eval:export-findings": "node src/eval/cli.ts export-findings",
     "eval:judge-replies": "node src/eval/cli.ts judge-replies",
+    "eval:lesson-cases": "node src/eval/cli.ts lesson-cases",
     "start": "node src/main.ts",
     "dev:send-webhook": "node src/forge/github/send-sample.ts",
     "app:create": "node src/forge/github/create-app.ts",

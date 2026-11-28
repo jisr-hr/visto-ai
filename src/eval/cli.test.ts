@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import test from 'node:test';
@@ -10,6 +11,7 @@ import type { CaseScores } from './backtest/metrics.ts';
 import { scoreMoves } from './backtest/noise.ts';
 import { A, B, block, C, file } from './backtest/test-cases.ts';
 import { main, prepareRun } from './cli.ts';
+import { loadCases } from './cases.ts';
 import { serializeCase } from './history/file.ts';
 import type { HistoryCase } from './history/file.ts';
 
@@ -784,4 +786,90 @@ test('judge-replies needs --findings, --config and --out outside the project, a 
 test('the script eval:judge-replies runs the command judge-replies', () => {
   const scripts = (JSON.parse(readFileSync(join(projectRoot, 'package.json'), 'utf8')) as { scripts: Record<string, string> }).scripts;
   assert.equal(scripts['eval:judge-replies'], 'node src/eval/cli.ts judge-replies');
+});
+
+// ---- lesson-cases ----
+
+function lessonCaseFiles(): { folder: string; history: string; findings: string; lessons: string; out: string } {
+  const folder = mkdtempSync(tmpdir() + '/');
+  const mk = (n: number): HistoryCase => ({
+    version: 1, repo: 'acme/shop', pr_number: n, title: `t${n}`, body: `b${n}`, author: 'ana', branch: `br${n}`, base_branch: 'main', merged_at: '2026-03-30T10:00:00.000Z',
+    review_head: `rh${n}`, review_base: `rb${n}`, review_at: '2026-03-04T10:00:00.000Z', reviewed_by_person: true, final_head: 'fh', final_base: 'fb',
+    final_files: [{ path: 'src/billing/tax.ts', previous_path: null, status: 'modified', patch: null }], activity: [],
+  });
+  const finding = (n: number, at: string): string => JSON.stringify({
+    version: 1, repo: 'acme/shop', pr_number: n, run: { id: n, head_sha: `head${n}`.padEnd(12, '0'), base_sha: `base${n}`, started_at: at },
+    comment_id: `c-${n}`, path: 'src/billing/tax.ts', side: 'RIGHT', line: 3, severity: 'major', finding: 'f',
+    replies: [{ id: `r-${n}`, order: 1, association: 'member', body: 'x', at: '2026-03-05T10:00:00.000Z' }], later: [],
+  });
+  const header = JSON.stringify({ version: 1, kind: 'findings_export', exported_at: '2026-03-20T08:00:00.000Z' });
+  const history = join(folder, 'history.jsonl');
+  const findings = join(folder, 'findings.jsonl');
+  const lessons = join(folder, 'lessons.json');
+  writeFileSync(history, [7, 8, 9].map((n) => serializeCase(mk(n))).join('\n') + '\n');
+  // 7 and 8 are run before the lesson was made (nothing shown); 9 after (shown one, an invalid label in it)
+  const text = [header, finding(7, '2026-02-04T10:00:00.000Z'), finding(8, '2026-02-05T10:00:00.000Z'), finding(9, '2026-03-04T10:00:00.000Z')].join('\n') + '\n';
+  writeFileSync(findings, text);
+  const verdicts = [7, 8, 9].map((n) => ({ repo: 'acme/shop', number: n, reply: `r-${n}`, finding: `c-${n}`, classification: 'valid_pushback', outcome: 'done', attempts: 1, night: '2026-03-06T00:00:00.000Z' }));
+  const lesson = { ref: '20:r', repo: 'acme/shop', number: 20, reply: 'r', path: 'src/billing/tax.ts', text: 'Invoices round half up on purpose, so a finding on the rounding of a total is wrong.', createdAt: '2026-03-01T00:00:00.000Z', madeAt: '2026-03-01T00:00:00.000Z', expiresAt: '2026-05-30T00:00:00.000Z' };
+  const body = (sha: string): string => JSON.stringify({
+    version: 1, findings_file: 'findings.jsonl', findings_sha256: sha, exported_at: '2026-03-20T08:00:00.000Z',
+    setting: { model: 'vendor/model-a', fallbacks: [], toolChoice: 'forced' }, rules_sha256: 'b'.repeat(64),
+    complete: true, end: null, nights: 1, first_night: null, last_night: null, cost: 0, verdicts, lessons: [lesson],
+  });
+  writeFileSync(lessons, body(createHash('sha256').update(text).digest('hex')));
+  writeFileSync(join(folder, 'other.json'), body('c'.repeat(64)));
+  return { folder, history, findings, lessons, out: join(folder, 'cases.jsonl') };
+}
+
+test('lesson-cases needs its files, outside the project, and refuses an existing out and another export', async () => {
+  const f = lessonCaseFiles();
+  const args = (over: Record<string, string> = {}, drop: string[] = []): string[] => {
+    const options: Record<string, string> = { history: f.history, findings: f.findings, lessons: f.lessons, out: f.out, ...over };
+    for (const name of drop) delete options[name];
+    return ['lesson-cases', ...Object.entries(options).flatMap(([k, v]) => [`--${k}`, v])];
+  };
+  const bad: [string, string[], string][] = [
+    ['no arguments', ['lesson-cases'], 'usage: lesson-cases needs --history'],
+    ['missing out', args({}, ['out']), 'usage: lesson-cases needs --out'],
+    ['history inside the project', args({ history: join(projectRoot, 'h.jsonl') }), 'usage: --history must be outside the project folder'],
+    ['findings inside the project', args({ findings: join(projectRoot, 'f.jsonl') }), 'usage: --findings must be outside the project folder'],
+    ['lessons inside the project', args({ lessons: join(projectRoot, 'l.json') }), 'usage: --lessons must be outside the project folder'],
+    ['out inside the project', args({ out: join(projectRoot, 'c.jsonl') }), 'usage: --out must be outside the project folder'],
+    ['lessons that do not exist', args({ lessons: join(f.folder, 'none.json') }), 'usage: cannot read --lessons'],
+    ['positional argument', [...args(), 'extra'], 'usage: lesson-cases takes no positional arguments'],
+    ['unknown option', [...args(), '--config', 'x'], 'usage: unknown option --config'],
+  ];
+  for (const [name, argv, message] of bad) {
+    const [code, lines] = await run(argv, {});
+    assert.equal(code, 2, name);
+    assert.deepEqual(lines, [message], name);
+  }
+  const [other, otherLines] = await run(args({ lessons: join(f.folder, 'other.json') }), {});
+  assert.deepEqual([other, otherLines], [1, ['different_export']]);
+  assert.equal(existsSync(f.out), false);
+  writeFileSync(f.out, 'kept');
+  assert.deepEqual(await run(args(), {}), [1, ['out_exists']]);
+  assert.equal(readFileSync(f.out, 'utf8'), 'kept');
+});
+
+test('lesson-cases writes the cases, prints counts and one line each, and --only-shown writes only the cases shown a lesson', async () => {
+  const f = lessonCaseFiles();
+  const base = ['lesson-cases', '--history', f.history, '--findings', f.findings, '--lessons', f.lessons, '--out', f.out];
+  const [code, lines] = await run(base, {});
+  assert.equal(code, 0);
+  assert.deepEqual(lines, [
+    'cases 3, labels valid 0 invalid 3, cases shown a lesson 1, invalid labels in them 1, skipped not in history 0, no base 0, same head 0',
+    'acme/shop#7@head70000000: lessons 0, invalid 1, valid 0',
+    'acme/shop#8@head80000000: lessons 0, invalid 1, valid 0',
+    'acme/shop#9@head90000000: lessons 1, invalid 1, valid 0',
+  ]);
+  const written = loadCases(f.out).cases;
+  assert.deepEqual(written.map((c) => [c.pr_number, c.review_at, c.review_round]), [[7, '2026-02-04T10:00:00.000Z', 1], [8, '2026-02-05T10:00:00.000Z', 1], [9, '2026-03-04T10:00:00.000Z', 1]]);
+  assert.equal(statSync(f.out).mode & 0o777, 0o600);
+  assert.deepEqual(lines.join('\n').includes('t7'), false);
+
+  const [, shownLines] = await run([...base, '--only-shown', '--force'], {});
+  assert.deepEqual(shownLines, lines);                                          // the counts are of all three
+  assert.deepEqual(loadCases(f.out).cases.map((c) => c.pr_number), [9]);
 });

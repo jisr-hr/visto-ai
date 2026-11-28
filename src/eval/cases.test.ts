@@ -89,3 +89,12 @@ test('parseCases refuses a start_line that is not an integer', () => {
   }
   assert.equal(badLine(JSON.stringify({ ...caseA, labels: [{ path: 'a.ts', label: 'valid', text: 5 }] })), 'bad_case_line_1');
 });
+
+test('a case file reads a review_at when there is one, and refuses one that is no time', () => {
+  const [kept] = parseCases(JSON.stringify({ ...caseA, review_at: '2026-03-04T10:00:00Z' }));
+  assert.equal(kept!.review_at, '2026-03-04T10:00:00Z');
+  const [plain] = parseCases(JSON.stringify(caseA));
+  assert.equal('review_at' in plain!, false);
+  assert.equal(badLine(JSON.stringify({ ...caseA, review_at: 'soon' })), 'bad_case_line_1');
+  assert.equal(badLine(JSON.stringify({ ...caseA, review_at: 5 })), 'bad_case_line_1');
+});
