@@ -477,6 +477,39 @@ test('the script eval:seed-memory runs the command seed-memory', () => {
   assert.equal(scripts['eval:seed-memory'], 'node src/eval/cli.ts seed-memory');
 });
 
+test('export-findings needs --config and --out, a database in the config, and an out path outside the project', async () => {
+  const folder = mkdtempSync(tmpdir() + '/');
+  const withDatabase = join(folder, 'deployment.yml');
+  writeFileSync(withDatabase, 'model:\n  apiKey: { env: MODEL_KEY }\n  model: vendor/model-a\ndatabase:\n  url: { env: DATABASE_URL }\n');
+  const withoutDatabase = join(folder, 'no-database.yml');
+  writeFileSync(withoutDatabase, 'model:\n  apiKey: { env: MODEL_KEY }\n  model: vendor/model-a\n');
+  const env = { MODEL_KEY: 'k', DATABASE_URL: 'postgres://export@db.invalid:5432/visto' };
+  const args = (over: Record<string, string> = {}, drop: string[] = []): string[] => {
+    const options: Record<string, string> = { config: withDatabase, out: join(folder, 'findings.jsonl'), ...over };
+    for (const name of drop) delete options[name];
+    return ['export-findings', ...Object.entries(options).flatMap(([k, v]) => [`--${k}`, v])];
+  };
+  const bad: [string, string[], string][] = [
+    ['no arguments', ['export-findings'], 'usage: export-findings needs --config'],
+    ['missing out', args({}, ['out']), 'usage: export-findings needs --out'],
+    ['out inside the project', args({ out: join(projectRoot, 'findings.jsonl') }), 'usage: --out must be outside the project folder'],
+    ['no database in the config', args({ config: withoutDatabase }), 'usage: export-findings needs a database in the config'],
+    ['config that does not exist', args({ config: join(folder, 'none.yml') }), 'usage: cannot read --config'],
+    ['positional argument', [...args(), 'extra'], 'usage: export-findings takes no positional arguments'],
+    ['unknown option', [...args(), '--history', 'x'], 'usage: unknown option --history'],
+  ];
+  for (const [name, argv, message] of bad) {
+    const [code, lines] = await run(argv, env);
+    assert.equal(code, 2, name);
+    assert.deepEqual(lines, [message], name);
+  }
+});
+
+test('the script eval:export-findings runs the command export-findings', () => {
+  const scripts = (JSON.parse(readFileSync(join(projectRoot, 'package.json'), 'utf8')) as { scripts: Record<string, string> }).scripts;
+  assert.equal(scripts['eval:export-findings'], 'node src/eval/cli.ts export-findings');
+});
+
 test('score-compare prints the count of focus and no step for it', async () => {
   const a = compareDir('focus-base', baseline, baseRows);
   const b = compareDir('focus-cand', candidate, candRows, WITH_MEMORY);

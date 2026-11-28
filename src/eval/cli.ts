@@ -25,6 +25,7 @@ import { runJudge } from './judge/run.ts';
 import { loadHistory } from './history/file.ts';
 import { runImport } from './history/import.ts';
 import { seedCommand } from './history/seed.ts';
+import { exportCommand } from './lessons/export.ts';
 import { assertOutsideProject, runReplay } from './replay.ts';
 import type { SummaryFile } from './replay.ts';
 
@@ -323,6 +324,32 @@ async function seedMemoryCommand(argv: string[], env: Record<string, string | un
   }
 }
 
+// The operator's export: one read-only transaction against a deployment, one file outside the project, mode 600.
+async function exportFindingsCommand(argv: string[], env: Record<string, string | undefined>, out: (line: string) => void): Promise<void> {
+  const parsed = parse(argv, ['config', 'out'], ['force']);
+  if (parsed.positional.length > 0) throw new UsageError('usage: export-findings takes no positional arguments');
+  const get = (name: string): string => {
+    const v = parsed.options.get(name);
+    if (v === undefined) throw new UsageError(`usage: export-findings needs --${name}`);
+    return v;
+  };
+  const configPath = get('config');
+  const outPath = get('out');
+  outsideProject(outPath, projectFolder(), 'out');
+  const config = readable('config', () => loadConfig(configPath, env));
+  if (config.database === null) throw new UsageError('usage: export-findings needs a database in the config');
+  const db = postgresDb(config.database.url, (entry) => { process.stderr.write(JSON.stringify(entry) + '\n'); });
+  try {
+    out(await exportCommand(db, outPath, parsed.flags.has('force'), new Date()));
+  } finally {
+    try {
+      await db.close();
+    } catch {
+      // a close that fails changes nothing of what was written
+    }
+  }
+}
+
 // A file that cannot be read is a usage error; one that is read but invalid is not.
 function readable<T>(name: string, load: () => T): T {
   return readableAs(`--${name}`, load);
@@ -488,7 +515,8 @@ export async function main(argv: string[], env: Record<string, string | undefine
     else if (command === 'memory-count') await memoryCountCommand(rest, out);
     else if (command === 'score-compare') scoreCompareCommand(rest, out);
     else if (command === 'seed-memory') await seedMemoryCommand(rest, env, out);
-    else throw new UsageError('usage: cli <replay|judge|compare|import-history|import-aacr|backtest|score-noise|memory-count|score-compare|seed-memory> ...');
+    else if (command === 'export-findings') await exportFindingsCommand(rest, env, out);
+    else throw new UsageError('usage: cli <replay|judge|compare|import-history|import-aacr|backtest|score-noise|memory-count|score-compare|seed-memory|export-findings> ...');
     return 0;
   } catch (error) {
     if (error instanceof UsageError) { out(error.message); return 2; }

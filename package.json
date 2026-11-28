@@ -21,6 +21,7 @@
     "eval:memory-count": "node src/eval/cli.ts memory-count",
     "eval:score-compare": "node src/eval/cli.ts score-compare",
     "eval:seed-memory": "node src/eval/cli.ts seed-memory",
+    "eval:export-findings": "node src/eval/cli.ts export-findings",
     "start": "node src/main.ts",
     "dev:send-webhook": "node src/forge/github/send-sample.ts",
     "app:create": "node src/forge/github/create-app.ts",
