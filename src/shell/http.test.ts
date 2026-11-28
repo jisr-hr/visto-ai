@@ -218,6 +218,31 @@ test('idle resolves at once with nothing in flight, and only after the answer ot
   void listener;
 });
 
+test('a request counts as in flight until its answer is sent or its connection is gone, not when it is written', async () => {
+  for (const event of ['finish', 'close'] as const) {
+    const { listener, idle } = createListener(routes);
+    const listeners = new Map<string, () => void>();
+    const { res } = response();
+    const flushing: ResponseLike = {
+      ...res, writableFinished: false,
+      once(name, fn) { listeners.set(name, fn); return flushing; },
+    };
+    listener(request('GET', '/healthz'), flushing);
+    let done = false;
+    const waiting = idle().then(() => { done = true; });
+    await new Promise((r) => setImmediate(r));
+    assert.equal(done, false, event);
+    listeners.get(event)!();
+    await waiting;
+    assert.equal(done, true, event);
+  }
+  // A response already sent, or one with no events (as in these tests), is not waited for.
+  const { listener, idle } = createListener(routes);
+  const { res } = response();
+  listener(request('GET', '/healthz'), { ...res, writableFinished: true, once() { throw new Error('not asked'); } });
+  await idle();
+});
+
 const TEXT = { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' };
 const CLOSE = { ...TEXT, connection: 'close' };
 

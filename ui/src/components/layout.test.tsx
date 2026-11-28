@@ -139,7 +139,9 @@ function words(...parts: string[]): string[] {
 
 // The classes of rules 5 and 6.
 const root = 'flex min-h-screen flex-wrap bg-bg font-sans text-text';
-const aside = 'flex max-w-full shrink grow basis-[232px] flex-col gap-6 border-r border-border bg-card px-3.5 py-5';
+// Beside the page (from 820 pixels wide) the sidebar stays in view while the page scrolls; stacked above it, it scrolls away.
+const aside =
+  'flex max-w-full shrink grow basis-[232px] flex-col gap-6 border-r border-border bg-card px-3.5 py-5 min-[820px]:sticky min-[820px]:top-0 min-[820px]:h-screen min-[820px]:self-start min-[820px]:overflow-y-auto';
 const brand = 'flex items-center gap-2.5 px-1.5';
 const mark = 'shrink-0 rounded-[7px] ring-1 ring-border';
 const nav = 'flex flex-col gap-0.5';

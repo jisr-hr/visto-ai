@@ -86,12 +86,24 @@ function Mode({ me }: { me: Me }) {
  * The frame of a signed-in person. It reads the activity every 5 seconds (not while the page is hidden) and puts it, with the
  * API and who is signed in, in the app's context. Signing out sends the token for changes; a failure leaves the person here.
  */
-export function Layout({ api, me, onSignedOut, children }: { api: Api; me: Me; onSignedOut: () => void; children: ReactNode }) {
+export function Layout({
+  api,
+  me,
+  readMe,
+  onSignedOut,
+  children,
+}: {
+  api: Api;
+  me: Me;
+  readMe?: () => void;
+  onSignedOut: () => void;
+  children: ReactNode;
+}) {
   const { path } = useLocation();
   const polled = usePoll(() => api.activity(), ACTIVITY_MS, 'activity');
   const value = useMemo<AppContextValue>(
-    () => ({ api, me, activity: polled.data, activityFailed: polled.failed }),
-    [api, me, polled.data, polled.failed],
+    () => ({ api, me, activity: polled.data, activityFailed: polled.failed, ...(readMe === undefined ? {} : { readMe }) }),
+    [api, me, readMe, polled.data, polled.failed],
   );
   const running = polled.data === null ? 0 : reviewCounts(polled.data.jobs).running;
   const theme = useSyncExternalStore(subscribeTheme, shownTheme);
@@ -111,7 +123,9 @@ export function Layout({ api, me, onSignedOut, children }: { api: Api; me: Me; o
   return (
     <AppContext.Provider value={value}>
       <div className="flex min-h-screen flex-wrap bg-bg font-sans text-text">
-        <aside className="flex max-w-full shrink grow basis-[232px] flex-col gap-6 border-r border-border bg-card px-3.5 py-5">
+        {/* Beside the page (from 820 pixels wide, past the 792 where the two wrap, scrollbar included) the sidebar stays in view
+            while the page scrolls; stacked above it on a narrow screen, it scrolls away with the page. */}
+        <aside className="flex max-w-full shrink grow basis-[232px] flex-col gap-6 border-r border-border bg-card px-3.5 py-5 min-[820px]:sticky min-[820px]:top-0 min-[820px]:h-screen min-[820px]:self-start min-[820px]:overflow-y-auto">
           <Brand />
           <nav aria-label="Main" className="flex flex-col gap-0.5">
             {ENTRIES.filter((entry) => entry.admin !== true || me.role === 'admin').map((entry) => {
